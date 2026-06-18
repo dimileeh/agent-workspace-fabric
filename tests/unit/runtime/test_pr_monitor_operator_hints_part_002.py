@@ -692,7 +692,10 @@ async def test_operator_hint_resume_no_op_push_when_commit_already_on_remote(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Divergence recovery: a restart that finds the preserved commit already on
-    the remote treats the push as a no-op (no duplicate push)."""
+    the remote treats the push as a no-op (no duplicate push). The preserved-head
+    marker is present (recorded durably at block time, cleared only by a finalize that
+    also consumes the grant), so the SHA-containment proof is available and the no-op
+    safely consumes the grant — the no-marker variant instead surfaces needs_human."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _seed_active_grant(factory, workspace_id, path="pyproject.toml")
     runner = make_runner(
@@ -709,6 +712,7 @@ async def test_operator_hint_resume_no_op_push_when_commit_already_on_remote(
         reason_code="OPERATOR_GUIDE",
     )
     state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-sha")
 
     async def _no_preexisting_dirty(**_kwargs: object) -> None:
         return None
@@ -978,6 +982,94 @@ async def test_operator_hint_resume_threads_recorded_preserved_sha_into_no_op_ch
     )
 
     assert captured.get("preserved_head_sha") == "recorded-preserved-sha"
+
+
+@pytest.mark.unit
+async def test_operator_hint_grant_only_no_op_without_marker_surfaces_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The idempotent no-op shortcut must NOT consume an active approve-and-keep grant
+    when no preserved-head marker is recorded. ``_preserved_commit_already_on_remote``
+    only runs its positive SHA-containment proof when ``preserved_head_sha`` is set;
+    with the marker missing it returns True on an empty worktree↔remote diff ALONE, so
+    a worktree reset to the remote head would let the early shortcut consume the
+    single-use grant while the approved protected commit never landed. Keep the grant
+    active and surface needs_human instead, mirroring the post-push EtU2 fall-through
+    guard (PR #609 comment 4521107313)."""
+    from awf.db.models import OperatorGrantAuditRecord
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    grant_id = await _seed_active_grant(factory, workspace_id, path="pyproject.toml")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="approved the protected change",
+        operation_id="op_no_marker_no_op",
+        requested_at="2026-06-18T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    # Deliberately NO preserved-head marker recorded on the state.
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _cli_must_not_run(**_kwargs: object) -> object:
+        pytest.fail("a grant-only resume must NOT invoke the CLI")
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _already_on_remote(**_kwargs: object) -> bool:
+        # Empty worktree↔remote diff with NO marker: True on the diff alone.
+        return True
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("an unproven no-op must NOT consume the grant via a push/finalize")
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "reset-to-remote-head-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _already_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    # The hint is NOT processed — it is surfaced for human attention instead.
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    # The grant is NOT consumed: the approved protected change was never proven landed.
+    async with factory() as session:
+        grant = await session.get(OperatorGrantAuditRecord, grant_id)
+        assert grant is not None
+        assert grant.consumed_at is None
 
 
 @pytest.mark.unit

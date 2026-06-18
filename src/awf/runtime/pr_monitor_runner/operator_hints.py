@@ -422,10 +422,28 @@ async def _run_operator_hint_cycle(
         worktree_path=worktree_path,
         remote_branch=remote_branch,
         remote_push_url=remote_push_url,
-        preserved_head_sha=state.threads_addressed_ids.get(
-            _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY
-        ),
+        preserved_head_sha=preserved_head_sha,
     ):
+        # An approve-and-keep resume (active grant) must NOT finalize this no-op
+        # without PROOF the approved commit landed. ``_preserved_commit_already_on_remote``
+        # only runs its positive SHA-containment check when ``preserved_head_sha`` is
+        # set; with the marker missing it returns True on an empty worktree↔remote
+        # diff ALONE, so a worktree reset to the remote head would consume the
+        # single-use grant while the approved protected commit never landed. The
+        # marker is recorded durably at block time and cleared only by finalize (which
+        # also consumes the grant), so a still-active grant without a marker is an
+        # ambiguous/anomalous state: keep the grant active and surface needs_human
+        # instead of silently dropping the approved change, mirroring the post-push
+        # EtU2 fall-through guard below (PR #609 comment 4521107313).
+        if active_grant_specs and not preserved_head_sha:
+            reason = (
+                "approve-and-keep resume cannot confirm the approved protected commit "
+                "landed on the remote PR branch (no preserved-head marker recorded); "
+                "refusing to consume the grant on an empty-diff no-op. Re-issue the "
+                "approve-and-keep grant or a directive, then resume."
+            )
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
