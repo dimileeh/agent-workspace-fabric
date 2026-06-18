@@ -29,9 +29,24 @@ from awf.service.config import ServiceSettings
 from awf.service.support_bundle import (
     BUNDLE_FILENAME_PREFIX,
     ISSUE_TEMPLATE_PATH,
+    _credential_ref_kind,
     collect_support_bundle,
     write_support_bundle,
 )
+
+
+@pytest.mark.unit
+def test_credential_ref_kind_classifies_backend_schemes() -> None:
+    # Recognized credential backends map to stable labels used in the support
+    # bundle; an unrecognized scheme (or a bare value with no scheme) must fall
+    # through to "unknown" so the bundle never mislabels a backend it does not
+    # understand, and an absent reference stays None.
+    assert _credential_ref_kind("keyring://aws/access-key") == "keyring"
+    assert _credential_ref_kind("env://AWS_ACCESS_KEY") == "env_ref"
+    assert _credential_ref_kind("plain-file:///etc/awf/secret") == "plain_file"
+    assert _credential_ref_kind("vault://prod/db") == "unknown"
+    assert _credential_ref_kind("no-scheme-here") == "unknown"
+    assert _credential_ref_kind(None) is None
 
 
 def _settings(
