@@ -238,11 +238,40 @@ async def _rollback_failed_pre_push_validation_fix_pass(
     *,
     workspace_id: str,
     worktree_path: Path,
-    restore_ref: str,
+    restore_ref: str | None,
     pass_number: int,
     reason: str,
 ) -> str | None:
-    """Rollback fix-pass edits and return a failure reason when recovery fails."""
+    """Roll back fix-pass edits and return a failure reason when recovery fails.
+
+    ``restore_ref`` is the HEAD captured AFTER the fix-pass agent ran but
+    BEFORE the commit sink (``post_agent_head``), NOT ``fix_start_head``. The
+    fix-pass agent may commit its own validation fix and advance HEAD past
+    ``fix_start_head``; the commit sink then raises a control-flow exception
+    (provider-recovery / policy-blocked / generic) BEFORE making its own
+    commit, so HEAD has not moved since ``post_agent_head``. Resetting to
+    ``fix_start_head`` would discard the agent's already-committed validation
+    fix along with the stranded residue, so the retry would start from the old
+    tree and redo (or lose) valid repair work (review thread
+    ``PRRT_kwDOSJAM6s6Klf78``). This mirrors the CI-repair rollback
+    (``_rollback_ci_fix_residue_before_provider_recovery``, thread
+    ``PRRT_kwDOSJAM6s6Klf74``) and the finalize rollback
+    (``_rollback_finalize_dirty_residue_before_provider_recovery``), which
+    both anchor against the post-agent/pre-sink HEAD for the same reason.
+    ``None`` means the post-agent HEAD could not be resolved; the rollback is
+    skipped (the residue strands, but a missing anchor makes a safe
+    ``git reset --hard`` impossible — better to strand visibly than restore
+    against the wrong ref, mirroring the CI-repair and finalize rollbacks'
+    ``restore_ref is None`` guards).
+    """
+    if restore_ref is None:
+        _log.warning(
+            "monitor.pre_push_validation_fix_rollback_skipped_no_anchor",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            reason=reason,
+        )
+        return None
     from awf.runtime.pr_monitor_runner.pre_push_validation import (
         _pre_push_validation_cleanup,
     )
@@ -427,6 +456,26 @@ async def _run_pre_push_validation_fix_pass(
             return False, rollback_failure_reason
         return False, None
 
+    # Capture HEAD AFTER the fix-pass agent ran but BEFORE the commit sink
+    # (``_commit_dirty_worktree``). The agent may have committed its own
+    # validation fix and advanced HEAD past ``fix_start_head``; if the commit
+    # sink then raises a control-flow exception (provider-recovery /
+    # policy-blocked / generic) BEFORE making its own commit, the residue
+    # rollbacks below must anchor against THIS HEAD, not ``fix_start_head``.
+    # Resetting to ``fix_start_head`` would discard the agent's
+    # already-committed validation fix along with the stranded protected-scope
+    # residue, so the retry would start from the old tree and redo (or lose)
+    # valid repair work (review thread ``PRRT_kwDOSJAM6s6Klf78``). This mirrors
+    # the CI-repair rollback (``_rollback_ci_fix_residue_before_provider_recovery``,
+    # thread ``PRRT_kwDOSJAM6s6Klf74``) and the finalize rollback
+    # (``_rollback_finalize_dirty_residue_before_provider_recovery``), which
+    # both anchor against the post-agent/pre-sink HEAD for the same reason.
+    # ``None`` means HEAD could not be resolved; the rollback helper then
+    # skips the reset (a missing anchor makes a safe restore impossible —
+    # better to strand visibly than restore against the wrong ref, mirroring
+    # the CI-repair and finalize rollbacks' ``restore_ref is None`` guards).
+    post_agent_head = await self._rev_parse_head(worktree_path)
+
     try:
         committed = bool(
             await self._commit_dirty_worktree(
@@ -454,16 +503,21 @@ async def _run_pre_push_validation_fix_pass(
         # left behind. Without this rollback the protected-scope edits remain
         # dirty and the next monitor attempt trips ``_pre_existing_dirty_repair_worktree_result``
         # as ``PRE_EXISTING_DIRTY_WORKTREE``, masking the provider outage and
-        # wedging the PR (review thread ``PRRT_kwDOSJAM6s6Kc_Ak``). A rollback
-        # failure is logged but never clobbers the recovery exception: the loop's
-        # recovery handlers still run, and the stranded residue surfaces as the
-        # next attempt's pre-existing-dirty guard rather than being silently
-        # swallowed here.
+        # wedging the PR (review thread ``PRRT_kwDOSJAM6s6Kc_Ak``). The rollback
+        # anchors against ``post_agent_head`` (captured above), NOT
+        # ``fix_start_head``: the agent may have self-committed a validation fix
+        # and advanced HEAD past ``fix_start_head`` before the commit sink
+        # raised, so resetting to ``fix_start_head`` would discard the
+        # already-committed fix along with the stranded residue (review thread
+        # ``PRRT_kwDOSJAM6s6Klf78``). A rollback failure is logged but never
+        # clobbers the recovery exception: the loop's recovery handlers still
+        # run, and the stranded residue surfaces as the next attempt's
+        # pre-existing-dirty guard rather than being silently swallowed here.
         rollback_failure_reason = await _rollback_failed_fix_pass(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            restore_ref=fix_start_head,
+            restore_ref=post_agent_head,
             pass_number=pass_number,
             reason="provider_recovery_dirty_residue",
         )
@@ -487,16 +541,20 @@ async def _run_pre_push_validation_fix_pass(
         # and the next cycle's repair-start dirty guard
         # (``_pre_existing_dirty_repair_worktree_result``) trips as
         # ``PRE_EXISTING_DIRTY_WORKTREE``, losing the policy reason and wedging
-        # recovery instead of re-polling cleanly. Roll back to ``fix_start_head``
-        # before re-raising so the next attempt starts clean, mirroring the
-        # provider-recovery residue rollback above (review thread
-        # ``PRRT_kwDOSJAM6s6Kg7Dm``). A rollback failure is logged but never
+        # recovery instead of re-polling cleanly. Roll back to
+        # ``post_agent_head`` (captured above) before re-raising so the next
+        # attempt starts clean, mirroring the provider-recovery residue rollback
+        # above (review thread ``PRRT_kwDOSJAM6s6Kg7Dm``). The anchor is
+        # ``post_agent_head``, NOT ``fix_start_head``, for the same reason as
+        # the provider-recovery handler: the agent may have self-committed a
+        # validation fix before the commit sink raised (review thread
+        # ``PRRT_kwDOSJAM6s6Klf78``). A rollback failure is logged but never
         # clobbers the policy exception.
         rollback_failure_reason = await _rollback_failed_fix_pass(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            restore_ref=fix_start_head,
+            restore_ref=post_agent_head,
             pass_number=pass_number,
             reason="policy_blocked_dirty_residue",
         )
@@ -534,11 +592,18 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             error=repr(exc),
         )
+        # Anchor against ``post_agent_head`` (captured above), NOT
+        # ``fix_start_head``: the agent may have self-committed a validation
+        # fix and advanced HEAD past ``fix_start_head`` before the commit sink
+        # raised this generic exception, so resetting to ``fix_start_head``
+        # would discard the already-committed fix along with the stranded
+        # residue (review thread ``PRRT_kwDOSJAM6s6Klf78``, mirroring the
+        # provider-recovery and policy-blocked handlers above).
         rollback_failure_reason = await _rollback_failed_fix_pass(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            restore_ref=fix_start_head,
+            restore_ref=post_agent_head,
             pass_number=pass_number,
             reason="commit_exception",
         )

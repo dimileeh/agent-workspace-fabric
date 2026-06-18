@@ -184,7 +184,12 @@ async def test_pre_push_validation_fix_pass_runs_cleanup_after_commit(
     )
     fix_start_head = "1" * 40
     committed_head = "2" * 40
-    rev_parse_results = [fix_start_head, committed_head]
+    # ``_run_pre_push_validation_fix_pass`` reads HEAD before the agent run
+    # (``fix_start_head``), again after the agent run but before the commit
+    # sink (``post_agent_head`` — the agent did not self-commit here, so it
+    # equals ``fix_start_head``), and finally after the commit to resolve
+    # ``committed_head``.
+    rev_parse_results = [fix_start_head, fix_start_head, committed_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -270,7 +275,13 @@ async def test_pre_push_validation_fix_pass_detects_agent_self_commit(
     )
     fix_start_head = "1" * 40
     advanced_head = "2" * 40
-    rev_parse_results: list[str | None] = [fix_start_head, advanced_head]
+    # ``_run_pre_push_validation_fix_pass`` reads HEAD before the agent run
+    # (``fix_start_head``), again after the agent run but before the commit
+    # sink (``post_agent_head`` — the agent self-committed, so it equals
+    # ``advanced_head``), and finally after the no-commit sink to detect the
+    # self-commit (``current_head`` — also ``advanced_head``; HEAD did not
+    # move during the sink). Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, advanced_head, advanced_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -380,7 +391,10 @@ async def test_pre_push_validation_fix_pass_prompt_carries_task_tag(
     )
     fix_start_head = "1" * 40
     advanced_head = "2" * 40
-    rev_parse_results: list[str | None] = [fix_start_head, advanced_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent self-committed ->
+    # ``advanced_head``), and post-no-commit-sink HEAD (``advanced_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, advanced_head, advanced_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -463,7 +477,10 @@ async def test_pre_push_validation_fix_pass_genuine_no_commit_still_rolls_back(
         worktrees_root=tmp_path / "worktrees",
     )
     reread_head = fix_start_head if post_commit_head == "fix_start" else None
-    rev_parse_results: list[str | None] = [fix_start_head, reread_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent did not self-commit ->
+    # ``fix_start_head``), and post-no-commit-sink HEAD (``reread_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, fix_start_head, reread_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -573,7 +590,10 @@ async def test_pre_push_validation_fix_pass_reparent_commit_carries_task_tag(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, divergent_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent rewrote to
+    # ``divergent_head``), and post-no-commit-sink HEAD (``divergent_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, divergent_head, divergent_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -674,7 +694,10 @@ async def test_pre_push_validation_fix_pass_non_descendant_head_is_reparented(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, divergent_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent rewrote to
+    # ``divergent_head``), and post-no-commit-sink HEAD (``divergent_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, divergent_head, divergent_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -792,7 +815,10 @@ async def test_pre_push_validation_fix_pass_amend_self_commit_is_reparented(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, amended_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent amended to
+    # ``amended_head``), and post-no-commit-sink HEAD (``amended_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, amended_head, amended_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -889,7 +915,10 @@ async def test_pre_push_validation_fix_pass_self_commit_cleanup_failure_surfaces
     )
     fix_start_head = "1" * 40
     advanced_head = "2" * 40
-    rev_parse_results: list[str | None] = [fix_start_head, advanced_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent self-committed ->
+    # ``advanced_head``), and post-no-commit-sink HEAD (``advanced_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, advanced_head, advanced_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -974,7 +1003,10 @@ async def test_pre_push_validation_fix_pass_commit_head_capture_failure_is_infra
         worktrees_root=tmp_path / "worktrees",
     )
     fix_start_head = "1" * 40
-    rev_parse_results: list[str | None] = [fix_start_head, None]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent did not self-commit ->
+    # ``fix_start_head``), and post-commit HEAD capture (``None`` -> infra
+    # failure). Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, fix_start_head, None]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)

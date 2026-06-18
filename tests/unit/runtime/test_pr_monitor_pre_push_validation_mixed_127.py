@@ -122,6 +122,10 @@ async def test_mixed_127_fix_pass_exhaustion_reports_real_pre_push_details(
     workspace_id, worktree, cmd, adapter = await _mixed_failure_setup(factory, tmp_path)
     cmd.queue_result(returncode=0, stdout=f"{'5' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'6' * 40}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): the agent did not
+    # self-commit, so it equals the fix-start HEAD. Review thread
+    # ``PRRT_kwDOSJAM6s6Klf78``.
+    cmd.queue_result(returncode=0, stdout=f"{'6' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'7' * 40}\n")
     # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
     cmd.queue_result(returncode=0)

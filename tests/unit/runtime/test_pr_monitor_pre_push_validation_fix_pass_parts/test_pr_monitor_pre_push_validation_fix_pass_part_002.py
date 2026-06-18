@@ -60,6 +60,11 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     cmd = FakeCommandRunner()
     fix_start_head = "e" * 40
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): the agent did not
+    # self-commit, so it equals ``fix_start_head``. The rollback anchors
+    # against this, not ``fix_start_head`` directly (review thread
+    # ``PRRT_kwDOSJAM6s6Klf78``).
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     # Re-read HEAD after a clean (no-commit) fix pass: HEAD did not advance, so
     # the fix pass is classified as a genuine no-op and rolled back.
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
@@ -161,6 +166,11 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     cmd = FakeCommandRunner()
     fix_start_head = "9" * 40
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): the agent did not
+    # self-commit, so it equals ``fix_start_head``. The generic commit-sink
+    # exception rollback anchors against this (review thread
+    # ``PRRT_kwDOSJAM6s6Klf78``).
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
     cmd.queue_result(returncode=0, stdout="?? generated.tmp\n")
     cmd.queue_result(returncode=0)
@@ -251,6 +261,11 @@ async def test_pre_push_validation_fix_pass_preserves_reason_coded_commit_except
     cmd = FakeCommandRunner()
     fix_start_head = "9" * 40
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): captured before the
+    # commit sink. These terminal reason-coded exceptions re-raise WITHOUT
+    # rolling back, so ``post_agent_head`` is resolved but never used as a
+    # reset anchor here (review thread ``PRRT_kwDOSJAM6s6Klf78``).
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
     cmd.queue_result(returncode=0, stdout="?? generated.tmp\n")
     cmd.queue_result(returncode=0)
@@ -336,6 +351,10 @@ async def test_pre_push_validation_fix_pass_rolls_back_dirty_residue_before_poli
     fix_start_head = "8" * 40
     # ``_run_pre_push_validation_fix_pass`` reads HEAD before the agent run.
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): the agent did not
+    # self-commit, so it equals ``fix_start_head``. The policy-blocked
+    # rollback anchors against this (review thread ``PRRT_kwDOSJAM6s6Klf78``).
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     # ``_rollback_failed_pre_push_validation_fix_pass`` -> ``reset --hard``.
     cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
     # ``_pre_push_validation_cleanup`` -> ``check_validation_worktree_clean``
@@ -393,8 +412,10 @@ async def test_pre_push_validation_fix_pass_rolls_back_dirty_residue_before_poli
             validation_commands=("pytest -q",),
         )
 
-    # The fix-pass MUST roll back to ``fix_start_head`` before re-raising so the
-    # next monitor attempt does not trip ``PRE_EXISTING_DIRTY_WORKTREE``.
+    # The fix-pass MUST roll back to the post-agent/pre-sink HEAD before
+    # re-raising so the next monitor attempt does not trip
+    # ``PRE_EXISTING_DIRTY_WORKTREE``. The agent did not self-commit here, so
+    # ``post_agent_head`` equals ``fix_start_head``.
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
 
@@ -435,6 +456,10 @@ async def test_pre_push_validation_fix_pass_rolls_back_dirty_residue_before_prov
     cmd = FakeCommandRunner()
     fix_start_head = "7" * 40
     # ``_run_pre_push_validation_fix_pass`` reads HEAD before the agent run.
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): the agent did not
+    # self-commit, so it equals ``fix_start_head``. The provider-recovery
+    # rollback anchors against this (review thread ``PRRT_kwDOSJAM6s6Klf78``).
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     # ``_rollback_failed_pre_push_validation_fix_pass`` -> ``reset --hard``.
     cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
@@ -496,8 +521,10 @@ async def test_pre_push_validation_fix_pass_rolls_back_dirty_residue_before_prov
             validation_commands=("pytest -q",),
         )
 
-    # The fix-pass MUST roll back to ``fix_start_head`` before re-raising so
-    # the next monitor attempt does not trip ``PRE_EXISTING_DIRTY_WORKTREE``.
+    # The fix-pass MUST roll back to the post-agent/pre-sink HEAD before
+    # re-raising so the next monitor attempt does not trip
+    # ``PRE_EXISTING_DIRTY_WORKTREE``. The agent did not self-commit here, so
+    # ``post_agent_head`` equals ``fix_start_head``.
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
 
@@ -734,6 +761,10 @@ async def test_pre_push_validation_fix_pass_post_reset_cleanup_failure_surfaces_
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
     cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): the agent did not
+    # self-commit, so it equals ``restore_ref``. The genuine-no-commit
+    # rollback anchors against this (review thread ``PRRT_kwDOSJAM6s6Klf78``).
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
     cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
     # Re-read HEAD after a clean (no-commit) fix pass shows HEAD unchanged, so the
     # genuine-no-commit rollback path runs (not the self-commit path).
@@ -831,6 +862,10 @@ async def test_pre_push_validation_fix_pass_revalidates_before_push(
     fixed_head = "c" * 40
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): the agent did not
+    # self-commit, so it equals ``first_head``. The commit sink then advances
+    # HEAD to ``fixed_head`` (review thread ``PRRT_kwDOSJAM6s6Klf78``).
+    cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
     cmd.queue_result(returncode=0)
@@ -888,6 +923,10 @@ async def test_pre_push_validation_fix_prompt_includes_underlying_reason_code(
     first_head = "d" * 40
     fixed_head = "e" * 40
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): the agent did not
+    # self-commit, so it equals ``first_head`` (review thread
+    # ``PRRT_kwDOSJAM6s6Klf78``).
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
@@ -949,6 +988,10 @@ async def test_pre_push_validation_fix_pass_commits_agent_failure_evidence(
     first_head = "f" * 40
     fixed_head = "1" * 40
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): the agent did not
+    # self-commit, so it equals ``first_head`` (review thread
+    # ``PRRT_kwDOSJAM6s6Klf78``).
     cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
     # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
@@ -1055,6 +1098,10 @@ async def test_pre_push_validation_fix_pass_commit_fail_returns_fix_failed_reaso
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
+    cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
+    # Post-agent/pre-sink HEAD (``post_agent_head``): the agent did not
+    # self-commit, so it equals the fix-start HEAD (review thread
+    # ``PRRT_kwDOSJAM6s6Klf78``).
     cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"HEAD is now at {'f' * 8}\n")
     cmd.queue_result(returncode=0, stdout="")

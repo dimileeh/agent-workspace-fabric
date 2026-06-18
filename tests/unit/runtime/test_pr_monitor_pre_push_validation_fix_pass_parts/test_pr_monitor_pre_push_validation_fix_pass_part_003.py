@@ -448,7 +448,10 @@ async def test_pre_push_validation_fix_pass_reset_recommit_drop_is_reparented(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, divergent_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent rewrote to
+    # ``divergent_head``), and post-no-commit-sink HEAD (``divergent_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, divergent_head, divergent_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -549,7 +552,10 @@ async def test_pre_push_validation_fix_pass_reparent_failure_returns_reparent_re
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, divergent_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent rewrote to
+    # ``divergent_head``), and post-no-commit-sink HEAD (``divergent_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, divergent_head, divergent_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -627,7 +633,10 @@ async def test_pre_push_validation_fix_pass_no_net_change_rolls_back(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, divergent_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent rewrote to
+    # ``divergent_head``), and post-no-commit-sink HEAD (``divergent_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, divergent_head, divergent_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -725,9 +734,17 @@ async def test_pre_push_validation_fix_pass_revalidates_after_reparent(
         _validation_result(tmp_path, ok=False),
         _validation_result(tmp_path, ok=True),
     )
-    # HEAD reads, in order: pass-1 validation HEAD, fix-pass fix_start_head, fix-pass
-    # post-commit HEAD (non-descendant amend), pass-2 validation HEAD (reparented).
-    head_reads: list[str | None] = [first_head, first_head, amended_head, reparented_head]
+    # HEAD reads, in order: pass-1 validation HEAD, fix-pass fix_start_head,
+    # fix-pass post-agent/pre-sink HEAD (agent self-amended to ``amended_head``),
+    # fix-pass post-no-commit-sink HEAD (``amended_head``), pass-2 validation
+    # HEAD (reparented). Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    head_reads: list[str | None] = [
+        first_head,
+        first_head,
+        amended_head,
+        amended_head,
+        reparented_head,
+    ]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return head_reads.pop(0)
@@ -899,7 +916,7 @@ async def test_pre_push_validation_fix_pass_committed_nondescendant_is_reparente
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, committed_head]
+    rev_parse_results: list[str | None] = [fix_start_head, fix_start_head, committed_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -1004,7 +1021,10 @@ async def test_pre_push_validation_fix_pass_committed_descendant_skips_reparent(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, committed_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent did not self-commit ->
+    # ``fix_start_head``), and post-commit HEAD (``committed_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, fix_start_head, committed_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -1093,7 +1113,10 @@ async def test_pre_push_validation_fix_pass_committed_reparent_failure_returns_r
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, committed_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent did not self-commit ->
+    # ``fix_start_head``), and post-commit HEAD (``committed_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, fix_start_head, committed_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
@@ -1173,7 +1196,10 @@ async def test_pre_push_validation_fix_pass_committed_no_net_change_rolls_back(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results: list[str | None] = [fix_start_head, committed_head]
+    # Pre-agent HEAD, post-agent/pre-sink HEAD (agent did not self-commit ->
+    # ``fix_start_head``), and post-commit HEAD (``committed_head``).
+    # Review thread ``PRRT_kwDOSJAM6s6Klf78``.
+    rev_parse_results: list[str | None] = [fix_start_head, fix_start_head, committed_head]
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0)
