@@ -59,14 +59,22 @@ export function formatBlockedResolutionCommands(
   workspaceId: string,
   violations: readonly Pick<WorkspaceBlockViolation, "path">[] | null | undefined,
 ): BlockedResolutionCommands {
-  const path = shellSingleQuote(firstViolationPath(violations));
+  // Cover EVERY recorded violation, not just the first: the blocked resume only
+  // suppresses violations covered by active grants, and the preserved-commit guard
+  // requires all recorded block_violations to be granted, so a single-path command
+  // would fail to unblock a multi-violation pause.
+  const paths = violationPaths(violations);
+  const grants = paths
+    .map((path) => `--grant '${shellSingleQuote(globEscape(path))}'`)
+    .join(" ");
+  const reverts = paths.map((path) => `revert ${shellSingleQuote(path)}`).join("; ");
   return {
     // The guide service rejects a grant that covers a recorded block violation
-    // unless `--approve-policy-downgrade` is set (controls_guide.py): the grant
-    // always targets the recorded violation path, so the flag is mandatory for
-    // the command to actually unblock — include it so the copied command works.
-    grantCommand: `awf workspace guide ${workspaceId} --grant '${path}' --approve-policy-downgrade --reason '${REASON_PLACEHOLDER}'`,
-    revertCommand: `awf workspace guide ${workspaceId} --directive 'revert ${path}; ${ALTERNATIVE_PLACEHOLDER}'`,
+    // unless `--approve-policy-downgrade` is set (controls_guide.py): the grants
+    // target the recorded violation paths, so the flag is mandatory for the command
+    // to actually unblock — include it so the copied command works.
+    grantCommand: `awf workspace guide ${workspaceId} ${grants} --approve-policy-downgrade --reason '${REASON_PLACEHOLDER}'`,
+    revertCommand: `awf workspace guide ${workspaceId} --directive '${reverts}; ${ALTERNATIVE_PLACEHOLDER}'`,
   };
 }
 
@@ -79,14 +87,28 @@ function shellSingleQuote(value: string): string {
   return value.replace(/'/g, "'\\''");
 }
 
-function firstViolationPath(
+// `--grant` is applied as an fnmatch path glob by the guide gate (controls_guide.py),
+// so a literal violation path containing glob metacharacters (`*`, `?`, `[`) would
+// match the wrong files. Escape each the fnmatch way (wrap in a character class) so
+// the grant targets exactly the recorded file. Mirrors Python's glob.escape. Applied
+// to grants only — the revert directive is free text, not a glob.
+function globEscape(value: string): string {
+  return value.replace(/([*?[])/g, "[$1]");
+}
+
+// All distinct, non-empty violation paths in recorded order, or the placeholder when
+// none are available so the command stays copy-able.
+function violationPaths(
   violations: readonly Pick<WorkspaceBlockViolation, "path">[] | null | undefined,
-): string {
+): string[] {
+  const seen = new Set<string>();
+  const paths: string[] = [];
   for (const violation of violations ?? []) {
     const candidate = violation.path?.trim();
-    if (candidate) {
-      return candidate;
+    if (candidate && !seen.has(candidate)) {
+      seen.add(candidate);
+      paths.push(candidate);
     }
   }
-  return PATH_PLACEHOLDER;
+  return paths.length > 0 ? paths : [PATH_PLACEHOLDER];
 }

@@ -117,3 +117,48 @@ test("formatBlockedResolutionCommands escapes a single quote in the path so the 
     "awf workspace guide ws_abc123 --directive 'revert it'\\''s/config.yml; <alternative>'",
   );
 });
+
+test("formatBlockedResolutionCommands grants and reverts every recorded violation path", () => {
+  // The resume path requires ALL recorded violations to be granted, so a
+  // multi-violation pause must emit one --grant per path (and revert each).
+  const { grantCommand, revertCommand } = formatBlockedResolutionCommands("ws_abc123", [
+    { path: "pyproject.toml" },
+    { path: ".github/workflows/ci.yml" },
+  ]);
+  assert.equal(
+    grantCommand,
+    "awf workspace guide ws_abc123 --grant 'pyproject.toml' --grant '.github/workflows/ci.yml' --approve-policy-downgrade --reason '<why>'",
+  );
+  assert.equal(
+    revertCommand,
+    "awf workspace guide ws_abc123 --directive 'revert pyproject.toml; revert .github/workflows/ci.yml; <alternative>'",
+  );
+});
+
+test("formatBlockedResolutionCommands de-duplicates repeated violation paths", () => {
+  const { grantCommand } = formatBlockedResolutionCommands("ws_abc123", [
+    { path: "pyproject.toml" },
+    { path: "   " },
+    { path: "pyproject.toml" },
+  ]);
+  assert.equal(
+    grantCommand,
+    "awf workspace guide ws_abc123 --grant 'pyproject.toml' --approve-policy-downgrade --reason '<why>'",
+  );
+});
+
+test("formatBlockedResolutionCommands escapes glob metacharacters in the grant path only", () => {
+  // `--grant` is applied as an fnmatch glob, so a literal path with `*?[` must be
+  // escaped to target the exact file; the revert directive is free text and stays literal.
+  const { grantCommand, revertCommand } = formatBlockedResolutionCommands("ws_abc123", [
+    { path: "config[1].yml" },
+  ]);
+  assert.equal(
+    grantCommand,
+    "awf workspace guide ws_abc123 --grant 'config[[]1].yml' --approve-policy-downgrade --reason '<why>'",
+  );
+  assert.equal(
+    revertCommand,
+    "awf workspace guide ws_abc123 --directive 'revert config[1].yml; <alternative>'",
+  );
+});
