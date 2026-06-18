@@ -142,6 +142,10 @@ test("mobile theme screenshots cover dashboard, workspace, and logs views", asyn
   // copy-id button overlaps that button's centre, so click the title box
   // directly (above the copy-id control) to land on the open-details button.
   const cardTitle = page.getByTestId(`workspace-title-${workspaceId}`);
+  // The fleet-health strip carries enough KPIs that the first card can sit below
+  // the mobile fold; scroll it into view so the raw-coordinate click below (used
+  // to dodge the overlapping copy-id control) lands inside the viewport.
+  await cardTitle.scrollIntoViewIfNeeded();
   const titleBox = await cardTitle.boundingBox();
   if (!titleBox) {
     throw new Error(`Workspace title ${workspaceId} did not produce a clickable box`);

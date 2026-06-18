@@ -25,6 +25,7 @@ compactDuration,
 compactId,
 fallbackLifecycleStages,
 formatDateTime,
+normalizeLifecycle,
 relativeTime,
 statusGlyph,
 statusTone,
@@ -908,7 +909,9 @@ export function LifecycleRail({
 }) {
   const terminal = status === "failed" || status === "cancelled";
   const stages: WorkspaceLifecycleStage[] =
-    lifecycle.length > 0 ? lifecycle : fallbackLifecycleStages(status, terminalSourceStage);
+    lifecycle.length > 0
+      ? normalizeLifecycle(status, lifecycle)
+      : fallbackLifecycleStages(status, terminalSourceStage);
   return (
     <Panel title="Lifecycle" icon={<GitPullRequest size={16} aria-hidden />}>
       <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-8">

@@ -30,6 +30,16 @@ test("control eligibility remonitor requires PR-monitorable workspace", () => {
   );
 });
 
+test("control eligibility cancel stays available for a blocked (operator-paused) workspace", () => {
+  // A blocked workspace holds its slot + warm stack awaiting an operator decision;
+  // cancel is the manual capacity-reclaim lever (state machine allows blocked →
+  // cancelled), so the operator can abandon it instead of being forced to resolve.
+  assertControl({ overview: overview({ status: "blocked" }) }, "cancel", {
+    enabled: true,
+    reason: null,
+  });
+});
+
 test("control eligibility refresh targets merge candidate or stale context", () => {
   assertControl(
     {
