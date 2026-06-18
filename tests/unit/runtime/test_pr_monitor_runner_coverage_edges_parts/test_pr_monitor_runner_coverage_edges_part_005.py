@@ -49,6 +49,7 @@ from awf.runtime.pr_monitor_runner.types import (
 from awf.service.merge_queue import MergeQueueBlocker
 from awf.service.supply_chain_policy import SupplyChainPolicyRefreshService
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -565,15 +566,14 @@ async def test_ci_fix_protected_scope_repair_ownership_repair_failure_returns_fa
     )
 
     async def _protected_scope_push_block(**_kwargs: object) -> _ProtectedScopePushBlock:
+        # A diff-unavailable block (NO violations) still routes through
+        # ``_repair_protected_scope_commits_before_push`` — only a block WITH
+        # violations takes the WS-2 protected-pause path — so this exercises an
+        # ownership-repair failure surfacing from the diff-unavailable repair branch.
         return _ProtectedScopePushBlock(
-            message="protected scope blocked",
-            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
-            violations=(
-                QualityGateViolation(
-                    path=".github/workflows/ci.yml",
-                    protected_pattern=".github/**",
-                ),
-            ),
+            message="protected scope diff unavailable",
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+            violations=(),
         )
 
     async def _repair_ownership_failed(**_kwargs: object) -> _GitPushResult:
@@ -729,10 +729,15 @@ async def test_git_push_result_blocks_existing_supply_chain_finding_before_git_p
 
 
 @pytest.mark.unit
-async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
+async def test_ci_fix_pauses_into_blocked_when_committed_protected_quality_gate_edits(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """WS-2: a protected-scope violation in an unpushed CI-repair commit PAUSES the
+    workspace into ``blocked`` for an operator decision (preserving the offending
+    commit) instead of the old silent ``git reset --hard`` rollback that failed the
+    workspace. Wires the CI-repair push site into the protected-pause flow the
+    comment-addressing path already uses (PRRT_kwDOSJAM6s6KFDHT)."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -748,11 +753,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
-    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
-    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
-    cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0, stdout="HEAD is now at abc1234\n")
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # preserved HEAD (no reset)
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
     runner = make_runner(
@@ -778,37 +779,35 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
 
     assert push_result.failed is True
     assert push_result.pushed is False
-    assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert push_result.paused_into_blocked is True
+    assert push_result.reason_code == "PROTECTED_SCOPE_PAUSED_BLOCKED"
     assert ".github/workflows/ci.yml" in push_result.stderr
     assert len(adapter.calls) == 1
     assert push_result.details is not None
-    assert push_result.details["branch_restored"] is True
-    assert push_result.details["reverted_paths"] == [".github/workflows/ci.yml", "src/fix.py"]
+    assert push_result.details["preserved_head_sha"] == "blocked-head-sha"
+    assert push_result.details["paused_into_blocked"] is True
     call_args = [call.args for call in cmd.calls]
-    assert any(
-        args[:1] == ["git"] and "status" in args and args[-1:] == ["--untracked-files=all"]
-        for args in call_args
+    # The offending commit is PRESERVED — no reset/clean before the operator decides.
+    assert not any(
+        args[:1] == ["git"] and "reset" in args and "--hard" in args for args in call_args
     )
-    assert any(
-        args[:1] == ["git"]
-        and "diff" in args
-        and "--name-status" in args
-        and "-z" in args
-        and "merge-base-sha..HEAD" in args
-        for args in call_args
-    )
-    assert _git_worktree_command(worktree, "reset", "--hard", "abc1234567890def") in call_args
     assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
     async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == "blocked"
+        assert workspace.block_epoch == 1
+        assert workspace.block_resume_phase == "monitor_protected_scope_push"
         events = await WorkspaceEventRepository(s).list(
             workspace_id=workspace_id,
-            event_type="workspace.monitor_protected_scope_push_blocked",
+            event_type="workspace.monitor_protected_scope_paused",
             limit=10,
         )
     assert len(events) == 1
-    assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert events[0].reason_code == "PROTECTED_SCOPE_PAUSED_BLOCKED"
     assert events[0].payload is not None
     assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+    assert events[0].payload["preserved_head_sha"] == "blocked-head-sha"
 
 
 @pytest.mark.unit
@@ -862,11 +861,27 @@ async def test_unpushed_commit_protected_scope_detects_rename_source(
     ) in [call.args for call in cmd.calls]
 
 
+class _CiPauseRecordingGh(DefaultMergeMethodGitHubClient):
+    """gh double that records protected-pause notification ``post_comment`` calls."""
+
+    def __init__(self, cmd: FakeCommandRunner) -> None:
+        super().__init__(cmd)
+        self.posts: list[dict[str, object]] = []
+
+    async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
+        self.posts.append({"repo": repo, "pr_number": pr_number, "body": body})
+
+
 @pytest.mark.unit
-async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_protected_scope(
+async def test_execute_ci_fix_pauses_into_blocked_when_local_commit_touches_protected_scope(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """WS-2: the loop's ``ReportCiFailure`` path pauses the workspace into ``blocked``
+    for an operator decision (preserving the offending commit) when a CI-repair commit
+    touches an unowned protected file, ending the monitor cycle cleanly with a
+    succeeded ``protected_scope_paused`` operation instead of the old rollback that
+    failed the workspace (PRRT_kwDOSJAM6s6KFDHT)."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -882,27 +897,17 @@ async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_p
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
-    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
-    cmd.queue_result(
-        returncode=0,
-        stdout=_name_status_z(
-            ".github/workflows/ci.yml",
-            "src/fix.py",
-            "tests/unit/control/test_ci_workflow_toolchain.py",
-            "plans/PR282_CI_SETUP_UV_PLAN.md",
-        ),
-    )
-    cmd.queue_result(returncode=0, stdout="")  # status before rollback
-    cmd.queue_result(returncode=0, stdout="HEAD is now at abc1234\n")  # reset
-    cmd.queue_result(returncode=0, stdout="")  # clean
+    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # preserved HEAD (no reset)
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
+    gh = _CiPauseRecordingGh(cmd)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+        gh=gh,
     )
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
@@ -932,56 +937,35 @@ async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_p
         call.args for call in cmd.calls if call.args[:1] == ["git"] and "push" in call.args
     ]
     assert push_calls == []
+    # The offending commit is PRESERVED — no reset/clean before the operator decides.
+    assert not any(
+        call.args[:1] == ["git"] and "reset" in call.args and "--hard" in call.args
+        for call in cmd.calls
+    )
+    # An operator notification comment was posted to the PR.
+    assert len(gh.posts) == 1
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
-        push_events = await WorkspaceEventRepository(s).list(
+        paused_events = await WorkspaceEventRepository(s).list(
             workspace_id=workspace_id,
-            event_type="workspace.audit.git_push",
+            event_type="workspace.monitor_protected_scope_paused",
             limit=10,
         )
 
     assert workspace is not None
-    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.status == WorkspaceStatus.blocked.value
+    assert workspace.block_epoch == 1
+    assert workspace.block_resume_phase == "monitor_protected_scope_push"
     ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
-    assert ci_operation.status == OperationStatus.failed.value
-    assert ci_operation.result["outcome"] == "protected_scope_push_blocked"
-    assert ci_operation.result["failure_evidence"]["branch_restored"] is True
-    assert ci_operation.result["failure_evidence"]["reverted_paths"] == [
-        ".github/workflows/ci.yml",
-        "plans/PR282_CI_SETUP_UV_PLAN.md",
-        "src/fix.py",
-        "tests/unit/control/test_ci_workflow_toolchain.py",
-    ]
-    requested_event = next(
-        event for event in push_events if event.payload and event.payload["outcome"] == "requested"
-    )
-    rollback_event = next(
-        event
-        for event in push_events
-        if event.payload
-        and event.payload["action"] == "protected_scope_transactional_rollback"
-        and event.payload["outcome"] == "succeeded"
-    )
-    failed_event = next(
-        event
-        for event in push_events
-        if event.payload and event.payload["action"] == "ci_repair_push"
-    )
-    assert requested_event.payload is not None
-    assert requested_event.payload["action"] == "protected_scope_transactional_rollback"
-    assert requested_event.payload["outcome"] == "requested"
-    assert rollback_event.payload is not None
-    assert rollback_event.payload["evidence"]["branch_restored"] is True
-    assert failed_event.payload is not None
-    assert failed_event.payload["outcome"] == "failed"
-    assert failed_event.payload["evidence"]["branch_restored"] is True
-    assert _git_worktree_command(worktree, "reset", "--hard", "abc1234567890def") in [
-        call.args for call in cmd.calls
-    ]
-    assert not any(
-        call.args == _git_worktree_command(worktree, "clean", "-fd") for call in cmd.calls
-    )
+    assert ci_operation.status == OperationStatus.succeeded.value
+    assert ci_operation.result["outcome"] == "protected_scope_paused"
+    assert ci_operation.result["reason_code"] == "PROTECTED_SCOPE_PAUSED_BLOCKED"
+    assert ci_operation.result["pushed"] is False
+    assert len(paused_events) == 1
+    assert paused_events[0].payload is not None
+    assert paused_events[0].payload["paths"] == [".github/workflows/ci.yml"]
+    assert paused_events[0].payload["preserved_head_sha"] == "blocked-head-sha"
 
 
 @pytest.mark.unit

@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from awf.common.commands import CommandResult
+from awf.control import operator_grants as control_operator_grants
 from awf.control.executor import quality_methods as executor_quality_methods
 from awf.control.executor import state_ops as executor_state_ops
 from awf.control.executor.quality_gates import _PostAgentCommitStepError
@@ -246,7 +247,9 @@ async def test_active_operator_grant_specs_returns_empty_when_workspace_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A vanished workspace yields no active grants rather than querying rows."""
-    monkeypatch.setattr(executor_state_ops, "WorkspaceRepository", _MissingWorkspaceRepo)
+    # The grant-loader body now lives in the shared ``control.operator_grants``
+    # module the executor wrapper delegates to, so patch the repository there.
+    monkeypatch.setattr(control_operator_grants, "WorkspaceRepository", _MissingWorkspaceRepo)
     executor = SimpleNamespace(_session_factory=lambda: _NullGetSession())
 
     specs = await executor_state_ops._active_operator_grant_specs(executor, "ws_gone")
@@ -259,7 +262,10 @@ async def test_consume_active_operator_grants_returns_zero_when_workspace_missin
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Consuming grants on a vanished workspace is a no-op that consumes nothing."""
-    monkeypatch.setattr(executor_state_ops, "WorkspaceRepository", _MissingWorkspaceRepo)
+    # The consume body lives in the shared ``control.operator_grants`` module the
+    # executor wrapper delegates to, so patch the repository there (the executor
+    # module no longer references ``WorkspaceRepository`` for this path).
+    monkeypatch.setattr(control_operator_grants, "WorkspaceRepository", _MissingWorkspaceRepo)
     executor = SimpleNamespace(_session_factory=lambda: _NullGetSession())
 
     consumed = await executor_state_ops._consume_active_operator_grants(executor, "ws_gone")

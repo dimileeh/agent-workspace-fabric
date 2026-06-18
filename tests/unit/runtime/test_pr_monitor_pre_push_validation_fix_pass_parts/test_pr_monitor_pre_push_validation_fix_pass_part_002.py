@@ -693,3 +693,67 @@ async def test_pre_push_validation_fix_pass_commit_fail_returns_fix_failed_reaso
     assert result.details["failing_command"] == "pytest -q"
     assert result.details["failing_returncode"] == 1
     assert "fix pass failed" in result.stderr
+
+
+@pytest.mark.unit
+async def test_disallowed_fix_passes_skip_fix_pass_on_failed_validation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``allow_validation_fix_passes=False`` returns the validation failure unchanged.
+
+    The operator-hint resume path disables fix passes while an approve-and-keep grant
+    is still active: a fix pass commits through ``_commit_dirty_worktree``, whose
+    protected-scope check honors the STILL-ACTIVE grant, so it could publish new edits
+    to the granted protected path under an approval meant only for the preserved commit
+    (PR #609 comment 4512881681). When disabled, a failing validation must NOT invoke a
+    fix pass and must surface ``PRE_PUSH_VALIDATION_FAILED`` (the grant survives for a
+    re-resume).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    local_head = "d" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=False))  # type: ignore[assignment]
+
+    async def _fix_pass_must_not_run(_runner: object, **_kwargs: object) -> tuple[bool, str | None]:
+        """Fail the test if a fix pass is invoked while fix passes are disabled."""
+        pytest.fail("fix passes must be skipped when allow_validation_fix_passes=False")
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation_fix_pass",
+        _fix_pass_must_not_run,
+    )
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        allow_validation_fix_passes=False,
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"

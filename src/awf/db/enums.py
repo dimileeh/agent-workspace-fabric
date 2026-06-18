@@ -232,3 +232,16 @@ SERVICE_GC_REQUEST_STATUS_RUNNING: Final = "running"
 SERVICE_GC_REQUEST_STATUS_COMPLETED: Final = "completed"
 SERVICE_GC_REQUEST_STATUS_FAILED: Final = "failed"
 SERVICE_GC_REQUEST_STATUS_EXPIRED: Final = "expired"
+
+
+MONITOR_BLOCK_RESUME_PHASE_PREFIX: Final = "monitor_"
+"""Prefix marking a ``Workspace.block_resume_phase`` as a POST-PR (monitor-origin)
+protected-scope pause.
+
+A pre-PR executor block records an executor phase (``validating`` etc.); a
+monitor-origin block records a ``monitor_*`` phase. The prefix is the single
+discriminator that routes resume: pre-PR blocks resume through the executor
+(``blocked -> running``), monitor-origin blocks resume through the PR monitor
+(``blocked -> monitoring_pr`` at guide time). Defined here (a dependency-free
+literal) so the ``db`` resumable selector and the ``control`` block-transition
+helpers share one source of truth without ``db -> control`` import inversion."""
