@@ -431,6 +431,7 @@ async def _run_fix_cycle(
             compose_file=compose_file,
             remote_url=remote_push_url,
             state=state,
+            operation_start_head=operation_start_head,
         )
     )
     pushed_head_sha: str | None = None

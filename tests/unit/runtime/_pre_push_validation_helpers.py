@@ -218,6 +218,17 @@ async def _set_resolved_profile(
         await session.commit()
 
 
+def _name_status_z(*records: str) -> str:
+    """Render ``git diff --name-status -z``-shaped stdout from raw NUL records.
+
+    Each record is expected to already include its own NUL terminators (e.g.
+    ``"M\\0src/fix.py\\0"`` or a rename ``"R100\\0old.txt\\0new.txt\\0"``), so
+    callers can build arbitrarily shaped ``--name-status -z`` output without a
+    bespoke builder per status letter.
+    """
+    return "".join(records)
+
+
 def _mark_git_worktree(worktree: Path) -> None:
     """Make a lightweight temp directory look like a git worktree to guards."""
     worktree.mkdir(parents=True, exist_ok=True)

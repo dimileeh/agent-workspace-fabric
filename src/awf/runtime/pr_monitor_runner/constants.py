@@ -132,6 +132,15 @@ _REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"
 
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
 
+# ``_commit_dirty_worktree`` returned False *because the commit sink failed*
+# (``git add`` / ``git commit`` errored after the agent left repair output
+# dirty/staged), leaving operation-owned dirt in the worktree. Surfacing this
+# reason (terminal) instead of letting provider recovery raise a retry keeps
+# the dirty repair output from being stranded for the next monitor attempt,
+# which would otherwise trip ``PRE_EXISTING_DIRTY_WORKTREE`` and hide the
+# commit-sink failure. See PRRT_kwDOSJAM6s6KY4Wi.
+_REPAIR_DIRTY_COMMIT_FAILED_REASON = "REPAIR_DIRTY_COMMIT_FAILED"
+
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 
 _VALIDATION_MISSING_CURRENT_HEAD_STALE_REASON = "validation_missing_for_current_head"

@@ -479,3 +479,68 @@ async def test_clear_preserved_head_marker_durably_missing_workspace_is_noop(
     )
     # Must not raise even though no such workspace exists.
     await runner._clear_preserved_head_marker_durably("ws_does_not_exist")
+
+
+@pytest.mark.unit
+async def test_consume_active_operator_grants_marks_grant_consumed_and_commits(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Consuming an active grant marks it consumed (single-use) and commits the
+    change so a later DIFFERENT protected change re-blocks and must be granted
+    again."""
+    from awf.common.ids import new_operator_grant_id
+    from awf.db.models import OperatorGrantAuditRecord
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    grant_id = new_operator_grant_id()
+    async with factory() as session:
+        session.add(
+            OperatorGrantAuditRecord(
+                id=grant_id,
+                workspace_id=workspace_id,
+                operator="op@example.com",
+                reason="approved the protected change",
+                normalized_path="pyproject.toml",
+                block_epoch=0,
+                approve_policy_downgrade=True,
+            )
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    consumed = await runner._consume_active_operator_grants(workspace_id)
+
+    assert consumed == 1
+    async with factory() as session:
+        record = await session.get(OperatorGrantAuditRecord, grant_id)
+        assert record is not None
+        assert record.consumed_at is not None
+
+
+@pytest.mark.unit
+async def test_consume_active_operator_grants_returns_zero_and_skips_commit_when_none(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Consuming when there are no active grants returns 0 and skips the commit
+    flush (no consumption happened, so there is nothing to persist)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    consumed = await runner._consume_active_operator_grants(workspace_id)
+
+    assert consumed == 0

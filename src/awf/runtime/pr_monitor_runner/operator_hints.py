@@ -471,6 +471,7 @@ async def _run_operator_hint_cycle(
             compose_file=compose_file,
             remote_url=remote_push_url,
             state=state,
+            operation_start_head=operation_start_head,
             # Disable the pre-push validation fix passes while an approve-and-keep
             # grant is still active (grant-only or directive+grant resume). The grant
             # is consumed only by ``_finalize_operator_hint_resume`` AFTER this push,

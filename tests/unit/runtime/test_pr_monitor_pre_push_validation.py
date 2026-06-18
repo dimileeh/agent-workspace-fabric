@@ -6,7 +6,6 @@ import ast
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -28,7 +27,6 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
-    ValidationWorktreeCheck,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -45,7 +43,7 @@ from tests.unit.runtime._pre_push_validation_helpers import (
     _FakeValidation,
     _mark_git_worktree,
     _OverriddenFirstFailureValidationResult,
-    _provider_coverage_failure_without_command,
+    _provider_coverage_failure_without_command,  # noqa: F401  (re-exported for sibling test modules)
     _seed_monitoring_workspace_without_attempt,
     _set_resolved_profile,
     _validation_result,
@@ -526,6 +524,10 @@ async def test_pre_push_validation_mixed_127_prefers_real_failure_for_fix_pass(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'2' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'3' * 40}\n")
+    # The commit sink then advances HEAD to ``{'4' * 40}``. The commit-sink
+    # ``except`` clauses capture HEAD INSIDE each clause (after the sink
+    # raised), not before the sink (review thread ``PRRT_kwDOSJAM6s6Klf78``
+    # / ``PRRT_kwDOSJAM6s6KpAD6``).
     cmd.queue_result(returncode=0, stdout=f"{'4' * 40}\n")
     # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
     cmd.queue_result(returncode=0)
@@ -1095,209 +1097,3 @@ async def test_pre_push_validation_pre_existing_dirty_blocks_before_validation(
     assert result.details["workspace_head_sha"] == local_head
     assert result.details["paths"] == ["apps/console/next-env.d.ts"]
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
-
-
-@pytest.mark.unit
-async def test_pre_push_validation_reports_dirty_worktree_when_head_capture_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """Pre-existing dirt should not be hidden by a later HEAD capture failure."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    await _set_resolved_profile(factory, workspace_id)
-    worktree = tmp_path / "worktrees" / workspace_id
-    _mark_git_worktree(worktree)
-    dirty_check = ValidationWorktreeCheck(
-        clean=False,
-        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
-        message="dirty file prevents validation",
-    )
-    check_worktree_clean = AsyncMock(return_value=dirty_check)
-    monkeypatch.setattr(
-        pre_push_validation_module,
-        "_pre_push_validation_worktree_check",
-        check_worktree_clean,
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
-    rev_parse_head = AsyncMock(return_value=None)
-    monkeypatch.setattr(runner, "_rev_parse_head", rev_parse_head)
-
-    result = await pre_push_validation_module._run_pre_push_validation(
-        runner,
-        workspace_id=workspace_id,
-        worktree_path=worktree,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        remote_branch=f"awf/{workspace_id}",
-    )
-
-    assert result.passed is False
-    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
-    assert result.workspace_head_sha is None
-    assert result.validation_run_id is None
-    check_worktree_clean.assert_awaited_once()
-    rev_parse_head.assert_awaited_once_with(worktree)
-
-
-@pytest.mark.unit
-async def test_pre_push_validation_worktree_check_installs_agent_scratch_excludes(
-    monkeypatch: pytest.MonkeyPatch,
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """The monitor guard must install adapter scratch excludes before checking cleanliness.
-
-    A monitor-adopted or resumed workspace may never have passed through the
-    executor's scratch-exclude setup, yet the monitor's own fix-pass agent run
-    can create ``.claude/worktrees/``. The pre-push worktree guard therefore has
-    to (re)install the adapter's scratch excludes before judging cleanliness, or
-    it would refuse the otherwise clean tree (regression for thread
-    ``PRRT_kwDOSJAM6s6HjHiR``).
-    """
-    worktree = tmp_path / "worktrees" / "ws-scratch"
-
-    class _ScratchAdapter(FakeAdapter):
-        @property
-        def runtime_scratch_paths(self) -> tuple[str, ...]:
-            return (".claude/worktrees/",)
-
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=_ScratchAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    call_order: list[str] = []
-    applied_scratch_paths: list[tuple[str, ...]] = []
-
-    async def _spy_apply(
-        *,
-        run_git: Any,
-        worktree_path: Path,
-        scratch_paths: tuple[str, ...],
-    ) -> bool:
-        call_order.append("apply")
-        applied_scratch_paths.append(scratch_paths)
-        return True
-
-    clean_check = ValidationWorktreeCheck(clean=True, reason_code=None, message=None)
-
-    async def _spy_clean(**_kwargs: Any) -> ValidationWorktreeCheck:
-        call_order.append("check")
-        return clean_check
-
-    monkeypatch.setattr(
-        pre_push_validation_module,
-        "apply_agent_scratch_excludes",
-        _spy_apply,
-    )
-    monkeypatch.setattr(
-        "awf.runtime.validation_worktree.check_validation_worktree_clean",
-        _spy_clean,
-    )
-
-    result = await pre_push_validation_module._pre_push_validation_worktree_check(
-        runner,
-        worktree_path=worktree,
-    )
-
-    assert result is clean_check
-    assert applied_scratch_paths == [(".claude/worktrees/",)]
-    assert call_order == ["apply", "check"]
-
-
-@pytest.mark.unit
-async def test_pre_push_validation_coverage_provider_failure_without_command_skips_fix_pass(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """Coverage provider failures without command records cannot run a fix pass."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    await _set_resolved_profile(factory, workspace_id)
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True)
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f"{'8' * 40}\n")
-    validation = _FakeValidation(
-        ValidationResult(coverage=_provider_coverage_failure_without_command())
-    )
-    adapter = FakeAdapter()
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-        pre_push_validation_fix_passes=1,
-    )
-    runner._deps.validation = validation  # type: ignore[assignment]
-
-    result = await runner._validated_git_push_result(
-        workspace_id=workspace_id,
-        worktree_path=worktree,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.failed is True
-    assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
-    assert result.details is not None
-    assert result.details["validation_reason_code"] == "COVERAGE_PROVIDER_FAILED"
-    assert "failing_command" not in result.details
-    assert "failing_returncode" not in result.details
-    assert len(validation.calls) == 1
-    assert adapter.calls == []
-    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
-
-
-@pytest.mark.unit
-async def test_pre_push_validation_coverage_provider_skip_still_pushes(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """A configured coverage provider may decline to emit a result."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    await _set_resolved_profile(factory, workspace_id, include_coverage=True)
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True)
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f"{'9' * 40}\n")
-    cmd.queue_result(returncode=0, stdout="", stderr="")
-    validation = _FakeValidation(
-        _validation_result(tmp_path, ok=True),
-        coverage_result=None,
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    runner._deps.validation = validation  # type: ignore[assignment]
-
-    result = await runner._validated_git_push_result(
-        workspace_id=workspace_id,
-        worktree_path=worktree,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.failed is False
-    assert result.pushed is True
-    assert len(validation.coverage_calls) == 1
-    runs = await _validation_runs(factory, workspace_id)
-    assert runs[-1].status == "succeeded"
-    assert runs[-1].coverage is None

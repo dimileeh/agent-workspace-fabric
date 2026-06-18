@@ -8,13 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
-from awf.common.command_evidence import append_command_evidence
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
-from awf.common.git_identity import git_identity_config_args
 from awf.common.logging import get_logger
-from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.executor.helpers import (
     _profile_for_workspace,
     _should_run_local_coverage,
@@ -23,25 +19,32 @@ from awf.control.executor.helpers import (
     _validation_tier_for_workspace,
 )
 from awf.control.executor.logging_ops import _validation_run_log_stream_refs
-from awf.control.validation_fix_cycle import (
-    ValidationFixContext,
-    build_fix_prompt,
-    read_output_tail,
-)
 from awf.db.repositories import (
     TaskAttemptRepository,
     ValidationRunRepository,
     WorkspaceRepository,
 )
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
+from awf.runtime.pr_monitor_runner.constants import (
+    _MONITOR_POLICY_BLOCKED_REASON,
+    _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
+    _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
     _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
     _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_dirty_finalize import (
+    _committed_delta_paths,  # noqa: F401  (re-exported for tests)
+    _operation_owned_delta_paths,  # noqa: F401  (re-exported for tests)
+    _rollback_finalize_dirty_residue_before_provider_recovery,  # noqa: F401  (re-exported for tests)
+    _try_finalize_pre_push_dirty_repair_state,  # noqa: F401  (re-exported for tests)
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_failures import (
     _failed_pre_push_commands,
@@ -50,7 +53,19 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_failures import (
     _preferred_pre_push_failure_from_failures,
     _pure_toolchain_missing_failure_for_result,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
+    _cleanup_committed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
+    _head_descends_from,  # noqa: F401  (re-exported for tests)
+    _reparent_fix_pass_commit,  # noqa: F401  (re-exported for tests)
+    _rollback_failed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
+    _run_pre_push_validation_fix_pass,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorPolicyBlockedError,
+)
 from awf.runtime.validation import profile_phase_command_plan
 from awf.runtime.validation_identity import (
     environment_identity_digest,
@@ -83,6 +98,8 @@ PRE_PUSH_VALIDATION_FIX_FAILED_REASON = _PRE_PUSH_VALIDATION_FIX_FAILED_REASON
 PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON = _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
 PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON = _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON
 PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON = _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
+PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON = _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON
+PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON = _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON
 
 _FAILING_COMMAND_DETAIL_LIMIT = 1000
 
@@ -204,6 +221,7 @@ async def _validated_git_push_result(
     remote_url: str | None = None,
     refspec: str | None = None,
     state: object | None = None,
+    operation_start_head: str | None = None,
     allow_validation_fix_passes: bool = True,
     allow_resync_on_rejection: bool = True,
 ) -> _GitPushResult:
@@ -244,6 +262,7 @@ async def _validated_git_push_result(
         remote_branch=remote_branch,
         remote_url=remote_url,
         state=state,
+        operation_start_head=operation_start_head,
         allow_validation_fix_passes=allow_validation_fix_passes,
     )
     if not validation_result.passed:
@@ -277,6 +296,7 @@ async def _run_pre_push_validation_with_fix_passes(
     remote_branch: str,
     remote_url: str | None,
     state: object | None,
+    operation_start_head: str | None = None,
     allow_validation_fix_passes: bool = True,
 ) -> _PrePushValidationResult:
     """Execute pre-push validation plus optional fix/retry attempts.
@@ -300,6 +320,9 @@ async def _run_pre_push_validation_with_fix_passes(
             compose_project=compose_project,
             compose_file=compose_file,
             remote_branch=remote_branch,
+            state=state,
+            operation_start_head=operation_start_head,
+            remote_url=remote_url,
         )
 
         if validation_result.passed:
@@ -320,19 +343,80 @@ async def _run_pre_push_validation_with_fix_passes(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
             )
-        committed, fix_pass_failure_reason = await _run_pre_push_validation_fix_pass(
-            self,
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            remote_branch=remote_branch,
-            remote_url=remote_url,
-            state=state,
-            validation_result=validation_result,
-            pass_number=pass_index + 1,
-            total_passes=max_fix_passes,
-            validation_commands=validation_commands,
-        )
+        # ``_run_pre_push_validation_fix_pass`` re-raises reason-coded commit-sink
+        # exceptions (``ProtectedScopeDiffError`` / ``_MonitorPolicyBlockedError`` /
+        # ``_MonitorAgentRuntimeOwnershipRepairFailedError``) so the monitor loop's
+        # dedicated handlers surface the right reason code. The monitor action loops
+        # only catch provider-recovery exceptions around this validated-push call;
+        # the protected/policy catches live in the earlier thread/comment address
+        # arms of ``_run_fix_cycle``. Letting these escape would abort the monitor
+        # without a ``_GitPushResult``, terminal reason code, or the rollback/failure
+        # accounting the push path expects. Convert them here into the same
+        # structured failure result used by the other commit-sink callers
+        # (``ci_ops.py``, ``operator_hints.py``, ``fix_cycle.py``,
+        # ``remote_ops.py``) so ``_validated_git_push_result`` returns a
+        # ``_GitPushResult`` carrying the terminal reason code and the loop's
+        # push-failure accounting runs normally (review thread PRRT_kwDOSJAM6s6KbbE4).
+        try:
+            committed, fix_pass_failure_reason = await _run_pre_push_validation_fix_pass(
+                self,
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                remote_branch=remote_branch,
+                remote_url=remote_url,
+                state=state,
+                validation_result=validation_result,
+                pass_number=pass_index + 1,
+                total_passes=max_fix_passes,
+                validation_commands=validation_commands,
+            )
+        except ProtectedScopeDiffError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_protected_scope_diff_unavailable",
+                workspace_id=workspace_id,
+                pass_number=pass_index + 1,
+                error=repr(exc),
+            )
+            return replace(
+                validation_result,
+                reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                message=(
+                    "PR monitor pre-push validation fix pass blocked: "
+                    f"protected-scope diff unavailable: {exc}"
+                ),
+            )
+        except _MonitorPolicyBlockedError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_policy_blocked",
+                workspace_id=workspace_id,
+                pass_number=pass_index + 1,
+                error=repr(exc),
+            )
+            return replace(
+                validation_result,
+                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+                message=(
+                    "PR monitor pre-push validation fix pass blocked: "
+                    f"monitor policy blocked the commit: {exc}"
+                ),
+            )
+        except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_ownership_repair_failed",
+                workspace_id=workspace_id,
+                pass_number=pass_index + 1,
+                error=repr(exc),
+                reason_code=exc.reason_code,
+            )
+            return replace(
+                validation_result,
+                reason_code=exc.reason_code,
+                message=(
+                    "PR monitor pre-push validation fix pass blocked: "
+                    f"agent runtime ownership repair failed: {exc}"
+                ),
+            )
         if fix_pass_failure_reason is not None:
             failure_label = (
                 "infrastructure failed"
@@ -423,155 +507,6 @@ async def _pre_push_validation_worktree_check(
     )
 
 
-async def _head_descends_from(
-    self: Any,
-    *,
-    worktree_path: Path,
-    ancestor: str,
-    descendant: str,
-) -> bool:
-    """Return True when ``descendant`` is a descendant of ``ancestor``.
-
-    Uses ``git merge-base --is-ancestor`` which exits 0 when the first ref is an
-    ancestor of the second and non-zero otherwise. Callers only invoke this with
-    distinct SHAs, so a 0 exit means the fix-pass agent advanced HEAD on top of
-    the pre-fix commit rather than moving it sideways or backward.
-    """
-    result = await self._deps.runner.run(
-        git_worktree_command(
-            worktree_path,
-            "merge-base",
-            "--is-ancestor",
-            ancestor,
-            descendant,
-        )
-    )
-    return bool(result.ok)
-
-
-async def _reparent_fix_pass_commit(
-    self: Any,
-    *,
-    workspace_id: str,
-    worktree_path: Path,
-    fix_start_head: str,
-    current_head: str,
-    pass_number: int,
-    task_tag: str | None,
-) -> tuple[str | None, bool, str | None]:
-    """Re-parent the fix agent's resulting tree onto ``fix_start_head`` (issue #411).
-
-    A fix-pass agent that rewrites the tip (e.g. ``git commit --amend`` or
-    ``git reset --hard HEAD~1`` + recommit) leaves HEAD as a non-descendant of
-    ``fix_start_head``. A legitimate content-modifying amend and a work-dropping
-    reset+recommit can produce byte-identical trees, so they are topologically and
-    tree-content indistinguishable. Rather than discriminate (and risk orphaning a
-    valid fix, the #406-class over-rollback), we ALWAYS reconstruct whatever the
-    agent produced as a single commit whose parent is ``fix_start_head``:
-
-    - ``fix_start_head`` is the new commit's parent, so it can never be orphaned and
-      is rescued from danglinghood after an amend.
-    - The agent's resulting tree is always kept, so the fix pass converges.
-    - Any dropped work is visible as ``git diff fix_start_head..HEAD`` and is
-      re-validated before push by the surrounding fix-pass loop.
-
-    Returns ``(new_head, no_net_change, failure_reason)``:
-      - ``(new_sha, False, None)``      -> reconstructed commit; accept against new_sha.
-      - ``(None, True, None)``          -> agent produced no net change; signal no-commit.
-      - ``(None, False, REPARENT)``     -> infra failure (rev-parse/commit-tree/reset).
-    """
-
-    def _warn(git_step: str, result: Any) -> None:
-        """Warn on a re-parent git step failure without logging secrets.
-
-        Logs both ``ok`` and a truncated ``stdout`` alongside ``stderr`` so the
-        "exit 0 but blank/whitespace-only output" path (where ``stderr`` is
-        typically empty) is distinguishable from a genuine non-zero exit.
-        """
-        _log.warning(
-            "monitor.pre_push_validation_fix_reparent_failed",
-            workspace_id=workspace_id,
-            pass_number=pass_number,
-            git_step=git_step,
-            ok=result.ok,
-            stdout=(result.stdout or "")[:400],
-            stderr=(result.stderr or "")[:400],
-        )
-
-    current_tree_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "rev-parse", f"{current_head}^{{tree}}")
-    )
-    current_tree = current_tree_result.stdout.strip() if current_tree_result.ok else ""
-    if not current_tree:
-        _warn("rev-parse current tree", current_tree_result)
-        return None, False, _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
-
-    start_tree_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "rev-parse", f"{fix_start_head}^{{tree}}")
-    )
-    start_tree = start_tree_result.stdout.strip() if start_tree_result.ok else ""
-    if not start_tree:
-        _warn("rev-parse fix_start_head tree", start_tree_result)
-        return None, False, _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
-
-    if current_tree == start_tree:
-        # The agent produced no net change relative to the pre-fix-pass commit. Emit a
-        # dedicated audit event so this case is distinguishable in logs from a genuine
-        # no-commit rollback, then signal no-commit so the caller falls through to the
-        # existing rollback.
-        _log.info(
-            "monitor.pre_push_validation_fix_reparent_no_net_change",
-            workspace_id=workspace_id,
-            pass_number=pass_number,
-            current_head=current_head,
-            fix_start_head=fix_start_head,
-        )
-        return None, True, None
-
-    message_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "log", "-1", "--format=%B", current_head)
-    )
-    message = message_result.stdout.strip() if message_result.ok else ""
-    if not message:
-        message = f"awf: pre-push validation fix for {workspace_id}"
-
-    # Prepend the workspace's Jira issue key (if any) so the reparented fix commit
-    # links to the issue, matching ``_commit_dirty_worktree`` in this same flow.
-    # ``task_tag`` is resolved once by the caller (``_run_pre_push_validation_fix_pass``)
-    # for the fix prompt and threaded in here, avoiding a second DB round-trip.
-    # Idempotent: a ``%B`` body that already carries the tag is left unchanged.
-    # Unlike the single-line dirty-worktree subject, the reparented message reuses
-    # the agent's full ``%B`` body, so it is NOT truncated to [:72] (that would drop
-    # the commit body); the tag only prefixes the subject line.
-    message = commit_message_with_task_tag(message, task_tag)
-
-    commit_result = await self._deps.runner.run(
-        git_worktree_command(
-            worktree_path,
-            *git_identity_config_args(),
-            "commit-tree",
-            current_tree,
-            "-p",
-            fix_start_head,
-            "-m",
-            message,
-        )
-    )
-    new_sha = commit_result.stdout.strip() if commit_result.ok else ""
-    if not new_sha:
-        _warn("commit-tree", commit_result)
-        return None, False, _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
-
-    reset_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", new_sha)
-    )
-    if not reset_result.ok:
-        _warn("reset --hard reparented commit", reset_result)
-        return None, False, _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
-
-    return new_sha, False, None
-
-
 async def _pre_push_validation_cleanup(
     self: Any,
     *,
@@ -640,397 +575,6 @@ def _pre_push_cleanup_result(
     )
 
 
-async def _run_pre_push_validation_fix_pass(
-    self: Any,
-    *,
-    workspace_id: str,
-    compose_project: str,
-    compose_file: Path,
-    remote_branch: str,
-    remote_url: str | None,
-    state: object | None,
-    validation_result: _PrePushValidationResult,
-    pass_number: int,
-    total_passes: int,
-    validation_commands: tuple[str, ...],
-) -> tuple[bool, str | None]:
-    """Attempt a validation fix pass and return commit status plus terminal failure reason."""
-    first_fail = validation_result.first_failure
-    if first_fail is None:
-        return False, None
-    worktree_path = self._worktrees_root / workspace_id
-    fix_start_head = await self._rev_parse_head(worktree_path)
-    if fix_start_head is None:
-        _log.warning(
-            "monitor.pre_push_validation_fix_start_head_unavailable",
-            workspace_id=workspace_id,
-            pass_number=pass_number,
-        )
-        return False, None
-    # Resolve the workspace's optional Jira issue key once; reused for the fix prompt
-    # and threaded into any ``_reparent_fix_pass_commit`` call below so the reparent
-    # path does not re-query the DB for the same value.
-    task_tag = await self._resolve_task_tag(workspace_id)
-    context = ValidationFixContext(
-        failed_command=first_fail.command,
-        returncode=first_fail.returncode,
-        stdout_tail=read_output_tail(first_fail.stdout_path),
-        stderr_tail=read_output_tail(first_fail.stderr_path),
-        pass_number=pass_number,
-        total_passes=total_passes,
-        test_commands=validation_commands,
-        reason_code=(
-            validation_result.validation_reason_code
-            if validation_result.validation_reason_code is not None
-            else validation_result.reason_code
-        ),
-        coverage_percent=(
-            validation_result.coverage.percent if validation_result.coverage is not None else None
-        ),
-        coverage_minimum_percent=(
-            validation_result.coverage.minimum_percent
-            if validation_result.coverage is not None
-            else None
-        ),
-        failing_test_node_ids=(
-            tuple(validation_result.coverage.failing_test_node_ids)
-            if validation_result.coverage is not None
-            else ()
-        ),
-        failing_test_evidence=(
-            tuple(validation_result.coverage.failing_test_evidence)
-            if validation_result.coverage is not None
-            else ()
-        ),
-        task_tag=task_tag,
-    )
-    command_evidence: list[str] = []
-    try:
-        fix_result = await self._deps.adapter.run(
-            compose_project=compose_project,
-            compose_file=compose_file,
-            prompt=build_fix_prompt(context),
-            workspace_id=workspace_id,
-            log_source="monitor-pre-push-validation-fix",
-        )
-        append_command_evidence(
-            command_evidence,
-            stdout=fix_result.stdout,
-            stderr=fix_result.stderr,
-        )
-    except AgentRunError as exc:
-        append_command_evidence(
-            command_evidence,
-            stdout=exc.result.stdout,
-            stderr=exc.result.stderr,
-        )
-        _log.warning(
-            "monitor.pre_push_validation_fix_agent_nonzero",
-            workspace_id=workspace_id,
-            pass_number=pass_number,
-            reason_code=exc.reason_code,
-        )
-    except ComposeExecCleanupError as exc:
-        _log.warning(
-            "monitor.pre_push_validation_fix_cleanup_failed",
-            workspace_id=workspace_id,
-            pass_number=pass_number,
-            reason_code=exc.reason_code,
-        )
-        rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
-            self,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            restore_ref=fix_start_head,
-            pass_number=pass_number,
-            reason="compose_cleanup_failed",
-        )
-        if rollback_failure_reason is not None:
-            return False, rollback_failure_reason
-        return False, None
-    except Exception as exc:
-        _log.warning(
-            "monitor.pre_push_validation_fix_failed",
-            workspace_id=workspace_id,
-            pass_number=pass_number,
-            error=repr(exc),
-        )
-        rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
-            self,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            restore_ref=fix_start_head,
-            pass_number=pass_number,
-            reason="agent_exception",
-        )
-        if rollback_failure_reason is not None:
-            return False, rollback_failure_reason
-        return False, None
-
-    try:
-        committed = bool(
-            await self._commit_dirty_worktree(
-                workspace_id=workspace_id,
-                message=f"awf: pre-push validation fix for {workspace_id}",
-                compose_project=compose_project,
-                compose_file=compose_file,
-                state=state,
-                command_evidence=command_evidence,
-                protected_scope_revert_remote_branch=remote_branch,
-                remote_push_url=remote_url,
-            )
-        )
-    except Exception as exc:
-        _log.warning(
-            "monitor.pre_push_validation_fix_commit_failed",
-            workspace_id=workspace_id,
-            pass_number=pass_number,
-            error=repr(exc),
-        )
-        rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
-            self,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            restore_ref=fix_start_head,
-            pass_number=pass_number,
-            reason="commit_exception",
-        )
-        if rollback_failure_reason is not None:
-            return False, rollback_failure_reason
-        return False, None
-    if not committed:
-        current_head = await self._rev_parse_head(worktree_path)
-        if current_head is not None and current_head != fix_start_head:
-            # The fix-pass agent self-committed a valid repair (the worktree is clean,
-            # so ``_commit_dirty_worktree`` had nothing to commit and returned False).
-            advanced = await _head_descends_from(
-                self,
-                worktree_path=worktree_path,
-                ancestor=fix_start_head,
-                descendant=current_head,
-            )
-            if advanced:
-                # HEAD strictly advanced on top of the pre-fix commit (issue #406):
-                # accept as-is.
-                _log.info(
-                    "monitor.pre_push_validation_fix_self_commit_detected",
-                    workspace_id=workspace_id,
-                    pass_number=pass_number,
-                    fix_start_head=fix_start_head,
-                    committed_head=current_head,
-                    self_commit_kind="advance",
-                )
-                cleanup_failure_reason = await _cleanup_committed_pre_push_validation_fix_pass(
-                    self,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    committed_head=current_head,
-                    pass_number=pass_number,
-                )
-                return True, cleanup_failure_reason
-            # Non-descendant rewrite (plain amend / content-modifying amend /
-            # reset+recommit). These are topologically and tree-content
-            # indistinguishable, so we STOP DISCRIMINATING and ALWAYS re-parent the
-            # agent's resulting tree onto ``fix_start_head`` (issue #411). This keeps
-            # the agent's fix (the pass converges), can never orphan ``fix_start_head``
-            # (it is the new commit's parent), and leaves any dropped work auditable as
-            # ``git diff fix_start_head..HEAD`` to be re-validated before push.
-            new_head, no_net_change, reparent_failure_reason = await _reparent_fix_pass_commit(
-                self,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                fix_start_head=fix_start_head,
-                current_head=current_head,
-                pass_number=pass_number,
-                task_tag=task_tag,
-            )
-            if reparent_failure_reason is not None:
-                return True, reparent_failure_reason
-            if not no_net_change and new_head is not None:
-                _log.info(
-                    "monitor.pre_push_validation_fix_reparented",
-                    workspace_id=workspace_id,
-                    pass_number=pass_number,
-                    from_sha=current_head,
-                    to_sha=new_head,
-                    fix_start_head=fix_start_head,
-                )
-                cleanup_failure_reason = await _cleanup_committed_pre_push_validation_fix_pass(
-                    self,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    committed_head=new_head,
-                    pass_number=pass_number,
-                )
-                return True, cleanup_failure_reason
-            # no_net_change: the agent's tree equals ``fix_start_head``'s tree, so there
-            # is nothing to preserve. Fall through to the existing rollback below.
-        rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
-            self,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            restore_ref=fix_start_head,
-            pass_number=pass_number,
-            reason="commit_failed",
-        )
-        if rollback_failure_reason is not None:
-            return False, rollback_failure_reason
-        return False, None
-
-    committed_head = await self._rev_parse_head(worktree_path)
-    if committed_head is None:
-        _log.warning(
-            "monitor.pre_push_validation_fix_commit_head_unavailable",
-            workspace_id=workspace_id,
-            pass_number=pass_number,
-        )
-        return True, PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
-    # ``_commit_dirty_worktree`` commits onto whatever the agent left as HEAD. If the
-    # fix-pass agent rewrote the tip (``commit --amend`` / ``reset`` to a non-descendant
-    # of ``fix_start_head``) AND also left dirty or untracked work, that commit lands as a
-    # child of the rewritten tip — so ``committed_head`` no longer descends from
-    # ``fix_start_head``, which is orphaned, and the later non-force push (remote_ops.py)
-    # would be rejected as a non-fast-forward (issue #411 gap). Re-parent the committed
-    # tree onto ``fix_start_head`` so the original tip is preserved as the new commit's
-    # parent and the push stays fast-forward, mirroring the self-commit reparent above.
-    if not await _head_descends_from(
-        self,
-        worktree_path=worktree_path,
-        ancestor=fix_start_head,
-        descendant=committed_head,
-    ):
-        new_head, no_net_change, reparent_failure_reason = await _reparent_fix_pass_commit(
-            self,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            fix_start_head=fix_start_head,
-            current_head=committed_head,
-            pass_number=pass_number,
-            task_tag=task_tag,
-        )
-        if reparent_failure_reason is not None:
-            return True, reparent_failure_reason
-        if not no_net_change and new_head is not None:
-            _log.info(
-                "monitor.pre_push_validation_fix_reparented",
-                workspace_id=workspace_id,
-                pass_number=pass_number,
-                from_sha=committed_head,
-                to_sha=new_head,
-                fix_start_head=fix_start_head,
-            )
-            committed_head = new_head
-        else:
-            # The committed tree equals ``fix_start_head``'s tree: the rewrite carried no
-            # net change worth preserving. Roll back to the pre-fix tip rather than accept
-            # an orphaning rewrite that the push would reject.
-            rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
-                self,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                restore_ref=fix_start_head,
-                pass_number=pass_number,
-                reason="commit_reparent_no_net_change",
-            )
-            if rollback_failure_reason is not None:
-                return False, rollback_failure_reason
-            return False, None
-    cleanup_failure_reason = await _cleanup_committed_pre_push_validation_fix_pass(
-        self,
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        committed_head=committed_head,
-        pass_number=pass_number,
-    )
-    return True, cleanup_failure_reason
-
-
-async def _cleanup_committed_pre_push_validation_fix_pass(
-    self: Any,
-    *,
-    workspace_id: str,
-    worktree_path: Path,
-    committed_head: str,
-    pass_number: int,
-) -> str | None:
-    """Clean validation side effects against a committed fix head.
-
-    Used for both the dirty-worktree commit produced by ``_commit_dirty_worktree``
-    and the agent self-commit detected when HEAD advanced but the worktree is
-    clean. Returns a failure reason code when cleanup fails, otherwise ``None``.
-    """
-    cleanup = await _pre_push_validation_cleanup(
-        self,
-        worktree_path=worktree_path,
-        restore_ref=committed_head,
-    )
-    ok = bool(cleanup.ok)
-    log = _log.info if ok else _log.warning
-    log(
-        "monitor.pre_push_validation_fix_commit_cleanup",
-        workspace_id=workspace_id,
-        pass_number=pass_number,
-        restore_ref=committed_head,
-        reason_code=None if ok else cleanup.reason_code,
-        cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
-    )
-    if not ok:
-        return cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
-    return None
-
-
-async def _rollback_failed_pre_push_validation_fix_pass(
-    self: Any,
-    *,
-    workspace_id: str,
-    worktree_path: Path,
-    restore_ref: str,
-    pass_number: int,
-    reason: str,
-) -> str | None:
-    """Rollback fix-pass edits and return a failure reason when recovery fails."""
-    reset = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", restore_ref)
-    )
-    if not reset.ok:
-        log = _log.warning
-        log(
-            "monitor.pre_push_validation_fix_rollback",
-            workspace_id=workspace_id,
-            pass_number=pass_number,
-            reason=reason,
-            restore_ref=restore_ref,
-            reset_returncode=reset.returncode,
-            clean_returncode=None,
-            reset_stderr=(reset.stderr or "")[:400],
-            clean_stderr=None,
-        )
-        return PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
-
-    cleanup = await _pre_push_validation_cleanup(
-        self,
-        worktree_path=worktree_path,
-        restore_ref=restore_ref,
-    )
-    ok = bool(cleanup.ok)
-    log = _log.info if ok else _log.warning
-    log(
-        "monitor.pre_push_validation_fix_rollback",
-        workspace_id=workspace_id,
-        pass_number=pass_number,
-        reason=reason,
-        restore_ref=restore_ref,
-        reset_returncode=reset.returncode,
-        clean_returncode=0 if ok else None,
-        clean_reason_code=None if ok else cleanup.reason_code,
-        reset_stderr=(reset.stderr or "")[:400],
-        clean_stderr=(cleanup.cleanup_stderr or "")[:400],
-    )
-    if ok:
-        return None
-    return cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
-
-
 async def _run_pre_push_validation(
     self: Any,
     *,
@@ -1039,6 +583,9 @@ async def _run_pre_push_validation(
     compose_project: str,
     compose_file: Path,
     remote_branch: str,
+    state: object | None = None,
+    operation_start_head: str | None = None,
+    remote_url: str | None = None,
 ) -> _PrePushValidationResult:
     """Run a single pre-push validation cycle and persist run metadata."""
     async with self._deps.session_factory() as session:
@@ -1060,6 +607,23 @@ async def _run_pre_push_validation(
         self,
         worktree_path=worktree_path,
     )
+    if not pre_validation_check.clean:
+        finalized_check = await _try_finalize_pre_push_dirty_repair_state(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+            check=pre_validation_check,
+            operation_start_head=operation_start_head,
+            remote_branch=remote_branch,
+            remote_url=remote_url,
+            finalize_start_head=workspace_head_sha,
+        )
+        if finalized_check is not None:
+            pre_validation_check = finalized_check
+            workspace_head_sha = await self._rev_parse_head(worktree_path)
     if not pre_validation_check.clean:
         return _pre_push_dirty_result(
             workspace_head_sha=workspace_head_sha,
