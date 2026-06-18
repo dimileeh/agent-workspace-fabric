@@ -31,8 +31,15 @@ hasConformanceArtifact,
 hasPlanArtifact,
 PLAN_ARTIFACT_NAME
 } from "@/lib/artifact-format";
+import {
+blockedAgeSeconds,
+blockedSince,
+formatBlockedResolutionCommands
+} from "@/lib/blocked-format";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { summarizeVisibleCoordinationWarnings } from "@/lib/coordination-format";
 import {
+compactDuration,
 compactId,
 fallbackLlmUsage,
 formatCostWithPricing,
@@ -530,6 +537,7 @@ export function WorkspaceSummary({
         <ProviderReadinessPreflightBlock
           preflight={workspace?.provider_readiness_preflight ?? overview.provider_readiness_preflight ?? null}
         />
+        <BlockedViolationBlock workspace={workspace} overview={overview} />
         {recovery && overview.status !== "completed" ? (
           <RecoveryCallout recovery={recovery} status={overview.status} />
         ) : null}
@@ -967,6 +975,123 @@ export function ProviderReadinessPreflightBlock({
           override: {preflight.override_reason}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// Operator-pause inspector block: for a `blocked` workspace (protected quality-gate
+// violation), surfaces the violating path(s) and the two ready-to-run `guide`
+// resolution commands. Reads the full GET's `block_state`; degrades to a
+// loading/unavailable line when only the overview snapshot is available.
+export function BlockedViolationBlock({
+  workspace,
+  overview,
+}: {
+  workspace: Workspace | null;
+  overview: WorkspaceOverview;
+}) {
+  if (overview.status !== "blocked") {
+    return null;
+  }
+  const blockState = workspace?.block_state ?? null;
+  const violations = blockState?.violations ?? [];
+  const commands = formatBlockedResolutionCommands(overview.workspace_id, violations);
+  // Prefer the authoritative blocked_at; fall back to the overview proxy while the
+  // full workspace fetch is still in flight (overview-only render).
+  const ageSeconds = blockedAgeSeconds(blockState?.blocked_at ?? blockedSince(overview));
+
+  return (
+    <div
+      data-testid="blocked-violation-block"
+      className="rounded-md border border-attention-border bg-attention-soft p-3 text-sm text-attention-text"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2 font-semibold">
+          <Ban size={14} aria-hidden />
+          <span className="truncate">
+            Awaiting operator — {blockState?.block_reason_code ?? "protected-file violation"}
+          </span>
+        </div>
+        <span className="mono rounded-md border border-attention-border bg-surface px-2 py-0.5 text-[11px] text-attention-text">
+          blocked for {compactDuration(ageSeconds)}
+        </span>
+      </div>
+      {blockState ? (
+        <>
+          <div className="mt-2 grid gap-2 text-xs sm:grid-cols-3">
+            <Fact label="Block type" value={blockState.block_type ?? "—"} />
+            <Fact label="Resume phase" value={blockState.block_resume_phase ?? "—"} />
+            <Fact label="Blocked at" value={formatDateTime(blockState.blocked_at)} />
+          </div>
+          {violations.length > 0 ? (
+            <div className="mt-3 grid gap-1">
+              <div className="label-caps">Protected violations</div>
+              <ul className="grid gap-1">
+                {violations.map((violation, index) => (
+                  <li
+                    key={`${violation.path ?? "violation"}-${index}`}
+                    data-testid="blocked-violation-row"
+                    className="rounded-md border border-attention-border bg-surface px-2 py-1 text-xs"
+                  >
+                    <span className="mono break-all text-fg-strong">
+                      {violation.path ?? "(unknown path)"}
+                    </span>
+                    <span className="text-attention-text">
+                      {" · "}
+                      {violation.protected_pattern ?? "protected"}
+                      {violation.section ? ` · ${violation.section}` : ""}
+                      {violation.reason ? ` · ${violation.reason}` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <div className="mt-3 text-xs text-attention-text">
+              No specific violation paths were recorded.
+            </div>
+          )}
+          <div className="mt-3 grid gap-2">
+            <div className="label-caps">Resolve</div>
+            <BlockedCommand label="Approve & keep" command={commands.grantCommand} />
+            <BlockedCommand label="Revert" command={commands.revertCommand} />
+          </div>
+        </>
+      ) : (
+        <div className="mt-2 text-xs text-attention-text">
+          Block details are loading or unavailable — open the workspace to load the full record.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A single copy-able guide command. The async copy works in both secure and
+// plain-HTTP (Tailscale) contexts via the shared clipboard helper.
+function BlockedCommand({ label, command }: { label: string; command: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="grid gap-1">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-medium text-attention-text">{label}</span>
+        <button
+          type="button"
+          onClick={async () => {
+            if (await copyTextToClipboard(command)) {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1500);
+            }
+          }}
+          className="inline-flex h-6 items-center gap-1 rounded-md border border-attention-border bg-surface px-2 text-[11px] text-attention-text transition hover:bg-surface-2"
+          aria-label={`Copy command: ${label}`}
+        >
+          <ClipboardCheck size={11} aria-hidden />
+          {copied ? "copied" : "copy"}
+        </button>
+      </div>
+      <code className="mono block overflow-x-auto whitespace-pre rounded-md border border-attention-border bg-surface px-2 py-1 text-[11px] text-fg-strong">
+        {command}
+      </code>
     </div>
   );
 }

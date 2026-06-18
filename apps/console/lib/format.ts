@@ -26,6 +26,11 @@ export const lifecycleStages: WorkspaceStatus[] = [
   "running",
   "validating",
   "pushing",
+  // `blocked` is the non-terminal operator-pause state (protected-file violation).
+  // It sits just before monitoring_pr — the push→monitor boundary where both the
+  // pre-PR and post-PR pauses cluster — so the status filter and fallback progress
+  // bar treat it as in-flight, not terminal.
+  "blocked",
   "monitoring_pr",
   "completed",
 ];
@@ -377,7 +382,14 @@ export function statusTone(status: string): StatusTone {
   if (status === "failed" || status === "destroyed" || status === "error" || status === "dead") {
     return "bad";
   }
-  if (status === "cancelled" || status === "destroying" || status === "unhealthy") {
+  // `blocked` is operator-attention (awaiting a guide decision), distinct from the
+  // `info` in-flight states and the `bad` failure states.
+  if (
+    status === "cancelled" ||
+    status === "destroying" ||
+    status === "unhealthy" ||
+    status === "blocked"
+  ) {
     return "warn";
   }
   if (
@@ -418,6 +430,10 @@ export function statusGlyph(status: string): string {
       return "✕";
     case "cancelled":
       return "⊘";
+    case "blocked":
+      // Pause glyph — a distinct shape (used nowhere else) so the operator-pause
+      // state reads as "halted, awaiting you" without relying on color alone.
+      return "⏸";
     case "destroying":
       return "◌";
     case "monitoring_pr":

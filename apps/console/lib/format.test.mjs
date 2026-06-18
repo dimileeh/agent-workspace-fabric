@@ -7,8 +7,11 @@ import {
   fallbackLlmUsage,
   formatCostWithPricing,
   formatUsageProvenance,
+  lifecycleStages,
   pickWorkspaceLogStreams,
   renderLogEntries,
+  statusGlyph,
+  statusTone,
   toneFillClass,
 } from "./format.ts";
 
@@ -78,6 +81,21 @@ test("fallbackLifecycleStages preserves active non-terminal status", () => {
   assert.equal(stages.running, "completed");
   assert.equal(stages.validating, "active");
   assert.equal(stages.pushing, "pending");
+});
+
+test("statusTone marks a blocked workspace as warn (operator attention)", () => {
+  assert.equal(statusTone("blocked"), "warn");
+});
+
+test("statusGlyph renders the pause glyph for a blocked workspace", () => {
+  assert.equal(statusGlyph("blocked"), "⏸");
+});
+
+test("lifecycleStages includes blocked as an in-flight stage before monitoring_pr", () => {
+  assert.ok(lifecycleStages.includes("blocked"));
+  assert.ok(lifecycleStages.indexOf("blocked") < lifecycleStages.indexOf("monitoring_pr"));
+  // blocked stays a non-terminal stage, so it must not appear after completed.
+  assert.ok(lifecycleStages.indexOf("blocked") < lifecycleStages.indexOf("completed"));
 });
 
 test("formatUsageProvenance maps ccusage source and reason codes to friendly labels", () => {
