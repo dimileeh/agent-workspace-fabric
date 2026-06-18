@@ -61,7 +61,7 @@ test("inspector shows the protected violation and both guide resolution commands
 
   // Both ready-to-run guide commands, pre-filled with the workspace id + path.
   await expect(block).toContainText(
-    "awf workspace guide ws_blocked1 --grant '.github/workflows/ci.yml' --reason '<why>'",
+    "awf workspace guide ws_blocked1 --grant '.github/workflows/ci.yml' --approve-policy-downgrade --reason '<why>'",
   );
   await expect(block).toContainText(
     "awf workspace guide ws_blocked1 --directive 'revert .github/workflows/ci.yml; <alternative>'",
