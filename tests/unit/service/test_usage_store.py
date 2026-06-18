@@ -74,6 +74,15 @@ def test_provider_ccusage_source_unknown_returns_none() -> None:
 
 
 @pytest.mark.unit
+def test_accumulate_usage_returns_none_when_no_metric_is_reported() -> None:
+    # No accumulated history, no run delta, and no fallback means the workspace
+    # has not produced a single trustworthy usage sample yet. accumulate_usage
+    # must report None rather than fabricating a zeroed snapshot, so downstream
+    # cost/usage surfaces can distinguish "nothing reported" from "reported zero".
+    assert accumulate_usage(None, None, fallback=None) is None
+
+
+@pytest.mark.unit
 def test_provider_ccusage_source_cursor_is_unsupported_until_ccusage_adds_source() -> None:
     """Cursor remains unsupported until ccusage exposes a source name."""
     assert provider_ccusage_source(AgentRuntime.cursor) is None
