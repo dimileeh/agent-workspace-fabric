@@ -558,27 +558,57 @@ async def _operation_owned_delta_paths(
     worktree_path: Path,
     operation_start_head: str,
 ) -> set[str] | None:
-    """Return paths changed by the current operation's committed delta.
+    """Return paths changed by the current operation's committed and staged delta.
 
     The repair-start dirty guard proves the worktree was clean at
-    ``operation_start_head``, so ``git diff --name-only
-    operation_start_head..HEAD`` is exactly the set of paths the current
-    monitor operation owns. Returns ``None`` when the delta cannot be
-    resolved (e.g. the start ref is unknown or git failed) so the caller can
-    keep the fail-closed dirty path instead of committing unowned dirt.
+    ``operation_start_head``, so the current monitor operation owns the union
+    of:
+
+    - its committed delta: ``git diff --name-only operation_start_head..HEAD``
+    - its staged delta: ``git diff --name-only --cached operation_start_head``
+
+    The staged delta is load-bearing for the case where the operation's
+    ``_commit_dirty_worktree`` returns False *before* creating a commit (e.g.
+    ``git commit`` fails after the agent already staged its edits via
+    ``git add -A``): ``operation_start_head..HEAD`` is then empty, but the
+    operation still owns the staged paths it attempted to commit. Without the
+    staged union every operation-owned dirty path would be treated as
+    unrelated and the finalize would strand the operation's own residue as
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (review thread
+    ``PRRT_kwDOSJAM6s6KYd-r``).
+
+    Returns ``None`` when either delta cannot be resolved (e.g. the start ref
+    is unknown or git failed) so the caller can keep the fail-closed dirty path
+    instead of committing unowned dirt.
     """
-    result = await self._deps.runner.run(
+    committed_result = await self._deps.runner.run(
         git_worktree_command(worktree_path, "diff", "--name-only", f"{operation_start_head}..HEAD")
     )
-    if not result.ok:
+    if not committed_result.ok:
         _log.warning(
             "monitor.pre_push_dirty_finalize_delta_unavailable",
             operation_start_head=operation_start_head,
-            returncode=result.returncode,
-            stderr=(result.stderr or "")[:400],
+            returncode=committed_result.returncode,
+            stderr=(committed_result.stderr or "")[:400],
         )
         return None
-    return {line for line in (result.stdout or "").splitlines() if line}
+    staged_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "diff", "--name-only", "--cached", operation_start_head)
+    )
+    if not staged_result.ok:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_staged_delta_unavailable",
+            operation_start_head=operation_start_head,
+            returncode=staged_result.returncode,
+            stderr=(staged_result.stderr or "")[:400],
+        )
+        return None
+    return {
+        line
+        for source in (committed_result.stdout, staged_result.stdout)
+        for line in (source or "").splitlines()
+        if line
+    }
 
 
 async def _try_finalize_pre_push_dirty_repair_state(
@@ -597,14 +627,20 @@ async def _try_finalize_pre_push_dirty_repair_state(
     The finalize is gated on the dirty paths being operation-owned: the
     repair-start dirty guard (``_pre_existing_dirty_repair_worktree_result``)
     proves the worktree was clean at ``operation_start_head``, so the current
-    monitor operation's own committed delta is exactly
-    ``git diff --name-only operation_start_head..HEAD``. Only dirt confined to
-    those paths is safe to finalize — dirt on any other path was introduced
-    after the repair-start guard (e.g. by a failed cleanup or another local
-    process) and must stay fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``
-    so it is never silently swept into the PR (review thread
-    ``PRRT_kwDOSJAM6s6KXLaI``). When ``operation_start_head`` is unavailable
-    (no operation-owned anchor), the finalize is skipped entirely.
+    monitor operation's own delta is the union of its committed delta
+    (``git diff --name-only operation_start_head..HEAD``) and its staged delta
+    (``git diff --name-only --cached operation_start_head``). The staged union
+    covers the case where the operation's ``_commit_dirty_worktree`` returned
+    False before creating a commit (e.g. ``git commit`` failed after
+    ``git add -A``), leaving the operation's staged edits dirty but
+    ``operation_start_head..HEAD`` empty (review thread
+    ``PRRT_kwDOSJAM6s6KYd-r``). Only dirt confined to those paths is safe to
+    finalize — dirt on any other path was introduced after the repair-start
+    guard (e.g. by a failed cleanup or another local process) and must stay
+    fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` so it is never
+    silently swept into the PR (review thread ``PRRT_kwDOSJAM6s6KXLaI``).
+    When ``operation_start_head`` is unavailable (no operation-owned anchor),
+    the finalize is skipped entirely.
     """
 
     # Skip finalization if: no state provided, the tree is already clean, or

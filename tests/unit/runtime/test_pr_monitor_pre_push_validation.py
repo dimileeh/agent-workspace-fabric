@@ -1118,9 +1118,102 @@ async def test_validated_push_finalizes_monitor_dirty_state_before_validation(
     monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
-    # Operation-owned delta includes the dirty path, so the finalize proceeds.
+    # Operation-owned committed delta includes the dirty path, so the finalize
+    # proceeds. The staged delta is empty (the operation already committed).
     cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is True
+    assert result.workspace_head_sha == "b" * 40
+    commit_dirty.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        message=f"awf: finalize PR monitor repair for {workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+    )
+    cleanup.assert_awaited_once()
+    assert check_worktree_clean.await_count == 2
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_commits_operation_owned_staged_dirt(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Operation-owned staged dirt (empty committed delta) must be finalized.
+
+    When the repair operation's ``_commit_dirty_worktree`` returns False
+    *before* creating a commit (for example ``git commit`` fails after the
+    agent already staged its edits via ``git add -A``), the operation's
+    staged edits are still dirty in the worktree but
+    ``git diff --name-only operation_start_head..HEAD`` is empty (HEAD never
+    moved). The pre-push dirty finalize ownership gate must include the
+    operation's staged delta against ``operation_start_head``
+    (``git diff --name-only --cached operation_start_head``), not only the
+    committed delta, or every operation-owned dirty path is treated as
+    unrelated and the finalize is skipped, stranding the operation's own
+    residue as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``
+    (review thread ``PRRT_kwDOSJAM6s6KYd-r``).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    # Dirt on a path the operation staged but did not commit (failed commit).
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    clean_check = ValidationWorktreeCheck(clean=True)
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cleanup = AsyncMock(
+        return_value=ValidationWorktreeCleanup(
+            cleaned=False,
+            check=clean_check,
+            restore_ref="b" * 40,
+        )
+    )
+    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Committed delta is empty (HEAD never moved): the operation staged but
+    # did not commit.
+    cmd.queue_result(returncode=0, stdout="")
+    # Staged delta against operation_start_head carries the operation-owned path.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1164,16 +1257,18 @@ async def test_pre_push_validation_finalize_skips_unrelated_dirt_outside_operati
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Unrelated dirt outside the operation's committed delta must stay fail-closed.
+    """Unrelated dirt outside the operation's committed and staged delta must stay fail-closed.
 
     The pre-push dirty finalize must only commit dirt the current monitor
     operation owns — i.e. paths within its committed delta
-    (``operation_start_head..HEAD``). Dirt on a path that the operation never
-    touched (introduced after the repair-start dirty guard by a failed cleanup
-    or another local process) must NOT be swept into the PR via
-    ``_commit_dirty_worktree``; the finalize must skip and the push must
-    fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (regression for
-    review thread ``PRRT_kwDOSJAM6s6KXLaI``).
+    (``operation_start_head..HEAD``) or its staged delta
+    (``git diff --name-only --cached operation_start_head``). Dirt on a path
+    that the operation never touched (introduced after the repair-start dirty
+    guard by a failed cleanup or another local process) must NOT be swept
+    into the PR via ``_commit_dirty_worktree``; the finalize must skip and
+    the push must fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``
+    (regression for review thread ``PRRT_kwDOSJAM6s6KXLaI``; the staged-delta
+    union was added in review thread ``PRRT_kwDOSJAM6s6KYd-r``).
     """
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
@@ -1399,8 +1494,10 @@ async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
     monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
-    # Operation-owned delta includes the dirty path, so the finalize proceeds.
+    # Operation-owned committed delta includes the dirty path, so the finalize
+    # proceeds. The staged delta is empty (the operation already committed).
     cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
