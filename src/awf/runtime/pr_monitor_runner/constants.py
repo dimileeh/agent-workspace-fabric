@@ -80,6 +80,14 @@ _PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
 
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
 
+# A push rejected non-fast-forward whose divergence-recovery ``reset --hard`` was
+# deliberately SUPPRESSED by the caller (``allow_resync_on_rejection=False``) so a
+# preserved protected commit is not dropped before its approve-and-keep grant is
+# consumed. Distinct from ``_GIT_PUSH_FAILED_REASON`` so the operator-hint resume
+# can recognize the kept-commit rejection and re-block instead of treating it as a
+# generic failure (PRRT_kwDOSJAM6s6KZK1v).
+_GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON = "GIT_PUSH_REJECTED_NON_FAST_FORWARD"
+
 _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON = "GITHUB_WORKFLOW_SCOPE_REQUIRED"
 
 _MONITOR_POLICY_BLOCKED_REASON = "MONITOR_POLICY_BLOCKED"
@@ -110,6 +118,11 @@ _CI_TRANSIENT_RERUN_FAILED_REASON = "CI_TRANSIENT_RERUN_FAILED"
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
+
+# A protected-scope violation in an unpushed monitor commit pauses the workspace
+# into ``blocked`` for an operator decision (WS-2) instead of silently rolling
+# the commit back. The offending commit is PRESERVED until the operator resolves.
+_PROTECTED_SCOPE_PAUSED_REASON = "PROTECTED_SCOPE_PAUSED_BLOCKED"
 
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 

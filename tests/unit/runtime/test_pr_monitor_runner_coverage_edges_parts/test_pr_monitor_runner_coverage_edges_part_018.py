@@ -33,6 +33,9 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
+from awf.runtime.pr_monitor_runner.constants import (
+    _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
+)
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     ProtectedScopeDiffError,
@@ -678,6 +681,58 @@ async def test_protected_scope_status_check_ignores_empty_or_missing_workspace(
 
 
 @pytest.mark.unit
+async def test_protected_scope_status_check_ignores_grant_for_new_dirty_edit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A grant must NOT suppress a NEW dirty protected edit (PRRT_kwDOSJAM6s6KJhxd).
+
+    The pre-commit dirty validator only ever sees uncommitted edits — the
+    preserved blocked commit is committed and authorized by the grant-aware
+    *committed*-path push checks. During a combined ``--directive ... --grant ...``
+    resume the directive agent runs before the grant is consumed, so honoring the
+    grant here would let a fresh agent edit to the granted protected file be
+    committed (and then pushed under the grant-aware push check) under an approval
+    meant to keep the preserved commit, not to authorize new edits. The dirty
+    validator must flag that new edit regardless of the active grant.
+    """
+    from awf.common.ids import new_operator_grant_id
+    from awf.db.models import OperatorGrantAuditRecord
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        session.add(
+            OperatorGrantAuditRecord(
+                id=new_operator_grant_id(),
+                workspace_id=workspace_id,
+                operator="op@example.com",
+                reason="approved keeping the preserved protected change",
+                normalized_path=".coveragerc",
+                block_epoch=workspace.block_epoch,
+                approve_policy_downgrade=True,
+            )
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    violations = await runner._protected_scope_violations_for_status(
+        workspace_id=workspace_id,
+        status_stdout=" M .coveragerc\n",
+    )
+    assert [violation.path for violation in violations] == [".coveragerc"]
+
+
+@pytest.mark.unit
 async def test_git_helpers_handle_bad_base_count_and_push_rejection_recovery(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -741,6 +796,42 @@ async def test_fork_push_rejection_does_not_reset_when_fetch_fails(
         "https://github.com/contributor/aira-web.git",
         "refs/heads/fix/review",
     ]
+    assert not any("reset" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_git_push_result_suppresses_resync_on_rejection_when_disallowed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """``allow_resync_on_rejection=False`` keeps a non-fast-forward rejection
+    unrecovered: no fetch, no ``reset --hard`` (so a preserved protected commit
+    survives), tagged with the dedicated reason code so an approve-and-keep resume
+    can re-block instead of dropping the commit (PRRT_kwDOSJAM6s6KZK1v)."""
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stderr="[rejected] non-fast-forward")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / "ws_keep"
+
+    result = await runner._git_push_result(
+        worktree_path=worktree,
+        remote_branch="awf/ws_keep",
+        remote_url="https://github.com/dimileeh/aira-web.git",
+        allow_resync_on_rejection=False,
+    )
+
+    assert result.failed is True
+    assert result.recovered_by_resync is False
+    assert result.reason_code == _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON
+    # Only the rejected push ran — no resync fetch and no destructive reset.
+    assert len(cmd.calls) == 1
+    assert not any("fetch" in call.args for call in cmd.calls)
     assert not any("reset" in call.args for call in cmd.calls)
 
 

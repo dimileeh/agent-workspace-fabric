@@ -271,7 +271,34 @@ async def _run_ci_fix(
         remote_branch=remote_branch,
         remote_push_url=remote_push_url,
     )
+    if protected_scope_block is not None and protected_scope_block.violations:
+        # A real protected-scope violation in the unpushed CI-repair commit PAUSES
+        # the workspace into ``blocked`` for an operator decision (WS-2), preserving
+        # the offending commit, instead of silently rolling it back and failing the
+        # workspace. This wires the CI-repair push site into the same protected-pause
+        # flow the comment-addressing (fix_cycle) path already uses, so a CI-repair
+        # agent touching an unowned protected workflow/pyproject file blocks for
+        # guide/grant rather than terminating the run (PRRT_kwDOSJAM6s6KFDHT).
+        return cast(
+            _GitPushResult,
+            await self._pause_monitor_for_protected_scope_block(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                pr_head_sha=status.head_sha if status is not None else "",
+                protected_scope_block=protected_scope_block,
+                worktree_path=worktree_path,
+                state=state,
+                remote_branch=remote_branch,
+                base_branch=base_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
+                source_head_sha=operation_start_head,
+            ),
+        )
     if protected_scope_block is not None:
+        # A diff-unavailable block (no violations) keeps the terminal handling:
+        # there is no preserved-commit decision for an operator to make.
         return cast(
             _GitPushResult,
             await self._repair_protected_scope_commits_before_push(

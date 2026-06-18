@@ -388,7 +388,26 @@ async def _run_fix_cycle(
         remote_push_url=remote_push_url,
     )
     push_result = (
-        await self._repair_protected_scope_commits_before_push(
+        # A real protected-scope violation in an unpushed commit PAUSES the
+        # workspace into ``blocked`` for an operator decision (WS-2), preserving
+        # the offending commit, instead of silently rolling it back. A
+        # diff-unavailable block (no violations) keeps the terminal handling.
+        await self._pause_monitor_for_protected_scope_block(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            pr_head_sha=pr_head_sha,
+            protected_scope_block=protected_scope_block,
+            worktree_path=worktree_path,
+            state=state,
+            remote_branch=remote_branch,
+            base_branch=base_branch or "",
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+            source_head_sha=operation_start_head,
+        )
+        if protected_scope_block is not None and protected_scope_block.violations
+        else await self._repair_protected_scope_commits_before_push(
             workspace_id=workspace_id,
             pr_number=pr_number,
             protected_scope_block=protected_scope_block,

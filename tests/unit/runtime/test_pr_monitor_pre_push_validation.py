@@ -14,6 +14,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
+from awf.runtime.pr_monitor_runner import pre_push_validation_failures
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
 )
@@ -60,8 +61,6 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 @pytest.mark.unit
 def test_pre_push_validation_structural_helpers_are_single_source() -> None:
     """Keep pre-push validation helper definitions and retry flow single-sourced."""
-    source_path = Path(pre_push_validation_module.__file__)
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
     helper_names = {
         "_failed_pre_push_commands",
         "_first_real_pre_push_failure",
@@ -76,10 +75,23 @@ def test_pre_push_validation_structural_helpers_are_single_source() -> None:
         "_pre_push_validation_reason_code_for_preferred_failure",
         "_pre_push_validation_reason_code",
     }
-    top_level_functions = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
-
+    # The failure-classification helpers live in the dedicated ``pre_push_validation_failures``
+    # module (split out to keep ``pre_push_validation`` under the first-party file-size
+    # guardrail). They must be defined there exactly once and not duplicated back into the
+    # orchestration module.
+    failures_path = Path(pre_push_validation_failures.__file__)
+    failures_tree = ast.parse(failures_path.read_text(encoding="utf-8"))
+    failures_functions = [
+        node.name for node in failures_tree.body if isinstance(node, ast.FunctionDef)
+    ]
     for helper_name in helper_names:
-        assert top_level_functions.count(helper_name) == 1
+        assert failures_functions.count(helper_name) == 1
+
+    source_path = Path(pre_push_validation_module.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    orchestrator_functions = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
+    for helper_name in helper_names:
+        assert orchestrator_functions.count(helper_name) == 0
 
     retry_function = next(
         node
@@ -219,12 +231,14 @@ def test_pre_push_failure_helpers_prefer_real_migration_and_coverage_commands(
         coverage=coverage_failure,
     )
 
-    failures = pre_push_validation_module._failed_pre_push_commands(result)
+    failures = pre_push_validation_failures._failed_pre_push_commands(result)
 
     assert failures == (migration_failure, coverage_command_failure)
-    assert pre_push_validation_module._first_real_pre_push_failure(result) is (migration_failure)
-    assert pre_push_validation_module._pure_toolchain_missing_failure(result) is None
-    assert pre_push_validation_module._pre_push_validation_reason_code(result) == "MIGRATION_FAILED"
+    assert pre_push_validation_failures._first_real_pre_push_failure(result) is (migration_failure)
+    assert pre_push_validation_failures._pure_toolchain_missing_failure(result) is None
+    assert (
+        pre_push_validation_failures._pre_push_validation_reason_code(result) == "MIGRATION_FAILED"
+    )
 
 
 @pytest.mark.unit
@@ -252,12 +266,12 @@ def test_pre_push_failure_helpers_identify_pure_coverage_toolchain_failure(
         )
     )
 
-    assert pre_push_validation_module._first_real_pre_push_failure(result) is None
-    assert pre_push_validation_module._pure_toolchain_missing_failure(result) is (
+    assert pre_push_validation_failures._first_real_pre_push_failure(result) is None
+    assert pre_push_validation_failures._pure_toolchain_missing_failure(result) is (
         coverage_command_failure
     )
     assert (
-        pre_push_validation_module._pre_push_validation_reason_code(result)
+        pre_push_validation_failures._pre_push_validation_reason_code(result)
         == "COVERAGE_COMMAND_FAILED"
     )
 
@@ -288,11 +302,11 @@ def test_pre_push_failure_helpers_prefer_non_127_first_failure_over_command_127(
         first_failure=provider_failure,
     )
 
-    assert pre_push_validation_module._first_real_pre_push_failure(result) is provider_failure
-    assert pre_push_validation_module._pure_toolchain_missing_failure(result) is None
-    assert pre_push_validation_module._preferred_pre_push_failure(result) is provider_failure
+    assert pre_push_validation_failures._first_real_pre_push_failure(result) is provider_failure
+    assert pre_push_validation_failures._pure_toolchain_missing_failure(result) is None
+    assert pre_push_validation_failures._preferred_pre_push_failure(result) is provider_failure
     assert (
-        pre_push_validation_module._pre_push_validation_reason_code(result)
+        pre_push_validation_failures._pre_push_validation_reason_code(result)
         == "COVERAGE_PROVIDER_FAILED"
     )
 
@@ -465,7 +479,7 @@ async def test_pre_push_validation_collects_failed_commands_once_for_reason_code
         pre_push_validation_fix_passes=0,
     )
     runner._deps.validation = validation  # type: ignore[assignment]
-    original_failed_commands = pre_push_validation_module._failed_pre_push_commands
+    original_failed_commands = pre_push_validation_failures._failed_pre_push_commands
     failed_command_calls = 0
 
     def _count_failed_commands(

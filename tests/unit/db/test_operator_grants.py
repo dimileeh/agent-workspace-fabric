@@ -187,6 +187,30 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
     running = await _workspace(session)
     running.pending_operator_hint = {"status": "pending", "directive": "revert it"}
 
+    # A MONITOR-ORIGIN block (post-PR) carries an actionable directive AND an
+    # active grant, but it is resumed via ``monitoring_pr`` (the guide control
+    # transitions it back into the monitor), NOT through the executor's
+    # ``blocked -> running`` path. The ``monitor_`` resume-phase prefix marks it,
+    # so the executor blocked-resume selector must EXCLUDE it — otherwise the
+    # executor and monitor would race to resume the same row.
+    monitor_origin = await _blocked_workspace(session, block_epoch=4)
+    monitor_origin.block_resume_phase = "monitor_protected_scope_push"
+    monitor_origin.pending_operator_hint = {
+        "status": "pending",
+        "reason": "revert the protected change",
+        "directive": "revert it",
+    }
+    session.add(
+        OperatorGrantAuditRecord(
+            id="grant_monitor_origin",
+            workspace_id=monitor_origin.id,
+            operator="op@example.com",
+            reason="approved",
+            normalized_path="pyproject.toml",
+            block_epoch=4,
+        )
+    )
+
     await session.flush()
 
     ids = await repo.list_resumable_blocked_ids(limit=10)
@@ -197,6 +221,7 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
     assert non_string_reason_directive.id not in ids
     assert directiveless.id not in ids
     assert blank_directive.id not in ids
+    assert monitor_origin.id not in ids
     assert non_string_directive.id not in ids
     assert with_stale_grant.id not in ids
     assert running.id not in ids
@@ -206,6 +231,43 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
     assert set(excluded) == {with_grant.id}
     assert len(await repo.list_resumable_blocked_ids(limit=1)) == 1
     assert await repo.list_resumable_blocked_ids(limit=0) == []
+
+
+@pytest.mark.unit
+async def test_list_resumable_blocked_ids_monitor_prefix_underscore_is_literal(
+    session: AsyncSession,
+) -> None:
+    """The monitor-origin exclusion must treat ``monitor_`` as a literal prefix.
+
+    ``_`` is a single-char LIKE wildcard, so a naive ``LIKE 'monitor_%'`` filter is
+    broader than the Python ``is_monitor_origin_block_resume_phase`` discriminator
+    (a literal ``startswith('monitor_')``). A pre-PR executor phase that merely
+    starts with ``monitor`` followed by a non-underscore char (e.g. ``monitorX``)
+    is NOT monitor-origin and must stay eligible for executor resume — otherwise
+    the loose wildcard would wrongly drop it.
+    """
+    repo = WorkspaceRepository(session)
+    armed_hint = {
+        "status": "pending",
+        "reason": "revert the protected change",
+        "directive": "revert it",
+    }
+
+    # Phase starts with ``monitor`` + a non-underscore char: NOT monitor-origin.
+    pre_pr_lookalike = await _blocked_workspace(session)
+    pre_pr_lookalike.block_resume_phase = "monitorX_phase"
+    pre_pr_lookalike.pending_operator_hint = dict(armed_hint)
+
+    # A genuine monitor-origin phase (literal ``monitor_`` prefix) stays excluded.
+    monitor_origin = await _blocked_workspace(session)
+    monitor_origin.block_resume_phase = "monitor_protected_scope_push"
+    monitor_origin.pending_operator_hint = dict(armed_hint)
+
+    await session.flush()
+
+    ids = set(await repo.list_resumable_blocked_ids(limit=10))
+    assert pre_pr_lookalike.id in ids
+    assert monitor_origin.id not in ids
 
 
 @pytest.mark.unit

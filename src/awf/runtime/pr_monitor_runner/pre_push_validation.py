@@ -16,7 +16,6 @@ from awf.control.executor.helpers import (
     _should_run_local_coverage,
     _validation_run_command_records,
     _validation_run_coverage_metadata,
-    _validation_run_reason_code,
     _validation_tier_for_workspace,
 )
 from awf.control.executor.logging_ops import _validation_run_log_stream_refs
@@ -42,6 +41,13 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
     _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_failures import (
+    _failed_pre_push_commands,
+    _pre_push_validation_reason_code_for_preferred_failure,
+    _preferred_pre_push_failure,
+    _preferred_pre_push_failure_from_failures,
+    _pure_toolchain_missing_failure_for_result,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
     _cleanup_committed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
@@ -94,157 +100,6 @@ PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON = _PRE_PUSH_VALIDATION_REPARENT_FAILE
 PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON = _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON
 
 _FAILING_COMMAND_DETAIL_LIMIT = 1000
-
-
-def _failed_pre_push_commands(result: ValidationResult) -> tuple[ValidationCommandResult, ...]:
-    """Return failed command-like records from a validation result."""
-    failures: list[ValidationCommandResult] = []
-    if result.migration is not None and not result.migration.ok:
-        failures.append(result.migration)
-    failures.extend(command for command in result.commands if command.blocks_validation)
-    coverage_command = result.coverage.command_result if result.coverage is not None else None
-    if coverage_command is not None and not coverage_command.ok:
-        failures.append(coverage_command)
-    return tuple(failures)
-
-
-def _first_real_pre_push_failure(result: ValidationResult) -> ValidationCommandResult | None:
-    """Return the first non-127 failure, giving real lint/test failures precedence."""
-    failures = _failed_pre_push_commands(result)
-    return _first_real_pre_push_failure_for_result(result, failures)
-
-
-def _first_failure_outside_collected_failures(
-    result: ValidationResult,
-    failures: tuple[ValidationCommandResult, ...],
-) -> ValidationCommandResult | None:
-    """Return ``first_failure`` when it is not represented in collected commands."""
-    first_failure = result.first_failure
-    if first_failure is None:
-        return None
-    if any(first_failure is failure for failure in failures):
-        return None
-    return first_failure
-
-
-def _first_real_pre_push_failure_for_result(
-    result: ValidationResult,
-    failures: tuple[ValidationCommandResult, ...],
-) -> ValidationCommandResult | None:
-    """Return the first non-127 failure across command and provider records.
-
-    Provider-level ``first_failure`` may describe a policy failure whose
-    underlying command succeeded, such as coverage below threshold with
-    ``ok=True`` and ``returncode=0``.
-    """
-    real_failure = _first_real_pre_push_failure_from_failures(failures)
-    if real_failure is not None:
-        return real_failure
-    first_failure = _first_failure_outside_collected_failures(result, failures)
-    if first_failure is not None and first_failure.returncode != 127:
-        return first_failure
-    return None
-
-
-def _first_real_pre_push_failure_from_failures(
-    failures: tuple[ValidationCommandResult, ...],
-) -> ValidationCommandResult | None:
-    """Return the first non-127 failure from an already collected failure tuple."""
-    return next(
-        (failure for failure in failures if failure.returncode != 127),
-        None,
-    )
-
-
-def _pure_toolchain_missing_failure(
-    result: ValidationResult,
-) -> ValidationCommandResult | None:
-    """Return the first 127 failure only when all command failures are command-not-found.
-
-    Mixed results are treated as genuine validation failures so a real lint/test
-    failure is not hidden behind an earlier missing-tool diagnostic.
-    """
-    failures = _failed_pre_push_commands(result)
-    return _pure_toolchain_missing_failure_for_result(result, failures)
-
-
-def _pure_toolchain_missing_failure_for_result(
-    result: ValidationResult,
-    failures: tuple[ValidationCommandResult, ...],
-) -> ValidationCommandResult | None:
-    """Return a pure 127 failure, including command-less provider failures."""
-    first_failure = _first_failure_outside_collected_failures(result, failures)
-    if first_failure is not None and first_failure.returncode != 127:
-        return None
-    toolchain_failure = _pure_toolchain_missing_failure_from_failures(failures)
-    if toolchain_failure is not None:
-        return toolchain_failure
-    if failures:
-        return None
-    if first_failure is not None and first_failure.returncode == 127:
-        return first_failure
-    return None
-
-
-def _pure_toolchain_missing_failure_from_failures(
-    failures: tuple[ValidationCommandResult, ...],
-) -> ValidationCommandResult | None:
-    """Return the first 127 failure only when the collected failures are all 127."""
-    if not failures:
-        return None
-    if any(failure.returncode != 127 for failure in failures):
-        return None
-    return failures[0]
-
-
-def _preferred_pre_push_failure(result: ValidationResult) -> ValidationCommandResult | None:
-    """Return the failure that should drive diagnostics and repair prompts."""
-    return _preferred_pre_push_failure_from_failures(
-        result,
-        _failed_pre_push_commands(result),
-    )
-
-
-def _preferred_pre_push_failure_from_failures(
-    result: ValidationResult,
-    failures: tuple[ValidationCommandResult, ...],
-) -> ValidationCommandResult | None:
-    """Return the preferred failure using an already collected failure tuple."""
-    real_failure = _first_real_pre_push_failure_for_result(result, failures)
-    if real_failure is not None:
-        return real_failure
-    toolchain_failure = _pure_toolchain_missing_failure_from_failures(failures)
-    if toolchain_failure is not None:
-        return toolchain_failure
-    return result.first_failure
-
-
-def _pre_push_validation_reason_code_for_preferred_failure(
-    result: ValidationResult,
-    preferred_failure: ValidationCommandResult | None,
-) -> str:
-    """Return the validation reason for an already selected preferred failure."""
-    validation_reason_code = _validation_run_reason_code(result)
-    if preferred_failure is None:
-        return validation_reason_code
-    coverage_command = result.coverage.command_result if result.coverage is not None else None
-    # ValidationResult.first_failure returns this same coverage command object when
-    # a coverage policy fails; preserve that identity if coverage results are copied.
-    if (
-        result.coverage is not None
-        and not result.coverage.ok
-        and preferred_failure is coverage_command
-    ):
-        return validation_reason_code
-    return preferred_failure.reason_code
-
-
-def _pre_push_validation_reason_code(result: ValidationResult) -> str:
-    """Return the underlying validation reason, honoring mixed-failure precedence."""
-    return _pre_push_validation_reason_code_for_preferred_failure(
-        result,
-        _preferred_pre_push_failure(result),
-    )
 
 
 def _safe_pre_push_validation_artifact_name(value: str) -> str:
@@ -365,8 +220,26 @@ async def _validated_git_push_result(
     refspec: str | None = None,
     state: object | None = None,
     operation_start_head: str | None = None,
+    allow_validation_fix_passes: bool = True,
+    allow_resync_on_rejection: bool = True,
 ) -> _GitPushResult:
-    """Run pre-push validation with optional fix passes before pushing."""
+    """Run pre-push validation with optional fix passes before pushing.
+
+    ``allow_resync_on_rejection`` is threaded straight to ``_git_push_result``: an
+    approve-and-keep operator-hint resume sets it ``False`` so a non-fast-forward
+    rejection does NOT reset --hard the preserved protected commit away before its
+    grant is consumed (PRRT_kwDOSJAM6s6KZK1v).
+
+    ``allow_validation_fix_passes`` gates the agent fix-pass + commit retry loop.
+    The operator-hint resume path sets it ``False`` while an approve-and-keep grant
+    is still active: a fix pass commits through ``_commit_dirty_worktree``, whose
+    protected-scope check consults the STILL-ACTIVE grant (the grant is consumed
+    only after the push), so a fix pass that edits the granted protected path would
+    publish extra protected edits under an approval meant only for the preserved
+    commit (PR #609 comment 4512881681). Disabling the fix passes leaves validation
+    itself intact: a real failure surfaces (the grant survives for a re-resume)
+    rather than being papered over with ungranted protected commits.
+    """
     if self._deps.validation is None:
         return cast(
             _GitPushResult,
@@ -375,6 +248,7 @@ async def _validated_git_push_result(
                 remote_branch=remote_branch,
                 remote_url=remote_url,
                 refspec=refspec,
+                allow_resync_on_rejection=allow_resync_on_rejection,
             ),
         )
     validation_result = await _run_pre_push_validation_with_fix_passes(
@@ -387,6 +261,7 @@ async def _validated_git_push_result(
         remote_url=remote_url,
         state=state,
         operation_start_head=operation_start_head,
+        allow_validation_fix_passes=allow_validation_fix_passes,
     )
     if not validation_result.passed:
         return _GitPushResult(
@@ -404,6 +279,7 @@ async def _validated_git_push_result(
             remote_branch=remote_branch,
             remote_url=remote_url,
             refspec=refspec,
+            allow_resync_on_rejection=allow_resync_on_rejection,
         ),
     )
 
@@ -419,9 +295,19 @@ async def _run_pre_push_validation_with_fix_passes(
     remote_url: str | None,
     state: object | None,
     operation_start_head: str | None = None,
+    allow_validation_fix_passes: bool = True,
 ) -> _PrePushValidationResult:
-    """Execute pre-push validation plus optional fix/retry attempts."""
-    max_fix_passes = max(0, self._runner_config.pre_push_validation_fix_passes)
+    """Execute pre-push validation plus optional fix/retry attempts.
+
+    When ``allow_validation_fix_passes`` is ``False`` the fix-pass budget is forced
+    to zero, so a failing validation returns its failure unchanged without invoking
+    an agent fix pass (see ``_validated_git_push_result``).
+    """
+    max_fix_passes = (
+        max(0, self._runner_config.pre_push_validation_fix_passes)
+        if allow_validation_fix_passes
+        else 0
+    )
     pass_index = 0
     validation_commands: tuple[str, ...] | None = None
     while True:

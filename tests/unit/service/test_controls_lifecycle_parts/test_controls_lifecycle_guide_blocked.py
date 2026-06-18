@@ -11,7 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.ids import new_operator_grant_id
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import OperatorGrantAuditRecord, Workspace
+from awf.db.models import MergeCandidate, OperatorGrantAuditRecord, Workspace
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+)
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload, utcnow
 from awf.service.controls import (
     IdempotencyConflictError,
@@ -23,6 +28,7 @@ from awf.service.controls import (
 )
 from tests.postgres import postgres_test_session
 from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers import (
+    _events,
     _service,
     _workspace,
 )
@@ -582,3 +588,251 @@ async def test_guide_grants_rejected_on_monitoring_pr(session: AsyncSession) -> 
             idempotency_key="guide-monitoring-grant",
             expected_version=workspace.version,
         )
+
+
+async def _monitor_origin_blocked_workspace(
+    session: AsyncSession,
+    *,
+    block_epoch: int = 1,
+) -> Workspace:
+    """A POST-PR (monitor-origin) protected-scope block: a PR exists and the
+    ``block_resume_phase`` carries the ``monitor_`` prefix that routes resume
+    back into the PR monitor rather than the executor."""
+    workspace = await _blocked_workspace(session, block_epoch=block_epoch)
+    workspace.block_resume_phase = "monitor_protected_scope_push"
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/7"
+    workspace.pr_number = 7
+    await session.flush()
+    return workspace
+
+
+async def _monitor_origin_blocked_workspace_with_candidate(
+    session: AsyncSession,
+    *,
+    block_epoch: int = 1,
+) -> tuple[Workspace, MergeCandidate]:
+    """A monitor-origin block that also carries a logical task/attempt with an
+    open merge candidate, so guiding it exercises the candidate-reopen path."""
+    workspace = await _monitor_origin_blocked_workspace(session, block_epoch=block_epoch)
+    workspace.branch_name = f"awf/{workspace.id}"
+    workspace.remote_push_branch = workspace.branch_name
+    workspace.base_commit = "a" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    task = await TaskRepository(session).create_or_get(
+        repo_url=workspace.repo_url,
+        base_branch=workspace.branch_base,
+        title=workspace.task_title,
+        prompt=workspace.task_prompt,
+        external_id=workspace.task_external_id,
+        idempotency_key=None,
+        task_class=workspace.task_class,
+        owned_paths=list(workspace.owned_paths),
+    )
+    attempt = await TaskAttemptRepository(session).create_for_workspace(
+        task=task,
+        workspace=workspace,
+    )
+    candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
+        task=task,
+        attempt=attempt,
+        workspace=workspace,
+        head_sha=workspace.monitor_last_commit_sha,
+        base_sha=workspace.base_commit,
+    )
+    await session.flush()
+    return workspace, candidate
+
+
+@pytest.mark.unit
+async def test_guide_monitor_origin_blocked_reopens_merge_candidate(
+    session: AsyncSession,
+) -> None:
+    # A monitor-origin block whose attempt still owns an open merge candidate must
+    # have that candidate reopened at its current head when the operator guides it
+    # back into the monitor, so the PR-monitor poll re-claims a live candidate.
+    workspace, candidate = await _monitor_origin_blocked_workspace_with_candidate(session)
+    candidate_repo = MergeCandidateRepository(session)
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="revert the protected workflow edit",
+        reason="operator asked for a revert",
+        idempotency_key="guide-monitor-reopens-candidate",
+        expected_version=workspace.version,
+    )
+
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    # The candidate is reopened at the workspace's current head and recorded as such.
+    reopened = await candidate_repo.get_open_for_workspace_with_merge_inputs(workspace.id)
+    assert reopened is not None
+    assert reopened.id == candidate.id
+    assert reopened.head_sha == "h" * 40
+    events = await _events(session, workspace.id)
+    guide_event = next(e for e in events if e.event_type == "workspace.guide_requested")
+    assert guide_event.payload["state_reset"]["candidate_reopened"] is True
+
+
+@pytest.mark.unit
+async def test_guide_monitor_origin_blocked_directive_resumes_into_monitor(
+    session: AsyncSession,
+) -> None:
+    from awf.runtime.operator_hints import operator_hint_from_threads
+
+    workspace = await _monitor_origin_blocked_workspace(session)
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="revert the protected workflow edit",
+        reason="operator asked for a revert",
+        idempotency_key="guide-monitor-directive",
+        expected_version=workspace.version,
+    )
+
+    # Monitor-origin block resumes back into the PR monitor, NOT the executor.
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    # The hint is armed in the MONITOR state map (not the pre-PR column).
+    hint = operator_hint_from_threads(dict(workspace.monitor_threads_addressed or {}))
+    assert hint is not None
+    assert hint.directive == "revert the protected workflow edit"
+    assert hint.status == "pending"
+    # Claims are force-cleared so the monitor poll can re-claim the row.
+    assert workspace.monitor_claimed_by is None
+    assert workspace.execution_claimed_by is None
+
+
+@pytest.mark.unit
+async def test_guide_monitor_origin_blocked_grant_only_arms_directiveless_hint(
+    session: AsyncSession,
+) -> None:
+    from awf.runtime.operator_hints import operator_hint_from_threads
+
+    workspace = await _monitor_origin_blocked_workspace(session, block_epoch=4)
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="",
+        reason="approved the protected change",
+        grants=["pyproject.toml"],
+        approve_policy_downgrade=True,
+        operator="alice@example.com",
+        idempotency_key="guide-monitor-grant",
+        expected_version=workspace.version,
+    )
+
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    # A grant-only resume still arms a (directive-less) pending hint so decide()
+    # routes to AddressOperatorHint and pushes the preserved commit.
+    hint = operator_hint_from_threads(dict(workspace.monitor_threads_addressed or {}))
+    assert hint is not None
+    assert hint.directive is None
+    assert hint.status == "pending"
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
+    assert grants[0].block_epoch == 4
+    assert grants[0].approve_policy_downgrade is True
+
+
+@pytest.mark.unit
+async def test_guide_monitor_origin_blocked_directive_only_revokes_stale_grant(
+    session: AsyncSession,
+) -> None:
+    # A prior approve-and-keep guide recorded an active current-epoch grant on a
+    # POST-PR (monitor-origin) block. The operator then changes their mind and
+    # issues a directive-only revert: the stale grant must be revoked so the
+    # monitor hint resume's protected-scope gates (which load
+    # ``_active_operator_grant_specs``) no longer suppress a violation on its path.
+    workspace = await _monitor_origin_blocked_workspace(session, block_epoch=3)
+    session.add(
+        OperatorGrantAuditRecord(
+            id=new_operator_grant_id(),
+            workspace_id=workspace.id,
+            operator="alice@example.com",
+            reason="approved keeping it",
+            normalized_path="pyproject.toml",
+            block_epoch=3,
+            approve_policy_downgrade=True,
+            created_at=utcnow(),
+        )
+    )
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="revert the pyproject change after all",
+        reason="actually revert it",
+        operator="alice@example.com",
+        idempotency_key="guide-monitor-directive-revokes-grant",
+        expected_version=workspace.version,
+    )
+
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
+    assert grants[0].revoked_at is not None
+
+
+@pytest.mark.unit
+async def test_guide_monitor_origin_blocked_directive_with_new_grant_revokes_prior(
+    session: AsyncSession,
+) -> None:
+    # A combined directive + grant on a monitor-origin block revokes a PRE-EXISTING
+    # grant (the directive is the latest decision) while preserving the path granted
+    # by this same request.
+    workspace = await _monitor_origin_blocked_workspace(session, block_epoch=4)
+    session.add(
+        OperatorGrantAuditRecord(
+            id=new_operator_grant_id(),
+            workspace_id=workspace.id,
+            operator="alice@example.com",
+            reason="approved keeping the old file",
+            normalized_path="pyproject.toml",
+            block_epoch=4,
+            approve_policy_downgrade=True,
+            created_at=utcnow(),
+        )
+    )
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="revert pyproject and fix the other module instead",
+        reason="changed my mind: revert that, grant only the new file",
+        grants=["docs/CONTRIBUTING.md"],
+        operator="alice@example.com",
+        idempotency_key="guide-monitor-directive-revokes-prior-keeps-fresh",
+        expected_version=workspace.version,
+    )
+
+    grants = await _grants(session, workspace.id)
+    by_path = {grant.normalized_path: grant for grant in grants}
+    assert by_path["pyproject.toml"].revoked_at is not None
+    assert by_path["docs/CONTRIBUTING.md"].revoked_at is None
+
+
+@pytest.mark.unit
+async def test_guide_pre_pr_blocked_stays_blocked_when_not_monitor_origin(
+    session: AsyncSession,
+) -> None:
+    """A pre-PR block (no ``monitor_`` resume phase) keeps WS-1 behavior: it stays
+    ``blocked`` and arms the directive in the pre-PR column, not the monitor map."""
+    workspace = await _blocked_workspace(session)
+    workspace.block_resume_phase = "validating"
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="revert it",
+        reason="operator asked for a revert",
+        idempotency_key="guide-pre-pr-directive",
+        expected_version=workspace.version,
+    )
+
+    assert response.status == WorkspaceStatus.blocked
+    assert workspace.status == WorkspaceStatus.blocked.value
+    assert pre_pr_operator_hint_from_payload(workspace.pending_operator_hint) is not None

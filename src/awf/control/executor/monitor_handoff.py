@@ -111,12 +111,21 @@ class CompanionEnvSecretPrecheckError(ComposeOperationError):
 
 
 async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
-    """Resume the PR monitor for a workspace already in ``monitoring_pr``."""
+    """Resume the PR monitor for a workspace already in ``monitoring_pr``.
+
+    The current monitor claim owner (``monitor_claimed_by`` on the row this worker
+    reclaimed) is threaded into the runner so the protected-scope pause CAS can
+    fence on it and refuse to clobber the row once a newer worker has reclaimed an
+    expired monitor lease: a stale runner captures the owner string it set, and if
+    a takeover changed ``monitor_claimed_by`` the pause CAS matches 0 rows and does
+    not enter ``blocked`` with its stale preserved commit (PRRT_kwDOSJAM6s6KHtX5).
+    """
 
     ws = await self._load_workspace(workspace_id)
     if ws is None:
         _log.warning("executor.resume_skip_unknown", workspace_id=workspace_id)
         return
+    monitor_owner_id = ws.monitor_claimed_by
     if ws.status != WorkspaceStatus.monitoring_pr.value:
         _log.info(
             "executor.resume_skip_not_monitoring_pr",
@@ -376,10 +385,17 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         action="resume_monitor_run",
     ):
         return
+    # Only forward ``monitor_owner_id`` when known so legacy/test monitor stubs
+    # whose ``run`` predates the parameter keep working; the inline initial
+    # handoff (under the execution claim, not a monitor claim) passes nothing.
+    run_kwargs: dict[str, Any] = {}
+    if monitor_owner_id is not None:
+        run_kwargs["monitor_owner_id"] = monitor_owner_id
     await monitor.run(
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=Path(compose_file_path),
+        **run_kwargs,
     )
 
 
