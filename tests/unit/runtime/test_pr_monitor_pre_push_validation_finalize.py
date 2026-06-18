@@ -123,6 +123,8 @@ async def test_validated_push_finalizes_monitor_dirty_state_before_validation(
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         state=state,
+        protected_scope_revert_remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
     )
     cleanup.assert_awaited_once()
     assert check_worktree_clean.await_count == 2
@@ -219,6 +221,8 @@ async def test_pre_push_validation_finalize_commits_operation_owned_staged_dirt(
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         state=state,
+        protected_scope_revert_remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
     )
     cleanup.assert_awaited_once()
     assert check_worktree_clean.await_count == 2
@@ -507,6 +511,8 @@ async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         state=state,
+        protected_scope_revert_remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
     )
     cleanup.assert_awaited_once()
 
@@ -737,6 +743,97 @@ async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unava
     assert result.validation_run_id is None
     # The finalize failure must not re-check the tree (no verify/recheck pass).
     assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_threads_remote_branch_and_url_to_commit_sink(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The dirty finalize must pass the PR branch and remote URL into the commit sink.
+
+    Operation-owned residue can contain a protected file that was already
+    restored to the remote PR branch. ``_commit_dirty_worktree`` ->
+    ``_repair_protected_scope_changes_before_commit`` only filters that safe
+    rollback when ``protected_scope_revert_remote_branch`` (and the remote URL
+    when needed) is supplied. The validation fix-pass commit path already
+    forwards them; the dirty-finalize path previously omitted them, so the
+    restored protected file was still counted as a violation and the monitor
+    launched another provider repair or fell back to a no-commit dirty failure
+    instead of committing the rollback and proceeding to validation
+    (regression for review thread ``PRRT_kwDOSJAM6s6KZjtR``).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    clean_check = ValidationWorktreeCheck(clean=True)
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cleanup = AsyncMock(
+        return_value=ValidationWorktreeCleanup(
+            cleaned=False,
+            check=clean_check,
+            restore_ref="b" * 40,
+        )
+    )
+    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Operation-owned committed delta includes the dirty path; staged delta empty.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stdout="")
+    # Post-commit re-validation: committed delta still operation-owned.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+    state = MonitorState()
+    operation_start_head = "0" * 40
+    remote_branch = f"awf/{workspace_id}"
+    remote_url = "https://example.invalid/awf.git"
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=remote_branch,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+        remote_url=remote_url,
+    )
+
+    assert result.passed is True
+    commit_dirty.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        message=f"awf: finalize PR monitor repair for {workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        protected_scope_revert_remote_branch=remote_branch,
+        remote_push_url=remote_url,
+    )
 
 
 @pytest.mark.unit

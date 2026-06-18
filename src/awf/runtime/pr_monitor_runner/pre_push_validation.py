@@ -431,6 +431,7 @@ async def _run_pre_push_validation_with_fix_passes(
             remote_branch=remote_branch,
             state=state,
             operation_start_head=operation_start_head,
+            remote_url=remote_url,
         )
 
         if validation_result.passed:
@@ -623,6 +624,8 @@ async def _try_finalize_pre_push_dirty_repair_state(
     state: object | None,
     check: ValidationWorktreeCheck,
     operation_start_head: str | None = None,
+    remote_branch: str | None = None,
+    remote_url: str | None = None,
 ) -> ValidationWorktreeCheck | None:
     """Commit monitor-owned residual repair dirt before pre-push validation.
 
@@ -654,6 +657,16 @@ async def _try_finalize_pre_push_dirty_repair_state(
     ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` if any unowned path appears, so
     the unowned commit is never silently pushed (review thread
     ``PRRT_kwDOSJAM6s6KZP8f``).
+
+    ``remote_branch``/``remote_url`` are forwarded to
+    ``_commit_dirty_worktree`` as ``protected_scope_revert_remote_branch`` /
+    ``remote_push_url`` so ``_repair_protected_scope_changes_before_commit``
+    can filter out protected files already restored to the remote PR branch.
+    Omitting them (as this call previously did) leaves a restored protected
+    file counted as a violation, so the monitor launches another provider
+    repair or falls back to a no-commit dirty failure instead of committing
+    the safe rollback and proceeding to validation (review thread
+    ``PRRT_kwDOSJAM6s6KZjtR``).
     """
 
     # Skip finalization if: no state provided, the tree is already clean, or
@@ -697,6 +710,8 @@ async def _try_finalize_pre_push_dirty_repair_state(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 state=state,
+                protected_scope_revert_remote_branch=remote_branch,
+                remote_push_url=remote_url,
             )
         )
     except _MonitorPolicyBlockedError as exc:
@@ -983,6 +998,7 @@ async def _run_pre_push_validation(
     remote_branch: str,
     state: object | None = None,
     operation_start_head: str | None = None,
+    remote_url: str | None = None,
 ) -> _PrePushValidationResult:
     """Run a single pre-push validation cycle and persist run metadata."""
     async with self._deps.session_factory() as session:
@@ -1014,6 +1030,8 @@ async def _run_pre_push_validation(
             state=state,
             check=pre_validation_check,
             operation_start_head=operation_start_head,
+            remote_branch=remote_branch,
+            remote_url=remote_url,
         )
         if finalized_check is not None:
             pre_validation_check = finalized_check
