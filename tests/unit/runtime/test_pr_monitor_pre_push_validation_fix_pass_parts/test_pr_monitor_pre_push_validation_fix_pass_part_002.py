@@ -218,7 +218,6 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     "exc_cls",
     [
         "ProtectedScopeDiffError",
-        "_MonitorPolicyBlockedError",
         "_MonitorAgentRuntimeOwnershipRepairFailedError",
     ],
 )
@@ -235,10 +234,13 @@ async def test_pre_push_validation_fix_pass_preserves_reason_coded_commit_except
     covered separately by
     ``test_pre_push_validation_fix_pass_rolls_back_dirty_residue_before_provider_retry``:
     those roll back the fix-pass residue BEFORE re-raising
-    (``PRRT_kwDOSJAM6s6Kc_Ak``). The three deterministic exceptions here
-    represent commit-sink failures with no provider outage, so they keep
-    the plain re-raise (no rollback) so the loop's dedicated handlers
-    surface the specific reason code.
+    (``PRRT_kwDOSJAM6s6Kc_Ak``). ``_MonitorPolicyBlockedError`` is also covered
+    separately (``PRRT_kwDOSJAM6s6Kg7Dm``): it is non-terminal so it must roll
+    back its dirty residue before re-raising too. The two exceptions here
+    represent TERMINAL commit-sink failures (``PROTECTED_SCOPE_DIFF_UNAVAILABLE``
+    / ``AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED``), so they keep the plain
+    re-raise (no rollback) — the loop terminates, so the stranded dirt surfaces
+    only on a later operator resume, matching the other commit-sink callers.
     """
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
     from awf.runtime.pr_monitor_runner import types as monitor_types
@@ -296,11 +298,105 @@ async def test_pre_push_validation_fix_pass_preserves_reason_coded_commit_except
             validation_commands=("pytest -q",),
         )
 
-    # The rollback handler must NOT run for reason-coded exceptions when the
-    # worktree is clean (no residue to clean): no ``reset --hard`` against
-    # ``fix_start_head`` should be queued.
+    # The rollback handler must NOT run for the TERMINAL reason-coded exceptions
+    # when the worktree is clean (no residue to clean): no ``reset --hard``
+    # against ``fix_start_head`` should be queued.
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert not any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_rolls_back_dirty_residue_before_policy_block(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6Kg7Dm (discussion r3435181747).
+
+    ``_commit_dirty_worktree`` raises ``_MonitorPolicyBlockedError`` from the
+    supply-chain policy check that runs BEFORE the actual ``git commit``, so
+    the agent's fix-pass residue is still dirty in the worktree. The parent
+    converts the exception to a ``MONITOR_POLICY_BLOCKED`` push failure, which
+    is intentionally NON-terminal: the monitor loop increments and retries.
+    Re-raising without rolling back strands the residue, and the next cycle's
+    repair-start dirty guard (``_pre_existing_dirty_repair_worktree_result``)
+    trips as ``PRE_EXISTING_DIRTY_WORKTREE``, losing the policy reason and
+    wedging recovery instead of re-polling cleanly. The fix-pass must roll
+    back the residue to ``fix_start_head`` BEFORE re-raising, mirroring the
+    provider-recovery residue rollback
+    (``test_pre_push_validation_fix_pass_rolls_back_dirty_residue_before_provider_retry``).
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    fix_start_head = "8" * 40
+    # ``_run_pre_push_validation_fix_pass`` reads HEAD before the agent run.
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    # ``_rollback_failed_pre_push_validation_fix_pass`` -> ``reset --hard``.
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
+    # ``_pre_push_validation_cleanup`` -> ``check_validation_worktree_clean``
+    # (status): report the residue the agent left behind.
+    cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
+    # ``git restore --source <fix_start_head> --staged --worktree -- <path>``.
+    cmd.queue_result(returncode=0)
+    # Post-restore status recheck (no more residue after the restore).
+    cmd.queue_result(returncode=0, stdout="")
+    # HEAD verification: ``rev-parse <fix_start_head>`` + ``rev-parse HEAD``.
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    raised_exc = monitor_types._MonitorPolicyBlockedError("supply-chain policy blocked the commit")
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """Simulate the policy check raising before the actual commit."""
+        raise raised_exc
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    # The policy exception must still propagate so the monitor loop's dedicated
+    # handler surfaces ``MONITOR_POLICY_BLOCKED`` semantics — but only AFTER the
+    # fix-pass residue has been rolled back.
+    with pytest.raises(monitor_types._MonitorPolicyBlockedError):
+        await pre_push_validation._run_pre_push_validation_fix_pass(
+            runner,
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch="codex/pr",
+            remote_url=None,
+            state=None,
+            validation_result=validation_result,
+            pass_number=1,
+            total_passes=1,
+            validation_commands=("pytest -q",),
+        )
+
+    # The fix-pass MUST roll back to ``fix_start_head`` before re-raising so the
+    # next monitor attempt does not trip ``PRE_EXISTING_DIRTY_WORKTREE``.
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
 
 
 @pytest.mark.unit

@@ -475,10 +475,42 @@ async def _run_pre_push_validation_fix_pass(
                 rollback_failure_reason=rollback_failure_reason,
             )
         raise
+    except _MonitorPolicyBlockedError:
+        # ``_commit_dirty_worktree`` raises this when monitor-authored changes
+        # violate blocking supply-chain policy. The policy check runs BEFORE the
+        # actual ``git commit`` (``_refresh_supply_chain_policy_before_push``),
+        # so the agent's fix-pass residue is still dirty in the worktree. The
+        # parent converts this to a ``MONITOR_POLICY_BLOCKED`` push failure,
+        # which is intentionally NON-terminal: the monitor loop increments and
+        # retries (matching the other commit-sink callers in ``fix_cycle.py`` /
+        # ``ci_ops.py``). Re-raising without rolling back strands the residue,
+        # and the next cycle's repair-start dirty guard
+        # (``_pre_existing_dirty_repair_worktree_result``) trips as
+        # ``PRE_EXISTING_DIRTY_WORKTREE``, losing the policy reason and wedging
+        # recovery instead of re-polling cleanly. Roll back to ``fix_start_head``
+        # before re-raising so the next attempt starts clean, mirroring the
+        # provider-recovery residue rollback above (review thread
+        # ``PRRT_kwDOSJAM6s6Kg7Dm``). A rollback failure is logged but never
+        # clobbers the policy exception.
+        rollback_failure_reason = await _rollback_failed_fix_pass(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=fix_start_head,
+            pass_number=pass_number,
+            reason="policy_blocked_dirty_residue",
+        )
+        if rollback_failure_reason is not None:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_policy_blocked_rollback_failed",
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+                rollback_failure_reason=rollback_failure_reason,
+            )
+        raise
     except (
         ProtectedScopeDiffError,
         _MonitorAgentRuntimeOwnershipRepairFailedError,
-        _MonitorPolicyBlockedError,
     ):
         # ``_commit_dirty_worktree`` (and the protected-scope paths it invokes)
         # raises these deterministic reason-coded exceptions so the monitor loop's
@@ -489,6 +521,11 @@ async def _run_pre_push_validation_fix_pass(
         # pattern every other ``_commit_dirty_worktree`` caller already uses
         # (``fix_cycle.py``, ``remote_ops.py``, ``ci_ops.py``,
         # ``operator_hints.py``, ``_try_finalize_pre_push_dirty_repair_state``).
+        # These two map to TERMINAL reason codes (``PROTECTED_SCOPE_DIFF_UNAVAILABLE``
+        # / ``AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED``), so the monitor loop
+        # terminates instead of retrying — no residue rollback is needed (the
+        # stranded dirt surfaces only on a later operator resume, matching every
+        # other commit-sink caller's treatment of these two).
         raise
     except Exception as exc:
         _log.warning(
