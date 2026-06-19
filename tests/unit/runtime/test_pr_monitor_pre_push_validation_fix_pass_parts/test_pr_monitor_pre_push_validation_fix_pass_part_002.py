@@ -13,7 +13,7 @@ from typing import cast
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
@@ -1202,3 +1202,137 @@ async def test_disallowed_fix_passes_skip_fix_pass_on_failed_validation(
 
     assert result.failed is True
     assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_repairs_protected_scope_after_missing_head_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recovered missing-HEAD commit must still pass protected-scope repair.
+
+    Regression for PRRT_kwDOSJAM6s6KyPln: the fix-pass-specific missing-HEAD
+    recovery can create a commit from filesystem state before the normal dirty
+    commit sink runs. If that recovered commit leaves the worktree clean, the
+    sink returns False and never invokes
+    ``_repair_protected_scope_changes_before_commit``. Re-check the recovered
+    ``fix_start_head..recovered`` delta before accepting the self-committed pass.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass_module
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    fix_start_head = "1" * 40
+    recovered_head = "2" * 40
+    cmd = FakeCommandRunner()
+    # Recovered protected-scope delta: ``git diff --name-only -z
+    # fix_start_head..recovered``.
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\0")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed validation and recovered HEAD\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    rev_parse_results = [fix_start_head, recovered_head]
+    protected_scope_calls: list[dict[str, object]] = []
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return False
+
+    async def _recover_missing_head_object_from_filesystem(
+        *_args: object,
+        **_kwargs: object,
+    ) -> str:
+        return recovered_head
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """Clean worktree after recovery: without the fix, protected scope is skipped."""
+        return False
+
+    async def _repair_protected_scope_changes_before_commit(
+        **kwargs: object,
+    ) -> CommandResult:
+        protected_scope_calls.append(dict(kwargs))
+        return CommandResult(returncode=0, stdout=str(kwargs["status_stdout"]), stderr="")
+
+    async def _head_descends_from(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def _cleanup_committed_pre_push_validation_fix_pass(
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        runner,
+        "_repair_protected_scope_changes_before_commit",
+        _repair_protected_scope_changes_before_commit,
+    )
+    monkeypatch.setattr(fix_pass_module, "mirror_path_for_worktree", lambda _path: None)
+    monkeypatch.setattr(
+        fix_pass_module,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+    monkeypatch.setattr(
+        fix_pass_module,
+        "_recover_missing_head_object_from_filesystem",
+        _recover_missing_head_object_from_filesystem,
+    )
+    monkeypatch.setattr(pre_push_validation, "_head_descends_from", _head_descends_from)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_cleanup_committed_pre_push_validation_fix_pass",
+        _cleanup_committed_pre_push_validation_fix_pass,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, cleanup_failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert cleanup_failure_reason is None
+    assert protected_scope_calls == [
+        {
+            "workspace_id": workspace_id,
+            "status_stdout": " M .github/workflows/ci.yml\n",
+            "compose_project": "proj",
+            "compose_file": tmp_path / "compose.yml",
+            "state": None,
+            "protected_scope_revert_remote_branch": "codex/pr",
+            "remote_push_url": None,
+        }
+    ]
+    assert rev_parse_results == []

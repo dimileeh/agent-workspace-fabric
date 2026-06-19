@@ -507,6 +507,7 @@ async def _run_pre_push_validation_fix_pass(
             return False, _MIRROR_HOOKS_PATH_POISONED_REASON
 
     head_object_exists = await verify_head_object_exists(worktree_path)
+    recovered_head_for_protected_scope: str | None = None
     if not head_object_exists:
         _log.warning(
             "monitor.pre_push_validation_fix_head_object_missing",
@@ -531,6 +532,8 @@ async def _run_pre_push_validation_fix_pass(
             recovered_head=recovered[:10],
             reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
         )
+        if recovered != fix_start_head:
+            recovered_head_for_protected_scope = recovered
 
     # The rollback anchor for the commit-sink ``except`` clauses below is
     # captured INSIDE each clause (after ``_commit_dirty_worktree`` raised),
@@ -550,6 +553,78 @@ async def _run_pre_push_validation_fix_pass(
     # inside each provider-recovery ``except`` clause for the same reason.
 
     try:
+        if recovered_head_for_protected_scope is not None:
+            recovered_delta = await self._deps.runner.run(
+                git_worktree_command(
+                    worktree_path,
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    f"{fix_start_head}..{recovered_head_for_protected_scope}",
+                )
+            )
+            if not recovered_delta.ok:
+                _log.warning(
+                    "monitor.pre_push_validation_fix_recovered_delta_failed",
+                    workspace_id=workspace_id,
+                    pass_number=pass_number,
+                    returncode=recovered_delta.returncode,
+                    stderr=recovered_delta.stderr[:400],
+                    reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                )
+                rollback_failure_reason = await _rollback_failed_fix_pass(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    restore_ref=fix_start_head,
+                    pass_number=pass_number,
+                    reason="recovered_delta_failed",
+                )
+                if rollback_failure_reason is not None:
+                    return False, rollback_failure_reason
+                return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+            recovered_paths = [p for p in recovered_delta.stdout.split("\0") if p]
+            if recovered_paths:
+                if not await repair_agent_runtime_ownership(
+                    logger=_log,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    reason="dirty_worktree_pre_commit",
+                    event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+                ):
+                    rollback_failure_reason = await _rollback_failed_fix_pass(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        restore_ref=fix_start_head,
+                        pass_number=pass_number,
+                        reason="recovered_protected_scope_ownership_failed",
+                    )
+                    if rollback_failure_reason is not None:
+                        return False, rollback_failure_reason
+                    return False, "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+                recovered_status_stdout = "".join(f" M {path}\n" for path in recovered_paths)
+                repaired_status = await self._repair_protected_scope_changes_before_commit(
+                    workspace_id=workspace_id,
+                    status_stdout=recovered_status_stdout,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    state=state,
+                    protected_scope_revert_remote_branch=remote_branch,
+                    remote_push_url=remote_url,
+                )
+                if repaired_status is None:
+                    rollback_failure_reason = await _rollback_failed_fix_pass(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        restore_ref=fix_start_head,
+                        pass_number=pass_number,
+                        reason="recovered_protected_scope_repair_failed",
+                    )
+                    if rollback_failure_reason is not None:
+                        return False, rollback_failure_reason
+                    return False, None
         committed = bool(
             await self._commit_dirty_worktree(
                 workspace_id=workspace_id,
