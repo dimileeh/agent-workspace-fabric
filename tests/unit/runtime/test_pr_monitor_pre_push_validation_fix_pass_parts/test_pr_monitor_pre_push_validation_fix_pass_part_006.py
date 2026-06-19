@@ -45,6 +45,7 @@ async def test_pre_push_validation_fix_pass_missing_head_falls_back_from_stale_a
     _mark_git_worktree(worktree)
     fix_start_head = "1" * 40
     candidate_head = "2" * 40
+    recovered_head = "3" * 40
     mirror_path = tmp_path / "mirror.git"
     cmd = FakeCommandRunner()
     # Missing stale anchor in the mirror, then an empty recovered delta.
@@ -59,7 +60,7 @@ async def test_pre_push_validation_fix_pass_missing_head_falls_back_from_stale_a
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    rev_parse_results = [fix_start_head, candidate_head]
+    rev_parse_results = [fix_start_head, recovered_head]
     captured_recovery_heads: list[str] = []
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
@@ -80,7 +81,7 @@ async def test_pre_push_validation_fix_pass_missing_head_falls_back_from_stale_a
     ) -> str:
         recovery_head = str(kwargs["operation_start_head"])
         captured_recovery_heads.append(recovery_head)
-        return recovery_head
+        return recovered_head
 
     async def _commit_dirty_worktree(**_kwargs: object) -> bool:
         return True
@@ -158,6 +159,14 @@ async def test_pre_push_validation_fix_pass_missing_head_falls_back_from_stale_a
     assert cmd.calls[0].env is not None
     assert "GIT_OBJECT_DIRECTORY" not in cmd.calls[0].env
     assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in cmd.calls[0].env
+    assert any(
+        call.args[-4:] == ["diff", "--name-status", "-z", f"{candidate_head}..{recovered_head}"]
+        for call in cmd.calls
+    )
+    assert not any(
+        call.args[-4:] == ["diff", "--name-status", "-z", f"{fix_start_head}..{recovered_head}"]
+        for call in cmd.calls
+    )
     assert rev_parse_results == []
 
 

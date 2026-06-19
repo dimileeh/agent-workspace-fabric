@@ -557,6 +557,7 @@ async def _run_pre_push_validation_fix_pass(
 
     head_object_exists = await verify_head_object_exists(worktree_path)
     recovered_head_for_protected_scope: str | None = None
+    recovered_base_for_protected_scope: str | None = None
     if not head_object_exists:
         _log.warning(
             "monitor.pre_push_validation_fix_head_object_missing",
@@ -596,7 +597,8 @@ async def _run_pre_push_validation_fix_pass(
             recovered_head=recovered[:10],
             reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
         )
-        if recovered != fix_start_head:
+        if recovered != recovery_head:
+            recovered_base_for_protected_scope = recovery_head
             recovered_head_for_protected_scope = recovered
 
     # The rollback anchor for the commit-sink ``except`` clauses below is
@@ -618,13 +620,14 @@ async def _run_pre_push_validation_fix_pass(
 
     try:
         if recovered_head_for_protected_scope is not None:
+            assert recovered_base_for_protected_scope is not None
             recovered_delta = await self._deps.runner.run(
                 git_worktree_command(
                     worktree_path,
                     "diff",
                     "--name-status",
                     "-z",
-                    f"{fix_start_head}..{recovered_head_for_protected_scope}",
+                    (f"{recovered_base_for_protected_scope}..{recovered_head_for_protected_scope}"),
                 ),
                 env=git_env_without_object_lookup_overrides(),
             )
@@ -655,7 +658,7 @@ async def _run_pre_push_validation_fix_pass(
                         self,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
-                        base_ref=fix_start_head,
+                        base_ref=recovered_base_for_protected_scope,
                         changed_paths=recovered_paths,
                     )
                 except ProtectedScopeDiffError:
