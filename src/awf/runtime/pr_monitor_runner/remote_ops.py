@@ -566,6 +566,25 @@ async def _git_push_result(
             returncode=1,
             stderr=policy_block_message,
         )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.push_mirror_hooks_path_repair_failed",
+                workspace_id=worktree_path.name,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                error_type=exc.__class__.__name__,
+            )
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr="could not repair poisoned mirror hooks path before git push",
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                details={"phase": "git_push"},
+            )
     r = await runner._deps.runner.run(git_worktree_command(worktree_path, "push", remote, refspec))
     if r.ok:
         pushed = "up-to-date" not in (r.stderr or "").lower()

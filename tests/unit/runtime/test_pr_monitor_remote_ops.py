@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from awf.common.commands import CommandResult
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.runtime.pr_monitor_runner import pre_push_validation, remote_ops
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
@@ -50,6 +50,21 @@ def _make_push_result(reason_code: str) -> _GitPushResult:
         returncode=1,
         reason_code=reason_code,
     )
+
+
+def _write_worktree_with_mirror(tmp_path: Path, workspace_id: str) -> tuple[Path, Path]:
+    """Create a linked worktree shape backed by a bare mirror path."""
+    worktree = tmp_path / "worktrees" / workspace_id
+    mirror = tmp_path / "mirrors" / "repo.git"
+    linked_git_dir = mirror / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+    (worktree / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    return worktree, mirror
 
 
 @pytest.mark.parametrize(
@@ -118,6 +133,41 @@ def test_git_push_terminal_monitor_failure_maps_unrecoverable_git_repairs_as_ter
 ) -> None:
     """Unrecoverable local git repairs should fail the monitor instead of retrying."""
     assert _make_push_result(reason_code).terminal_monitor_failure is True
+
+
+@pytest.mark.unit
+async def test_git_push_result_fails_closed_when_mirror_hooks_repair_fails_before_push(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-validation mirror hooks-path poison must block the actual publish."""
+    worktree, mirror = _write_worktree_with_mirror(tmp_path, "ws_push_hooks")
+    cmd = FakeCommandRunner()
+
+    class _Runner:
+        def __init__(self) -> None:
+            self._deps = SimpleNamespace(runner=cmd)
+
+        async def _active_policy_block_message(self, _workspace_id: str) -> str | None:
+            return None
+
+    async def _repair_mirror_hooks_path(mirror_path: Path) -> bool:
+        assert mirror_path == mirror
+        raise OSError("poisoned hooks path")
+
+    monkeypatch.setattr(remote_ops, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    result = await remote_ops._git_push_result(
+        _Runner(),
+        worktree_path=worktree,
+        remote_branch="awf/ws_push_hooks",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == _MIRROR_HOOKS_PATH_POISONED_REASON
+    assert "before git push" in (result.stderr or "")
+    assert cmd.calls == []
 
 
 @pytest.mark.unit
