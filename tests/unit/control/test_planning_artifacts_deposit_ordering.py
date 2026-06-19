@@ -115,6 +115,41 @@ def test_deposit_skips_invalid_profile_template_instead_of_raising(
 
 
 @pytest.mark.unit
+def test_deposit_skips_missing_artifact_root_config_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deposited: list[object] = []
+
+    def _fail_if_called(**kwargs: object) -> None:
+        deposited.append(kwargs)
+
+    monkeypatch.setattr(
+        planning_artifacts,
+        "deposit_workspace_planning_artifacts",
+        _fail_if_called,
+    )
+
+    self = SimpleNamespace(
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=6,
+        )
+    )
+
+    _deposit_planning_artifacts_best_effort(
+        self,
+        profile=_profile_with_planning(
+            plan_path="plans/ws-1.md",
+            conformance_report_path="reports/ws-1.json",
+        ),
+        workspace_id="ws-1",
+        worktree_path=Path("/tmp/worktree"),
+    )
+
+    assert deposited == []
+
+
+@pytest.mark.unit
 async def test_planning_failure_marks_failed_even_with_invalid_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

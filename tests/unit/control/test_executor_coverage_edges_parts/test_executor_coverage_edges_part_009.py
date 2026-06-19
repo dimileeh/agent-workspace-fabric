@@ -1,14 +1,4 @@
-"""Focused branch-coverage tests for the validation fix-cycle.
-
-These drive ``run_validation_and_fix_cycle`` directly with a lightweight
-``SimpleNamespace`` fake executor (same pattern as
-``test_executor_coverage_edges_part_007``) to exercise narrow branches in
-``execution_validation.py`` that the heavier full-pipeline executor suites do
-not reach: the post-validation conformance report error detail enrichment, the
-fix-pass status-recheck races, the fix-pass git-failure ``command_reason_code``
-detail, the plan-only fix-pass guard, and the budget-exhausted loop fall
-through.
-"""
+"""Focused branch-coverage tests for the validation fix-cycle."""
 
 from __future__ import annotations
 
@@ -23,13 +13,16 @@ import pytest
 from awf.common.commands import CommandResult
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import quality_methods as executor_quality_methods
+from awf.control.executor.constants import (
+    POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
+)
 from awf.control.executor.types import (
     _PlanningRunFailure,
     _PlanningValidationHandoff,
 )
 from awf.control.quality_gates import PLAN_ONLY_OUTPUT_REASON_CODE
 from awf.control.quality_gates_common import QualityGateViolation
-from awf.db.enums import OperationStatus, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     PlanConformanceReport,
@@ -315,6 +308,16 @@ async def test_fix_pass_status_recheck_race_before_agent_run_stops(
     workspace = _workspace("ws_fix_recheck_agent")
     _patch_profile(monkeypatch, profile)
     _patch_clean_worktree(monkeypatch)
+    deposit_calls: list[str] = []
+
+    def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        deposit_calls.append(str(kwargs["workspace_id"]))
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
@@ -356,6 +359,79 @@ async def test_fix_pass_status_recheck_race_before_agent_run_stops(
     assert recheck.await_count == 2
     last_recheck_kwargs = recheck.await_args.kwargs
     assert last_recheck_kwargs["action"] == "validation_fix_agent_run"
+    assert deposit_calls == [workspace.id]
+
+
+@pytest.mark.unit
+async def test_unexpected_validation_cleanup_guard_deposits_planning_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When an unexpected validation exception is terminally handled by the
+    cleanup guard, successful cleanup still deposits planning artifacts before
+    returning."""
+    profile = WorkspaceProfile.model_validate(
+        {"name": "prof-unexpected-cleanup", "planning": {"required": True}}
+    )
+    workspace = _workspace("ws_unexpected_cleanup")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    guard_result = executor_execution_validation.ExecutionValidationResult(
+        stop=True,
+        successful_validation_run_id=None,
+        successful_validation_workspace_head_sha=None,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_handle_validation_cleanup_guard",
+        AsyncMock(return_value=guard_result),
+    )
+
+    deposit_calls: list[str] = []
+
+    def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        deposit_calls.append(str(kwargs["workspace_id"]))
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            raise RuntimeError("validation runner exploded")
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-unexpected-cleanup"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+    )
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=SimpleNamespace(run=AsyncMock()),
+    )
+
+    assert result is guard_result
+    assert deposit_calls == [workspace.id]
+    executor._finish_validation_run.assert_not_awaited()
+    executor._mark_failed.assert_not_awaited()
 
 
 @pytest.mark.unit
@@ -368,6 +444,16 @@ async def test_fix_pass_status_recheck_race_before_commit_stops(
     workspace = _workspace("ws_fix_recheck_commit")
     _patch_profile(monkeypatch, profile)
     _patch_clean_worktree(monkeypatch)
+    deposit_calls: list[str] = []
+
+    def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        deposit_calls.append(str(kwargs["workspace_id"]))
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
@@ -409,6 +495,103 @@ async def test_fix_pass_status_recheck_race_before_commit_stops(
     adapter.run.assert_awaited_once()
     assert recheck.await_count == 3
     assert recheck.await_args.kwargs["action"] == "validation_fix_commit"
+    assert deposit_calls == [workspace.id]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "unavailable_action",
+    [
+        "validation_fix_agent_run",
+        "validation_fix_git_add",
+        "validation_fix_git_diff",
+        "validation_fix_git_commit",
+    ],
+)
+async def test_fix_pass_worktree_guard_stops_deposit_planning_artifacts(
+    unavailable_action: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression PRRT_kwDOSJAM6s6KxQa0: fix-pass worktree guard stops must
+    deposit planning artifacts before returning stop=True.
+    """
+    profile = WorkspaceProfile.model_validate({"name": f"prof-{unavailable_action}"})
+    workspace = _workspace(f"ws_{unavailable_action}")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "find_protected_quality_gate_changes",
+        lambda **_kwargs: [],
+    )
+
+    deposit_calls: list[str] = []
+
+    def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        deposit_calls.append(str(kwargs["workspace_id"]))
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_failing_command(tmp_path)])
+
+    async def _ensure_worktree_available(**kwargs: object) -> bool:
+        return kwargs.get("action") != unavailable_action
+
+    git_in_worktree = AsyncMock(
+        side_effect=[
+            CommandResult(returncode=0, stdout="", stderr=""),  # git add -A
+            CommandResult(
+                returncode=0,
+                stdout="src/foo.py\n",
+                stderr="",
+            ),  # git diff --cached --name-only
+        ]
+    )
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=1,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value=f"vr-{unavailable_action}"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _ensure_worktree_available=AsyncMock(side_effect=_ensure_worktree_available),
+        _repair_agent_git_ownership=AsyncMock(),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False),
+        ),
+        _committed_and_staged_output_is_plan_only=AsyncMock(return_value=False),
+        _active_operator_grant_specs=AsyncMock(return_value=[]),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+        _runner=SimpleNamespace(run=AsyncMock(return_value=CommandResult(0, "", ""))),
+    )
+    adapter = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout="", stderr="")))
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=adapter,
+        git_in_worktree=git_in_worktree,
+    )
+
+    assert result.stop
+    assert deposit_calls == [workspace.id]
 
 
 @pytest.mark.unit
@@ -707,6 +890,93 @@ async def test_post_validation_conformance_fix_pass_loop_falls_through_to_contin
     assert conformance_check.await_count == 2
     # The conformance fix pass re-invoked the agent exactly once between checks.
     assert adapter.run.await_count == 1
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_report_cleanup_failure_skips_fix_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Report cleanup residue is AWF/git failure, not an agent-correctable gap."""
+    profile = WorkspaceProfile.model_validate({"name": "prof-conf-cleanup"})
+    workspace = _workspace("ws_conf_cleanup")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+    deposit_calls: list[str] = []
+
+    def _spy_deposit(*_args: object, **_kwargs: object) -> None:
+        deposit_calls.append("deposit")
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_passing_command(tmp_path)])
+
+    conformance_failure = _PlanningRunFailure(
+        message="post-validation conformance report cleanup left report path dirty: report.json",
+        reason_code=POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
+        details={"conformance_report_cleanup": {"report_path": "report.json"}},
+    )
+    conformance_check = AsyncMock(return_value=conformance_failure)
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=2,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-1"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _run_post_validation_conformance_check=conformance_check,
+        _ensure_worktree_available=AsyncMock(return_value=True),
+        _repair_agent_git_ownership=AsyncMock(),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False),
+        ),
+        _fail_if_plan_only_paths=AsyncMock(return_value=False),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+        _runner=SimpleNamespace(run=AsyncMock(return_value=CommandResult(0, "", ""))),
+    )
+    adapter = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout="", stderr="")))
+
+    # Handoff has remaining iteration budget, but cleanup residue must not trigger
+    # a post-validation conformance fix pass.
+    handoff = _handoff(tmp_path, iteration=1, max_iterations=3)
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=adapter,
+        planning_validation_handoff=handoff,
+    )
+
+    assert result.stop
+    assert conformance_check.await_count == 1
+    assert adapter.run.await_count == 0
+    assert deposit_calls == []
+    executor._mark_failed.assert_awaited_once()
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["status"] == OperationStatus.failed
+    assert (
+        finish_kwargs["reason_code"]
+        == POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE
+    )
+    mark_failed_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_failed_kwargs["failure_reason"] == FailureReason.infrastructure_failure
 
 
 @pytest.mark.unit
@@ -1142,153 +1412,3 @@ async def test_fix_pass_protected_block_fences_on_execution_owner(
     assert block_kwargs["resume_phase"] == "validation_fix_cycle"
     finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
     assert finish_kwargs["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
-
-
-# --- Direct unit tests for the guard helper itself ------------------------
-
-
-@pytest.mark.unit
-async def test_committed_and_staged_guard_short_circuits_on_real_staged_path() -> None:
-    """Staged delta has a real file → False without consulting committed state."""
-    executor = SimpleNamespace(_committed_paths_since=AsyncMock())
-
-    result = await executor_quality_methods._committed_and_staged_output_is_plan_only(
-        executor,
-        worktree_path=Path("/wt"),
-        base_commit="b" * 40,
-        staged_paths=["src/foo.py"],
-    )
-
-    assert result is False
-    executor._committed_paths_since.assert_not_awaited()
-
-
-@pytest.mark.unit
-async def test_committed_and_staged_guard_false_when_committed_has_real_output() -> None:
-    """Staged plan-only but committed net output has a real file → False."""
-    executor = SimpleNamespace(
-        _committed_paths_since=AsyncMock(return_value={Path("src/foo.py")}),
-    )
-
-    result = await executor_quality_methods._committed_and_staged_output_is_plan_only(
-        executor,
-        worktree_path=Path("/wt"),
-        base_commit="b" * 40,
-        staged_paths=[_CONFORMANCE_PATH],
-    )
-
-    assert result is False
-    executor._committed_paths_since.assert_awaited_once()
-
-
-@pytest.mark.unit
-async def test_committed_and_staged_guard_true_when_committed_empty() -> None:
-    """Staged plan-only and committed net output empty → True."""
-    executor = SimpleNamespace(_committed_paths_since=AsyncMock(return_value=set()))
-
-    result = await executor_quality_methods._committed_and_staged_output_is_plan_only(
-        executor,
-        worktree_path=Path("/wt"),
-        base_commit="b" * 40,
-        staged_paths=[_CONFORMANCE_PATH],
-    )
-
-    assert result is True
-
-
-# --- Direct unit tests for the final pre-push committed-output gate --------
-#
-# Regression for PR #436 review thread PRRT_kwDOSJAM6s6HkBSS: the final gate
-# ``_fail_if_plan_only_committed_output`` (execution_flow.py:1141) must reject an
-# empty net ``base..HEAD`` diff, not just plan-only paths. When a fix/validation
-# pass reverts the agent's real changes back to the base tree, the net diff is
-# empty -- ``changed_paths_are_only_internal_plan_artifacts([])`` is ``False`` --
-# so without an explicit empty check the gate would wave the branch through and
-# open an empty PR. The post-agent no-work check counts *commits* (a revert
-# commit still counts), so this is the last guard that can catch it.
-
-
-def _committed_output_gate_executor(committed_paths: set[Path]) -> SimpleNamespace:
-    """Executor wired with the REAL plan-only delegate + a mocked net-diff source."""
-    executor = SimpleNamespace(
-        _committed_paths_since=AsyncMock(return_value=committed_paths),
-        _mark_failed=AsyncMock(),
-    )
-    executor._fail_if_plan_only_paths = partial(
-        executor_quality_methods._fail_if_plan_only_paths,
-        executor,
-    )
-    return executor
-
-
-@pytest.mark.unit
-async def test_committed_output_gate_fails_on_empty_net_diff() -> None:
-    """Empty ``base..HEAD`` (changes reverted) → terminal PLAN_ONLY_OUTPUT failure."""
-    executor = _committed_output_gate_executor(set())
-
-    result = await executor_quality_methods._fail_if_plan_only_committed_output(
-        executor,
-        workspace_id="ws_empty_net",
-        worktree_path=Path("/wt"),
-        base_commit="b" * 40,
-        expected_status=WorkspaceStatus.validating,
-    )
-
-    assert result is True
-    executor._mark_failed.assert_awaited_once()
-    kwargs = executor._mark_failed.await_args.kwargs
-    assert kwargs["reason_code"] == PLAN_ONLY_OUTPUT_REASON_CODE
-    assert kwargs["from_status"] == WorkspaceStatus.validating
-    assert kwargs["details"]["changed_paths"] == []
-
-
-@pytest.mark.unit
-async def test_committed_output_gate_fails_on_plan_only_net_diff() -> None:
-    """Net committed output is plan-only → PLAN_ONLY_OUTPUT failure (delegated)."""
-    executor = _committed_output_gate_executor({Path("docs/awf-plans/ws_x.md")})
-
-    result = await executor_quality_methods._fail_if_plan_only_committed_output(
-        executor,
-        workspace_id="ws_plan_only_net",
-        worktree_path=Path("/wt"),
-        base_commit="b" * 40,
-        expected_status=WorkspaceStatus.validating,
-    )
-
-    assert result is True
-    executor._mark_failed.assert_awaited_once()
-    assert executor._mark_failed.await_args.kwargs["reason_code"] == PLAN_ONLY_OUTPUT_REASON_CODE
-
-
-@pytest.mark.unit
-async def test_committed_output_gate_proceeds_on_real_net_diff() -> None:
-    """Net committed output has a real file → gate passes, no failure marked."""
-    executor = _committed_output_gate_executor({Path("src/foo.py")})
-
-    result = await executor_quality_methods._fail_if_plan_only_committed_output(
-        executor,
-        workspace_id="ws_real_net",
-        worktree_path=Path("/wt"),
-        base_commit="b" * 40,
-        expected_status=WorkspaceStatus.validating,
-    )
-
-    assert result is False
-    executor._mark_failed.assert_not_awaited()
-
-
-@pytest.mark.unit
-async def test_committed_and_staged_guard_true_when_committed_plan_only() -> None:
-    """Staged plan-only and committed net output also plan-only → True."""
-    executor = SimpleNamespace(
-        _committed_paths_since=AsyncMock(return_value={Path("docs/awf-plans/ws_x.md")}),
-    )
-
-    result = await executor_quality_methods._committed_and_staged_output_is_plan_only(
-        executor,
-        worktree_path=Path("/wt"),
-        base_commit="b" * 40,
-        staged_paths=[_CONFORMANCE_PATH],
-    )
-
-    assert result is True

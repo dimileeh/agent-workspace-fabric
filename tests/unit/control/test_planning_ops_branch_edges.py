@@ -9,19 +9,20 @@ helpers, and the fresh-vs-stale post-validation conformance report paths.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
+import structlog
 
-from awf.adapters.base import AgentRunError
-from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.commands import FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.executor import planning_conformance as planning_conformance
 from awf.control.executor import planning_ops as planning_ops
 from awf.control.executor.types import _PlanningValidationHandoff
-from awf.db.enums import AgentRuntime
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -32,6 +33,7 @@ from awf.runtime.planning import (
     PlanConformanceReport,
     PlanConformanceStatus,
 )
+from awf.service import artifacts as executor_service_artifacts
 from awf.service.workspaces import WorkspaceRetrySourceRuntimeNotReleasedError
 
 # ---------------------------------------------------------------------------
@@ -526,6 +528,9 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
     runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
     runner.queue_result(returncode=0, stdout="")  # after_compare (changed paths)
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    # The report path is gitignored/untracked, so git restore fails; AWF falls
+    # back to unlinking the fresh on-disk report (#604).
+    runner.queue_result(returncode=1, stdout="", stderr="error: path not tracked")
 
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
@@ -570,6 +575,7 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is None
@@ -577,11 +583,663 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
     assert recorded == ["validation-run-1"]
     # The report is recorded as an event but never staged or committed.
     assert all("commit" not in call.args for call in runner.calls)
+    # #604: the fresh on-worktree report is also removed so it cannot dirty the
+    # tree during later validation/push cleanliness checks.
+    assert not report_abs.exists()
 
 
-# ---------------------------------------------------------------------------
-# _build_conformance_stall_failure — no-baseline and successful event record
-# ---------------------------------------------------------------------------
+@pytest.mark.unit
+async def test_post_validation_conformance_missing_artifact_root_skips_deposit(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KyDg- regression: satisfied conformance should not fail
+    when a focused executor double lacks the best-effort artifact root config."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=1, stdout="", stderr="error: path not tracked")
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._config = SimpleNamespace(  # type: ignore[assignment]
+        max_validation_fix_passes=0,
+        planning_max_iterations_default=6,
+    )
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+
+    recorded: list[str] = []
+
+    async def _record_event(**kwargs: object) -> None:
+        recorded.append(str(kwargs.get("validation_run_id")))
+
+    executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        failure = await executor._run_post_validation_conformance_check(
+            adapter=_ReportWritingAdapter(report_abs_path=report_abs, content=satisfied),  # type: ignore[arg-type]
+            workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+            profile=profile,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=worktree_path,
+            model=None,
+            handoff=handoff,
+            validation_run_id="validation-run-1",
+            base_commit="base-commit-sha",
+        )
+
+    assert failure is None
+    assert recorded == ["validation-run-1"]
+    assert not report_abs.exists()
+    assert any(
+        entry["event"]
+        == "executor.post_validation_conformance_deposit_skipped_missing_artifact_root"
+        and entry["workspace_id"] == "ws_post"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_stale_report_with_failed_rewrite_uses_in_memory_deposit(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KL7-o regression: when stdout supplies the satisfied
+    report but the AWF-synthesized rewrite fails while a stale handoff report
+    remains on disk, the served artifact must receive the in-memory satisfied
+    report, not the stale disk copy."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    plan_path = Path("docs/awf-plans/ws_post.md")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    plan_abs = worktree_path / plan_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="validated-head\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    runner.queue_result(
+        returncode=128, stderr="fatal: path not in index\n"
+    )  # git restore fails; fallback to unlink
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+
+    async def _record_event(**_kwargs: object) -> None:
+        return None
+
+    executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
+
+    # The worktree carries a stale unsatisfied report, but the conformance call
+    # only emits the satisfied report in stdout.
+    plan_abs.parent.mkdir(parents=True, exist_ok=True)
+    plan_abs.write_text("# plan\n", encoding="utf-8")
+    report_abs.parent.mkdir(parents=True, exist_ok=True)
+    stale_content = '{"status":"needs_iteration","summary":"stale unsatisfied","gaps":["do work"]}'
+    report_abs.write_text(stale_content, encoding="utf-8")
+
+    def _fail_rewrite(**_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    executor._write_satisfied_post_validation_conformance_report = _fail_rewrite  # type: ignore[method-assign]
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=plan_path,
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(satisfied),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+    )
+
+    assert failure is None
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(
+        tmp_path / "compose" / "..", "ws_post"
+    ).resolve()
+    deposited_report = json.loads((artifact_dir / "conformance.json").read_text(encoding="utf-8"))
+    assert deposited_report["status"] == "satisfied"
+    assert deposited_report["summary"] == "validated evidence satisfies plan"
+    assert deposited_report["gaps"] == []
+
+
+class _PlanningAdapter:
+    def __init__(self, *stdout_values: str) -> None:
+        self.stdout_values = list(stdout_values)
+        self.prompts: list[str] = []
+
+    async def run(self, **kwargs: object) -> SimpleNamespace:
+        prompt = kwargs.get("prompt")
+        assert isinstance(prompt, str)
+        self.prompts.append(prompt)
+        stdout = self.stdout_values.pop(0) if self.stdout_values else ""
+        return SimpleNamespace(stdout=stdout, stderr="")
+
+
+@pytest.mark.unit
+def test_empty_report_parent_residue_treats_oserror_as_dirty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If AWF cannot inspect an otherwise empty report parent, treat it as
+    dirty so cleanup residue cannot be silently ignored."""
+    worktree_path = tmp_path / "worktree"
+    report_parent = worktree_path / "docs" / "awf-plans"
+    report_parent.mkdir(parents=True)
+
+    real_iterdir = Path.iterdir
+
+    def _raise_on_report_parent(self: Path) -> Any:
+        if self == report_parent:
+            raise OSError(5, "I/O error")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _raise_on_report_parent)
+
+    assert (
+        planning_conformance._empty_report_parent_residue_is_dirty(  # noqa: SLF001
+            report_parent,
+            worktree_path=worktree_path,
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_remove_stale_satisfied_conformance_artifacts_logs_unlink_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stale served conformance artifacts are best-effort cleanup; unlink
+    failures should preserve diagnostic logs and not fail the deposit path."""
+    artifact_dir = tmp_path / "artifacts" / "ws_deposit"
+    dest = artifact_dir / "conformance.json"
+    tmp_dest = artifact_dir / ".conformance.json.tmp"
+    artifact_dir.mkdir(parents=True)
+    dest.write_text('{"status":"needs_iteration"}\n', encoding="utf-8")
+    tmp_dest.write_text('{"status":"needs_iteration"}\n', encoding="utf-8")
+
+    def _raise_on_stale_artifact(self: Path, missing_ok: bool = False) -> None:
+        if self in {dest, tmp_dest}:
+            raise OSError(13, "Permission denied")
+        raise AssertionError(f"unexpected unlink for {self}")
+
+    monkeypatch.setattr(Path, "unlink", _raise_on_stale_artifact)
+
+    with structlog.testing.capture_logs() as captured:
+        planning_conformance._remove_stale_satisfied_conformance_artifacts(  # noqa: SLF001
+            workspace_id="ws_deposit",
+            dest=dest,
+            tmp_dest=tmp_dest,
+        )
+
+    cleanup_failures = [
+        entry
+        for entry in captured
+        if entry["event"] == "executor.satisfied_conformance_report_deposit_cleanup_failed"
+    ]
+    assert [
+        (entry["workspace_id"], entry["artifact_name"], entry["error_type"], entry["errno"])
+        for entry in cleanup_failures
+    ] == [
+        ("ws_deposit", "conformance.json", "PermissionError", 13),
+        ("ws_deposit", ".conformance.json.tmp", "PermissionError", 13),
+    ]
+    assert dest.exists()
+    assert tmp_dest.exists()
+
+
+@pytest.mark.unit
+def test_deposit_satisfied_conformance_report_mkdir_oserror_is_non_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Creating the served artifact directory is best-effort; a filesystem
+    failure should be logged without failing the satisfied conformance outcome."""
+    work_dir = tmp_path / "work_dir"
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_deposit.md")
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="validated evidence satisfies plan",
+        gaps=(),
+    )
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(work_dir, "ws_deposit")
+    real_mkdir = Path.mkdir
+
+    def _raise_on_artifact_dir_mkdir(
+        self: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if self == artifact_dir:
+            raise OSError(13, "Permission denied")
+        return real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", _raise_on_artifact_dir_mkdir)
+
+    with structlog.testing.capture_logs() as captured:
+        planning_ops._deposit_satisfied_conformance_report(
+            work_dir=work_dir,
+            workspace_id="ws_deposit",
+            worktree_path=worktree_path,
+            plan_path=plan_path,
+            report=report,
+        )
+
+    assert not artifact_dir.exists()
+    assert any(
+        entry["event"] == "executor.satisfied_conformance_report_deposit_failed"
+        and entry["workspace_id"] == "ws_deposit"
+        and entry["error_type"] == "PermissionError"
+        and entry["errno"] == 13
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_unlink_failure_is_non_fatal(
+    tmp_path: Path,
+) -> None:
+    """#604: if the satisfied report cannot be removed from the worktree, the
+    failure must be best-effort and non-fatal; the conformance outcome is still
+    recorded and success is returned."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=1, stdout="", stderr="restore failed")  # git restore report path
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+
+    async def _record_event(**_kwargs: object) -> None:
+        return None
+
+    executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
+
+    real_unlink = Path.unlink
+
+    def _raise_on_report_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == report_abs and missing_ok:
+            raise OSError("permission denied")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    # Ensure the report file exists before the conformance check so that a
+    # mocked ``Path.unlink`` raises on the actual unlink call rather than on
+    # the write failure path (which would make the file absent and leave
+    # ``missing_ok=True`` a no-op).
+    report_abs.parent.mkdir(parents=True, exist_ok=True)
+    report_abs.write_text(satisfied, encoding="utf-8")
+
+    with patch.object(Path, "unlink", _raise_on_report_unlink):
+        failure = await executor._run_post_validation_conformance_check(
+            adapter=_PlanningAdapter(satisfied),  # type: ignore[arg-type]
+            workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+            profile=profile,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=worktree_path,
+            model=None,
+            handoff=handoff,
+            validation_run_id="validation-run-1",
+            base_commit="base-commit-sha",
+        )
+
+    assert failure is None
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_report_deposit_oserror_is_non_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6KL4ab regression: an OSError depositing the served
+    satisfied conformance report must not propagate and fail the
+    post-validation conformance check."""
+    work_dir = tmp_path / "work_dir"
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_deposit.md")
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="validated evidence satisfies plan",
+        gaps=(),
+    )
+
+    artifact_dir = work_dir / "artifacts" / "ws_deposit"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "conformance.json").write_text(
+        '{"status":"needs_iteration","summary":"stale","gaps":["old gap"]}\n',
+        encoding="utf-8",
+    )
+    (artifact_dir / ".conformance.json.tmp").write_text(
+        '{"status":"needs_iteration","summary":"stale tmp","gaps":["old gap"]}\n',
+        encoding="utf-8",
+    )
+
+    # Ensure the artifact directory parent exists so mkdir passes; block only
+    # the temporary report rewrite so we exercise the new error path.
+    real_write_text = Path.write_text
+
+    def _raise_on_report_tmp(self: Path, content: str, *, encoding: str | None = None) -> int:
+        if self.name == ".conformance.json.tmp":
+            raise OSError(13, "Permission denied")
+        return real_write_text(self, content, encoding=encoding)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", _raise_on_report_tmp)
+
+    # Make sure the best-effort plan copy still runs after the report write
+    # failure so callers can serve the plan even when the convenience
+    # conformance artifact cannot be rewritten.
+    plan_source = worktree_path / plan_path
+    plan_source.parent.mkdir(parents=True, exist_ok=True)
+    plan_source.write_text("# plan", encoding="utf-8")
+
+    with structlog.testing.capture_logs() as captured:
+        planning_ops._deposit_satisfied_conformance_report(
+            work_dir=work_dir,
+            workspace_id="ws_deposit",
+            worktree_path=worktree_path,
+            plan_path=plan_path,
+            report=report,
+        )
+
+    # The served report and temp report are absent because the rewrite failed.
+    assert not (artifact_dir / "conformance.json").exists()
+    assert not (artifact_dir / ".conformance.json.tmp").exists()
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan"
+
+    assert any(
+        entry["event"] == "executor.satisfied_conformance_report_deposit_failed"
+        and entry["workspace_id"] == "ws_deposit"
+        and entry["error_type"] == "PermissionError"
+        and entry["errno"] == 13
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+def test_deposit_satisfied_conformance_report_rejects_symlinked_plan(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KMbis regression: the fallback satisfied-conformance
+    deposit must not follow a symlinked plan into host-readable files."""
+    work_dir = tmp_path / "work_dir"
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_deposit.md")
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="validated evidence satisfies plan",
+        gaps=(),
+    )
+
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("TOP SECRET", encoding="utf-8")
+    (worktree_path / plan_path.parent).mkdir(parents=True, exist_ok=True)
+    (worktree_path / plan_path).symlink_to(secret)
+
+    with structlog.testing.capture_logs() as captured:
+        planning_ops._deposit_satisfied_conformance_report(
+            work_dir=work_dir,
+            workspace_id="ws_deposit",
+            worktree_path=worktree_path,
+            plan_path=plan_path,
+            report=report,
+        )
+
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(work_dir, "ws_deposit")
+    assert (artifact_dir / "conformance.json").exists()
+    assert not (artifact_dir / "plan.md").exists()
+    assert any(
+        entry["event"] == "service.planning_artifact_deposit_rejected"
+        and entry["workspace_id"] == "ws_deposit"
+        and entry["reason"] == "symlink"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+def test_deposit_satisfied_conformance_report_rejects_plan_escaping_worktree(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KMbis regression: a plan reached via an intermediate
+    directory symlink outside the worktree must not be deposited."""
+    work_dir = tmp_path / "work_dir"
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_deposit.md")
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="validated evidence satisfies plan",
+        gaps=(),
+    )
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (outside_dir / plan_path.name).write_text("# outside plan", encoding="utf-8")
+
+    plans_dir = worktree_path / plan_path.parent
+    plans_dir.parent.mkdir(parents=True, exist_ok=True)
+    plans_dir.symlink_to(outside_dir, target_is_directory=True)
+
+    with structlog.testing.capture_logs() as captured:
+        planning_ops._deposit_satisfied_conformance_report(
+            work_dir=work_dir,
+            workspace_id="ws_deposit",
+            worktree_path=worktree_path,
+            plan_path=plan_path,
+            report=report,
+        )
+
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(work_dir, "ws_deposit")
+    assert (artifact_dir / "conformance.json").exists()
+    assert not (artifact_dir / "plan.md").exists()
+    assert any(
+        entry["event"] == "service.planning_artifact_deposit_rejected"
+        and entry["workspace_id"] == "ws_deposit"
+        and entry["reason"] == "escapes_worktree"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+def test_deposit_satisfied_conformance_report_rejects_oversized_report(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KxUlq regression: the stdout-derived fallback report
+    deposit must not write artifacts larger than the served artifact cap.
+
+    PRRT_kwDOSJAM6s6KznT8 regression: rejecting an oversized report must still
+    deposit the safe plan artifact through the hardened plan copy path.
+    """
+    work_dir = tmp_path / "work_dir"
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_deposit.md")
+    (worktree_path / plan_path.parent).mkdir(parents=True, exist_ok=True)
+    (worktree_path / plan_path).write_text("# plan", encoding="utf-8")
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="x" * executor_service_artifacts.MAX_ARTIFACT_CONTENT_BYTES,
+        gaps=(),
+    )
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(work_dir, "ws_deposit")
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "conformance.json").write_text(
+        '{"status":"needs_iteration","summary":"stale","gaps":["old gap"]}\n',
+        encoding="utf-8",
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        planning_ops._deposit_satisfied_conformance_report(
+            work_dir=work_dir,
+            workspace_id="ws_deposit",
+            worktree_path=worktree_path,
+            plan_path=plan_path,
+            report=report,
+        )
+
+    assert not (artifact_dir / "conformance.json").exists()
+    assert not (artifact_dir / ".conformance.json.tmp").exists()
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan"
+    assert any(
+        entry["event"] == "executor.satisfied_conformance_report_deposit_rejected"
+        and entry["workspace_id"] == "ws_deposit"
+        and entry["reason"] == "oversized"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_staged_deletion_restored_from_head(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KKSZU regression: when ``base_commit`` lacks the report
+    but HEAD contains it, ``git restore --source=base_commit`` stages a
+    deletion. The executor must restore from HEAD so the committed report copy
+    remains on disk and the index is clean."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    # base_commit restore exits 0 but leaves staged deletion relative to HEAD.
+    runner.queue_result(returncode=0, stdout=f"D  {report_path.as_posix()}\n")
+    # Cleanliness check after base_commit restore still sees the staged deletion.
+    runner.queue_result(returncode=0, stdout=f"D  {report_path.as_posix()}\n")
+    # HEAD restore exits 0 and cleans the path.
+    runner.queue_result(returncode=0, stdout="")
+    # Final cleanliness check after HEAD restore is clean.
+    runner.queue_result(returncode=0, stdout="")
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+
+    async def _record_event(**_kwargs: object) -> None:
+        return None
+
+    executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
+
+    # Preserve the committed HEAD copy on disk; the real writer would overwrite
+    # it with the AWF-synthesized satisfied report.
+    def _no_overwrite(**kwargs: object) -> None:
+        del kwargs
+
+    executor._write_satisfied_post_validation_conformance_report = _no_overwrite  # type: ignore[method-assign]
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    # Simulate the committed HEAD copy by writing it to disk; the fake HEAD
+    # restore command leaves the file untouched, but the cleanliness check
+    # returns an empty status after it.
+    report_abs.parent.mkdir(parents=True, exist_ok=True)
+    report_abs.write_text('{"status":"committed","summary":"from head"}', encoding="utf-8")
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(satisfied),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+    )
+
+    assert failure is None
+    assert report_abs.exists()
+    joined_calls = [" ".join(call.args) for call in runner.calls]
+    assert any(
+        "restore --source HEAD --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
+        for call in joined_calls
+    )
+    assert all("add" not in call.args for call in runner.calls)
+    assert all("commit" not in call.args for call in runner.calls)
 
 
 def _stall_evidence() -> ConformanceStallEvidence:
@@ -774,81 +1432,3 @@ async def test_build_conformance_stall_failure_skips_event_when_workspace_vanish
 
     assert failure.reason_code == AGENT_STALLED_IN_CONFORMANCE
     assert session.commits == 0
-
-
-# ---------------------------------------------------------------------------
-# _run_agent_task_with_optional_planning — timeout falls back to stdout report
-# ---------------------------------------------------------------------------
-
-
-class _StdoutTimeoutAdapter:
-    """First two runs (plan + execute) succeed; the conformance run idles out
-    with a satisfied report only in stdout (nothing written to disk), so the
-    timeout branch falls back to ``report_text = stdout``."""
-
-    def __init__(self, *, satisfied_stdout: str) -> None:
-        self._satisfied_stdout = satisfied_stdout
-        self.prompts: list[str] = []
-
-    async def run(self, **kwargs: object) -> SimpleNamespace:
-        prompt = kwargs.get("prompt")
-        assert isinstance(prompt, str)
-        self.prompts.append(prompt)
-        if len(self.prompts) == 3:  # conformance call
-            raise AgentRunError(
-                agent=AgentRuntime.codex,
-                result=CommandResult(
-                    returncode=124,
-                    stdout=self._satisfied_stdout,
-                    stderr="idle timeout",
-                ),
-                reason_code="AGENT_IDLE_TIMEOUT",
-            )
-        if len(self.prompts) == 1:
-            return SimpleNamespace(stdout="plan written", stderr="")
-        return SimpleNamespace(stdout="implementation", stderr="")
-
-
-@pytest.mark.unit
-async def test_planning_conformance_timeout_falls_back_to_stdout_report(
-    tmp_path: Path,
-) -> None:
-    """On an idle timeout with no fresh on-disk report, the satisfied report is
-    taken from stdout, short-circuiting the loop with success."""
-    worktree = tmp_path / "worktree"
-    runner = FakeCommandRunner()
-    runner.queue_result(returncode=0, stdout="")  # before_plan changed paths
-    runner.queue_result(returncode=0, stdout="sha1\n")  # baseline HEAD
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_stdout.md\n")  # plan dirty
-    runner.queue_result(returncode=0, stdout="")  # committed paths
-    runner.queue_result(returncode=0, stdout="sha1\n")  # implementation baseline HEAD
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_stdout.md\n")  # before_compare
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_stdout.md\n")  # after_compare
-    runner.queue_result(returncode=0, stdout="sha2\n")  # after_head
-    executor = _executor_with_runner(runner, tmp_path)
-
-    profile = WorkspaceProfile.model_validate(
-        {
-            "name": "planning-stdout",
-            "planning": {
-                "required": True,
-                "plan_path": "docs/awf-plans/{workspace_id}.md",
-                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
-                "max_iterations": 0,
-            },
-        }
-    )
-    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
-
-    result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
-        adapter=_StdoutTimeoutAdapter(satisfied_stdout=satisfied),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_stdout", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
-        profile=profile,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        worktree_path=worktree,
-        model=None,
-    )
-
-    # Satisfied report parsed from stdout -> conformance succeeds (returns None).
-    assert result is None

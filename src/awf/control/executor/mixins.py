@@ -7,6 +7,7 @@ from awf.control.executor import monitor_handoff as _monitor_handoff
 from awf.control.executor import monitor_handoff_setup as _monitor_handoff_setup
 from awf.control.executor import monitor_handoff_sync as _monitor_handoff_sync
 from awf.control.executor import ollama_model as _ollama_model
+from awf.control.executor import planning_conformance as _planning_conformance
 from awf.control.executor import planning_ops as _planning_ops
 from awf.control.executor import quality_methods as _quality_methods
 from awf.control.executor import state_ops as _state_ops
@@ -69,24 +70,28 @@ class ExecutorDelegatesMixin:
     _record_monitor_runtime_restart_failed = _monitor_handoff._record_monitor_runtime_restart_failed
 
     _prepare_conformance_salvage_for_execution = (
-        _planning_ops._prepare_conformance_salvage_for_execution
+        _planning_conformance._prepare_conformance_salvage_for_execution
     )
-    _fail_conformance_salvage_execution = _planning_ops._fail_conformance_salvage_execution
-    _record_conformance_salvage_event = _planning_ops._record_conformance_salvage_event
-    _materialize_salvage_patch_for_agent = _planning_ops._materialize_salvage_patch_for_agent
-    _exclude_agent_salvage_artifacts = _planning_ops._exclude_agent_salvage_artifacts
+    _fail_conformance_salvage_execution = _planning_conformance._fail_conformance_salvage_execution
+    _record_conformance_salvage_event = _planning_conformance._record_conformance_salvage_event
+    _materialize_salvage_patch_for_agent = (
+        _planning_conformance._materialize_salvage_patch_for_agent
+    )
+    _exclude_agent_salvage_artifacts = _planning_conformance._exclude_agent_salvage_artifacts
     _record_planning_validation_handoff_event = (
-        _planning_ops._record_planning_validation_handoff_event
+        _planning_conformance._record_planning_validation_handoff_event
     )
-    _run_post_validation_conformance_check = _planning_ops._run_post_validation_conformance_check
+    _run_post_validation_conformance_check = (
+        _planning_conformance._run_post_validation_conformance_check
+    )
     _write_satisfied_post_validation_conformance_report = staticmethod(
-        _planning_ops._write_satisfied_post_validation_conformance_report
+        _planning_conformance._write_satisfied_post_validation_conformance_report
     )
     _record_post_validation_conformance_event = (
-        _planning_ops._record_post_validation_conformance_event
+        _planning_conformance._record_post_validation_conformance_event
     )
     _validation_run_evidence_for_conformance = (
-        _planning_ops._validation_run_evidence_for_conformance
+        _planning_conformance._validation_run_evidence_for_conformance
     )
     _auto_retry_planning_scope_failure = _planning_ops._auto_retry_planning_scope_failure
     _run_agent_task_with_optional_planning = _planning_ops._run_agent_task_with_optional_planning
