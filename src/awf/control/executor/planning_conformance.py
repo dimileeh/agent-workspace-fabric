@@ -325,22 +325,28 @@ async def _run_post_validation_conformance_check(
     # the worktree file would still carry the stale report, so deposit the
     # in-memory satisfied report directly to keep the served artifact consistent
     # with the satisfied event recorded after cleanup succeeds.
-    if not report_from_fresh_file and report_text is not None and not rewrite_succeeded:
-        _deposit_satisfied_conformance_report(
-            work_dir=self._config.compose_projects_root.parent,
-            workspace_id=workspace.id,
-            worktree_path=worktree_path,
-            plan_path=handoff.plan_path,
-            report=report,
-        )
-    else:
-        deposit_workspace_planning_artifacts(
-            work_dir=self._config.compose_projects_root.parent,
-            workspace_id=workspace.id,
-            worktree_path=worktree_path,
-            plan_path=handoff.plan_path,
-            report_path=handoff.report_path,
-        )
+    artifact_work_dir = _post_validation_conformance_artifact_work_dir(
+        self,
+        workspace_id=workspace.id,
+        validation_run_id=validation_run_id,
+    )
+    if artifact_work_dir is not None:
+        if not report_from_fresh_file and report_text is not None and not rewrite_succeeded:
+            _deposit_satisfied_conformance_report(
+                work_dir=artifact_work_dir,
+                workspace_id=workspace.id,
+                worktree_path=worktree_path,
+                plan_path=handoff.plan_path,
+                report=report,
+            )
+        else:
+            deposit_workspace_planning_artifacts(
+                work_dir=artifact_work_dir,
+                workspace_id=workspace.id,
+                worktree_path=worktree_path,
+                plan_path=handoff.plan_path,
+                report_path=handoff.report_path,
+            )
     # The satisfied conformance report is an AWF artifact/event, not source
     # work. Remove the on-worktree copy so project-specific profiles that
     # track the conformance report path do not see a dirty worktree at
@@ -460,6 +466,24 @@ async def _run_post_validation_conformance_check(
         validation_run_id=validation_run_id,
     )
     return None
+
+
+def _post_validation_conformance_artifact_work_dir(
+    self: Any,
+    *,
+    workspace_id: str,
+    validation_run_id: str,
+) -> Path | None:
+    config = getattr(self, "_config", None)
+    compose_projects_root = getattr(config, "compose_projects_root", None)
+    if compose_projects_root is None:
+        _log.warning(
+            "executor.post_validation_conformance_deposit_skipped_missing_artifact_root",
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+        )
+        return None
+    return Path(compose_projects_root).parent
 
 
 def _remove_report_worktree_path(path: Path, *, worktree_path: Path) -> None:

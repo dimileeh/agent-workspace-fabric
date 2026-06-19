@@ -590,6 +590,79 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
 
 
 @pytest.mark.unit
+async def test_post_validation_conformance_missing_artifact_root_skips_deposit(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KyDg- regression: satisfied conformance should not fail
+    when a focused executor double lacks the best-effort artifact root config."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=1, stdout="", stderr="error: path not tracked")
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._config = SimpleNamespace(  # type: ignore[assignment]
+        max_validation_fix_passes=0,
+        planning_max_iterations_default=6,
+    )
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+
+    recorded: list[str] = []
+
+    async def _record_event(**kwargs: object) -> None:
+        recorded.append(str(kwargs.get("validation_run_id")))
+
+    executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        failure = await executor._run_post_validation_conformance_check(
+            adapter=_ReportWritingAdapter(report_abs_path=report_abs, content=satisfied),  # type: ignore[arg-type]
+            workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+            profile=profile,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=worktree_path,
+            model=None,
+            handoff=handoff,
+            validation_run_id="validation-run-1",
+            base_commit="base-commit-sha",
+        )
+
+    assert failure is None
+    assert recorded == ["validation-run-1"]
+    assert not report_abs.exists()
+    assert any(
+        entry["event"]
+        == "executor.post_validation_conformance_deposit_skipped_missing_artifact_root"
+        and entry["workspace_id"] == "ws_post"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
 async def test_post_validation_conformance_stale_report_with_failed_rewrite_uses_in_memory_deposit(
     tmp_path: Path,
 ) -> None:
