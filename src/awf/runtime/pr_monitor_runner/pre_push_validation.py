@@ -415,10 +415,11 @@ async def _run_pre_push_validation_with_fix_passes(
                 workspace_id=workspace_id,
                 pass_number=pass_index + 1,
                 error=repr(exc),
+                reason_code=exc.reason_code,
             )
             return replace(
                 validation_result,
-                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+                reason_code=exc.reason_code,
                 message=(
                     "PR monitor pre-push validation fix pass blocked: "
                     f"monitor policy blocked the commit: {exc}"
