@@ -384,6 +384,10 @@ async def execute(
                 setup_all_passed=setup_result.all_passed,
             )
         if not setup_result.all_passed:
+            if not await _repair_mirror_hooks_path_or_mark_failed(
+                failure_stage="after profile setup failure"
+            ):
+                return
             first_fail = setup_result.first_failure
             setup_dependency_details = _setup_dependency_network_failure_details(first_fail)
             setup_failure_reason_code = (

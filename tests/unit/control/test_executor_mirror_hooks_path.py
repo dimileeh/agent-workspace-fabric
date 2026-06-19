@@ -25,6 +25,7 @@ from awf.db.enums import (
 from awf.db.models import Operation, Workspace
 from awf.node.git_manager import GitOperationError
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.validation import ValidationCommandResult
 
 
 @pytest.mark.unit
@@ -179,6 +180,155 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
         else []
     )
     assert finish_recovery_calls == expected_finish_recovery_calls
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("post_setup_repair_fails", [False, True])
+async def test_execute_repairs_mirror_hooks_path_after_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    post_setup_repair_fails: bool,
+) -> None:
+    profile_snapshot = WorkspaceProfile(name="mirror-hooks-setup-failure").model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    workspace = Workspace(
+        id="ws_mirror_hooks_setup_failure",
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Mirror hooks",
+        task_prompt="Repair mirror hooks after setup failure.",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=profile_snapshot,
+    )
+    mirror_path = tmp_path / "mirror.git"
+    mark_failed_calls: list[dict[str, Any]] = []
+    repair_calls: list[Path] = []
+    setup_stdout = tmp_path / "setup.stdout"
+    setup_stderr = tmp_path / "setup.stderr"
+    setup_stdout.write_text("setup stdout\n", encoding="utf-8")
+    setup_stderr.write_text("setup stderr\n", encoding="utf-8")
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: Any) -> object:
+            return execution_flow.ValidationResult(
+                commands=[
+                    ValidationCommandResult(
+                        command="git config --local core.hooksPath /dev/null && false",
+                        returncode=1,
+                        duration_seconds=0.1,
+                        stdout_path=setup_stdout,
+                        stderr_path=setup_stderr,
+                        phase="setup",
+                    )
+                ]
+            )
+
+    class _Executor:
+        _config = SimpleNamespace(
+            agent_idle_timeout_seconds=30,
+            agent_wall_timeout_seconds=60,
+            compose_projects_root=tmp_path / "compose",
+            planning_max_iterations_default=6,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        _log_store = None
+        _runner = object()
+        _usage_sampler = None
+        _validation = _Validation()
+
+        async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
+            return workspace, False, False, None
+
+        async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _block_open_pr_reexecution_without_recovery(
+            self, *_args: object, **_kwargs: object
+        ) -> object:
+            return SimpleNamespace(blocked=False, recovery=None)
+
+        async def _dispatch_non_feature_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _prepare_conformance_salvage_for_execution(
+            self, *_args: object, **_kwargs: object
+        ) -> None:
+            return None
+
+        def _defaults_for(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def _mark_failed(self, **kwargs: Any) -> None:
+            mark_failed_calls.append(kwargs)
+
+        async def _finish_active_recovery_operations(self, **_kwargs: Any) -> None:
+            raise AssertionError("no recovery operation should be finished")
+
+        async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+            return None
+
+    async def _repair_agent_runtime_ownership(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def _repair_mirror_hooks_path(path: Path) -> bool:
+        repair_calls.append(path)
+        if post_setup_repair_fails and len(repair_calls) == 2:
+            raise GitOperationError(
+                operation="mirror.hooks_path_repair",
+                returncode=128,
+                stdout="",
+                stderr="could not lock config file\n",
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+        return True
+
+    monkeypatch.setattr(
+        execution_flow,
+        "get_adapter",
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+    )
+    monkeypatch.setattr(
+        execution_flow,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(execution_flow, "mirror_path_for_worktree", lambda _path: mirror_path)
+    monkeypatch.setattr(execution_flow, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    await execution_flow.execute(_Executor(), workspace.id)
+
+    assert repair_calls == [mirror_path, mirror_path]
+    if post_setup_repair_fails:
+        assert mark_failed_calls == [
+            {
+                "workspace_id": workspace.id,
+                "from_status": WorkspaceStatus.running,
+                "failure_reason": FailureReason.infrastructure_failure,
+                "message": (
+                    "could not repair poisoned mirror hooks path after profile setup failure"
+                ),
+                "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            }
+        ]
+    else:
+        assert mark_failed_calls == [
+            {
+                "workspace_id": workspace.id,
+                "from_status": WorkspaceStatus.running,
+                "failure_reason": FailureReason.service_startup_failure,
+                "message": (
+                    "profile setup failed: git config --local core.hooksPath /dev/null && false"
+                ),
+                "reason_code": None,
+                "details": None,
+            }
+        ]
 
 
 @pytest.mark.unit
