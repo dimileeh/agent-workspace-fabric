@@ -475,6 +475,7 @@ async def _resolve_worktree_branch_ref(worktree_path: Path) -> str | None:
         "HEAD",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=git_env_without_object_lookup_overrides(),
     )
     stdout_bytes, _ = await proc.communicate()
     assert proc.returncode is not None

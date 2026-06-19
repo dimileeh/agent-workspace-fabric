@@ -88,6 +88,38 @@ def _mock_verify_head_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.mark.unit
+async def test_resolve_worktree_branch_ref_strips_git_object_lookup_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    calls: list[dict[str, object]] = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"refs/heads/agent-work\n", b""
+
+    async def _create_subprocess_exec(*args: object, **kwargs: object) -> _Proc:
+        calls.append({"args": args, "env": kwargs.get("env")})
+        return _Proc()
+
+    monkeypatch.setattr(remote_repair.asyncio, "create_subprocess_exec", _create_subprocess_exec)
+
+    branch_ref = await remote_repair._resolve_worktree_branch_ref(tmp_path)
+
+    assert branch_ref == "refs/heads/agent-work"
+    assert calls
+    assert calls[0]["args"][-2:] == ("symbolic-ref", "HEAD")
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert "GIT_OBJECT_DIRECTORY" not in env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in env
+
+
 class PersistCheckingSleep(RecordedSleep):
     def __init__(
         self,
