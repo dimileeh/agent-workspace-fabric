@@ -743,6 +743,74 @@ class TestMiscMonitorHelpers:
         assert not any(arg.startswith(".claude/agent-memory") for arg in add_args)
 
     @pytest.mark.unit
+    async def test_commit_dirty_worktree_strips_git_object_env_from_write_path(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dirty-worktree writes never inherit alternate object stores."""
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+        workspace_id = "ws_object_env"
+        fake = FakeCommandRunner()
+        fixed_path = "src/awf/foo.py"
+        dirty = f" M {fixed_path}\n"
+        hook_stderr = (
+            "fix end of files................................................Failed\n"
+            "- hook id: end-of-file-fixer\n"
+            "- exit code: 1\n"
+            "- files were modified by this hook\n\n"
+            f"Fixing {fixed_path}\n"
+        )
+        for result in (
+            {"returncode": 0, "stdout": dirty},  # status --porcelain
+            {"returncode": 0, "stdout": dirty},  # status --untracked-files=all
+            {"returncode": 0},  # add -A -- <stage_paths>
+            {"returncode": 1},  # diff --cached --quiet (staged changes present)
+            {"returncode": 1, "stderr": hook_stderr},  # commit runs an autofixing hook
+            {"returncode": 0, "stdout": dirty},  # retry status
+            {"returncode": 0},  # retry add
+            {"returncode": 0},  # retry commit
+        ):
+            fake.queue_result(**result)
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+        repair_reasons: list[str] = []
+
+        async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
+            repair_reasons.append(str(kwargs["reason"]))
+            return True
+
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+        )
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+        )
+
+        assert committed is True
+        git_calls = [
+            call
+            for call in fake.calls
+            if {"status", "add", "diff", "commit"}.intersection(call.args)
+        ]
+        assert len(git_calls) == 8
+        for call in git_calls:
+            assert call.env is not None
+            assert "GIT_OBJECT_DIRECTORY" not in call.env
+            assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+        assert repair_reasons == [
+            "dirty_worktree_pre_commit",
+            "dirty_worktree_post_commit_failed",
+            "dirty_worktree_post_commit_succeeded",
+        ]
+
+    @pytest.mark.unit
     async def test_commit_dirty_worktree_memory_only_skips_commit_side_effects(
         self,
         factory: async_sessionmaker[AsyncSession],

@@ -872,7 +872,8 @@ async def _commit_dirty_worktree(
     # escape the agent-runtime filter, letting memory-only dirt fall through into the
     # side-effecting path. Enumerating leaf paths lets the filter drop the memory files.
     status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all"),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not status.ok:
         _log.warning(
@@ -934,7 +935,8 @@ async def _commit_dirty_worktree(
     # leaf paths lets the filter drop the memory files. If nothing else remains to
     # stage, there is no PR-worthy change — return False like the clean path above.
     stage_status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all"),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not stage_status.ok:
         _log.warning(
@@ -953,7 +955,8 @@ async def _commit_dirty_worktree(
         return False
 
     add = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "--literal-pathspecs", "add", "-A", "--", *stage_paths)
+        git_worktree_command(worktree_path, "--literal-pathspecs", "add", "-A", "--", *stage_paths),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not add.ok:
         _log.warning(
@@ -964,7 +967,8 @@ async def _commit_dirty_worktree(
         return False
 
     cached = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "diff", "--cached", "--quiet")
+        git_worktree_command(worktree_path, "diff", "--cached", "--quiet"),
+        env=git_env_without_object_lookup_overrides(),
     )
     if cached.returncode == 0:
         return False
@@ -984,7 +988,8 @@ async def _commit_dirty_worktree(
     message = commit_message_with_task_tag(message, resolved_task_tag)[:72]
 
     commit = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "commit", "-m", message)
+        git_worktree_command(worktree_path, "commit", "-m", message),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not commit.ok:
         if not await repair_agent_runtime_ownership(
