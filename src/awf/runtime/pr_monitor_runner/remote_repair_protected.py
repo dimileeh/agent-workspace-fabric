@@ -831,6 +831,17 @@ async def _repair_protected_scope_changes_before_commit(
         raise _MonitorAgentRuntimeOwnershipRepairFailedError(
             "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
         )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.protected_scope_repair_mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            )
+            raise _MonitorMirrorHooksPathRepairFailedError() from exc
     agent_run_err = None
     try:
         await self._deps.adapter.run(
@@ -843,7 +854,6 @@ async def _repair_protected_scope_changes_before_commit(
     except AgentRunError as exc:
         agent_run_err = exc
 
-    mirror_path = mirror_path_for_worktree(worktree_path)
     if mirror_path is not None:
         try:
             await repair_mirror_hooks_path(mirror_path)
