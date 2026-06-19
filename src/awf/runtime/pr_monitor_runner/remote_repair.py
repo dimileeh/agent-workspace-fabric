@@ -104,7 +104,8 @@ async def _pre_existing_dirty_repair_worktree_result(
     # Enumerating leaf paths lets the agent-runtime filter below see and drop the
     # memory files. Mirrors ``check_validation_worktree_clean``.
     status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all"),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not status.ok:
         stderr = status.stderr[:400]
