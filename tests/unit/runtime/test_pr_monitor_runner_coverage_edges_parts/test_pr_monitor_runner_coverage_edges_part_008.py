@@ -697,6 +697,35 @@ async def test_repair_operation_start_head_uses_fallback_when_worktree_missing(
 
 
 @pytest.mark.unit
+async def test_repair_operation_start_head_uses_fallback_when_rev_parse_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: not a git repository\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    head, result = await runner._repair_operation_start_head_result(
+        workspace_id="ws_bad_worktree_head",
+        worktree_path=worktree,
+        operation_type="sync_base",
+        fallback_head_sha="b" * 40,
+    )
+
+    assert head == "b" * 40
+    assert result is None
+    assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
 async def test_repair_operation_start_head_strips_git_object_lookup_env(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

@@ -198,6 +198,19 @@ async def _repair_operation_start_head_result(
 
     stdout = result.stdout[:400]
     stderr = result.stderr[:400]
+    if fallback_head_sha:
+        _log.info(
+            "monitor.repair_operation_start_head_from_fallback",
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            head_sha=fallback_head_sha[:10],
+            source="status",
+            returncode=result.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return fallback_head_sha, None
+
     _log.warning(
         "monitor.repair_operation_start_head_unavailable",
         workspace_id=workspace_id,
