@@ -71,6 +71,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_failures import (
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
     _cleanup_committed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
     _head_descends_from,  # noqa: F401  (re-exported for tests)
+    _protected_scope_violations_for_recovered_commit,
     _reparent_fix_pass_commit,  # noqa: F401  (re-exported for tests)
     _rollback_failed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
     _run_pre_push_validation_fix_pass,
@@ -786,22 +787,38 @@ async def _run_pre_push_validation(
                         "agent runtime ownership repair failed for recovered HEAD"
                     ),
                 )
-            recovered_status_stdout = "".join(f" M {path}\n" for path in recovered_paths)
-            repaired_status = await self._repair_protected_scope_changes_before_commit(
-                workspace_id=workspace_id,
-                status_stdout=recovered_status_stdout,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                state=state,
-                protected_scope_revert_remote_branch=remote_branch,
-                remote_push_url=remote_url,
-            )
-            if repaired_status is None:
+            try:
+                violations = await _protected_scope_violations_for_recovered_commit(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    base_ref=recovery_head,
+                    changed_paths=recovered_paths,
+                )
+            except ProtectedScopeDiffError as exc:
+                _log.warning(
+                    "monitor.pre_push_validation_recovered_head_diff_unavailable",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                    error=repr(exc),
+                )
+                return _PrePushValidationResult(
+                    passed=False,
+                    validation_run_id=None,
+                    workspace_head_sha=recovered,
+                    reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                    message=(
+                        "PR monitor pre-push validation blocked: recovered HEAD "
+                        f"diff unavailable: {exc}"
+                    ),
+                )
+            if violations:
                 _log.warning(
                     "monitor.pre_push_validation_recovered_head_protected_scope_repair_failed",
                     workspace_id=workspace_id,
                     recovered_head=recovered[:10],
-                    paths=list(recovered_paths),
+                    paths=[violation.path for violation in violations],
                     reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
                 )
                 return _PrePushValidationResult(

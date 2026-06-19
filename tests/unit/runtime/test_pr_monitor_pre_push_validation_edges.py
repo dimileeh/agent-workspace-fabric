@@ -9,10 +9,14 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.control.quality_gates import QualityGateViolation
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner import pre_push_validation
-from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
+from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
+    _MonitorPolicyBlockedError,
+)
 from awf.runtime.validation_types import ValidationCommandResult, ValidationResult
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
 from tests.postgres import postgres_test_engine
@@ -523,12 +527,12 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_recovered_head_runs_protected_scope_repair_before_validation(
+async def test_pre_push_validation_recovered_head_blocks_committed_protected_scope_violation(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Recovered pre-push HEAD commits must pass protected-scope repair before validation."""
+    """Recovered pre-push HEAD commits must validate protected files as committed diffs."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -538,10 +542,6 @@ async def test_pre_push_validation_recovered_head_runs_protected_scope_repair_be
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{recovery_base}\n")
     cmd.queue_result(returncode=0, stdout="M\0.github/workflows/ci.yml\0")
-    cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0, stdout=f"{recovered_head}\n")
-    cmd.queue_result(returncode=0, stdout=f"{recovered_head}\n")
     validation = _FakeValidation(_validation_result(tmp_path, ok=True))
     runner = make_runner(
         factory=factory,
@@ -551,7 +551,7 @@ async def test_pre_push_validation_recovered_head_runs_protected_scope_repair_be
         worktrees_root=tmp_path / "worktrees",
     )
     runner._deps.validation = validation  # type: ignore[assignment]
-    protected_scope_calls: list[dict[str, object]] = []
+    committed_diff_calls: list[dict[str, object]] = []
     ownership_calls: list[dict[str, object]] = []
 
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
@@ -577,11 +577,20 @@ async def test_pre_push_validation_recovered_head_runs_protected_scope_repair_be
         ownership_calls.append(dict(kwargs))
         return True
 
-    async def _repair_protected_scope_changes_before_commit(
+    async def _protected_scope_violations_for_recovered_commit(
+        *args: object,
         **kwargs: object,
-    ) -> CommandResult:
-        protected_scope_calls.append(dict(kwargs))
-        return CommandResult(returncode=0, stdout=str(kwargs["status_stdout"]), stderr="")
+    ) -> list[QualityGateViolation]:
+        committed_diff_calls.append({"args": args, **kwargs})
+        return [
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/workflows/",
+            )
+        ]
+
+    async def _repair_protected_scope_changes_before_commit(**_kwargs: object) -> CommandResult:
+        raise AssertionError("recovered committed diffs must not use dirty-status repair")
 
     monkeypatch.setattr(
         pre_push_validation,
@@ -608,6 +617,11 @@ async def test_pre_push_validation_recovered_head_runs_protected_scope_repair_be
         "_repair_protected_scope_changes_before_commit",
         _repair_protected_scope_changes_before_commit,
     )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_protected_scope_violations_for_recovered_commit",
+        _protected_scope_violations_for_recovered_commit,
+    )
 
     result = await pre_push_validation._run_pre_push_validation(
         runner,
@@ -619,8 +633,10 @@ async def test_pre_push_validation_recovered_head_runs_protected_scope_repair_be
         operation_start_head=recovery_base,
     )
 
-    assert result.passed is True
+    assert result.passed is False
     assert result.workspace_head_sha == recovered_head
+    assert result.reason_code == "PROTECTED_SCOPE_REPAIR_FAILED"
+    assert "recovered HEAD protected-scope repair failed" in result.message
     assert ownership_calls == [
         {
             "logger": pre_push_validation._log,
@@ -630,41 +646,25 @@ async def test_pre_push_validation_recovered_head_runs_protected_scope_repair_be
             "event_name": "monitor.agent_runtime_ownership_repair_failed",
         }
     ]
-    assert protected_scope_calls == [
+    assert committed_diff_calls == [
         {
+            "args": (runner,),
             "workspace_id": workspace_id,
-            "status_stdout": " M .github/workflows/ci.yml\n",
-            "compose_project": "proj",
-            "compose_file": tmp_path / "compose.yml",
-            "state": None,
-            "protected_scope_revert_remote_branch": f"awf/{workspace_id}",
-            "remote_push_url": None,
+            "worktree_path": worktree,
+            "base_ref": recovery_base,
+            "changed_paths": (".github/workflows/ci.yml",),
         }
     ]
-    assert [call["phase_names"] for call in validation.calls] == [("post_agent", "validate")]
+    assert validation.calls == []
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    ("ownership_ok", "repair_result", "expected_reason"),
-    [
-        (
-            False,
-            CommandResult(returncode=0, stdout="", stderr=""),
-            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
-        ),
-        (True, None, "PROTECTED_SCOPE_REPAIR_FAILED"),
-    ],
-)
-async def test_pre_push_validation_recovered_head_repair_failures_block_validation(
+async def test_pre_push_validation_recovered_head_ownership_repair_failure_blocks_validation(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    ownership_ok: bool,
-    repair_result: CommandResult | None,
-    expected_reason: str,
 ) -> None:
-    """Recovered pre-push HEAD repair failures must stop before validation starts."""
+    """Recovered pre-push HEAD ownership repair failures must stop before validation starts."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -683,7 +683,7 @@ async def test_pre_push_validation_recovered_head_repair_failures_block_validati
         worktrees_root=tmp_path / "worktrees",
     )
     runner._deps.validation = validation  # type: ignore[assignment]
-    protected_scope_calls: list[dict[str, object]] = []
+    committed_diff_calls: list[dict[str, object]] = []
 
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
         return False
@@ -705,13 +705,14 @@ async def test_pre_push_validation_recovered_head_repair_failures_block_validati
         return recovered_head
 
     async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
-        return ownership_ok
+        return False
 
-    async def _repair_protected_scope_changes_before_commit(
+    async def _protected_scope_violations_for_recovered_commit(
+        *args: object,
         **kwargs: object,
-    ) -> CommandResult | None:
-        protected_scope_calls.append(dict(kwargs))
-        return repair_result
+    ) -> list[QualityGateViolation]:
+        committed_diff_calls.append({"args": args, **kwargs})
+        return []
 
     monkeypatch.setattr(
         pre_push_validation,
@@ -734,9 +735,9 @@ async def test_pre_push_validation_recovered_head_repair_failures_block_validati
         _repair_agent_runtime_ownership,
     )
     monkeypatch.setattr(
-        runner,
-        "_repair_protected_scope_changes_before_commit",
-        _repair_protected_scope_changes_before_commit,
+        pre_push_validation,
+        "_protected_scope_violations_for_recovered_commit",
+        _protected_scope_violations_for_recovered_commit,
     )
 
     result = await pre_push_validation._run_pre_push_validation(
@@ -751,9 +752,104 @@ async def test_pre_push_validation_recovered_head_repair_failures_block_validati
 
     assert result.passed is False
     assert result.workspace_head_sha == recovered_head
-    assert result.reason_code == expected_reason
+    assert result.reason_code == "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
     assert validation.calls == []
-    if ownership_ok:
-        assert protected_scope_calls
-    else:
-        assert protected_scope_calls == []
+    assert committed_diff_calls == []
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_recovered_head_committed_diff_error_blocks_validation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovered pre-push HEAD committed-diff read failures must stop before validation."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    recovery_base = "9" * 40
+    recovered_head = "a" * 40
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{recovery_base}\n")
+    cmd.queue_result(returncode=0, stdout="M\0pyproject.toml\0")
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return False
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        return False
+
+    async def _recover_missing_head_object_from_filesystem(
+        self: object,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_start_head: str,
+        task_tag: str | None = None,
+        command_evidence: object = (),
+    ) -> str | None:
+        del self, workspace_id, worktree_path, task_tag, command_evidence
+        assert operation_start_head == recovery_base
+        return recovered_head
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _protected_scope_violations_for_recovered_commit(
+        *args: object,
+        **kwargs: object,
+    ) -> list[QualityGateViolation]:
+        del args, kwargs
+        raise ProtectedScopeDiffError("committed diff unavailable")
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_recover_missing_head_object_from_filesystem",
+        _recover_missing_head_object_from_filesystem,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_protected_scope_violations_for_recovered_commit",
+        _protected_scope_violations_for_recovered_commit,
+    )
+
+    result = await pre_push_validation._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+        operation_start_head=recovery_base,
+    )
+
+    assert result.passed is False
+    assert result.workspace_head_sha == recovered_head
+    assert result.reason_code == "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
+    assert "recovered HEAD diff unavailable" in result.message
+    assert validation.calls == []
