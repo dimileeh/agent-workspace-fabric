@@ -21,6 +21,7 @@ queued result, in order.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -630,9 +631,30 @@ class _TerminalDuringCleanupCommandRunner(FakeCommandRunner):
 
 
 def _mark_git_worktree(worktree_path: Path) -> None:
-    """Create a minimal `.git` control file at the worktree root."""
+    """Create a minimal real git repository at the worktree root."""
     worktree_path.mkdir(parents=True, exist_ok=True)
-    (worktree_path / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(worktree_path), "init", "-q"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree_path),
+            "-c",
+            "user.name=AWF Test",
+            "-c",
+            "user.email=awf-test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+        check=True,
+        capture_output=True,
+    )
 
 
 class TestValidationPassesOnFirstTry:
