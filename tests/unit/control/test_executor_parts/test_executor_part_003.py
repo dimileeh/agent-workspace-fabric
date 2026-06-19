@@ -176,6 +176,22 @@ async def test_report_path_is_dirty_treats_leftover_directory_as_dirty(tmp_path:
 
 
 @pytest.mark.unit
+async def test_report_path_is_dirty_treats_empty_parent_residue_as_dirty(
+    tmp_path: Path,
+) -> None:
+    report_path = Path("docs/awf-plans/ws_dir.conformance.json")
+    (tmp_path / report_path.parent).mkdir(parents=True)
+
+    dirty = await _planning_conformance._report_path_is_dirty(  # noqa: SLF001
+        _ChangedPathsStub(),
+        tmp_path,
+        report_path,
+    )
+
+    assert dirty is True
+
+
+@pytest.mark.unit
 def test_remove_report_worktree_path_removes_empty_directory(tmp_path: Path) -> None:
     report_path = tmp_path / "docs" / "awf-plans" / "ws_dir.conformance.json"
     report_path.mkdir(parents=True)

@@ -517,10 +517,30 @@ async def _report_path_is_dirty(
     previous fix pass). Treating the command exit code alone as success would
     publish that stale report, so we inspect the actual worktree state.
     """
-    if (worktree_path / report_path).is_dir():
+    report_worktree_path = worktree_path / report_path
+    if report_worktree_path.is_dir():
+        return True
+    if _empty_report_parent_residue_is_dirty(
+        report_worktree_path.parent,
+        worktree_path=worktree_path,
+    ):
         return True
     changed = await self._changed_paths(worktree_path)
     return report_path in changed
+
+
+def _empty_report_parent_residue_is_dirty(path: Path, *, worktree_path: Path) -> bool:
+    current = path
+    while current != worktree_path and current != current.parent:
+        if current.is_dir():
+            try:
+                next(current.iterdir())
+            except StopIteration:
+                return True
+            except OSError:
+                return True
+        current = current.parent
+    return False
 
 
 def _build_unsatisfied_failure(
