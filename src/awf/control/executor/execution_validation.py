@@ -409,6 +409,8 @@ async def run_validation_and_fix_cycle(
                     check_callback_after_cleanup=True,
                 )
             ) is not None:
+                if cleanup_result.ok:
+                    _deposit_planning_artifacts_if_required()
                 return cleanup_guard_result
             await self._finish_validation_run(
                 validation_run_id,
@@ -467,6 +469,8 @@ async def run_validation_and_fix_cycle(
                     check_callback_after_cleanup=True,
                 )
             ) is not None:
+                if cleanup_result.ok:
+                    _deposit_planning_artifacts_if_required()
                 return cleanup_guard_result
             await self._finish_validation_run(
                 validation_run_id,

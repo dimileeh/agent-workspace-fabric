@@ -313,8 +313,25 @@ async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanu
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    profile = WorkspaceProfile.model_validate({"name": "validation-callback-race"})
+    workspace_id = "ws_callback_race"
+    profile = WorkspaceProfile.model_validate(
+        {"name": "validation-callback-race", "planning": {"required": True}}
+    )
     workspace = _workspace()
+    calls: list[str] = []
+    real_deposit = (
+        executor_execution_validation._planning_artifacts._deposit_planning_artifacts_best_effort
+    )
+
+    def _spy_deposit(*_args: object, **_kwargs: object) -> None:
+        calls.append("deposit")
+        real_deposit(*_args, **_kwargs)
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
 
     class _ThrowingValidation:
         async def run_profile_phases(self, **_kwargs: object) -> object:
@@ -328,7 +345,11 @@ async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanu
     executor = SimpleNamespace(
         _transition_if_current=AsyncMock(return_value=True),
         _recheck_status=AsyncMock(return_value=True),
-        _config=SimpleNamespace(max_validation_fix_passes=0, planning_max_iterations_default=3),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
         _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
         _start_validation_run=AsyncMock(return_value="vr-callback-race"),
         _finish_validation_callback_if_terminal=AsyncMock(side_effect=[False, True]),
@@ -341,6 +362,13 @@ async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanu
 
     async def _sync_resolved_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
         return profile
+
+    worktree_path = tmp_path / "worktree"
+    plan_path = worktree_path / "docs" / "awf-plans" / f"{workspace_id}.md"
+    report_path = worktree_path / "docs" / "awf-plans" / f"{workspace_id}.conformance.json"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# plan\n", encoding="utf-8")
+    report_path.write_text('{"status":"satisfied"}', encoding="utf-8")
 
     monkeypatch.setattr(
         executor_execution_validation,
@@ -381,9 +409,9 @@ async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanu
 
     result = await executor_execution_validation.run_validation_and_fix_cycle(
         executor,
-        workspace_id="ws_callback_race",
+        workspace_id=workspace_id,
         ws=workspace,  # type: ignore[arg-type]
-        worktree_path=tmp_path / "worktree",
+        worktree_path=worktree_path,
         compose_project="awf_ws_callback_race",
         compose_file=tmp_path / "compose.yml",
         base_commit="b" * 40,
@@ -402,6 +430,13 @@ async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanu
     assert executor._finish_validation_callback_if_terminal.await_count == 2
     executor._finish_validation_run.assert_not_awaited()
     executor._finish_pending_validate_operations.assert_not_awaited()
+    assert calls == ["deposit"]
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(
+        (tmp_path / "artifacts").parent, workspace_id
+    )
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan\n"
+    deposited_report = json.loads((artifact_dir / "conformance.json").read_text(encoding="utf-8"))
+    assert deposited_report["status"] == "satisfied"
 
 
 @pytest.mark.unit
