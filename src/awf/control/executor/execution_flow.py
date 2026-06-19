@@ -110,6 +110,10 @@ from awf.runtime.validation import (
 )
 
 
+class _MirrorHooksPathRepairAbortedError(RuntimeError):
+    """Raised after mirror hooks repair already marked the workspace failed."""
+
+
 async def execute(
     self: Any,
     workspace_id: str,
@@ -340,7 +344,14 @@ async def execute(
             )
             return
         mirror_path = mirror_path_for_worktree(worktree_path)
-        if mirror_path is not None:
+
+        async def _repair_mirror_hooks_path_or_mark_failed(
+            *,
+            failure_stage: str,
+            before_mark_failed: Any = None,
+        ) -> bool:
+            if mirror_path is None:
+                return True
             mirror_repair_failure_reason_code: str | None = None
             try:
                 await repair_mirror_hooks_path(mirror_path)
@@ -361,23 +372,28 @@ async def execute(
                     error=repr(exc)[:400],
                 )
             if mirror_repair_failure_reason_code is not None:
+                failure_message = f"could not repair poisoned mirror hooks path {failure_stage}"
+                if before_mark_failed is not None:
+                    before_mark_failed()
                 if recovery is not None:
                     await self._finish_active_recovery_operations(
                         workspace_id=workspace_id,
                         status=OperationStatus.failed,
                         reason_code=mirror_repair_failure_reason_code,
-                        error_message=(
-                            "could not repair poisoned mirror hooks path before profile setup"
-                        ),
+                        error_message=failure_message,
                     )
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
                     failure_reason=FailureReason.infrastructure_failure,
-                    message="could not repair poisoned mirror hooks path before profile setup",
+                    message=failure_message,
                     reason_code=mirror_repair_failure_reason_code,
                 )
-                return
+                return False
+            return True
+
+        if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
+            return
         setup_result = await self._validation.run_profile_phases(
             workspace_id=workspace_id,
             compose_project=compose_project,
@@ -508,6 +524,10 @@ async def execute(
                 workspace_id,
                 expected=WorkspaceStatus.running,
                 action="agent_run",
+            ):
+                return
+            if not await _repair_mirror_hooks_path_or_mark_failed(
+                failure_stage="before agent launch"
             ):
                 return
             planning_failure = await self._run_agent_task_with_optional_planning(
@@ -880,6 +900,11 @@ async def execute(
 
                 async def _run_commit() -> CommandResult:
                     """Execute the post-agent ``git commit`` with AWF's identity."""
+                    if not await _repair_mirror_hooks_path_or_mark_failed(
+                        failure_stage="before post-agent commit",
+                        before_mark_failed=_deposit_planning_artifacts,
+                    ):
+                        raise _MirrorHooksPathRepairAbortedError
                     return cast(
                         CommandResult,
                         await self._runner.run(
@@ -1059,6 +1084,8 @@ async def execute(
                     reason_code="MONITOR_RECOVERY_REBASE_FAILED",
                 )
                 return
+    except _MirrorHooksPathRepairAbortedError:
+        return
     except _PostAgentCommitStepError as exc:
         # Planning ran before the commit step, so the worktree (preserved on
         # the FAILED workspace) can already hold the plan + conformance report.
