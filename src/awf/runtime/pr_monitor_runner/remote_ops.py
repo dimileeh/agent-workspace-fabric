@@ -871,9 +871,6 @@ async def _run_sync_base(
                 stderr=exc.result.stderr,
             )
 
-        if agent_run_err is not None:
-            await runner._handle_provider_agent_run_error(workspace_id, agent_run_err)
-
         try:
             await runner._commit_dirty_worktree(
                 workspace_id=workspace_id,
@@ -918,6 +915,7 @@ async def _run_sync_base(
             )
 
         if agent_run_err is not None:
+            await runner._handle_provider_agent_run_error(workspace_id, agent_run_err)
             _log.warning(
                 "monitor.sync_base_cli_failed",
                 workspace_id=workspace_id,

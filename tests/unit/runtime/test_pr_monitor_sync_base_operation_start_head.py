@@ -9,11 +9,14 @@ from typing import Any
 
 import pytest
 
+from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
+from awf.db.enums import AgentRuntime
 from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner import remote_ops
 from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_REASON
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
 
 
 @pytest.mark.unit
@@ -513,3 +516,113 @@ async def test_run_sync_base_threads_compose_context_to_conflict_commit(
             "operation_start_head": "operation-start-sha",
         }
     ]
+
+
+@pytest.mark.unit
+async def test_run_sync_base_runs_post_agent_guard_before_provider_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed conflict agents must still repair post-agent mirror/HEAD state."""
+
+    class _FakeCommandRunner:
+        def __init__(self) -> None:
+            self.results = [
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=1, stdout="", stderr="merge conflict"),
+                CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+            ]
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
+            return self.results.pop(0)
+
+    async def _repair_operation_start_head_result(
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_type: str,
+        fallback_head_sha: str | None = None,
+    ) -> tuple[str, None]:
+        del workspace_id, worktree_path, operation_type, fallback_head_sha
+        return "operation-start-sha", None
+
+    async def _resolve_task_tag(_workspace_id: str) -> str | None:
+        return None
+
+    async def _fetch_base(**_kwargs: object) -> None:
+        return None
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _unexpected_protected_scope(**_kwargs: object) -> None:
+        pytest.fail("provider retry should leave before protected-scope push checks")
+
+    async def _unexpected_validated_push(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("provider retry should leave before push")
+
+    class _Adapter:
+        async def run(self, **_kwargs: object) -> SimpleNamespace:
+            raise AgentRunError(
+                agent=AgentRuntime.claude_code,
+                result=CommandResult(returncode=1, stdout="stdout evidence", stderr="retry me"),
+            )
+
+    events: list[str] = []
+    captured_command_evidence: list[list[str]] = []
+
+    async def _commit_dirty_worktree(**kwargs: Any) -> bool:
+        events.append("commit")
+        captured_command_evidence.append(list(kwargs["command_evidence"]))
+        return False
+
+    async def _handle_provider_agent_run_error(
+        _workspace_id: str,
+        _exc: AgentRunError,
+    ) -> None:
+        events.append("provider-recovery")
+        raise ProviderRecoveryRetryError()
+
+    monkeypatch.setattr(
+        remote_ops,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _workspace_runtime_context="",
+        _repair_operation_start_head_result=_repair_operation_start_head_result,
+        _resolve_task_tag=_resolve_task_tag,
+        _fetch_base=_fetch_base,
+        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
+        _handle_provider_agent_run_error=_handle_provider_agent_run_error,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _protected_scope_push_block=_unexpected_protected_scope,
+        _validated_git_push_result=_unexpected_validated_push,
+        _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
+    )
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await remote_ops._run_sync_base(
+            runner,
+            workspace_id="ws-sync",
+            repo=SimpleNamespace(slug=lambda: "owner/repo"),
+            pr_number=614,
+            base_branch="main",
+            remote_branch="awf/ws-sync",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    assert events == ["commit", "provider-recovery"]
+    assert captured_command_evidence == [["stdout evidence", "retry me"]]
