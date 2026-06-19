@@ -14,7 +14,7 @@ from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
     ComposeExecCleanupError,
 )
-from awf.control.executor import execution_flow
+from awf.control.executor import execution_flow, mirror_hooks_repair
 from awf.db.enums import (
     AgentRuntime,
     FailureReason,
@@ -26,6 +26,96 @@ from awf.db.models import Operation, Workspace
 from awf.node.git_manager import GitOperationError
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationCommandResult
+
+
+@pytest.mark.unit
+async def test_repair_mirror_hooks_path_or_mark_failed_marks_failed_on_oserror(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws_mirror_hooks_oserror"
+    mirror_path = tmp_path / "mirror.git"
+    mark_failed_calls: list[dict[str, Any]] = []
+    finish_recovery_calls: list[dict[str, Any]] = []
+    before_mark_failed_calls: list[str] = []
+
+    class _Executor:
+        async def _mark_failed(self, **kwargs: Any) -> None:
+            mark_failed_calls.append(kwargs)
+
+        async def _finish_active_recovery_operations(self, **kwargs: Any) -> None:
+            finish_recovery_calls.append(kwargs)
+
+    async def _repair_mirror_hooks_path(path: Path) -> bool:
+        assert path == mirror_path
+        raise OSError("permission denied")
+
+    with structlog.testing.capture_logs() as captured:
+        repaired = await mirror_hooks_repair.repair_mirror_hooks_path_or_mark_failed(
+            executor=_Executor(),
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            repair_mirror_hooks_path_fn=_repair_mirror_hooks_path,
+            recovery_active=True,
+            failure_stage="before agent launch",
+            before_mark_failed=lambda: before_mark_failed_calls.append("called"),
+        )
+
+    assert repaired is False
+    assert before_mark_failed_calls == ["called"]
+    assert {
+        "event": "executor.mirror_hooks_path_repair_failed",
+        "workspace_id": workspace_id,
+        "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        "error": "OSError('permission denied')",
+        "log_level": "warning",
+    } in captured
+    assert finish_recovery_calls == [
+        {
+            "workspace_id": workspace_id,
+            "status": OperationStatus.failed,
+            "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            "error_message": "could not repair poisoned mirror hooks path before agent launch",
+        }
+    ]
+    assert mark_failed_calls == [
+        {
+            "workspace_id": workspace_id,
+            "from_status": WorkspaceStatus.running,
+            "failure_reason": FailureReason.infrastructure_failure,
+            "message": "could not repair poisoned mirror hooks path before agent launch",
+            "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        }
+    ]
+
+
+@pytest.mark.unit
+async def test_repair_mirror_hooks_path_after_agent_cleanup_failure_logs_oserror(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws_mirror_hooks_cleanup_oserror"
+    mirror_path = tmp_path / "mirror.git"
+    repair_calls: list[Path] = []
+
+    async def _repair_mirror_hooks_path(path: Path) -> bool:
+        repair_calls.append(path)
+        raise OSError("read-only filesystem")
+
+    with structlog.testing.capture_logs() as captured:
+        await mirror_hooks_repair.repair_mirror_hooks_path_after_agent_cleanup_failure(
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            repair_mirror_hooks_path_fn=_repair_mirror_hooks_path,
+        )
+
+    assert repair_calls == [mirror_path]
+    assert {
+        "event": "executor.mirror_hooks_path_repair_failed",
+        "workspace_id": workspace_id,
+        "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        "error": "OSError('read-only filesystem')",
+        "failure_stage": "after agent cleanup failure",
+        "log_level": "warning",
+    } in captured
 
 
 @pytest.mark.unit

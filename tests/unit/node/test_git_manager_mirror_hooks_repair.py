@@ -427,3 +427,44 @@ class TestRepairMirrorHooksPath:
         result = await git_module.repair_mirror_hooks_path(mirror)
 
         assert result is False
+
+
+class TestMirrorHasRegisteredHooksPath:
+    @pytest.mark.unit
+    def test_rejects_absolute_hooks_path(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+
+        assert git_module._mirror_has_registered_hooks_path(mirror, "/tmp/hooks") is False
+
+    @pytest.mark.unit
+    def test_rejects_empty_registered_gitdir(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "mirror.git"
+        gitdir_file = mirror / "worktrees" / "workspace" / "gitdir"
+        gitdir_file.parent.mkdir(parents=True)
+        gitdir_file.write_text("", encoding="utf-8")
+
+        assert git_module._mirror_has_registered_hooks_path(mirror, ".githooks/Lefthook") is False
+
+    @pytest.mark.unit
+    def test_resolves_relative_registered_gitdir(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "mirror.git"
+        gitdir_file = mirror / "worktrees" / "workspace" / "gitdir"
+        gitdir_file.parent.mkdir(parents=True)
+        worktree = tmp_path / "workspace"
+        (worktree / ".git").mkdir(parents=True)
+        (worktree / ".githooks" / "Lefthook").mkdir(parents=True)
+        gitdir_file.write_text("../../../workspace/.git\n", encoding="utf-8")
+
+        assert git_module._mirror_has_registered_hooks_path(mirror, ".githooks/Lefthook") is True
+
+    @pytest.mark.unit
+    def test_rejects_registered_gitdir_not_named_dot_git(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "mirror.git"
+        gitdir_file = mirror / "worktrees" / "workspace" / "gitdir"
+        gitdir_file.parent.mkdir(parents=True)
+        worktree = tmp_path / "workspace"
+        worktree.mkdir()
+        gitdir_file.write_text(str(worktree / "gitdir") + "\n", encoding="utf-8")
+
+        assert git_module._mirror_has_registered_hooks_path(mirror, ".githooks/Lefthook") is False

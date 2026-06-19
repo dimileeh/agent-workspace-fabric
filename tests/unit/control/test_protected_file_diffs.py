@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from awf.common.commands import FakeCommandRunner
+from awf.control import protected_file_diffs as protected_diffs_module
 from awf.control.protected_file_diffs import (
     changed_paths_from_name_status_z,
     committed_changed_paths_since,
@@ -53,6 +54,31 @@ def test_changed_paths_from_name_status_z_rejects_malformed_output(
         changed_paths_from_name_status_z(stdout)
 
     assert message in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+@pytest.mark.parametrize("refspec", ["HEAD", "HEAD:"])
+async def test_git_refspec_missing_path_rejects_malformed_refspecs(
+    tmp_path,
+    refspec: str,
+) -> None:
+    runner = FakeCommandRunner()
+
+    assert (
+        await protected_diffs_module._git_refspec_missing_path_is_recoverable(
+            runner,
+            worktree_path=tmp_path,
+            refspec=refspec,
+        )
+        is False
+    )
+    assert runner.calls == []
+
+
+@pytest.mark.unit
+def test_git_z_listing_treats_malformed_record_as_present() -> None:
+    assert protected_diffs_module._git_z_listing_contains_path("pyproject.toml\0", "other") is True
 
 
 @pytest.mark.asyncio
