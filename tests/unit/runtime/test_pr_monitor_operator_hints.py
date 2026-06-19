@@ -40,10 +40,12 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import helpers as runner_helpers
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.constants import _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
@@ -437,6 +439,76 @@ async def test_operator_hint_repair_marks_runtime_ownership_failure_as_needs_hum
         requested_at=hint.requested_at,
         status="needs_human",
         status_reason="agent runtime ownership repair failed",
+    )
+
+
+@pytest.mark.unit
+async def test_operator_hint_repair_marks_head_object_missing_as_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint repair cannot resolve poisoned head",
+        operation_id="op_head_object_missing_hint",
+        requested_at="2026-06-19T08:00:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _head_object_missing(**_kwargs: object) -> VerdictResult:
+        raise _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            "HEAD commit object is missing from the canonical mirror",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _head_object_missing)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_head_object_missing",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_head_object_missing",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is True
+    assert result.returncode == 1
+    assert result.stderr == "HEAD commit object is missing from the canonical mirror"
+    assert result.reason_code == _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+    assert state.pending_operator_hint == OperatorHint(
+        reason=hint.reason,
+        operation_id=hint.operation_id,
+        requested_at=hint.requested_at,
+        status="needs_human",
+        status_reason="HEAD commit object is missing from the canonical mirror",
     )
 
 

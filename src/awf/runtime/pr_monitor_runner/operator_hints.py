@@ -27,6 +27,7 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
@@ -36,6 +37,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedS
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
@@ -211,6 +213,16 @@ async def _run_operator_hint_cycle(
                 returncode=1,
                 stderr=reason,
                 reason_code=exc.reason_code,
+            )
+        except _MonitorHeadObjectMissingError as exc:
+            reason = str(exc) or "HEAD commit object is missing from the canonical mirror"
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=reason,
+                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
             )
         except _MonitorMirrorHooksPathRepairFailedError as exc:
             reason = str(exc) or "mirror hooks path repair failed"
