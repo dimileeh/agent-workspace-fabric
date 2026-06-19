@@ -19,6 +19,9 @@ from typing import Any
 
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
+from awf.control.operator_grants import (
+    consume_active_operator_grants_in_session,
+)
 from awf.db.enums import (
     FailureReason,
     WorkspaceStatus,
@@ -41,6 +44,7 @@ from awf.runtime.operator_hints import (
     persist_operator_hint,
 )
 from awf.runtime.pr_monitor import (
+    _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     AbortReason,
     MonitorState,
     OperatorHint,
@@ -515,6 +519,70 @@ async def _remove_forge_transient_retry_count(
             return
         ws.monitor_threads_addressed = threads_addressed
         await s.commit()
+
+
+async def _clear_preserved_head_marker_durably(self: Any, workspace_id: str) -> None:
+    """Remove ONLY the protected-block preserved-head marker from the persisted row.
+
+    The block-time RECORDING of ``_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY`` is
+    durable as soon as the ``monitoring_pr -> blocked`` transition commits — not only
+    in the in-memory ``MonitorState`` that the loop flushes later
+    (PRRT_kwDOSJAM6s6KEtU6). The CLEAR must be symmetric: when a directive-only
+    terminal resume drops the preserved commit and clears the in-memory marker, that
+    clear is otherwise not durable until the outer loop's later :func:`_persist_state`.
+    A crash in that window reloads the pending directive with the STALE marker, and the
+    directive-drop restart shortcut in ``_run_operator_hint_cycle`` — which only checks
+    that the local HEAD is on the remote — would finalize the new hint as a no-op,
+    SKIP the CLI, and swallow the terminal verdict (PRRT_kwDOSJAM6s6KWAIx). Removing the
+    key durably (merged onto the DB row, never flushing the rest of the in-memory state,
+    which may still carry an unset terminal verdict) closes that window: a later crash
+    leaves NO marker, so the shortcut is skipped and the directive CLI re-runs behind the
+    normal guards and re-derives the verdict. No-ops when the key is already absent."""
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        if threads_addressed.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None) is None:
+            return
+        ws.monitor_threads_addressed = threads_addressed
+        await s.commit()
+
+
+async def _clear_preserved_marker_and_consume_grants_durably(self: Any, workspace_id: str) -> None:
+    """Clear the preserved-head marker AND consume the active operator grants in ONE
+    durable transaction.
+
+    The terminal directive+grant DROP branch of ``_terminal_directive_grant_reblock``
+    must do BOTH when the combined CLI dropped the preserved commit: clear the stale
+    marker (so a later grant-revoking directive cannot satisfy the directive-drop
+    restart shortcut and no-op the operator's follow-up — PRRT_kwDOSJAM6s6KVgwV) AND
+    consume the single-use grant that approved ONLY the now-dropped commit (so a later
+    ``SyncBase`` cannot honor it for a conflict edit — PRRT_kwDOSJAM6s6KVt_Q).
+
+    Running these as two SEPARATE committed transactions leaves a crash window: clearing
+    the marker first drops ``has_preserved_protected_block`` to False on the persisted
+    row, so ``decide()`` no longer ranks the resume ahead of ``SyncBase``; if the process
+    dies after that commit but before the grant consume commits, the row durably reloads
+    with the marker GONE but the grant STILL ACTIVE — exactly the KVt_Q grant leak the
+    consume was added to close. Performing both writes under one transaction closes that
+    window: a crash before the single commit leaves marker-present + grant-active (the
+    resume re-blocks / re-runs safely), and a crash after leaves marker-gone +
+    grant-consumed (nothing carries the stale approval forward). Never flushes the rest
+    of the in-memory state. No-ops when both are already settled."""
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        marker_cleared = (
+            threads_addressed.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None) is not None
+        )
+        if marker_cleared:
+            ws.monitor_threads_addressed = threads_addressed
+        consumed = await consume_active_operator_grants_in_session(s, workspace_id)
+        if marker_cleared or consumed:
+            await s.commit()
 
 
 async def _terminate_completed(
@@ -1035,12 +1103,63 @@ async def _terminate_failed(
 ) -> None:
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
-        ws = await repo.get(workspace_id)
+        # Lock the row before the owner fence below: a plain ``get`` leaves a
+        # TOCTOU window where this stale runner reads its old ``monitor_claimed_by``,
+        # a newer worker reclaims the monitor lease (``claim_monitoring_pr``
+        # reassigns expired leases), and this session still commits ``failed`` at
+        # the transition below. ``get_for_update`` holds the row from this read
+        # through the commit so the fence check and the state write are atomic.
+        ws = await repo.get_for_update(workspace_id)
         if ws is None:
             return
         rc = reason_code.value if isinstance(reason_code, AbortReason) else reason_code
         rc = rc or "MONITOR_ABORT"
         if ws.status != WorkspaceStatus.monitoring_pr.value:
+            await _record_ignored_monitor_terminal_callback(
+                repo,
+                ws,
+                requested_status=WorkspaceStatus.failed,
+                reason_code=rc,
+            )
+            await s.commit()
+            return
+        superseded_claimed_runner = (
+            self._monitor_owner_id is not None and ws.monitor_claimed_by != self._monitor_owner_id
+        )
+        # The inline initial handoff runs with no monitor claim
+        # (``_monitor_owner_id`` is None) while the row sits unclaimed in
+        # ``monitoring_pr`` — exactly the state ``claim_monitoring_pr`` can
+        # immediately reclaim for a recovery monitor on another worker. Once a
+        # recovery monitor has claimed it, ``monitor_claimed_by`` is no longer
+        # None and this inline runner is the stale one. Mirror the
+        # ``fence_unclaimed_monitor`` arm of the pause CAS here so the stale
+        # inline runner does not clobber the takeover to ``failed``
+        # (PRRT_kwDOSJAM6s6KTj4R).
+        superseded_inline_handoff = (
+            self._monitor_owner_id is None and ws.monitor_claimed_by is not None
+        )
+        if superseded_claimed_runner or superseded_inline_handoff:
+            # A superseded monitor runner — its lease expired and a newer worker
+            # reclaimed the row (``claim_monitoring_pr`` reassigns expired leases),
+            # OR an inline initial handoff whose unclaimed row was taken over by a
+            # recovery monitor — while this stale runner stayed alive must NOT
+            # clobber the live claimant's workspace to ``failed``. The status guard
+            # above misses this race because the takeover keeps the row in
+            # ``monitoring_pr``; the protected-scope pause fence
+            # (PRRT_kwDOSJAM6s6KHtX5 / PRRT_kwDOSJAM6s6KKmGo) already stops the
+            # stale runner from PAUSING, but the fenced CAS-miss returns a TERMINAL
+            # failed push result, so the loop would otherwise reach here and fail
+            # the takeover. Mirror that owner fence at this terminal sink and
+            # record an ignored terminal callback instead (PRRT_kwDOSJAM6s6KIep5,
+            # PRRT_kwDOSJAM6s6KTj4R). A genuine inline handoff with no takeover
+            # leaves ``monitor_claimed_by`` None and still fails normally.
+            _log.warning(
+                "monitor.terminal_failed_ignored_superseded_owner",
+                workspace_id=workspace_id,
+                reason_code=rc,
+                monitor_owner_id=self._monitor_owner_id,
+                monitor_claimed_by=ws.monitor_claimed_by,
+            )
             await _record_ignored_monitor_terminal_callback(
                 repo,
                 ws,

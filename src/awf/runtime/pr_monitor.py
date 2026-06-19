@@ -263,6 +263,15 @@ class PRStatus:
 # ── State — small, serialisable, lives on the workspace row ────────────────
 
 
+_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY = "__awf_protected_block_preserved_head__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key carrying the preserved
+(unpushed) commit SHA of a POST-PR protected-scope pause, so a monitor/worker
+restart reconstructs it and the idempotent-push ancestry check avoids a
+duplicate push (WS-2 §5). Defined here (the pure core) so ``decide`` can spot a
+still-preserved protected commit; the runner re-exports it from
+``remote_repair``."""
+
+
 @dataclass
 class MonitorState:
     """Mutable state the runner keeps across iterations.
@@ -291,6 +300,15 @@ class MonitorState:
     def mark_addressed(self, thread_id: str, verdict: str) -> None:
         self.threads_addressed_ids[thread_id] = verdict
         self._changed_thread_ids.add(thread_id)
+
+    @property
+    def has_preserved_protected_block(self) -> bool:
+        """Whether a POST-PR protected-scope pause preserved an unpushed commit.
+
+        True between the block and the resume that pushes/reverts it — i.e. while
+        the offending protected commit is still sitting on the workspace HEAD.
+        """
+        return bool(self.threads_addressed_ids.get(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY))
 
     def changed_thread_ids(self) -> set[str]:
         return set(self._changed_thread_ids)
@@ -854,6 +872,17 @@ def _should_rerun_transient_ci(
 # ── The decision function ──────────────────────────────────────────────────
 
 
+def _operator_hint_needs_human_notice(hint: OperatorHint) -> NotifyHuman:
+    """``NotifyHuman`` for a terminal (``needs_human`` / ``agent_failed``) hint."""
+    reason_suffix = f" Reason: {hint.status_reason}" if hint.status_reason else ""
+    return NotifyHuman(
+        message=(
+            f"An {hint.control_label} still requires human attention before "
+            f"this PR can merge.{reason_suffix}"
+        )
+    )
+
+
 def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> MonitorAction:
     """Pure policy: which ``MonitorAction`` should the runner take next?
 
@@ -924,6 +953,49 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         and _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
     )
 
+    # 1.pre A pending protected-block resume — DIRECTIVE or GRANT-ONLY — runs
+    # BEFORE SyncBase. When a monitor-origin protected-scope block is resolved and
+    # the base advanced during the human decision window, letting SyncBase run
+    # first mishandles the STILL-PRESERVED protected commit in two distinct ways:
+    #
+    #   * DIRECTIVE (revert/redo): the directive guide revoked the grants that
+    #     would have suppressed the preserved violation (controls_guide), so
+    #     ``_run_sync_base`` re-validates it and pauses the workspace back into
+    #     ``blocked`` before the directive ever runs — a re-block loop where the
+    #     operator's directive is silently discarded each base update
+    #     (PRRT_kwDOSJAM6s6KFgtj).
+    #   * GRANT-ONLY (approve-and-keep): the path-scoped grant is still active
+    #     (it is only consumed when the hint runs), so if SyncBase hits a conflict
+    #     and its resolution agent edits the SAME granted protected path,
+    #     ``_protected_scope_violations_for_sync_base_push`` honors that grant and
+    #     pushes the NEW protected edit under an approval meant only for the
+    #     preserved commit — a grant leak (PRRT_kwDOSJAM6s6KGX2A).
+    #
+    # Running the hint first resolves the block (directive revert/redo, or
+    # grant-only push of the preserved commit) and pushes it to the PR branch — a
+    # base update does not make THAT push non-fast-forward — and spends the grant;
+    # SyncBase then integrates the base on a later iteration with no active grant,
+    # so any sync-base protected edit re-blocks. Scoped to a resume WITH the
+    # preserved-head marker: an ordinary remonitor (no preserved block) keeps
+    # syncing base first.
+    #
+    # A TERMINAL hint (needs_human / agent_failed) here means the directive pass
+    # already ran and failed BEFORE any push, so the preserved protected commit and
+    # its single-use grant are BOTH still unfinalized (the grant is consumed and the
+    # marker dropped only on a successful resume). Falling through to SyncBase would
+    # let ``_protected_scope_violations_for_sync_base_push`` load that still-active
+    # grant and push the preserved protected commit — or a conflict-resolution edit
+    # on the granted path — under an approval meant only for the original preserved
+    # commit, before the failed hint is resolved or the grant consumed
+    # (PRRT_kwDOSJAM6s6KHtX0). So an unfinalized preserved block outranks SyncBase
+    # regardless of hint status: surface NotifyHuman instead, and a later resume
+    # pushes the resolved block before SyncBase integrates the base with no grant.
+    if state.pending_operator_hint is not None and state.has_preserved_protected_block:
+        hint = state.pending_operator_hint
+        if hint.status == "pending":
+            return AddressOperatorHint(hint=hint)
+        return _operator_hint_needs_human_notice(hint)
+
     # 1. Base-behind / DIRTY check runs BEFORE comments and operator hints.
     # Rationale: on a PR with an active bot-review fleet every push triggers a
     # new wave of comments — AddressComments would fire every single iteration
@@ -967,13 +1039,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         hint = state.pending_operator_hint
         if hint.status == "pending":
             return AddressOperatorHint(hint=hint)
-        reason_suffix = f" Reason: {hint.status_reason}" if hint.status_reason else ""
-        return NotifyHuman(
-            message=(
-                f"An {hint.control_label} still requires human attention before "
-                f"this PR can merge.{reason_suffix}"
-            )
-        )
+        return _operator_hint_needs_human_notice(hint)
 
     # 3. Unresolved comments, filtered to those we haven't handled yet.
     # Review comments get one agent pass so the monitor records whether the

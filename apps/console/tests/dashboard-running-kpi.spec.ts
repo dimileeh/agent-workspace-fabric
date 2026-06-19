@@ -18,8 +18,23 @@ test("Running KPI sums running, validating, and pushing workspaces", async ({ pa
   const runningKpi = page.getByText("Running", { exact: true }).locator("..").filter({ has: page.locator(".kpi-value") });
   await expect(runningKpi).toBeVisible();
 
-  // running:2 + validating:1 + pushing:1 => 4
+  // running:2 + validating:1 + pushing:1 => 4 (blocked:1 is NOT folded in).
   await expect(runningKpi.locator(".kpi-value")).toHaveText("4");
+});
+
+test("a blocked workspace lands in Active but never in the Running KPI", async ({ page }) => {
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const kpi = (label: string) =>
+    page.getByText(label, { exact: true }).locator("..").filter({ has: page.locator(".kpi-value") });
+
+  // Running stays running+validating+pushing — blocked must not regress it.
+  await expect(kpi("Running").locator(".kpi-value")).toHaveText("4");
+  // Active is active_total, which includes the blocked workspace.
+  await expect(kpi("Active").locator(".kpi-value")).toHaveText("5");
+  // The dedicated Awaiting operator KPI reflects the blocked count.
+  await expect(kpi("Awaiting operator").locator(".kpi-value")).toHaveText("1");
 });
 
 async function waitForConsoleReady(page: Page) {
@@ -78,8 +93,9 @@ function resourceSaturation() {
         validating: 1,
         pushing: 1,
         monitoring_pr: 0,
+        blocked: 1,
       },
-      active_total: 4,
+      active_total: 5,
       requested: 0,
       provisioning: 0,
       ready: 0,
@@ -87,6 +103,7 @@ function resourceSaturation() {
       validating: 1,
       pushing: 1,
       monitoring_pr: 0,
+      blocked: 1,
       destroying: 0,
       completed: 0,
       failed: 0,

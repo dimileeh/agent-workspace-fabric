@@ -19,7 +19,9 @@ from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     MonitorState,
 )
+from awf.runtime.pr_monitor_runner import remote_ops as pr_remote_ops
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
+from awf.runtime.pr_monitor_runner import remote_repair_protected as pr_remote_repair_protected
 from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
     ProtectedScopeDiffError,
@@ -582,7 +584,7 @@ async def test_sync_base_protected_scope_wraps_committed_diff_read_failure(
     monkeypatch.setattr(runner, "_merge_base_with_head", _merged_base)
     monkeypatch.setattr(runner, "_changed_paths_between_ref_and_head", _base_changes)
     monkeypatch.setattr(
-        pr_remote_repair,
+        pr_remote_repair_protected,
         "protected_file_diffs_for_committed_paths",
         _raise_committed_diff_read,
     )
@@ -713,7 +715,7 @@ async def test_rollback_protected_scope_repair_delta_records_cleanup_failure(
         workspace_id="ws_delta",
         pr_number=42,
         worktree_path=tmp_path,
-        protected_scope_block=pr_remote_repair._ProtectedScopePushBlock(  # noqa: SLF001
+        protected_scope_block=pr_remote_ops._ProtectedScopePushBlock(  # noqa: SLF001
             message="blocked",
             reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
             violations=(_protected_workflow_violation(),),
@@ -849,8 +851,8 @@ async def test_protected_scope_diff_unavailable_push_result_uses_block_details(
         worktrees_root=tmp_path / "worktrees",
     )
 
-    async def _block(**_kwargs: object) -> pr_remote_repair._ProtectedScopePushBlock:  # noqa: SLF001
-        return pr_remote_repair._ProtectedScopePushBlock(  # noqa: SLF001
+    async def _block(**_kwargs: object) -> pr_remote_ops._ProtectedScopePushBlock:  # noqa: SLF001
+        return pr_remote_ops._ProtectedScopePushBlock(  # noqa: SLF001
             message="diff unavailable",
             reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
         )

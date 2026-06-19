@@ -334,6 +334,14 @@ async def _post_human_notification_once(
     state: MonitorState,
     blocker_reason: str | None = None,
 ) -> None:
+    """Post a single human-attention PR comment, deduped once per (head, reason).
+
+    The dedupe key is head/reason scoped (``_notification_key``), matching the
+    once-per-(head, reason) behavior every caller relies on. The protected-block
+    pause needs different semantics (epoch-keyed dedupe, ``ForgeClientError``
+    swallowing, best-effort skip on missing monitor context) and so posts via its
+    own ``_post_protected_block_notification`` rather than through this helper.
+    """
     from awf.runtime.pr_monitor_runner.helpers import _notification_key, _notify_human_reason
 
     reason = blocker_reason if blocker_reason is not None else _notify_human_reason(status, state)

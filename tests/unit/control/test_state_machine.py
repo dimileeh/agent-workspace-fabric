@@ -56,11 +56,16 @@ class TestValidTransitions:
             (WorkspaceStatus.pushing, WorkspaceStatus.failed),
             (WorkspaceStatus.pushing, WorkspaceStatus.cancelled),
             # A blocked workspace resumes (operator grant) or is terminated.
+            # A monitor-origin (post-PR) block resumes back into the monitor.
             (WorkspaceStatus.blocked, WorkspaceStatus.running),
             (WorkspaceStatus.blocked, WorkspaceStatus.validating),
             (WorkspaceStatus.blocked, WorkspaceStatus.pushing),
+            (WorkspaceStatus.blocked, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.blocked, WorkspaceStatus.failed),
             (WorkspaceStatus.blocked, WorkspaceStatus.cancelled),
+            # A protected-scope violation during the PR monitor pauses the PR
+            # owner for an operator decision instead of failing (post-PR block).
+            (WorkspaceStatus.monitoring_pr, WorkspaceStatus.blocked),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.completed),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.failed),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.cancelled),
@@ -100,15 +105,16 @@ class TestInvalidTransitions:
             (WorkspaceStatus.running, WorkspaceStatus.ready),
             (WorkspaceStatus.completed, WorkspaceStatus.running),
             # blocked is non-terminal but cannot jump straight to completed /
-            # monitoring_pr / destroying — only resume or terminate.
+            # destroying — only resume or terminate. (blocked → monitoring_pr is
+            # now allowed for the post-PR monitor resume.)
             (WorkspaceStatus.blocked, WorkspaceStatus.completed),
-            (WorkspaceStatus.blocked, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.blocked, WorkspaceStatus.destroying),
             (WorkspaceStatus.blocked, WorkspaceStatus.blocked),
             # Cannot self-transition.
             (WorkspaceStatus.running, WorkspaceStatus.running),
-            # monitoring_pr is a dead-end for its own inputs — only the
-            # monitor owns transitions out, and only to completed/failed/cancelled.
+            # monitoring_pr exits to completed/failed/cancelled (and now blocked
+            # for a protected-scope pause) — never to its own input or back to
+            # pushing/validating.
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.pushing),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.validating),

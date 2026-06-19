@@ -19,6 +19,10 @@ from awf.runtime.pr_monitor_runner import remote_ops as _remote_ops
 from awf.runtime.pr_monitor_runner import remote_prompt_ops as _remote_prompt_ops
 from awf.runtime.pr_monitor_runner import remote_repair as _remote_repair
 from awf.runtime.pr_monitor_runner import remote_repair_diffs as _remote_repair_diffs
+from awf.runtime.pr_monitor_runner import remote_repair_protected as _remote_repair_protected
+from awf.runtime.pr_monitor_runner import (
+    remote_repair_protected_grants as _remote_repair_protected_grants,
+)
 from awf.runtime.pr_monitor_runner import transient_ops as _transient_ops
 
 
@@ -62,6 +66,10 @@ class RunnerDelegatesMixin:
     _persist_state = _lifecycle._persist_state
     _persist_forge_transient_retry_count = _lifecycle._persist_forge_transient_retry_count
     _remove_forge_transient_retry_count = _lifecycle._remove_forge_transient_retry_count
+    _clear_preserved_head_marker_durably = _lifecycle._clear_preserved_head_marker_durably
+    _clear_preserved_marker_and_consume_grants_durably = (
+        _lifecycle._clear_preserved_marker_and_consume_grants_durably
+    )
     _terminate_completed = _lifecycle._terminate_completed
     _reconcile_target_branch_after_merge = _lifecycle._reconcile_target_branch_after_merge
     _teardown_compose_stack = _lifecycle._teardown_compose_stack
@@ -111,24 +119,55 @@ class RunnerDelegatesMixin:
     _repair_operation_start_head_result = _remote_repair._repair_operation_start_head_result
     _open_merge_candidate_head_sha = _remote_repair._open_merge_candidate_head_sha
     _resolve_task_tag = _remote_repair._resolve_task_tag
+    _resolve_block_resume_phase = _remote_repair._resolve_block_resume_phase
+    _clear_block_resume_phase = _remote_repair._clear_block_resume_phase
     _commit_dirty_worktree = _remote_repair._commit_dirty_worktree
     _repair_protected_scope_commits_before_push = (
-        _remote_repair._repair_protected_scope_commits_before_push
+        _remote_repair_protected._repair_protected_scope_commits_before_push
+    )
+    _pause_monitor_for_protected_scope_block = (
+        _remote_repair_protected._pause_monitor_for_protected_scope_block
+    )
+    _post_protected_block_notification = _remote_repair_protected._post_protected_block_notification
+    _active_operator_grant_specs = _remote_repair_protected_grants._active_operator_grant_specs
+    _preserved_protected_change_fully_granted = (
+        _remote_repair_protected_grants._preserved_protected_change_fully_granted
+    )
+    _consume_active_operator_grants = (
+        _remote_repair_protected_grants._consume_active_operator_grants
+    )
+    _preserved_commit_already_on_remote = (
+        _remote_repair_protected_grants._preserved_commit_already_on_remote
+    )
+    _preserved_commit_in_unpushed_range = (
+        _remote_repair_protected_grants._preserved_commit_in_unpushed_range
+    )
+    _preserved_head_on_remote_fetch_head = (
+        _remote_repair_protected_grants._preserved_head_on_remote_fetch_head
+    )
+    _preserved_commit_reachable_from_head = (
+        _remote_repair_protected_grants._preserved_commit_reachable_from_head
     )
     _rollback_protected_scope_repair_delta_before_push = (
-        _remote_repair._rollback_protected_scope_repair_delta_before_push
+        _remote_repair_protected._rollback_protected_scope_repair_delta_before_push
     )
-    _protected_scope_repair_delta_paths = _remote_repair._protected_scope_repair_delta_paths
-    _record_protected_scope_rollback_result = _remote_repair._record_protected_scope_rollback_result
+    _protected_scope_repair_delta_paths = (
+        _remote_repair_protected._protected_scope_repair_delta_paths
+    )
+    _record_protected_scope_rollback_result = (
+        _remote_repair_protected._record_protected_scope_rollback_result
+    )
     _repair_protected_scope_changes_before_commit = (
-        _remote_repair._repair_protected_scope_changes_before_commit
+        _remote_repair_protected._repair_protected_scope_changes_before_commit
     )
     _protected_scope_violations_not_restored_to_remote_branch = (
-        _remote_repair._protected_scope_violations_not_restored_to_remote_branch
+        _remote_repair_protected._protected_scope_violations_not_restored_to_remote_branch
     )
-    _protected_scope_violations_for_status = _remote_repair._protected_scope_violations_for_status
+    _protected_scope_violations_for_status = (
+        _remote_repair_protected._protected_scope_violations_for_status
+    )
     _protected_scope_violations_for_unpushed_commits = (
-        _remote_repair._protected_scope_violations_for_unpushed_commits
+        _remote_repair_protected._protected_scope_violations_for_unpushed_commits
     )
     _changed_paths_since_remote_branch = _remote_repair_diffs._changed_paths_since_remote_branch
     _remote_branch_diff_base_and_changed_paths = (
@@ -141,13 +180,15 @@ class RunnerDelegatesMixin:
         _remote_repair_diffs._protected_file_diffs_for_status_paths
     )
     _protected_scope_violations_for_sync_base_push = (
-        _remote_repair._protected_scope_violations_for_sync_base_push
+        _remote_repair_protected._protected_scope_violations_for_sync_base_push
     )
-    _protected_scope_diff_unavailable_block = _remote_repair._protected_scope_diff_unavailable_block
+    _protected_scope_diff_unavailable_block = (
+        _remote_repair_protected._protected_scope_diff_unavailable_block
+    )
     _protected_scope_diff_unavailable_push_result = (
-        _remote_repair._protected_scope_diff_unavailable_push_result
+        _remote_repair_protected._protected_scope_diff_unavailable_push_result
     )
-    _protected_scope_push_block = _remote_repair._protected_scope_push_block
+    _protected_scope_push_block = _remote_repair_protected._protected_scope_push_block
     _protected_scope_repair_prompt = _remote_prompt_ops._protected_scope_repair_prompt
     _protected_scope_committed_repair_prompt = (
         _remote_prompt_ops._protected_scope_committed_repair_prompt

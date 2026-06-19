@@ -88,6 +88,7 @@ export function fallbackResourceSaturation(
       validating: saturation.workspace_counts?.validating ?? 0,
       pushing: saturation.workspace_counts?.pushing ?? 0,
       monitoring_pr: saturation.workspace_counts?.monitoring_pr ?? 0,
+      blocked: saturation.workspace_counts?.blocked ?? 0,
       destroying: saturation.workspace_counts?.destroying ?? 0,
       completed: saturation.workspace_counts?.completed ?? 0,
       failed: saturation.workspace_counts?.failed ?? 0,

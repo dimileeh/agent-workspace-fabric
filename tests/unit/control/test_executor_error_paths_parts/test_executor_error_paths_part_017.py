@@ -235,6 +235,54 @@ class TestResumePrMonitorStatusRechecks:
             assert ws.status == WorkspaceStatus.cancelled.value
 
     @pytest.mark.unit
+    async def test_resume_threads_monitor_claim_owner_into_runner(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # PRRT_kwDOSJAM6s6KHtX5: the resume hands the runner the current monitor
+        # claim owner (``monitor_claimed_by`` on the reclaimed row) so the
+        # protected-scope pause CAS can fence on it. A stale runner that later
+        # finds the claim reassigned then loses the CAS instead of clobbering.
+        captured: list[str | None] = []
+
+        class _Compose:
+            async def ensure_project_up(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                del workspace_id
+
+        class _Monitor:
+            async def run(
+                self,
+                *,
+                workspace_id: str,
+                compose_project: str,
+                compose_file: Path,
+                monitor_owner_id: str | None = None,
+            ) -> None:
+                del workspace_id, compose_project, compose_file
+                captured.append(monitor_owner_id)
+
+        ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-current"
+            await s.commit()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=_Compose(),
+            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
+        )
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert captured == ["worker-current"]
+
+    @pytest.mark.unit
     async def test_resume_no_op_when_feature_branch_remote_push_recovery_returns_none(
         self,
         fake: FakeCommandRunner,

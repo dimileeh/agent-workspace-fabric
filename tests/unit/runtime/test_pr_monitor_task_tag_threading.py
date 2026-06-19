@@ -449,6 +449,9 @@ async def test_run_ci_fix_resolves_once_and_threads_to_sink(
     async def _owned_paths(_self: object, _workspace_id: str) -> list[str]:
         return []
 
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return "headsha"
+
     async def _commit_dirty_worktree(**kwargs: object) -> bool:
         sink_tags.append(kwargs.get("task_tag"))
         return True
@@ -473,6 +476,7 @@ async def test_run_ci_fix_resolves_once_and_threads_to_sink(
         _pre_existing_dirty_repair_worktree_result=_pre_existing,
         _provider_recovery_suppresses_cli=_suppress,
         _repair_operation_start_head_result=_head,
+        _rev_parse_head=_rev_parse_head,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_psb,
         _validated_git_push_result=_validated,
@@ -527,6 +531,22 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
     async def _rev_parse_head(_worktree_path: Path) -> str:
         return "pushedsha"
 
+    async def _grant_specs(_workspace_id: str) -> list[object]:
+        # A directive resume runs the CLI regardless of grants; no grants here.
+        return []
+
+    async def _resolve_block_resume_phase(_workspace_id: str) -> str | None:
+        return None
+
+    async def _preserved_commit_already_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _clear_marker_and_consume_grants(_workspace_id: str) -> None:
+        return None
+
+    async def _clear_block_resume_phase(_workspace_id: str) -> None:
+        return None
+
     def _operator_hint_prompt(**kwargs: object) -> str:
         prompt_tags.append(kwargs.get("task_tag"))
         return "PROMPT"
@@ -540,13 +560,18 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
         _resolve_task_tag=_resolve_task_tag,
         _pre_existing_dirty_repair_worktree_result=_pre_existing,
         _repair_operation_start_head_result=_head,
+        _active_operator_grant_specs=_grant_specs,
+        _resolve_block_resume_phase=_resolve_block_resume_phase,
+        _preserved_commit_already_on_remote=_preserved_commit_already_on_remote,
+        _clear_preserved_marker_and_consume_grants_durably=_clear_marker_and_consume_grants,
+        _clear_block_resume_phase=_clear_block_resume_phase,
         _invoke_cli_for_verdict_result=_invoke,
         _protected_scope_push_block=_psb,
         _validated_git_push_result=_validated,
         _rev_parse_head=_rev_parse_head,
     )
 
-    state = SimpleNamespace(last_push_sha=None)
+    state = SimpleNamespace(last_push_sha=None, threads_addressed_ids={})
     await operator_hints._run_operator_hint_cycle(
         self,
         workspace_id="ws_hint",
