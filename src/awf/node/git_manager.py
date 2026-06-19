@@ -44,6 +44,14 @@ AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
 
 
+def _mirror_hooks_path_unset_pattern(hooks_path: str) -> str | None:
+    if hooks_path in _POISONED_MIRROR_HOOKS_PATH_PATTERNS:
+        return _POISONED_MIRROR_HOOKS_PATH_PATTERNS[hooks_path]
+    if not hooks_path or Path(hooks_path).is_absolute():
+        return f"^{re.escape(hooks_path)}$"
+    return None
+
+
 class GitOperationError(Exception):
     """Raised when a git subprocess exits non-zero or a precondition fails.
 
@@ -736,17 +744,17 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
             reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
         )
 
-    poisoned_hooks_paths = tuple(
+    disallowed_hooks_paths = tuple(
         dict.fromkeys(
-            hooks_path
+            (hooks_path, unset_pattern)
             for hooks_path in probe_stdout.splitlines()
-            if hooks_path in _POISONED_MIRROR_HOOKS_PATH_PATTERNS
+            if (unset_pattern := _mirror_hooks_path_unset_pattern(hooks_path)) is not None
         )
     )
-    if not poisoned_hooks_paths:
+    if not disallowed_hooks_paths:
         return False
 
-    for hooks_path in poisoned_hooks_paths:
+    for hooks_path, unset_pattern in disallowed_hooks_paths:
         unset = await asyncio.create_subprocess_exec(
             "git",
             "--git-dir",
@@ -754,7 +762,7 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
             "config",
             "--unset-all",
             "core.hooksPath",
-            _POISONED_MIRROR_HOOKS_PATH_PATTERNS[hooks_path],
+            unset_pattern,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=git_env_without_object_lookup_overrides(),

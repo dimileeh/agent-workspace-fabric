@@ -1275,6 +1275,39 @@ class TestRepairMirrorHooksPath:
         assert check.stdout.splitlines() == [".githooks/Lefthook"]
 
     @pytest.mark.unit
+    async def test_clears_unrecognized_absolute_hooks_path(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "core.hooksPath",
+                "/tmp/empty-hooks",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--get-all", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+
+    @pytest.mark.unit
     async def test_removes_poisoned_hooks_path_without_clearing_legitimate_hooks_path(
         self, tmp_path: Path
     ) -> None:
