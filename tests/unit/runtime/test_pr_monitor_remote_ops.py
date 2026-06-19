@@ -6,6 +6,10 @@ import pytest
 
 from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor_runner import pre_push_validation
+from awf.runtime.pr_monitor_runner.constants import (
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+)
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
 )
@@ -77,6 +81,21 @@ def test_git_push_terminal_monitor_failure_maps_reparent_failed_as_terminal() ->
     must end monitor recovery rather than let a later iteration push the orphaning HEAD
     and mask the error as a non-fast-forward (PR #422 thread)."""
     assert _make_push_result("PRE_PUSH_VALIDATION_REPARENT_FAILED").terminal_monitor_failure is True
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    [
+        _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        _MIRROR_HOOKS_PATH_POISONED_REASON,
+    ],
+)
+@pytest.mark.unit
+def test_git_push_terminal_monitor_failure_maps_unrecoverable_git_repairs_as_terminal(
+    reason_code: str,
+) -> None:
+    """Unrecoverable local git repairs should fail the monitor instead of retrying."""
+    assert _make_push_result(reason_code).terminal_monitor_failure is True
 
 
 @pytest.mark.unit
