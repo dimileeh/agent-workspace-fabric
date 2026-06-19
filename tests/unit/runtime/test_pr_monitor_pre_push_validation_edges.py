@@ -851,7 +851,6 @@ async def test_pre_push_validation_recovered_head_rename_includes_source_path(
     recovered_head = "7" * 40
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{recovery_base}\n")
-    cmd.queue_result(returncode=0)
     cmd.queue_result(
         returncode=0,
         stdout="R100\0.github/workflows/ci.yml\0docs/ci.yml\0",
