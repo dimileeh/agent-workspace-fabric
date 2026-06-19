@@ -281,54 +281,6 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
     return frozenset(paths)
 
 
-def _is_ignored_path(worktree_path: Path, path: str) -> bool:
-    """Return whether ``path`` matches a gitignore rule.
-
-    ``git status --ignored=matching`` only prints ignored entries that contain
-    at least one tracked or untracked file. Empty directories matched by a
-    wildcard rule such as ``cache/**`` are not listed, so the cleanup helpers
-    consult ``git check-ignore`` directly for directory candidates that would
-    otherwise be treated as untracked side effects.
-
-    Raises:
-        _IgnoreCheckError: If ``git check-ignore`` fails with an unexpected
-        exit code. Treating a probe failure as "not ignored" would let empty-
-        directory cleanup remove wildcard-ignored empty dirs, mirroring the
-        unsafe pattern fixed for ``_gitlink_paths``.
-    """
-    result = subprocess.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "check-ignore",
-            "--no-index",
-            "--",
-            path,
-        ],
-        capture_output=True,
-    )
-    stdout = (
-        result.stdout.decode("utf-8", errors="surrogateescape")
-        if isinstance(result.stdout, bytes)
-        else result.stdout
-    )
-    stderr = (
-        result.stderr.decode("utf-8", errors="surrogateescape")
-        if isinstance(result.stderr, bytes)
-        else result.stderr
-    )
-    if result.returncode == 0:
-        return stdout.strip() != ""
-    if result.returncode == 1:
-        return False
-    raise _IgnoreCheckError(
-        "Could not determine whether path is ignored with `git check-ignore`.",
-        stderr=stderr or "",
-    )
-
-
 def _ignored_paths(worktree_path: Path, paths: tuple[str, ...]) -> frozenset[str]:
     """Return candidate paths that match a gitignore rule."""
     if not paths:
@@ -457,11 +409,11 @@ def _snapshot_empty_untracked_dirs(
     ignore_check_ignored_empty_dirs: bool = False,
 ) -> tuple[str, ...]:
     """Snapshot fileless non-ignored directory trees that git status omits."""
-    empty_dirs: list[str] = []
+    candidates: list[str] = []
     ignored_path_set = {_normalize_porcelain_path(path) for path in ignored_paths}
     gitlink_paths = _gitlink_paths(worktree_path)
 
-    def has_file_descendant(directory: Path) -> bool:
+    def collect_empty_candidate(directory: Path) -> bool:
         try:
             children = tuple(sorted(directory.iterdir(), key=lambda child: child.name))
         except OSError:
@@ -490,25 +442,33 @@ def _snapshot_empty_untracked_dirs(
             if child.name == ".git" or (child / ".git").exists() or relative_child in gitlink_paths:
                 has_file = True
                 continue
-            if has_file_descendant(child):
+            if collect_empty_candidate(child):
                 has_file = True
-            else:
-                try:
-                    ignored = (
-                        _is_ignored_path(worktree_path, child_path)
-                        if ignore_check_ignored_empty_dirs
-                        else False
-                    )
-                except _IgnoreCheckError:
-                    raise
-                if ignored:
-                    has_file = True
-                else:
-                    empty_dirs.append(child_path)
+                continue
+            candidates.append(child_path)
         return has_file
 
-    has_file_descendant(worktree_path)
-    return tuple(dict.fromkeys(empty_dirs))
+    collect_empty_candidate(worktree_path)
+    if not ignore_check_ignored_empty_dirs:
+        return tuple(dict.fromkeys(candidates))
+
+    ignored_candidate_paths = _ignored_paths(worktree_path, tuple(candidates))
+    ignored_candidate_parent_paths: set[str] = set()
+    for ignored_path in ignored_candidate_paths:
+        current = PurePosixPath(ignored_path.rstrip("/"))
+        for parent in current.parents:
+            if str(parent) == ".":
+                break
+            ignored_candidate_parent_paths.add(f"{parent.as_posix()}/")
+
+    return tuple(
+        dict.fromkeys(
+            dir_path
+            for dir_path in candidates
+            if dir_path not in ignored_candidate_paths
+            and dir_path not in ignored_candidate_parent_paths
+        )
+    )
 
 
 def _cleanup_empty_untracked_parent_dirs(

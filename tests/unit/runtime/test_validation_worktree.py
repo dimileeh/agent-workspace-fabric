@@ -963,6 +963,42 @@ def test_remove_empty_untracked_dirs_batch_check_ignore_candidates(
 
 
 @pytest.mark.unit
+def test_snapshot_empty_untracked_dirs_batch_check_ignore_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot mode should batch ignored-empty-dir checks."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    for name in ("a", "b", "c", "a/nested", "b/nested"):
+        (worktree / name).mkdir(parents=True)
+
+    captured: list[tuple[list[str], object]] = []
+    original_run = subprocess.run
+
+    def capture_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append((list(cmd), kwargs.get("input")))
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
+    empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+        ignore_check_ignored_empty_dirs=True,
+    )
+
+    check_ignore_calls = [call for call in captured if "check-ignore" in call[0]]
+    assert len(check_ignore_calls) == 1
+    check_ignore_cmd, check_ignore_input = check_ignore_calls[0]
+    assert "--stdin" in check_ignore_cmd
+    assert "-z" in check_ignore_cmd
+    assert isinstance(check_ignore_input, bytes)
+    assert check_ignore_input.count(b"\0") == 5
+    assert len(empty_dirs) == 5
+
+
+@pytest.mark.unit
 def test_snapshot_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
     tmp_path: Path,
 ) -> None:
