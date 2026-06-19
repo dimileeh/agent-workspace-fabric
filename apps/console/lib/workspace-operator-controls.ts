@@ -54,6 +54,11 @@ const cancellableStatuses = new Set([
   "validating",
   "pushing",
   "monitoring_pr",
+  // A paused (blocked) workspace holds its execution slot + warm stack while it
+  // awaits an operator decision. Cancel stays the manual capacity-reclaim lever
+  // (the state machine allows blocked → cancelled), so the operator can abandon a
+  // workspace that should not be resumed instead of being forced to grant/revert.
+  "blocked",
 ]);
 
 const terminalOperationStatuses = new Set(["succeeded", "failed", "cancelled", "canceled"]);

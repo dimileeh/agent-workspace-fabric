@@ -839,6 +839,18 @@ const searchParams = useSearchParams();
         stale: saturationStale,
       },
       {
+        // Protected-file pause: a `blocked` workspace is awaiting an operator
+        // guide decision while it still holds its slot + stack. It counts inside
+        // Active (server-side, via active_total) but deliberately NOT inside
+        // Running (running+validating+pushing, the PR #598 contract) — it is
+        // halted, not executing.
+        id: "blocked",
+        label: "Awaiting operator",
+        value: counts ? (counts.blocked ?? 0) : dash,
+        tone: counts?.blocked ? "warn" : undefined,
+        stale: saturationStale,
+      },
+      {
         id: "queued",
         label: "Queued",
         value: queued ?? dash,

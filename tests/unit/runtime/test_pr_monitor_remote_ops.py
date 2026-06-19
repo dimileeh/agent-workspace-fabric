@@ -6,6 +6,9 @@ import pytest
 
 from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor_runner import pre_push_validation
+from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     VALIDATION_WORKTREE_CLEANUP_FAILED as REMOTE_OPS_VALIDATION_WORKTREE_CLEANUP_FAILED,
 )
@@ -177,4 +180,37 @@ def test_append_git_recovery_failure_includes_available_context() -> None:
             operation="reset",
         )
         == "AWF worktree recovery failed during git push failure resync (reset failed)"
+    )
+
+
+@pytest.mark.unit
+def test_git_push_terminal_monitor_failure_maps_dirty_finalize_unowned_delta_as_terminal() -> None:
+    """Pre-push dirty finalize that commits an unowned path must end monitor recovery.
+
+    The pre-push dirty finalize re-validates the operation delta after the
+    commit sink's side effects and fails closed with
+    ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` when a path outside the owned
+    delta was committed (review thread ``PRRT_kwDOSJAM6s6KZP8f``). A bad local
+    commit may already exist at that point, so the monitor loop must stop
+    iterating instead of retrying and risk pushing the unowned commit on a
+    later iteration (regression for review thread ``PRRT_kwDOSJAM6s6KZ33M``).
+    """
+    assert (
+        _make_push_result(_PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON).terminal_monitor_failure
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_git_push_failure_outcome_maps_dirty_finalize_unowned_delta() -> None:
+    """The dirty finalize unowned-delta reason should classify as a pre-push validation failure.
+
+    It is a pre-push validation reason code (returned by
+    ``_run_pre_push_validation`` via ``_pre_push_dirty_result``), so it must map
+    to ``pre_push_validation_failed`` like the other finalize dirty reasons
+    (regression for review thread ``PRRT_kwDOSJAM6s6KZ33M``).
+    """
+    assert (
+        _git_push_failure_outcome(_make_push_result(_PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON))
+        == "pre_push_validation_failed"
     )

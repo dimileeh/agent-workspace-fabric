@@ -1008,7 +1008,14 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
     worktree.mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="")  # dirty status (clean: agent wrote nothing)
+    # ``_run_ci_fix`` re-checks the worktree dirty state after the commit sink
+    # returns False with an agent run error in flight, to decide whether the
+    # False means "nothing to commit" (clean — safe to retry) or "commit failed
+    # with dirt stranded" (terminal ``REPAIR_DIRTY_COMMIT_FAILED``). Here the
+    # agent wrote nothing, so the recheck is clean and provider recovery may
+    # proceed. See PRRT_kwDOSJAM6s6KY4Wi.
+    cmd.queue_result(returncode=0, stdout="")  # post-commit dirty recheck (clean)
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout="")  # committed diff has no protected paths
