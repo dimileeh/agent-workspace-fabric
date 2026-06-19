@@ -351,12 +351,12 @@ async def test_pre_push_validation_missing_head_uses_candidate_recovery_anchor(
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
+async def test_pre_push_validation_missing_head_recovery_policy_block_cleans_residue(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Recovered pre-push HEAD commits must run supply-chain policy before validation."""
+    """Policy-blocked missing-HEAD recovery cleans staged residue before retry."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -374,6 +374,7 @@ async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
     )
     runner._deps.validation = validation  # type: ignore[assignment]
     recovery_calls: list[dict[str, object]] = []
+    cleanup_calls: list[dict[str, object]] = []
 
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
         return False
@@ -400,6 +401,26 @@ async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
         )
         raise _MonitorPolicyBlockedError("SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION (package-lock.json)")
 
+    async def _pre_push_validation_cleanup(
+        self: object,
+        *,
+        worktree_path: Path,
+        restore_ref: str,
+    ) -> ValidationWorktreeCleanup:
+        del self
+        cleanup_calls.append(
+            {
+                "worktree_path": worktree_path,
+                "restore_ref": restore_ref,
+            }
+        )
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=False, paths=("package-lock.json",)),
+            restore_ref=restore_ref,
+            cleaned_paths=("package-lock.json",),
+        )
+
     monkeypatch.setattr(
         pre_push_validation,
         "repair_mirror_hooks_path",
@@ -414,6 +435,11 @@ async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
         pre_push_validation,
         "_recover_missing_head_object_from_filesystem",
         _recover_missing_head_object_from_filesystem,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
     )
     result = await pre_push_validation._run_pre_push_validation(
         runner,
@@ -433,6 +459,12 @@ async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
         {
             "workspace_id": workspace_id,
             "command_evidence": ("pytest -q",),
+        }
+    ]
+    assert cleanup_calls == [
+        {
+            "worktree_path": worktree,
+            "restore_ref": recovery_base,
         }
     ]
     assert validation.calls == []

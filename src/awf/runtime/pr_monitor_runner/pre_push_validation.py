@@ -713,6 +713,20 @@ async def _run_pre_push_validation(
                 recovered_head=recovery_head[:10],
                 reason_code=_MONITOR_POLICY_BLOCKED_REASON,
             )
+            cleanup = await _pre_push_validation_cleanup(
+                self,
+                worktree_path=worktree_path,
+                restore_ref=recovery_head,
+            )
+            if not cleanup.ok:
+                _log.warning(
+                    "monitor.pre_push_validation_recovered_head_policy_blocked_cleanup_failed",
+                    workspace_id=workspace_id,
+                    recovered_head=recovery_head[:10],
+                    cleanup_reason_code=cleanup.reason_code,
+                    cleanup_message=cleanup.message[:400],
+                    cleanup_stderr=cleanup.cleanup_stderr[:400],
+                )
             return _PrePushValidationResult(
                 passed=False,
                 validation_run_id=None,
