@@ -240,6 +240,113 @@ async def test_pre_push_validation_does_not_mislabel_unexpected_mirror_repair_er
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_missing_head_uses_candidate_recovery_anchor(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing-HEAD pre-push recovery must not reuse the broken current HEAD SHA."""
+    broken_head = "b" * 40
+    candidate_head = "c" * 40
+    workspace_id = await seed_monitoring_workspace(factory, head_sha=candidate_head)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{broken_head}\n")
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    recovery_anchors: list[str] = []
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return False
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        return False
+
+    async def _recover_missing_head_object_from_filesystem(
+        self: object,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_start_head: str,
+        task_tag: str | None = None,
+        command_evidence: object = (),
+    ) -> str | None:
+        del self, workspace_id, worktree_path, task_tag, command_evidence
+        recovery_anchors.append(operation_start_head)
+        return operation_start_head
+
+    async def _pre_push_validation_worktree_check(
+        self: object,
+        *,
+        worktree_path: Path,
+    ) -> ValidationWorktreeCheck:
+        del self, worktree_path
+        return ValidationWorktreeCheck(clean=True)
+
+    async def _pre_push_validation_cleanup(
+        self: object,
+        *,
+        worktree_path: Path,
+        restore_ref: str,
+    ) -> ValidationWorktreeCleanup:
+        del self, worktree_path
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=restore_ref,
+        )
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_recover_missing_head_object_from_filesystem",
+        _recover_missing_head_object_from_filesystem,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_worktree_check",
+        _pre_push_validation_worktree_check,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+
+    result = await pre_push_validation._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.passed is True
+    assert result.workspace_head_sha == candidate_head
+    assert recovery_anchors == [candidate_head]
+    assert candidate_head != broken_head
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -311,6 +418,7 @@ async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         remote_branch=f"awf/{workspace_id}",
+        operation_start_head=recovery_base,
     )
 
     assert result.passed is False
@@ -404,6 +512,7 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         remote_branch=f"awf/{workspace_id}",
+        operation_start_head=recovery_base,
     )
 
     assert result.passed is False
@@ -507,6 +616,7 @@ async def test_pre_push_validation_recovered_head_runs_protected_scope_repair_be
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         remote_branch=f"awf/{workspace_id}",
+        operation_start_head=recovery_base,
     )
 
     assert result.passed is True
@@ -636,6 +746,7 @@ async def test_pre_push_validation_recovered_head_repair_failures_block_validati
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         remote_branch=f"awf/{workspace_id}",
+        operation_start_head=recovery_base,
     )
 
     assert result.passed is False

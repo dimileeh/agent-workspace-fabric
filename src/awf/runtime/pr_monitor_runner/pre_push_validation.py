@@ -77,6 +77,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.remote_repair import (
+    _open_merge_candidate_head_sha,
     _recover_missing_head_object_from_filesystem,
 )
 from awf.runtime.pr_monitor_runner.types import (
@@ -681,7 +682,9 @@ async def _run_pre_push_validation(
             workspace_id=workspace_id,
             reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
         )
-        recovery_head = operation_start_head or workspace_head_sha
+        recovery_head = operation_start_head or await _open_merge_candidate_head_sha(
+            self, workspace_id
+        )
         if recovery_head is None:
             return _PrePushValidationResult(
                 passed=False,
