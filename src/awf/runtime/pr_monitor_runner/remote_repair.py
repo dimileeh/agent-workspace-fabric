@@ -220,7 +220,7 @@ async def _repair_operation_start_head_result(
         fallback_exists = (
             await _mirror_commit_object_exists(self, mirror_path, fallback_head)
             if mirror_path is not None
-            else await verify_head_object_exists(worktree_path)
+            else await _worktree_commit_object_exists(self, worktree_path, fallback_head)
         )
         if not fallback_exists:
             _log.warning(
@@ -339,6 +339,17 @@ async def _mirror_commit_object_exists(self: Any, mirror_path: Path, commit_sha:
         CommandResult,
         await self._deps.runner.run(
             ["git", "--git-dir", str(mirror_path), "cat-file", "-e", f"{commit_sha}^{{commit}}"],
+            env=git_env_without_object_lookup_overrides(),
+        ),
+    )
+    return result.ok
+
+
+async def _worktree_commit_object_exists(self: Any, worktree_path: Path, commit_sha: str) -> bool:
+    result = cast(
+        CommandResult,
+        await self._deps.runner.run(
+            git_worktree_command(worktree_path, "cat-file", "-e", f"{commit_sha}^{{commit}}"),
             env=git_env_without_object_lookup_overrides(),
         ),
     )

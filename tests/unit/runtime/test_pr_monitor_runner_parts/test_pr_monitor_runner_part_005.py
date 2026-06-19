@@ -192,6 +192,49 @@ def _monitor_runner(
     )
 
 
+@pytest.mark.unit
+async def test_repair_operation_start_head_rejects_dangling_no_mirror_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    fallback_head = "f" * 40
+    fake = FakeCommandRunner()
+    fake.queue_result(returncode=1, stderr="HEAD is unreadable")
+    fake.queue_result(returncode=1, stderr="fallback is missing")
+    runner = _monitor_runner(tmp_path, fake)
+    worktree_path = tmp_path / "repair-worktree"
+    worktree_path.mkdir()
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(remote_repair, "mirror_path_for_worktree", lambda _worktree_path: None)
+    monkeypatch.setattr(
+        remote_repair,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+
+    operation_start_head, result = await runner._repair_operation_start_head_result(
+        workspace_id="ws_dangling_fallback",
+        worktree_path=worktree_path,
+        operation_type="comment_repair",
+        fallback_head_sha=fallback_head,
+    )
+
+    assert operation_start_head == ""
+    assert result is not None
+    assert result.failed is True
+    assert result.details["fallback_head_sha"] == fallback_head
+    assert result.details["fallback_source"] == "status"
+    assert fake.calls[1].args[-3:] == ["cat-file", "-e", f"{fallback_head}^{{commit}}"]
+    assert fake.calls[1].env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in fake.calls[1].env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[1].env
+
+
 def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") -> PRStatus:
     return PRStatus(
         number=pr_number,
