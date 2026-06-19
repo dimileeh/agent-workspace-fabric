@@ -33,6 +33,7 @@ from awf.db.repositories import (
 )
 from awf.node.git_manager import (
     GitOperationError,
+    git_env_without_object_lookup_overrides,
     mirror_path_for_worktree,
     repair_agent_writable_worktree,
     repair_mirror_hooks_path,
@@ -232,7 +233,8 @@ async def _mirror_commit_object_exists(self: Any, mirror_path: Path, commit_sha:
     result = cast(
         CommandResult,
         await self._deps.runner.run(
-            ["git", "--git-dir", str(mirror_path), "cat-file", "-e", f"{commit_sha}^{{commit}}"]
+            ["git", "--git-dir", str(mirror_path), "cat-file", "-e", f"{commit_sha}^{{commit}}"],
+            env=git_env_without_object_lookup_overrides(),
         ),
     )
     return result.ok
@@ -312,7 +314,14 @@ async def _recover_missing_head_object_from_filesystem(
     async def mirror_git(args: list[str]) -> CommandResult:
         return cast(
             CommandResult,
-            await self._deps.runner.run(["git", "--git-dir", str(mirror_path), *args]),
+            await self._deps.runner.run(
+                ["git", "--git-dir", str(mirror_path), *args],
+                env=(
+                    git_env_without_object_lookup_overrides()
+                    if args[:2] == ["cat-file", "-e"]
+                    else None
+                ),
+            ),
         )
 
     async def worktree_git(args: list[str]) -> CommandResult:

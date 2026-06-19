@@ -21,6 +21,7 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
 )
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     MonitorState,
@@ -160,7 +161,8 @@ async def _run_fix_cycle(
         if not current_head:
             return cast(str, operation_start_head)
         current_head_ok = await self._deps.runner.run(
-            git_worktree_command(worktree_path, "cat-file", "-e", f"{current_head}^{{commit}}")
+            git_worktree_command(worktree_path, "cat-file", "-e", f"{current_head}^{{commit}}"),
+            env=git_env_without_object_lookup_overrides(),
         )
         if current_head_ok.ok:
             return current_head

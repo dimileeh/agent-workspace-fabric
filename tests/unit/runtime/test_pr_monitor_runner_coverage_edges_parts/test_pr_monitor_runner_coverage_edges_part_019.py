@@ -115,6 +115,8 @@ async def test_recover_missing_head_object_fails_closed_on_branch_ref_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
     workspace_id = await seed_monitoring_workspace(factory)
     worktree = tmp_path / "worktrees" / workspace_id
     _write_worktree_with_mirror(tmp_path, workspace_id)
@@ -145,6 +147,10 @@ async def test_recover_missing_head_object_fails_closed_on_branch_ref_mismatch(
     )
 
     assert recovered is None
+    assert cmd.calls[0].args[-3:] == ["cat-file", "-e", f"{'a' * 40}^{{commit}}"]
+    assert cmd.calls[0].env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in cmd.calls[0].env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in cmd.calls[0].env
     assert not any("update-ref" in call.args for call in cmd.calls)
 
 

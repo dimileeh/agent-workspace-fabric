@@ -772,14 +772,14 @@ async def verify_head_object_exists(worktree_path: Path) -> bool:
         "HEAD^{commit}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=_git_env_without_object_lookup_overrides(),
+        env=git_env_without_object_lookup_overrides(),
     )
     await proc.communicate()
     assert proc.returncode is not None
     return proc.returncode == 0
 
 
-def _git_env_without_object_lookup_overrides() -> dict[str, str]:
+def git_env_without_object_lookup_overrides() -> dict[str, str]:
     env = dict(os.environ)
     for key in _GIT_OBJECT_LOOKUP_ENV_KEYS:
         env.pop(key, None)

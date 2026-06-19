@@ -1168,6 +1168,8 @@ async def test_fix_cycle_falls_back_when_per_item_head_object_is_poisoned(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)  # cat-file start^{commit}
     cmd.queue_result(returncode=128, stderr="fatal: Not a valid object name poisoned")
@@ -1263,6 +1265,9 @@ async def test_fix_cycle_falls_back_when_per_item_head_object_is_poisoned(
         "start^{commit}",
         "poisoned^{commit}",
     ]
+    assert all(call.env is not None for call in cat_file_calls)
+    assert all("GIT_OBJECT_DIRECTORY" not in call.env for call in cat_file_calls)
+    assert all("GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env for call in cat_file_calls)
 
 
 @pytest.mark.unit
