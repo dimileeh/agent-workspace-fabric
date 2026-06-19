@@ -601,6 +601,84 @@ async def test_satisfied_post_validation_conformance_report_is_written_not_commi
 
 
 @pytest.mark.unit
+async def test_satisfied_post_validation_conformance_report_fails_when_unlink_leaves_dirty_index(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KOoX7 regression: the unlink fallback must not return
+    success when a staged report-path residue remains dirty after the file is
+    removed from the worktree.
+    """
+    worktree_path = tmp_path / "worktree"
+    runner = _GitRestoreFakeRunner(worktree_path)
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    report_file.write_text(
+        '{"status":"needs_iteration","summary":"stale miss","gaps":["fix me"]}',
+        encoding="utf-8",
+    )
+    runner.queue_result(returncode=0, stdout=f" M {report_path.as_posix()}\n")  # before_compare
+    runner.queue_result(returncode=0, stdout="fix-pass-head\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout=f" M {report_path.as_posix()}\n")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    # base_commit restore leaves staged modification.
+    runner.queue_result(returncode=0, stdout=f"M  {report_path.as_posix()}\n")
+    # Cleanliness check after base_commit restore still sees the staged path.
+    runner.queue_result(returncode=0, stdout=f"M  {report_path.as_posix()}\n")
+    # HEAD restore also fails to reconcile the staged residue.
+    runner.queue_result(returncode=128, stdout="", stderr="fatal: could not resolve HEAD\n")
+    # Cleanliness check after unlink still sees the staged path.
+    runner.queue_result(returncode=0, stdout=f"M  {report_path.as_posix()}\n")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+    )
+
+    assert failure is not None
+    assert failure.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    assert failure.message == (
+        "post-validation conformance report cleanup left report path dirty: "
+        "docs/awf-plans/ws_post.conformance.json"
+    )
+    assert not report_file.exists()
+    joined_calls = [" ".join(call.args) for call in runner.calls]
+    assert sum("status --porcelain=v1 --untracked-files=all" in call for call in joined_calls) == 4
+    # No staging or committing of the AWF artifact.
+    assert all("add" not in call.args for call in runner.calls)
+    assert all("commit" not in call.args for call in runner.calls)
+    executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
 async def test_satisfied_post_validation_conformance_report_restores_from_base_commit(
     tmp_path: Path,
 ) -> None:
@@ -1294,8 +1372,8 @@ async def test_satisfied_post_validation_conformance_report_unlinks_when_head_re
     runner.queue_result(returncode=0, stdout=f"M  {report_path.as_posix()}\n")
     # HEAD restore fails (or leaves the path dirty).
     runner.queue_result(returncode=128, stdout="", stderr="fatal: could not resolve HEAD\n")
-    # Cleanliness check after failed HEAD restore still sees the staged path.
-    runner.queue_result(returncode=0, stdout=f"M  {report_path.as_posix()}\n")
+    # Cleanliness check after unlink confirms the fallback removed the residue.
+    runner.queue_result(returncode=0, stdout="")
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"

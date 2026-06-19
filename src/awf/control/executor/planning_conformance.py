@@ -310,12 +310,6 @@ async def _run_post_validation_conformance_check(
                 error_type=type(exc).__name__,
                 errno=exc.errno,
             )
-    await self._record_post_validation_conformance_event(
-        workspace_id=workspace.id,
-        handoff=handoff,
-        report=report,
-        validation_run_id=validation_run_id,
-    )
     # For successful planned workspaces where the report was produced from
     # stdout or a fresh on-disk file, deposit a snapshot into the served
     # artifact dir BEFORE removing the on-worktree copy. The deposit is
@@ -326,7 +320,7 @@ async def _run_post_validation_conformance_check(
     # AWF-synthesized satisfied report was written above. If that write failed,
     # the worktree file would still carry the stale report, so deposit the
     # in-memory satisfied report directly to keep the served artifact consistent
-    # with the recorded event.
+    # with the satisfied event recorded after cleanup succeeds.
     if not report_from_fresh_file and report_text is not None and not rewrite_succeeded:
         _deposit_satisfied_conformance_report(
             work_dir=self._config.compose_projects_root.parent,
@@ -378,6 +372,12 @@ async def _run_post_validation_conformance_check(
     )
     if restore_succeeded:
         # Tracked report: restore put the committed copy back; leave it there.
+        await self._record_post_validation_conformance_event(
+            workspace_id=workspace.id,
+            handoff=handoff,
+            report=report,
+            validation_run_id=validation_run_id,
+        )
         return None
     if restore_result.ok:
         # ``git restore --source=base_commit`` can leave the path staged
@@ -403,6 +403,12 @@ async def _run_post_validation_conformance_check(
         if head_restore_result.ok and not await _report_path_is_dirty(
             self, worktree_path, handoff.report_path
         ):
+            await self._record_post_validation_conformance_event(
+                workspace_id=workspace.id,
+                handoff=handoff,
+                report=report,
+                validation_run_id=validation_run_id,
+            )
             return None
         # The path is still dirty after restoring from both base_commit and
         # HEAD. Log the partial restore so we do not silently leave the stale
@@ -422,8 +428,10 @@ async def _run_post_validation_conformance_check(
             report_path=handoff.report_path.as_posix(),
             stderr=restore_result.stderr,
         )
+    unlink_succeeded = False
     try:
         (worktree_path / handoff.report_path).unlink(missing_ok=True)
+        unlink_succeeded = True
     except OSError as exc:
         _log.warning(
             "executor.post_validation_conformance_report_unlink_failed",
@@ -433,6 +441,21 @@ async def _run_post_validation_conformance_check(
             error_type=type(exc).__name__,
             errno=exc.errno,
         )
+    if unlink_succeeded and await _report_path_is_dirty(self, worktree_path, handoff.report_path):
+        _log.warning(
+            "executor.post_validation_conformance_report_unlink_left_dirty",
+            workspace_id=workspace.id,
+            validation_run_id=validation_run_id,
+            report_path=handoff.report_path.as_posix(),
+            base_commit=base_commit,
+        )
+        return _build_report_cleanup_failure(handoff, validation_run_id)
+    await self._record_post_validation_conformance_event(
+        workspace_id=workspace.id,
+        handoff=handoff,
+        report=report,
+        validation_run_id=validation_run_id,
+    )
     return None
 
 
@@ -471,6 +494,26 @@ def _build_unsatisfied_failure(
                 report_path=handoff.report_path,
             ),
             "validation_run_id": validation_run_id,
+        },
+    )
+
+
+def _build_report_cleanup_failure(
+    handoff: _PlanningValidationHandoff,
+    validation_run_id: str,
+) -> _PlanningRunFailure:
+    return _PlanningRunFailure(
+        message=(
+            "post-validation conformance report cleanup left report path dirty: "
+            f"{handoff.report_path.as_posix()}"
+        ),
+        reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+        details={
+            "conformance_report_cleanup": {
+                "validation_run_id": validation_run_id,
+                "report_path": handoff.report_path.as_posix(),
+                "plan_path": handoff.plan_path.as_posix(),
+            },
         },
     )
 
