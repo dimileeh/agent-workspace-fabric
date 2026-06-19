@@ -391,6 +391,9 @@ async def _recover_missing_head_object_from_filesystem(
         await cleanup_after_abort("staged_diff_failed")
         return None
     staged_paths = list(_changed_paths_from_name_status_z(staged.stdout))
+    staged_untracked_cleanup_paths = list(
+        _untracked_cleanup_paths_from_name_status_z(staged.stdout)
+    )
     excluded = [p for p in staged_paths if is_under_agent_runtime_root(p)]
     if excluded:
         unstage = await worktree_git(
@@ -404,6 +407,9 @@ async def _recover_missing_head_object_from_filesystem(
             await cleanup_after_abort("staged_diff_after_runtime_path_unstage_failed")
             return None
         staged_paths = list(_changed_paths_from_name_status_z(staged.stdout))
+        staged_untracked_cleanup_paths = list(
+            _untracked_cleanup_paths_from_name_status_z(staged.stdout)
+        )
 
     if staged_paths:
         policy_message = await self._refresh_supply_chain_policy_before_push(
@@ -420,6 +426,23 @@ async def _recover_missing_head_object_from_filesystem(
                     returncode=cleanup.returncode,
                     stderr=cleanup.stderr[:400],
                 )
+            elif staged_untracked_cleanup_paths:
+                clean = await worktree_git(
+                    [
+                        "--literal-pathspecs",
+                        "clean",
+                        "-fd",
+                        "--",
+                        *staged_untracked_cleanup_paths,
+                    ]
+                )
+                if not clean.ok:
+                    _log.warning(
+                        "monitor.head_object_missing_recovery_policy_blocked_clean_failed",
+                        workspace_id=workspace_id,
+                        returncode=clean.returncode,
+                        stderr=clean.stderr[:400],
+                    )
             raise _MonitorPolicyBlockedError(policy_message)
         commit = await self._deps.runner.run(
             [
@@ -459,6 +482,41 @@ async def _recover_missing_head_object_from_filesystem(
         await cleanup_after_abort("recovered_head_missing_from_mirror")
         return None
     return recovered_head_sha
+
+
+def _untracked_cleanup_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
+    if not diff_stdout:
+        return ()
+    fields = diff_stdout.split("\0")
+    if fields[-1] != "":
+        raise ProtectedScopeDiffError(
+            "truncated `--name-status -z` output: missing terminating NUL"
+        )
+    fields = fields[:-1]
+
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        if not status:
+            raise ProtectedScopeDiffError("malformed `--name-status -z` output: empty status field")
+        index += 1
+        path_count = 2 if status.startswith(("R", "C")) else 1
+        if index + path_count > len(fields):
+            raise ProtectedScopeDiffError(
+                f"truncated `--name-status -z` record for status {status!r}"
+            )
+        record_paths = fields[index : index + path_count]
+        index += path_count
+        if any(not path for path in record_paths):
+            raise ProtectedScopeDiffError(
+                f"malformed `--name-status -z` record for status {status!r}"
+            )
+        if status.startswith("A"):
+            paths.append(record_paths[0])
+        elif status.startswith(("R", "C")):
+            paths.append(record_paths[1])
+    return tuple(dict.fromkeys(paths))
 
 
 def _worktree_git_dir(worktree_path: Path) -> Path | None:

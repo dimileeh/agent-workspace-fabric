@@ -14,6 +14,7 @@ from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_REPAIR_FAILED_REASON
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
@@ -106,6 +107,41 @@ def _write_worktree_with_mirror(tmp_path: Path, workspace_id: str) -> None:
     (worktree / ".git").write_text(f"gitdir: {mirror}/worktrees/{workspace_id}\n")
     (mirror / "worktrees" / workspace_id).mkdir(parents=True)
     (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
+
+
+@pytest.mark.unit
+def test_untracked_cleanup_paths_from_name_status_z_extracts_reset_leftovers() -> None:
+    paths = pr_remote_repair._untracked_cleanup_paths_from_name_status_z(
+        "A\0generated.tmp\0"
+        "M\0src/recovered.py\0"
+        "D\0deleted.txt\0"
+        "R100\0old-name.txt\0new-name.txt\0"
+        "C75\0template.txt\0copy.txt\0"
+        "A\0generated.tmp\0"
+    )
+
+    assert paths == ("generated.tmp", "new-name.txt", "copy.txt")
+    assert pr_remote_repair._untracked_cleanup_paths_from_name_status_z("") == ()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stdout", "message"),
+    [
+        ("M\ttracked.py\n", "missing terminating NUL"),
+        ("\0tracked.py\0", "empty status field"),
+        ("R100\0old-name.txt\0", "truncated"),
+        ("M\0\0", "malformed"),
+    ],
+)
+def test_untracked_cleanup_paths_from_name_status_z_rejects_malformed_output(
+    stdout: str,
+    message: str,
+) -> None:
+    with pytest.raises(ProtectedScopeDiffError) as excinfo:
+        pr_remote_repair._untracked_cleanup_paths_from_name_status_z(stdout)
+
+    assert message in str(excinfo.value)
 
 
 @pytest.mark.unit
@@ -463,6 +499,89 @@ async def test_recover_missing_head_object_blocks_policy_before_recovery_commit(
     ]
     assert not any("commit" in call.args for call in cmd.calls)
     assert any(call.args[-3:] == ["reset", "--hard", "a" * 40] for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_recover_missing_head_object_policy_block_cleans_recovery_untracked_paths(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+    runtime_path = ".claude/agent-memory/session.log"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(
+        returncode=0,
+        stdout=f"A\0generated.tmp\0M\0src/recovered.py\0A\0{runtime_path}\0",
+    )
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="A\0generated.tmp\0M\0src/recovered.py\0")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    refresh_calls: list[dict[str, object]] = []
+
+    async def _resolve_worktree_branch_ref(_worktree_path: Path) -> str | None:
+        return f"refs/heads/awf/{workspace_id}"
+
+    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
+        refresh_calls.append(dict(kwargs))
+        return "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION (generated.tmp)"
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "_resolve_worktree_branch_ref",
+        _resolve_worktree_branch_ref,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_refresh_supply_chain_policy_before_push",
+        _refresh_supply_chain_policy_before_push,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError):
+        await pr_remote_repair._recover_missing_head_object_from_filesystem(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            operation_start_head="a" * 40,
+            command_evidence=("npm install",),
+        )
+
+    assert refresh_calls == [
+        {
+            "workspace_id": workspace_id,
+            "command_evidence": ("npm install",),
+            "changed_paths": ["generated.tmp", "src/recovered.py"],
+        }
+    ]
+    assert any(call.args[-3:] == ["reset", "--hard", "a" * 40] for call in cmd.calls)
+    assert any(
+        call.args
+        == _git_worktree_command(
+            worktree,
+            "--literal-pathspecs",
+            "clean",
+            "-fd",
+            "--",
+            "generated.tmp",
+        )
+        for call in cmd.calls
+    )
+    assert not any("commit" in call.args for call in cmd.calls)
+    assert not any("clean" in call.args and runtime_path in call.args for call in cmd.calls)
 
 
 @pytest.mark.unit
