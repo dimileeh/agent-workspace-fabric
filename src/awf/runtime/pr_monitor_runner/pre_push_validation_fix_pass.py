@@ -433,6 +433,9 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
         )
         return False, None
+    # Missing-HEAD recovery may discover that the original start head is unusable.
+    # Post-recovery checks must anchor to the commit used to build the recovered head.
+    fix_pass_baseline_head = fix_start_head
     # Resolve the workspace's optional Jira issue key once; reused for the fix prompt
     # and threaded into any ``_reparent_fix_pass_commit`` call below so the reparent
     # path does not re-query the DB for the same value.
@@ -590,6 +593,7 @@ async def _run_pre_push_validation_fix_pass(
         )
         if recovered is None:
             return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+        fix_pass_baseline_head = recovery_head
         _log.info(
             "monitor.pre_push_validation_fix_head_object_missing_recovered",
             workspace_id=workspace_id,
@@ -644,7 +648,7 @@ async def _run_pre_push_validation_fix_pass(
                     self,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    restore_ref=fix_start_head,
+                    restore_ref=fix_pass_baseline_head,
                     pass_number=pass_number,
                     reason="recovered_delta_failed",
                 )
@@ -666,7 +670,7 @@ async def _run_pre_push_validation_fix_pass(
                         self,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
-                        restore_ref=fix_start_head,
+                        restore_ref=fix_pass_baseline_head,
                         pass_number=pass_number,
                         reason="recovered_protected_scope_diff_unavailable",
                     )
@@ -684,7 +688,7 @@ async def _run_pre_push_validation_fix_pass(
                         self,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
-                        restore_ref=fix_start_head,
+                        restore_ref=fix_pass_baseline_head,
                         pass_number=pass_number,
                         reason="recovered_protected_scope_repair_failed",
                     )
@@ -702,7 +706,7 @@ async def _run_pre_push_validation_fix_pass(
                 protected_scope_revert_remote_branch=remote_branch,
                 remote_push_url=remote_url,
                 task_tag=task_tag,
-                operation_start_head=fix_start_head,
+                operation_start_head=fix_pass_baseline_head,
             )
         )
     except (
@@ -865,13 +869,13 @@ async def _run_pre_push_validation_fix_pass(
         return False, None
     if not committed:
         current_head = await self._rev_parse_head(worktree_path)
-        if current_head is not None and current_head != fix_start_head:
+        if current_head is not None and current_head != fix_pass_baseline_head:
             # The fix-pass agent self-committed a valid repair (the worktree is clean,
             # so ``_commit_dirty_worktree`` had nothing to commit and returned False).
             advanced = await _head_descends_from_impl(
                 self,
                 worktree_path=worktree_path,
-                ancestor=fix_start_head,
+                ancestor=fix_pass_baseline_head,
                 descendant=current_head,
             )
             if advanced:
@@ -881,7 +885,7 @@ async def _run_pre_push_validation_fix_pass(
                     "monitor.pre_push_validation_fix_self_commit_detected",
                     workspace_id=workspace_id,
                     pass_number=pass_number,
-                    fix_start_head=fix_start_head,
+                    fix_start_head=fix_pass_baseline_head,
                     committed_head=current_head,
                     self_commit_kind="advance",
                 )
@@ -904,7 +908,7 @@ async def _run_pre_push_validation_fix_pass(
                 self,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
-                fix_start_head=fix_start_head,
+                fix_start_head=fix_pass_baseline_head,
                 current_head=current_head,
                 pass_number=pass_number,
                 task_tag=task_tag,
@@ -918,7 +922,7 @@ async def _run_pre_push_validation_fix_pass(
                     pass_number=pass_number,
                     from_sha=current_head,
                     to_sha=new_head,
-                    fix_start_head=fix_start_head,
+                    fix_start_head=fix_pass_baseline_head,
                 )
                 cleanup_failure_reason = await _cleanup_committed_fix_pass(
                     self,
@@ -934,7 +938,7 @@ async def _run_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            restore_ref=fix_start_head,
+            restore_ref=fix_pass_baseline_head,
             pass_number=pass_number,
             reason="commit_failed",
         )
@@ -961,14 +965,14 @@ async def _run_pre_push_validation_fix_pass(
     if not await _head_descends_from_impl(
         self,
         worktree_path=worktree_path,
-        ancestor=fix_start_head,
+        ancestor=fix_pass_baseline_head,
         descendant=committed_head,
     ):
         new_head, no_net_change, reparent_failure_reason = await _reparent_fix_pass_commit_impl(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            fix_start_head=fix_start_head,
+            fix_start_head=fix_pass_baseline_head,
             current_head=committed_head,
             pass_number=pass_number,
             task_tag=task_tag,
@@ -982,7 +986,7 @@ async def _run_pre_push_validation_fix_pass(
                 pass_number=pass_number,
                 from_sha=committed_head,
                 to_sha=new_head,
-                fix_start_head=fix_start_head,
+                fix_start_head=fix_pass_baseline_head,
             )
             committed_head = new_head
         else:
@@ -993,7 +997,7 @@ async def _run_pre_push_validation_fix_pass(
                 self,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
-                restore_ref=fix_start_head,
+                restore_ref=fix_pass_baseline_head,
                 pass_number=pass_number,
                 reason="commit_reparent_no_net_change",
             )

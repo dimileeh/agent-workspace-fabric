@@ -171,6 +171,152 @@ async def test_pre_push_validation_fix_pass_missing_head_falls_back_from_stale_a
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_fix_pass_clean_recovery_uses_fallback_anchor(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean recovered commit must use the fallback anchor as its baseline."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass_module
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    fix_start_head = "1" * 40
+    candidate_head = "2" * 40
+    recovered_head = "3" * 40
+    mirror_path = tmp_path / "mirror.git"
+    cmd = FakeCommandRunner()
+    # Stale fix_start_head is absent in the mirror; recovered delta is empty.
+    cmd.queue_result(returncode=1, stderr="missing commit")
+    cmd.queue_result(returncode=0, stdout="")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="recovered clean fix-pass commit\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    rev_parse_results = [fix_start_head, recovered_head]
+    commit_operation_start_heads: list[str] = []
+    descendant_checks: list[tuple[str, str]] = []
+    cleanup_heads: list[str] = []
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return False
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> None:
+        return None
+
+    async def _open_merge_candidate_head_sha(*_args: object) -> str:
+        return candidate_head
+
+    async def _recover_missing_head_object_from_filesystem(
+        *_args: object,
+        **_kwargs: object,
+    ) -> str:
+        return recovered_head
+
+    async def _commit_dirty_worktree(**kwargs: object) -> bool:
+        commit_operation_start_heads.append(str(kwargs["operation_start_head"]))
+        return False
+
+    async def _head_descends_from(*_args: object, **kwargs: object) -> bool:
+        descendant_checks.append((str(kwargs["ancestor"]), str(kwargs["descendant"])))
+        return True
+
+    async def _reparent_fix_pass_commit(
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[str | None, bool, str | None]:
+        raise AssertionError("clean fallback recovery should be accepted without reparenting")
+
+    async def _rollback_failed_pre_push_validation_fix_pass(
+        *_args: object,
+        **_kwargs: object,
+    ) -> str | None:
+        raise AssertionError("clean fallback recovery should not roll back")
+
+    async def _cleanup_committed_pre_push_validation_fix_pass(
+        *_args: object,
+        **kwargs: object,
+    ) -> None:
+        cleanup_heads.append(str(kwargs["committed_head"]))
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(fix_pass_module, "mirror_path_for_worktree", lambda _path: mirror_path)
+    monkeypatch.setattr(
+        fix_pass_module,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+    monkeypatch.setattr(
+        fix_pass_module,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(
+        fix_pass_module,
+        "_open_merge_candidate_head_sha",
+        _open_merge_candidate_head_sha,
+    )
+    monkeypatch.setattr(
+        fix_pass_module,
+        "_recover_missing_head_object_from_filesystem",
+        _recover_missing_head_object_from_filesystem,
+    )
+    monkeypatch.setattr(pre_push_validation, "_head_descends_from", _head_descends_from)
+    monkeypatch.setattr(pre_push_validation, "_reparent_fix_pass_commit", _reparent_fix_pass_commit)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback_failed_pre_push_validation_fix_pass,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_cleanup_committed_pre_push_validation_fix_pass",
+        _cleanup_committed_pre_push_validation_fix_pass,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, cleanup_failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert cleanup_failure_reason is None
+    assert commit_operation_start_heads == [candidate_head]
+    assert descendant_checks == [(candidate_head, recovered_head)]
+    assert cleanup_heads == [recovered_head]
+    assert rev_parse_results == []
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_blocks_recovered_commit_protected_scope_violations(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
