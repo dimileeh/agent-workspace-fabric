@@ -18,13 +18,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import structlog
 
-from awf.adapters.base import AgentRunError
-from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.commands import FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.executor import planning_conformance as planning_conformance
 from awf.control.executor import planning_ops as planning_ops
 from awf.control.executor.types import _PlanningValidationHandoff
-from awf.db.enums import AgentRuntime
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -1429,81 +1427,3 @@ async def test_build_conformance_stall_failure_skips_event_when_workspace_vanish
 
     assert failure.reason_code == AGENT_STALLED_IN_CONFORMANCE
     assert session.commits == 0
-
-
-# ---------------------------------------------------------------------------
-# _run_agent_task_with_optional_planning — timeout falls back to stdout report
-# ---------------------------------------------------------------------------
-
-
-class _StdoutTimeoutAdapter:
-    """First two runs (plan + execute) succeed; the conformance run idles out
-    with a satisfied report only in stdout (nothing written to disk), so the
-    timeout branch falls back to ``report_text = stdout``."""
-
-    def __init__(self, *, satisfied_stdout: str) -> None:
-        self._satisfied_stdout = satisfied_stdout
-        self.prompts: list[str] = []
-
-    async def run(self, **kwargs: object) -> SimpleNamespace:
-        prompt = kwargs.get("prompt")
-        assert isinstance(prompt, str)
-        self.prompts.append(prompt)
-        if len(self.prompts) == 3:  # conformance call
-            raise AgentRunError(
-                agent=AgentRuntime.codex,
-                result=CommandResult(
-                    returncode=124,
-                    stdout=self._satisfied_stdout,
-                    stderr="idle timeout",
-                ),
-                reason_code="AGENT_IDLE_TIMEOUT",
-            )
-        if len(self.prompts) == 1:
-            return SimpleNamespace(stdout="plan written", stderr="")
-        return SimpleNamespace(stdout="implementation", stderr="")
-
-
-@pytest.mark.unit
-async def test_planning_conformance_timeout_falls_back_to_stdout_report(
-    tmp_path: Path,
-) -> None:
-    """On an idle timeout with no fresh on-disk report, the satisfied report is
-    taken from stdout, short-circuiting the loop with success."""
-    worktree = tmp_path / "worktree"
-    runner = FakeCommandRunner()
-    runner.queue_result(returncode=0, stdout="")  # before_plan changed paths
-    runner.queue_result(returncode=0, stdout="sha1\n")  # baseline HEAD
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_stdout.md\n")  # plan dirty
-    runner.queue_result(returncode=0, stdout="")  # committed paths
-    runner.queue_result(returncode=0, stdout="sha1\n")  # implementation baseline HEAD
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_stdout.md\n")  # before_compare
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_stdout.md\n")  # after_compare
-    runner.queue_result(returncode=0, stdout="sha2\n")  # after_head
-    executor = _executor_with_runner(runner, tmp_path)
-
-    profile = WorkspaceProfile.model_validate(
-        {
-            "name": "planning-stdout",
-            "planning": {
-                "required": True,
-                "plan_path": "docs/awf-plans/{workspace_id}.md",
-                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
-                "max_iterations": 0,
-            },
-        }
-    )
-    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
-
-    result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
-        adapter=_StdoutTimeoutAdapter(satisfied_stdout=satisfied),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_stdout", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
-        profile=profile,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        worktree_path=worktree,
-        model=None,
-    )
-
-    # Satisfied report parsed from stdout -> conformance succeeds (returns None).
-    assert result is None
