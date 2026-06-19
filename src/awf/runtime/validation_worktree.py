@@ -407,6 +407,7 @@ def _snapshot_empty_untracked_dirs(
     *,
     worktree_path: Path,
     ignored_paths: tuple[str, ...],
+    ignore_check_ignored_empty_dirs: bool = False,
 ) -> tuple[str, ...]:
     """Snapshot fileless non-ignored directory trees that git status omits."""
     empty_dirs: list[str] = []
@@ -446,7 +447,11 @@ def _snapshot_empty_untracked_dirs(
                 has_file = True
             else:
                 try:
-                    ignored = _is_ignored_path(worktree_path, child_path)
+                    ignored = (
+                        _is_ignored_path(worktree_path, child_path)
+                        if ignore_check_ignored_empty_dirs
+                        else False
+                    )
                 except _IgnoreCheckError:
                     raise
                 if ignored:
@@ -688,6 +693,7 @@ async def check_validation_worktree_clean(
             empty_untracked_dirs = _snapshot_empty_untracked_dirs(
                 worktree_path=worktree_path,
                 ignored_paths=snapshot_ignored_paths,
+                ignore_check_ignored_empty_dirs=ignore_all_ignored,
             )
     except (_GitlinkLookupError, _IgnoreCheckError) as exc:
         # A failed gitlink or check-ignore lookup is an infrastructure failure,

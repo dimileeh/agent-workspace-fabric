@@ -107,6 +107,7 @@ def test_snapshot_empty_untracked_dirs_preserves_wildcard_ignored_empty_dir_when
         validation_worktree._snapshot_empty_untracked_dirs(
             worktree_path=worktree,
             ignored_paths=(),
+            ignore_check_ignored_empty_dirs=True,
         )
 
     assert ignored_dir.exists()
@@ -211,7 +212,7 @@ def test_remove_empty_untracked_dirs_preserves_dash_prefixed_wildcard_ignored_em
 def test_snapshot_empty_untracked_dirs_preserves_dash_prefixed_wildcard_ignored_empty_dir(
     tmp_path: Path,
 ) -> None:
-    """Dash-prefixed wildcard-ignored empty directories must not be surfaced as dirty."""
+    """Opted-in wildcard ignore checks must handle dash-prefixed empty directories."""
     worktree = _init_real_worktree_with_gitignore(tmp_path, gitignore_content="-cache/**\n")
     ignored_dir = worktree / "-cache"
     ignored_dir.mkdir()
@@ -219,6 +220,7 @@ def test_snapshot_empty_untracked_dirs_preserves_dash_prefixed_wildcard_ignored_
     empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
         worktree_path=worktree,
         ignored_paths=(),
+        ignore_check_ignored_empty_dirs=True,
     )
 
     assert sorted(empty_dirs) == []
@@ -285,7 +287,7 @@ def test_remove_empty_untracked_dirs_preserves_wildcard_ignored_empty_dir(
 def test_snapshot_empty_untracked_dirs_preserves_wildcard_ignored_empty_dir(
     tmp_path: Path,
 ) -> None:
-    """Wildcard-ignored empty directories must not be surfaced as dirty."""
+    """Opted-in wildcard ignore checks must not surface ignored empty directories."""
     worktree = _init_real_worktree_with_gitignore(tmp_path)
     ignored_dir = worktree / "cache"
     ignored_dir.mkdir()
@@ -293,9 +295,55 @@ def test_snapshot_empty_untracked_dirs_preserves_wildcard_ignored_empty_dir(
     empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
         worktree_path=worktree,
         ignored_paths=(),
+        ignore_check_ignored_empty_dirs=True,
     )
 
     assert sorted(empty_dirs) == []
+    assert ignored_dir.exists()
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_reports_wildcard_ignored_empty_dir_by_default(
+    tmp_path: Path,
+) -> None:
+    """Default clean checks keep ignored empty directories dirty."""
+    worktree = _init_real_worktree_with_gitignore(tmp_path)
+    ignored_dir = worktree / "cache"
+    ignored_dir.mkdir()
+
+    check = await check_validation_worktree_clean(
+        run_git=_run_git_in_real_worktree(worktree),
+        worktree_path=worktree,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == validation_worktree.VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert check.paths == ("cache/",)
+    assert check.untracked_paths == ("cache/",)
+    assert check.ignored_paths == ()
+    assert ignored_dir.exists()
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_ignores_wildcard_ignored_empty_dir_when_opted_in(
+    tmp_path: Path,
+) -> None:
+    """ignore_all_ignored keeps wildcard-ignored empty dirs clean in snapshot mode."""
+    worktree = _init_real_worktree_with_gitignore(tmp_path)
+    ignored_dir = worktree / "cache"
+    ignored_dir.mkdir()
+
+    check = await check_validation_worktree_clean(
+        run_git=_run_git_in_real_worktree(worktree),
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+    )
+
+    assert check.clean is True
+    assert check.reason_code is None
+    assert check.paths == ()
+    assert check.untracked_paths == ()
+    assert check.ignored_paths == ()
     assert ignored_dir.exists()
 
 
