@@ -206,6 +206,77 @@ async def test_recover_missing_head_object_updates_expected_branch_ref(
 
 
 @pytest.mark.unit
+async def test_recover_missing_head_object_unstages_runtime_paths_without_deletion(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+    runtime_path = ".claude/agent-memory/session.log"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout=f"{runtime_path}\0src/recovered.py\0")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="b" * 40)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _resolve_worktree_branch_ref(_worktree_path: Path) -> str | None:
+        return f"refs/heads/awf/{workspace_id}"
+
+    repaired_worktrees: list[tuple[Path, Path]] = []
+
+    def _repair_agent_writable_worktree(mirror_path: Path, worktree_path: Path) -> None:
+        repaired_worktrees.append((mirror_path, worktree_path))
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "_resolve_worktree_branch_ref",
+        _resolve_worktree_branch_ref,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    recovered = await pr_remote_repair._recover_missing_head_object_from_filesystem(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        operation_start_head="a" * 40,
+    )
+
+    assert recovered == "b" * 40
+    assert any(
+        call.args
+        == _git_worktree_command(
+            worktree,
+            "--literal-pathspecs",
+            "reset",
+            "-q",
+            "HEAD",
+            "--",
+            runtime_path,
+        )
+        for call in cmd.calls
+    )
+    assert not any(call.args[-4:-2] == ["rm", "--cached"] for call in cmd.calls)
+    assert repaired_worktrees
+
+
+@pytest.mark.unit
 async def test_commit_dirty_worktree_repairs_mirror_hooks_path(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

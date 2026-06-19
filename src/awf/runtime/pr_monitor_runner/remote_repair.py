@@ -305,8 +305,10 @@ async def _recover_missing_head_object_from_filesystem(
         staged_paths = [p for p in staged.stdout.split("\0") if p]
         excluded = [p for p in staged_paths if is_under_agent_runtime_root(p)]
         if excluded:
-            rm_cached = await worktree_git(["rm", "--cached", "--", *excluded])
-            if not rm_cached.ok:
+            unstage = await worktree_git(
+                ["--literal-pathspecs", "reset", "-q", "HEAD", "--", *excluded]
+            )
+            if not unstage.ok:
                 return None
 
     diff = await worktree_git(["diff", "--cached", "--quiet"])
