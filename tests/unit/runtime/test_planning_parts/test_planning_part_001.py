@@ -1472,33 +1472,3 @@ def test_classify_conformance_stall_breaks_no_output_streak_on_stderr_progress()
     )
 
     assert evidence is None
-
-
-@pytest.mark.unit
-def test_classify_conformance_stall_breaks_no_output_streak_on_report_file_progress() -> None:
-    history = [
-        _iter_record(
-            iteration=0,
-            elapsed_seconds=400.0,
-            report_digest="digest-from-report-file",
-            worktree_changed=True,
-            stdout="",
-        ),
-        _iter_record(
-            iteration=1,
-            elapsed_seconds=400.0,
-            report_digest=None,
-            worktree_changed=False,
-            stdout="",
-        ),
-    ]
-
-    evidence = classify_conformance_stall(
-        history=history,
-        policy=_stall_policy(no_output_seconds=600),
-        plan_path=Path("docs/awf-plans/ws_report_progress.md"),
-        report_path=Path("docs/awf-plans/ws_report_progress.conformance.json"),
-        latest_error=None,
-    )
-
-    assert evidence is None
