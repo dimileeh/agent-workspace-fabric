@@ -26,6 +26,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.node.git_manager import (
+    GitOperationError,
     mirror_path_for_worktree,
     repair_agent_writable_worktree,
     repair_mirror_hooks_path,
@@ -430,13 +431,28 @@ async def _commit_dirty_worktree(
     if mirror_path is not None:
         try:
             await repair_mirror_hooks_path(mirror_path)
-        except Exception:
+        except (GitOperationError, OSError) as exc:
+            log_kwargs: dict[str, object] = {
+                "workspace_id": workspace_id,
+                "reason_code": _MIRROR_HOOKS_PATH_POISONED_REASON,
+                "error_type": exc.__class__.__name__,
+            }
+            if isinstance(exc, GitOperationError):
+                log_kwargs.update(
+                    {
+                        "repair_reason_code": exc.reason_code,
+                        "git_operation": exc.operation,
+                        "git_returncode": exc.returncode,
+                        "stderr": exc.stderr[:1000],
+                    }
+                )
+            else:
+                log_kwargs["error"] = str(exc)
             _log.warning(
                 "monitor.mirror_hooks_path_repair_failed",
-                workspace_id=workspace_id,
-                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                **log_kwargs,
             )
-            raise _MonitorMirrorHooksPathRepairFailedError() from None
+            raise _MonitorMirrorHooksPathRepairFailedError() from exc
 
     head_object_exists = await verify_head_object_exists(worktree_path)
     if not head_object_exists:

@@ -17,6 +17,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -337,6 +338,67 @@ async def test_commit_dirty_worktree_repairs_mirror_hooks_path(
     )
 
     assert len(hooks_path_repaired) >= 1
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_preserves_mirror_hooks_repair_failure_details(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+
+    repair_error = GitOperationError(
+        operation="mirror.hooks_path_repair",
+        returncode=1,
+        stdout="",
+        stderr="fatal: config unset failed",
+        reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+    )
+    warning_calls: list[tuple[str, dict[str, object]]] = []
+
+    def _warning(event: str, **kwargs: object) -> None:
+        warning_calls.append((event, kwargs))
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        raise repair_error
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(pr_remote_repair._log, "warning", _warning)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(_MonitorMirrorHooksPathRepairFailedError) as raised:
+        await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="fix: test",
+        )
+
+    assert raised.value.__cause__ is repair_error
+    assert warning_calls == [
+        (
+            "monitor.mirror_hooks_path_repair_failed",
+            {
+                "workspace_id": workspace_id,
+                "reason_code": "MIRROR_HOOKS_PATH_POISONED",
+                "error_type": "GitOperationError",
+                "repair_reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+                "git_operation": "mirror.hooks_path_repair",
+                "git_returncode": 1,
+                "stderr": "fatal: config unset failed",
+            },
+        )
+    ]
 
 
 @pytest.mark.unit
