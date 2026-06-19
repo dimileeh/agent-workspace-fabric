@@ -804,6 +804,82 @@ class TestMiscMonitorHelpers:
         assert committed is False
 
     @pytest.mark.unit
+    async def test_commit_dirty_worktree_missing_head_falls_back_from_stale_start_head(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A dangling operation-start SHA does not block candidate-head recovery."""
+        workspace_id = "ws_missing_head_stale_anchor"
+        stale_operation_start_head = "1" * 40
+        candidate_head = "2" * 40
+        mirror_path = tmp_path / "mirror.git"
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="missing")
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+        captured_recovery_heads: list[str] = []
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _repair_mirror_hooks_path(_mirror_path: Path) -> None:
+            return None
+
+        async def _open_merge_candidate_head_sha(*_args: object) -> str:
+            return candidate_head
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **kwargs: object,
+        ) -> str:
+            recovery_head = str(kwargs["operation_start_head"])
+            captured_recovery_heads.append(recovery_head)
+            return recovery_head
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "mirror_path_for_worktree",
+            lambda _worktree_path: mirror_path,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_open_merge_candidate_head_sha",
+            _open_merge_candidate_head_sha,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+            operation_start_head=stale_operation_start_head,
+            task_tag=None,
+        )
+
+        assert committed is False
+        assert captured_recovery_heads == [candidate_head]
+        assert fake.calls[0].args[-3:] == [
+            "cat-file",
+            "-e",
+            f"{stale_operation_start_head}^{{commit}}",
+        ]
+
+    @pytest.mark.unit
     async def test_commit_dirty_worktree_missing_head_recovery_runtime_only_returns_false(
         self,
         factory: async_sessionmaker[AsyncSession],

@@ -225,6 +225,16 @@ async def _open_merge_candidate_head_sha(self: Any, workspace_id: str) -> str | 
         return candidate.head_sha if candidate is not None else None
 
 
+async def _mirror_commit_object_exists(self: Any, mirror_path: Path, commit_sha: str) -> bool:
+    result = cast(
+        CommandResult,
+        await self._deps.runner.run(
+            ["git", "--git-dir", str(mirror_path), "cat-file", "-e", f"{commit_sha}^{{commit}}"]
+        ),
+    )
+    return result.ok
+
+
 async def _protected_scope_violations_for_recovered_dirty_commit(
     self: Any,
     *,
@@ -521,13 +531,24 @@ async def _commit_dirty_worktree(
             workspace_id=workspace_id,
             reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
         )
-        recovery_head = operation_start_head or await _open_merge_candidate_head_sha(
-            self, workspace_id
-        )
+        recovery_head = operation_start_head
+        if recovery_head and mirror_path is not None:
+            recovery_head_exists = await _mirror_commit_object_exists(
+                self, mirror_path, recovery_head
+            )
+            if not recovery_head_exists:
+                _log.warning(
+                    "monitor.head_object_missing_recovery_anchor_missing",
+                    workspace_id=workspace_id,
+                    operation_start_head=recovery_head[:10],
+                )
+                recovery_head = None
+        if not recovery_head:
+            recovery_head = await _open_merge_candidate_head_sha(self, workspace_id)
         if recovery_head is None:
             raise _MonitorHeadObjectMissingError(
                 _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
-                f"HEAD object missing for workspace {workspace_id} and no operation start head available",
+                f"HEAD object missing for workspace {workspace_id} and no recovery head available",
             )
         recovered = await _recover_missing_head_object_from_filesystem(
             self,
