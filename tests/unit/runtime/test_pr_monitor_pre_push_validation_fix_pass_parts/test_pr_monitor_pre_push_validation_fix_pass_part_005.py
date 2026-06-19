@@ -296,6 +296,63 @@ async def test_pre_push_validation_fix_pass_cleanup_failure_preserves_specific_f
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_fix_pass_agent_exception_repairs_mirror_before_rollback_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass
+
+    fix_start_head = "7" * 40
+    workspace_id, runner, cmd, adapter = await _make_fix_pass_runner(factory, tmp_path)
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    adapter.queue(exc=RuntimeError("unexpected fix-agent failure"))
+    repair_calls = 0
+    rollback_calls: list[str] = []
+
+    async def _repair_mirror_hooks(**_kwargs: object) -> None:
+        nonlocal repair_calls
+        repair_calls += 1
+
+    async def _rollback_failed_fix_pass(*_args: object, **kwargs: object) -> str:
+        rollback_calls.append(str(kwargs["reason"]))
+        return "PRE_PUSH_VALIDATION_ROLLBACK_FAILED"
+
+    monkeypatch.setattr(fix_pass, "mirror_path_for_worktree", lambda _worktree_path: tmp_path)
+    monkeypatch.setattr(
+        fix_pass, "_repair_pre_push_validation_fix_mirror_hooks", _repair_mirror_hooks
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback_failed_fix_pass,
+    )
+
+    committed, failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=_failed_validation_result(
+            pre_push_validation,
+            tmp_path,
+            workspace_head_sha=fix_start_head,
+        ),
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert (committed, failure_reason) == (False, "PRE_PUSH_VALIDATION_ROLLBACK_FAILED")
+    assert rollback_calls == ["agent_exception"]
+    assert repair_calls == 2
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_returns_missing_head_when_recovery_anchor_missing(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

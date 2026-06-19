@@ -577,8 +577,6 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason="agent_exception",
         )
-        if rollback_failure_reason is not None:
-            return False, rollback_failure_reason
         mirror_repair_failure_reason = await _repair_pre_push_validation_fix_mirror_hooks(
             workspace_id=workspace_id,
             pass_number=pass_number,
@@ -586,6 +584,8 @@ async def _run_pre_push_validation_fix_pass(
         )
         if mirror_repair_failure_reason is not None:
             return False, mirror_repair_failure_reason
+        if rollback_failure_reason is not None:
+            return False, rollback_failure_reason
         return False, None
 
     mirror_repair_failure_reason = await _repair_pre_push_validation_fix_mirror_hooks(
