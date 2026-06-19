@@ -23,13 +23,16 @@ import pytest
 from awf.common.commands import CommandResult
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import quality_methods as executor_quality_methods
+from awf.control.executor.constants import (
+    POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
+)
 from awf.control.executor.types import (
     _PlanningRunFailure,
     _PlanningValidationHandoff,
 )
 from awf.control.quality_gates import PLAN_ONLY_OUTPUT_REASON_CODE
 from awf.control.quality_gates_common import QualityGateViolation
-from awf.db.enums import OperationStatus, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     PlanConformanceReport,
@@ -729,6 +732,82 @@ async def test_post_validation_conformance_fix_pass_loop_falls_through_to_contin
     assert conformance_check.await_count == 2
     # The conformance fix pass re-invoked the agent exactly once between checks.
     assert adapter.run.await_count == 1
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_report_cleanup_failure_skips_fix_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Report cleanup residue is AWF/git failure, not an agent-correctable gap."""
+    profile = WorkspaceProfile.model_validate({"name": "prof-conf-cleanup"})
+    workspace = _workspace("ws_conf_cleanup")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_passing_command(tmp_path)])
+
+    conformance_failure = _PlanningRunFailure(
+        message="post-validation conformance report cleanup left report path dirty: report.json",
+        reason_code=POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
+        details={"conformance_report_cleanup": {"report_path": "report.json"}},
+    )
+    conformance_check = AsyncMock(return_value=conformance_failure)
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=2,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-1"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _run_post_validation_conformance_check=conformance_check,
+        _ensure_worktree_available=AsyncMock(return_value=True),
+        _repair_agent_git_ownership=AsyncMock(),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False),
+        ),
+        _fail_if_plan_only_paths=AsyncMock(return_value=False),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+        _runner=SimpleNamespace(run=AsyncMock(return_value=CommandResult(0, "", ""))),
+    )
+    adapter = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout="", stderr="")))
+
+    # Handoff has remaining iteration budget, but cleanup residue must not trigger
+    # a post-validation conformance fix pass.
+    handoff = _handoff(tmp_path, iteration=1, max_iterations=3)
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=adapter,
+        planning_validation_handoff=handoff,
+    )
+
+    assert result.stop
+    assert conformance_check.await_count == 1
+    assert adapter.run.await_count == 0
+    executor._mark_failed.assert_awaited_once()
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["status"] == OperationStatus.failed
+    assert (
+        finish_kwargs["reason_code"]
+        == POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE
+    )
+    mark_failed_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_failed_kwargs["failure_reason"] == FailureReason.infrastructure_failure
 
 
 @pytest.mark.unit

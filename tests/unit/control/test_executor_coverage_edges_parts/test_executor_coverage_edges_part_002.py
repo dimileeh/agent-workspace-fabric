@@ -17,6 +17,9 @@ from awf.control.executor import (
 )
 from awf.control.executor import helpers as executor_helpers
 from awf.control.executor import quality_gates as executor_quality_gates
+from awf.control.executor.constants import (
+    POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
+)
 from awf.control.executor.types import (
     _PlanningValidationHandoff,
 )
@@ -664,7 +667,7 @@ async def test_satisfied_post_validation_conformance_report_fails_when_unlink_le
     )
 
     assert failure is not None
-    assert failure.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    assert failure.reason_code == POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE
     assert failure.message == (
         "post-validation conformance report cleanup left report path dirty: "
         "docs/awf-plans/ws_post.conformance.json"

@@ -24,6 +24,7 @@ from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor.constants import (
     PLAN_CONFORMANCE_UNSATISFIED,
     POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
+    POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
 )
 from awf.control.executor.git_ops import _git_name_lines
 from awf.control.executor.helpers import (
@@ -703,6 +704,10 @@ async def run_validation_and_fix_cycle(
                         0,
                         conformance_handoff.max_iterations - conformance_handoff.iteration,
                     )
+                    conformance_report_cleanup_failed = (
+                        conformance_failure.reason_code
+                        == POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE
+                    )
                     # Recovery skips feature execution; retrying this
                     # conformance miss would only rerun validation.
                     # ``resume_disable_fix_passes`` (a grant-bearing resume) must
@@ -712,7 +717,8 @@ async def run_validation_and_fix_cycle(
                     # by the same single-use grant. Mark FAILED for operator
                     # triage instead (mirrors the zeroed validation-fix budget).
                     if (
-                        recovery is not None
+                        conformance_report_cleanup_failed
+                        or recovery is not None
                         or remaining_conformance_iterations <= 0
                         or resume_disable_fix_passes
                     ):
@@ -729,7 +735,11 @@ async def run_validation_and_fix_cycle(
                         await _mark_failed_preserving_planning_artifacts(
                             workspace_id=workspace_id,
                             from_status=WorkspaceStatus.validating,
-                            failure_reason=FailureReason.agent_failure,
+                            failure_reason=(
+                                FailureReason.infrastructure_failure
+                                if conformance_report_cleanup_failed
+                                else FailureReason.agent_failure
+                            ),
                             message=conformance_failure.message[:2000],
                             reason_code=conformance_failure.reason_code,
                             details=conformance_failure.details,

@@ -22,7 +22,10 @@ from awf.adapters.base import (
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
-from awf.control.executor.constants import PLAN_CONFORMANCE_UNSATISFIED
+from awf.control.executor.constants import (
+    PLAN_CONFORMANCE_UNSATISFIED,
+    POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
+)
 from awf.control.executor.helpers import (
     _digest_text,
     _read_text_if_present,
@@ -507,7 +510,7 @@ def _build_report_cleanup_failure(
             "post-validation conformance report cleanup left report path dirty: "
             f"{handoff.report_path.as_posix()}"
         ),
-        reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+        reason_code=POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
         details={
             "conformance_report_cleanup": {
                 "validation_run_id": validation_run_id,
