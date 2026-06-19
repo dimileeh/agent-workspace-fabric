@@ -368,6 +368,14 @@ async def _recover_missing_head_object_from_filesystem(
             changed_paths=staged_paths,
         )
         if policy_message is not None:
+            cleanup = await worktree_git(["reset", "--hard", operation_start_head])
+            if not cleanup.ok:
+                _log.warning(
+                    "monitor.head_object_missing_recovery_policy_blocked_cleanup_failed",
+                    workspace_id=workspace_id,
+                    returncode=cleanup.returncode,
+                    stderr=cleanup.stderr[:400],
+                )
             raise _MonitorPolicyBlockedError(policy_message)
         commit = await self._deps.runner.run(
             [

@@ -265,6 +265,7 @@ async def test_recover_missing_head_object_blocks_policy_before_recovery_commit(
         }
     ]
     assert not any("commit" in call.args for call in cmd.calls)
+    assert any(call.args[-3:] == ["reset", "--hard", "a" * 40] for call in cmd.calls)
 
 
 @pytest.mark.unit
