@@ -482,6 +482,19 @@ async def _run_pre_push_validation_fix_pass(
         event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     ):
         return False, "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                error_type=exc.__class__.__name__,
+            )
+            return False, _MIRROR_HOOKS_PATH_POISONED_REASON
     try:
         fix_result = await self._deps.adapter.run(
             compose_project=compose_project,
@@ -544,7 +557,6 @@ async def _run_pre_push_validation_fix_pass(
             return False, rollback_failure_reason
         return False, None
 
-    mirror_path = mirror_path_for_worktree(worktree_path)
     if mirror_path is not None:
         try:
             await repair_mirror_hooks_path(mirror_path)

@@ -432,7 +432,7 @@ async def test_pre_push_validation_fix_pass_repairs_ownership_before_agent(
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_fix_pass_repairs_hooks_path_after_agent(
+async def test_pre_push_validation_fix_pass_repairs_hooks_path_before_and_after_agent(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -459,19 +459,31 @@ async def test_pre_push_validation_fix_pass_repairs_hooks_path_after_agent(
         pre_push_validation_fix_passes=1,
     )
 
+    events: list[str] = []
     hooks_path_repaired: list[Path] = []
+    adapter_run = adapter.run
+
+    async def _adapter_run(**kwargs: object) -> object:
+        events.append("agent")
+        return await adapter_run(**kwargs)  # type: ignore[arg-type]
 
     async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
         del kwargs
         return True
 
     async def _repair_mirror_hooks_path(mirror_path: Path) -> bool:
+        events.append("repair")
         hooks_path_repaired.append(mirror_path)
         return True
 
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
         return True
 
+    monkeypatch.setattr(
+        adapter,
+        "run",
+        _adapter_run,
+    )
     monkeypatch.setattr(
         "awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass.repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
@@ -543,7 +555,9 @@ async def test_pre_push_validation_fix_pass_repairs_hooks_path_after_agent(
         validation_commands=("ruff check",),
     )
 
-    assert len(hooks_path_repaired) >= 1
+    assert events[:2] == ["repair", "agent"]
+    assert events.count("repair") >= 2
+    assert len(hooks_path_repaired) >= 2
 
 
 @pytest.mark.unit
@@ -608,6 +622,7 @@ async def test_pre_push_validation_fix_pass_fails_closed_on_git_mirror_hooks_rep
 
     assert not committed
     assert failure_reason == "MIRROR_HOOKS_PATH_POISONED"
+    assert adapter.calls == []
 
 
 @pytest.mark.unit
