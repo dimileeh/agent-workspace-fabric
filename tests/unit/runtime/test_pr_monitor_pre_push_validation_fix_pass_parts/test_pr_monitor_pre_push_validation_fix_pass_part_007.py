@@ -44,6 +44,7 @@ async def _run_recovered_fix_pass(
     protected_result: list[QualityGateViolation] | None = None,
     protected_error: ProtectedScopeDiffError | None = None,
     rollback_reason: str | None = None,
+    recorded_rollback_reasons: list[str] | None = None,
 ) -> tuple[bool, str | None, list[str]]:
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
     import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass_module
@@ -63,7 +64,7 @@ async def _run_recovered_fix_pass(
         worktrees_root=tmp_path / "worktrees",
     )
     rev_parse_results = [fix_start_head]
-    rollback_reasons: list[str] = []
+    rollback_reasons = recorded_rollback_reasons if recorded_rollback_reasons is not None else []
 
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
         return rev_parse_results.pop(0) if rev_parse_results else fix_start_head
@@ -173,6 +174,7 @@ async def test_recovered_fix_pass_reraises_protected_diff_error_after_rollback(
 ) -> None:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="M\0.github/workflows/ci.yml\0")
+    rollback_reasons: list[str] = []
 
     with pytest.raises(ProtectedScopeDiffError, match="diff unavailable"):
         await _run_recovered_fix_pass(
@@ -181,7 +183,9 @@ async def test_recovered_fix_pass_reraises_protected_diff_error_after_rollback(
             monkeypatch=monkeypatch,
             cmd=cmd,
             protected_error=ProtectedScopeDiffError("diff unavailable"),
+            recorded_rollback_reasons=rollback_reasons,
         )
+    assert rollback_reasons == ["recovered_protected_scope_diff_unavailable"]
 
 
 @pytest.mark.unit
