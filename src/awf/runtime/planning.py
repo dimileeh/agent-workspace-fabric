@@ -923,10 +923,12 @@ def changed_paths_from_porcelain(output: str) -> set[Path]:
     for raw in output.splitlines():
         if not raw:
             continue
+        status = raw[:2] if len(raw) >= 2 else ""
         path_text = raw[3:] if len(raw) > 3 else raw
-        if " -> " in path_text:
+        if status[:1] in {"R", "C"} or status[1:2] in {"R", "C"}:
             rename_paths = split_porcelain_rename_paths(path_text)
-            path_text = rename_paths[1] if rename_paths else path_text.split(" -> ", 1)[1]
+            if rename_paths:
+                path_text = rename_paths[1]
         path_text = path_text.strip()
         if path_text:
             paths.add(Path(unquote_porcelain_path(path_text)))
