@@ -849,6 +849,8 @@ async def _run_sync_base(
                 workspace_id=workspace_id,
                 message=f"fix: resolve PR #{pr_number} base conflicts",
                 command_evidence=command_evidence,
+                compose_project=compose_project,
+                compose_file=compose_file,
                 task_tag=task_tag,
                 operation_start_head=operation_start_head,
             )
