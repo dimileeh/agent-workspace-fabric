@@ -50,6 +50,8 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_CLEANUP_FAILED
@@ -667,6 +669,8 @@ async def _run_pre_push_validation_fix_pass(
     except (
         ProtectedScopeDiffError,
         _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorHeadObjectMissingError,
+        _MonitorMirrorHooksPathRepairFailedError,
     ):
         # ``_commit_dirty_worktree`` (and the protected-scope paths it invokes)
         # raises these deterministic reason-coded exceptions so the monitor loop's

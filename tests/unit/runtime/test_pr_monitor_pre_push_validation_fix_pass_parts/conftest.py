@@ -23,6 +23,10 @@ def _mock_verify_head_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
         _verify_head_object_exists,
     )
     monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass.verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+    monkeypatch.setattr(
         "awf.runtime.pr_monitor_runner.remote_repair.repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )

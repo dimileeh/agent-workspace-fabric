@@ -75,6 +75,8 @@ from awf.runtime.pr_monitor_runner.remote_repair import (
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation import profile_phase_command_plan
@@ -426,6 +428,37 @@ async def _run_pre_push_validation_with_fix_passes(
                 message=(
                     "PR monitor pre-push validation fix pass blocked: "
                     f"agent runtime ownership repair failed: {exc}"
+                ),
+            )
+        except _MonitorHeadObjectMissingError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_head_object_missing",
+                workspace_id=workspace_id,
+                pass_number=pass_index + 1,
+                error=repr(exc),
+                reason_code=exc.reason_code,
+            )
+            return replace(
+                validation_result,
+                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                message=(
+                    f"PR monitor pre-push validation fix pass blocked: HEAD object missing: {exc}"
+                ),
+            )
+        except _MonitorMirrorHooksPathRepairFailedError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_mirror_hooks_path_poisoned",
+                workspace_id=workspace_id,
+                pass_number=pass_index + 1,
+                error=repr(exc),
+                reason_code=exc.reason_code,
+            )
+            return replace(
+                validation_result,
+                reason_code=exc.reason_code,
+                message=(
+                    "PR monitor pre-push validation fix pass blocked: "
+                    f"mirror hooks path poisoned: {exc}"
                 ),
             )
         if fix_pass_failure_reason is not None:

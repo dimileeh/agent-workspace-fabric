@@ -228,6 +228,8 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     [
         "ProtectedScopeDiffError",
         "_MonitorAgentRuntimeOwnershipRepairFailedError",
+        "_MonitorHeadObjectMissingError",
+        "_MonitorMirrorHooksPathRepairFailedError",
     ],
 )
 async def test_pre_push_validation_fix_pass_preserves_reason_coded_commit_exceptions(
@@ -245,11 +247,9 @@ async def test_pre_push_validation_fix_pass_preserves_reason_coded_commit_except
     those roll back the fix-pass residue BEFORE re-raising
     (``PRRT_kwDOSJAM6s6Kc_Ak``). ``_MonitorPolicyBlockedError`` is also covered
     separately (``PRRT_kwDOSJAM6s6Kg7Dm``): it is non-terminal so it must roll
-    back its dirty residue before re-raising too. The two exceptions here
-    represent TERMINAL commit-sink failures (``PROTECTED_SCOPE_DIFF_UNAVAILABLE``
-    / ``AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED``), so they keep the plain
-    re-raise (no rollback) — the loop terminates, so the stranded dirt surfaces
-    only on a later operator resume, matching the other commit-sink callers.
+    back its dirty residue before re-raising too. The exceptions here represent
+    deterministic commit-sink failures that must keep the plain re-raise (no
+    rollback), so the caller can surface their structured reason codes.
     """
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
     from awf.runtime.pr_monitor_runner import types as monitor_types
@@ -539,6 +539,8 @@ async def test_pre_push_validation_fix_pass_rolls_back_dirty_residue_before_prov
             "_MonitorAgentRuntimeOwnershipRepairFailedError",
             "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
         ),
+        ("_MonitorHeadObjectMissingError", "HEAD_OBJECT_MISSING_UNRECOVERABLE"),
+        ("_MonitorMirrorHooksPathRepairFailedError", "MIRROR_HOOKS_PATH_POISONED"),
     ],
 )
 async def test_pre_push_validation_fix_pass_reason_coded_commit_exception_is_structured_push_failure(
@@ -606,7 +608,7 @@ async def test_pre_push_validation_fix_pass_reason_coded_commit_exception_is_str
         _run_pre_push_validation,
     )
 
-    raised_exc = getattr(monitor_types, exc_cls)("reason-coded fix-pass commit failure")
+    raised_exc = getattr(monitor_types, exc_cls)(expected_reason_code)
 
     async def _commit_dirty_worktree(**_kwargs: object) -> bool:
         """Simulate a reason-coded commit-sink failure during a fix pass."""
