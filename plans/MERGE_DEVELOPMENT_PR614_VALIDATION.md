@@ -38,6 +38,12 @@ Focused commands run:
 - `uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor_runner/ci_ops.py src/awf/runtime/pr_monitor_runner/operator_hints.py src/awf/runtime/pr_monitor_runner/pre_push_validation.py src/awf/runtime/pr_monitor_runner/pre_push_validation_fix_pass.py src/awf/runtime/pr_monitor_runner/remote_ops.py src/awf/runtime/pr_monitor_runner/remote_repair.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_004.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_019.py`
 - `uv run --python 3.12 --extra dev mypy src/awf/runtime/pr_monitor_runner/ci_ops.py src/awf/runtime/pr_monitor_runner/operator_hints.py src/awf/runtime/pr_monitor_runner/pre_push_validation.py src/awf/runtime/pr_monitor_runner/pre_push_validation_fix_pass.py src/awf/runtime/pr_monitor_runner/remote_ops.py src/awf/runtime/pr_monitor_runner/remote_repair.py`
 - `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_004.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_019.py -q`
+- `git status --short`
+
+The `compileall`, focused Ruff, and focused mypy commands were precautionary
+checks added during validation after the plan was written. They remained scoped
+to the touched Python files and did not expand into broad AWF/GitHub-owned
+validation.
 
 Results:
 
@@ -45,5 +51,6 @@ Results:
 - Focused Ruff: passed.
 - Focused mypy: passed for the 6 touched source files.
 - Focused pytest: `36 passed in 38.49s`.
+- Unmerged-path check: `git status --short` produced no unmerged path entries before committing.
 
 Full AWF/GitHub validation, full coverage, and CI-equivalent suites were not run in the agent phase per the AWF workspace contract.
