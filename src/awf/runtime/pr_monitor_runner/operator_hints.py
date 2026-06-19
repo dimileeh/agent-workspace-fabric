@@ -27,7 +27,6 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
-    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
@@ -223,7 +222,7 @@ async def _run_operator_hint_cycle(
                 failed=True,
                 returncode=1,
                 stderr=reason,
-                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                reason_code=exc.reason_code,
             )
         except _MonitorMirrorHooksPathRepairFailedError as exc:
             reason = str(exc) or "mirror hooks path repair failed"
