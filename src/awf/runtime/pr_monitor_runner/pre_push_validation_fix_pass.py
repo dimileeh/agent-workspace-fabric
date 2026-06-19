@@ -42,6 +42,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_RECOVERED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
@@ -666,7 +667,7 @@ async def _run_pre_push_validation_fix_pass(
                     )
                     if rollback_failure_reason is not None:
                         return False, rollback_failure_reason
-                    return False, None
+                    return False, _PROTECTED_SCOPE_REPAIR_FAILED_REASON
         committed = bool(
             await self._commit_dirty_worktree(
                 workspace_id=workspace_id,

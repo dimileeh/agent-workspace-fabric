@@ -1481,7 +1481,7 @@ jobs:
     )
 
     assert committed is False
-    assert cleanup_failure_reason is None
+    assert cleanup_failure_reason == "PROTECTED_SCOPE_REPAIR_FAILED"
     assert rollback_calls == [
         {
             "workspace_id": workspace_id,
