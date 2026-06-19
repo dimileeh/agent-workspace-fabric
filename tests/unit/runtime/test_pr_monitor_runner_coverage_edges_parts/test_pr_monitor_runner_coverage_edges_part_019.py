@@ -834,6 +834,7 @@ async def test_commit_dirty_worktree_preserves_mirror_hooks_repair_failure_detai
         )
 
     assert raised.value.__cause__ is repair_error
+    assert str(raised.value) == "could not repair poisoned mirror hooks path"
     assert warning_calls == [
         (
             "monitor.mirror_hooks_path_repair_failed",

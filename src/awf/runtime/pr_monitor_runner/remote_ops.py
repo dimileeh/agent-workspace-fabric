@@ -902,7 +902,7 @@ async def _run_sync_base(
                 failed=True,
                 returncode=1,
                 stderr=str(exc),
-                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                reason_code=exc.reason_code,
             )
         except _MonitorMirrorHooksPathRepairFailedError as exc:
             return _GitPushResult(

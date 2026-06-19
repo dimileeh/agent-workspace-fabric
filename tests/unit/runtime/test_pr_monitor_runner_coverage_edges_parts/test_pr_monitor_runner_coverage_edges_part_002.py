@@ -1134,7 +1134,7 @@ async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_head_object_mi
 
     async def _head_object_missing(**_kwargs: object) -> str:
         raise _MonitorHeadObjectMissingError(
-            "HEAD_OBJECT_MISSING_UNRECOVERABLE",
+            "HEAD_OBJECT_MISSING_FIX_THREAD_CUSTOM",
             "HEAD object missing for workspace ws_head_thread and recovery failed",
         )
 
@@ -1156,7 +1156,7 @@ async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_head_object_mi
     assert result.failed is True
     assert result.pushed is False
     assert result.returncode == 1
-    assert result.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert result.reason_code == "HEAD_OBJECT_MISSING_FIX_THREAD_CUSTOM"
     assert "HEAD object missing" in result.stderr
 
 
@@ -1289,7 +1289,7 @@ async def test_fix_cycle_returns_failed_push_when_review_fix_hits_head_object_mi
 
     async def _head_object_missing(**_kwargs: object) -> object:
         raise _MonitorHeadObjectMissingError(
-            "HEAD_OBJECT_MISSING_UNRECOVERABLE",
+            "HEAD_OBJECT_MISSING_FIX_REVIEW_CUSTOM",
             "HEAD object missing for workspace ws_head_review and recovery failed",
         )
 
@@ -1311,5 +1311,5 @@ async def test_fix_cycle_returns_failed_push_when_review_fix_hits_head_object_mi
     assert result.failed is True
     assert result.pushed is False
     assert result.returncode == 1
-    assert result.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert result.reason_code == "HEAD_OBJECT_MISSING_FIX_REVIEW_CUSTOM"
     assert "HEAD object missing" in result.stderr

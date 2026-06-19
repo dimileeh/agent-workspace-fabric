@@ -1114,7 +1114,7 @@ async def test_sync_base_catches_head_object_missing_error(
 
     async def _head_object_missing(**_kwargs: object) -> None:
         raise _MonitorHeadObjectMissingError(
-            "HEAD_OBJECT_MISSING_UNRECOVERABLE",
+            "HEAD_OBJECT_MISSING_SYNC_BASE_CUSTOM",
             "HEAD object missing for workspace test and recovery failed",
         )
 
@@ -1135,7 +1135,7 @@ async def test_sync_base_catches_head_object_missing_error(
     assert push_result.failed is True
     assert push_result.pushed is False
     assert push_result.returncode == 1
-    assert push_result.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert push_result.reason_code == "HEAD_OBJECT_MISSING_SYNC_BASE_CUSTOM"
     assert "HEAD object missing" in push_result.stderr
 
 

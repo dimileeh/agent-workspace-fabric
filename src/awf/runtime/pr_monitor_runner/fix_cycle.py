@@ -45,7 +45,6 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _GITHUB_TRANSIENT_RETRY_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
-    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
@@ -228,7 +227,7 @@ async def _run_fix_cycle(
                     failed=True,
                     returncode=1,
                     stderr=str(exc),
-                    reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                    reason_code=exc.reason_code,
                 )
             except _MonitorMirrorHooksPathRepairFailedError as exc:
                 for item_id in publish_dependent_ids:
@@ -353,7 +352,7 @@ async def _run_fix_cycle(
                     failed=True,
                     returncode=1,
                     stderr=str(exc),
-                    reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                    reason_code=exc.reason_code,
                 )
             except _MonitorMirrorHooksPathRepairFailedError as exc:
                 for item_id in publish_dependent_ids:

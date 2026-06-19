@@ -99,6 +99,13 @@ class _MonitorAgentRuntimeOwnershipRepairFailedError(RuntimeError):
 class _MonitorMirrorHooksPathRepairFailedError(RuntimeError):
     """Raised when monitor cannot repair a poisoned ``core.hooksPath`` on the shared mirror."""
 
+    def __init__(
+        self,
+        message: str = "could not repair poisoned mirror hooks path",
+    ) -> None:
+        """Store a diagnostic message for terminal push evidence."""
+        super().__init__(message)
+
     @property
     def reason_code(self: Any) -> str:
         """Return the fixed reason code for poisoned mirror hook-path failures."""
