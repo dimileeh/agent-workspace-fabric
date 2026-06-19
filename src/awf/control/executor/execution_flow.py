@@ -104,6 +104,7 @@ from awf.runtime.ownership import (
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_REASON
 from awf.runtime.validation import (
     ValidationResult,
 )
@@ -346,7 +347,16 @@ async def execute(
                 _log.warning(
                     "executor.mirror_hooks_path_repair_failed",
                     workspace_id=workspace_id,
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                 )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message="could not repair poisoned mirror hooks path before profile setup",
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                )
+                return
         setup_result = await self._validation.run_profile_phases(
             workspace_id=workspace_id,
             compose_project=compose_project,
