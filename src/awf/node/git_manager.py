@@ -713,6 +713,7 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         "core.hooksPath",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=git_env_without_object_lookup_overrides(),
     )
     probe_stdout_bytes, probe_stderr_bytes = await proc.communicate()
     probe_stdout = probe_stdout_bytes.decode("utf-8", errors="replace")
@@ -739,6 +740,7 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         "core.hooksPath",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=git_env_without_object_lookup_overrides(),
     )
     unset_stdout_bytes, unset_stderr_bytes = await unset.communicate()
     unset_stdout = unset_stdout_bytes.decode("utf-8", errors="replace")

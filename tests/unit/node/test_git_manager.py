@@ -1282,6 +1282,35 @@ class TestRepairMirrorHooksPath:
         assert check.stdout == ""
 
     @pytest.mark.unit
+    async def test_ignores_git_object_lookup_envs_for_config_repair(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "core.hooksPath", "/dev/null"],
+            check=True,
+            capture_output=True,
+        )
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "")
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "")
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--local", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+
+    @pytest.mark.unit
     async def test_noop_when_hooks_path_not_set(self, tmp_path: Path) -> None:
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
