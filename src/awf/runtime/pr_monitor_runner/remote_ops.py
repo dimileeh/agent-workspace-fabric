@@ -18,6 +18,11 @@ from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
+from awf.node.git_manager import (
+    GitOperationError,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+)
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
@@ -776,6 +781,24 @@ async def _run_sync_base(
         worktree_path=worktree_path,
         base_branch=base_branch,
     )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.sync_base_mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                error_type=exc.__class__.__name__,
+            )
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr="could not repair poisoned mirror hooks path before sync-base merge",
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            )
     merge_args: tuple[str, ...] = ("merge", "--no-edit", f"origin/{base_branch}")
     if task_tag:
         # A clean (conflict-free) base sync produces an AWF-authored merge commit;
