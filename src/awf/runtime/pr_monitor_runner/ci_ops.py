@@ -276,6 +276,19 @@ async def _run_ci_fix(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+    except Exception as exc:
+        if mirror_path is not None:
+            try:
+                await repair_mirror_hooks_path(mirror_path)
+            except (GitOperationError, OSError) as repair_exc:
+                _log.warning(
+                    "monitor.ci_fix_post_agent_mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    error_type=repair_exc.__class__.__name__,
+                    original_error_type=exc.__class__.__name__,
+                )
+        raise
 
     # The rollback anchor for the provider-recovery ``except`` clause below is
     # captured INSIDE that clause (after ``_commit_dirty_worktree`` raised),

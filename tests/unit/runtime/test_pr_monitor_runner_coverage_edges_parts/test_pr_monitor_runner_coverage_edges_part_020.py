@@ -214,6 +214,85 @@ async def test_ci_fix_ownership_repair_failure_blocks_agent_launch(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("post_repair_fails", [False, True])
+async def test_ci_fix_cleanup_error_repairs_hooks_path(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    post_repair_fails: bool,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="abc123\n")
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=ComposeExecCleanupError(
+            invocation_id="awf_ci_fix_cleanup",
+            source="agent",
+            label="monitor-ci-fix",
+            message="tagged process still running",
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    events: list[str] = []
+    hooks_path_repaired: list[Path] = []
+    adapter_run = adapter.run
+
+    async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
+        del kwargs
+        return True
+
+    async def _repair_mirror_hooks_path(mirror_path: Path) -> bool:
+        events.append("repair")
+        hooks_path_repaired.append(mirror_path)
+        if post_repair_fails and len(hooks_path_repaired) == 2:
+            raise OSError("mirror still poisoned")
+        return True
+
+    async def _adapter_run(**kwargs: object) -> object:
+        events.append("agent")
+        return await adapter_run(**kwargs)
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.ci_ops.repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.ci_ops.repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(runner._deps.adapter, "run", _adapter_run)
+
+    from awf.common.github_client import RepoRef
+    from awf.runtime.pr_monitor import CheckFailure
+
+    with pytest.raises(ComposeExecCleanupError) as exc_info:
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="test failure"),),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch="awf/ws_test",
+        )
+
+    assert events == ["repair", "agent", "repair"]
+    assert len(hooks_path_repaired) == 2
+    assert exc_info.value.invocation_id == "awf_ci_fix_cleanup"
+
+
+@pytest.mark.unit
 async def test_sync_base_repairs_ownership_before_agent_launch(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
