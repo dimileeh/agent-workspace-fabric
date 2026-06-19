@@ -46,6 +46,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
 )
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _defer_reason_state_key,
@@ -156,7 +157,14 @@ async def _run_fix_cycle(
         if not worktree_path.exists():
             return cast(str, operation_start_head)
         current_head = cast(str | None, await self._rev_parse_head(worktree_path))
-        return current_head or cast(str, operation_start_head)
+        if not current_head:
+            return cast(str, operation_start_head)
+        current_head_ok = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "cat-file", "-e", f"{current_head}^{{commit}}")
+        )
+        if current_head_ok.ok:
+            return current_head
+        return cast(str, operation_start_head)
 
     for _pass_num in range(self._runner_config.max_fix_cycle_passes):
         # 1) Address each item in the current batch.
