@@ -141,6 +141,34 @@ async def test_protected_file_diffs_for_committed_paths_loads_only_classified_pa
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_protected_file_diffs_for_committed_paths_strips_git_object_lookup_env(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0, stdout='[project]\nname = "demo2"\n')
+
+    await protected_file_diffs_for_committed_paths(
+        runner,
+        worktree_path=tmp_path,
+        base_ref="origin/main",
+        changed_paths=["pyproject.toml"],
+    )
+
+    assert runner.calls
+    for call in runner.calls:
+        assert call.env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in call.env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_protected_file_diffs_for_committed_paths_skips_owned_protected_paths(
     tmp_path,
 ) -> None:
