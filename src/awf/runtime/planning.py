@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 from awf.common.redaction import redact_secrets
+from awf.runtime.git_porcelain import split_porcelain_rename_paths, unquote_porcelain_path
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
 
 if TYPE_CHECKING:
@@ -924,10 +925,11 @@ def changed_paths_from_porcelain(output: str) -> set[Path]:
             continue
         path_text = raw[3:] if len(raw) > 3 else raw
         if " -> " in path_text:
-            path_text = path_text.split(" -> ", 1)[1]
+            rename_paths = split_porcelain_rename_paths(path_text)
+            path_text = rename_paths[1] if rename_paths else path_text.split(" -> ", 1)[1]
         path_text = path_text.strip()
         if path_text:
-            paths.add(Path(path_text))
+            paths.add(Path(unquote_porcelain_path(path_text)))
     return paths
 
 

@@ -193,6 +193,13 @@ def test_changed_paths_from_porcelain_handles_renames_and_short_lines() -> None:
 
 
 @pytest.mark.unit
+def test_changed_paths_from_porcelain_decodes_quoted_report_paths() -> None:
+    paths = changed_paths_from_porcelain(' M "docs/awf plans/report.json"\n')
+
+    assert paths == {Path("docs/awf plans/report.json")}
+
+
+@pytest.mark.unit
 def test_prompts_reference_plan_and_report_paths() -> None:
     plan = Path("docs/awf-plans/ws_123.md")
     report = Path("docs/awf-plans/ws_123.conformance.json")
