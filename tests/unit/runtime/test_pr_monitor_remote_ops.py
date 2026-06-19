@@ -171,6 +171,75 @@ async def test_git_push_result_fails_closed_when_mirror_hooks_repair_fails_befor
 
 
 @pytest.mark.unit
+async def test_git_push_result_strips_git_object_lookup_env_from_push_and_resync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Push and rejection resync must not inherit private Git object stores."""
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/alternate-objects")
+    monkeypatch.setenv("AWF_PUSH_ENV_SENTINEL", "kept")
+    worktree = tmp_path / "worktrees" / "ws_push_env"
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stderr="[rejected] non-fast-forward")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+
+    class _Runner:
+        def __init__(self) -> None:
+            self._deps = SimpleNamespace(runner=cmd)
+
+        async def _active_policy_block_message(self, _workspace_id: str) -> str | None:
+            return None
+
+    result = await remote_ops._git_push_result(
+        _Runner(),
+        worktree_path=worktree,
+        remote_branch="awf/ws_push_env",
+    )
+
+    assert result.recovered_by_resync is True
+    assert [call.args for call in cmd.calls] == [
+        [
+            "git",
+            "-c",
+            f"safe.directory={worktree}",
+            "-C",
+            str(worktree),
+            "push",
+            "origin",
+            "HEAD:refs/heads/awf/ws_push_env",
+        ],
+        [
+            "git",
+            "-c",
+            f"safe.directory={worktree}",
+            "-C",
+            str(worktree),
+            "fetch",
+            "origin",
+            "awf/ws_push_env",
+        ],
+        [
+            "git",
+            "-c",
+            f"safe.directory={worktree}",
+            "-C",
+            str(worktree),
+            "reset",
+            "--hard",
+            "origin/awf/ws_push_env",
+        ],
+    ]
+    for call in cmd.calls:
+        assert call.env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in call.env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+        assert call.env["AWF_PUSH_ENV_SENTINEL"] == "kept"
+
+
+@pytest.mark.unit
 def test_git_push_failure_outcome_defaults_to_git_push_failed() -> None:
     """Unknown push failures should retain the default push-failed outcome."""
     assert _git_push_failure_outcome(_make_push_result("UNKNOWN_FAILURE")) == "git_push_failed"

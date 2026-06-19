@@ -585,7 +585,11 @@ async def _git_push_result(
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                 details={"phase": "git_push"},
             )
-    r = await runner._deps.runner.run(git_worktree_command(worktree_path, "push", remote, refspec))
+    git_env = git_env_without_object_lookup_overrides()
+    r = await runner._deps.runner.run(
+        git_worktree_command(worktree_path, "push", remote, refspec),
+        env=git_env,
+    )
     if r.ok:
         pushed = "up-to-date" not in (r.stderr or "").lower()
         return _GitPushResult(
@@ -673,12 +677,14 @@ async def _git_push_result(
                 "fetch",
                 remote_url,
                 f"refs/heads/{remote_branch}",
-            )
+            ),
+            env=git_env,
         )
         reset_target = "FETCH_HEAD"
     else:
         fetch_result = await runner._deps.runner.run(
-            git_worktree_command(worktree_path, "fetch", "origin", remote_branch)
+            git_worktree_command(worktree_path, "fetch", "origin", remote_branch),
+            env=git_env,
         )
         reset_target = f"origin/{remote_branch}"
     if not fetch_result.ok:
@@ -701,7 +707,8 @@ async def _git_push_result(
             stderr=stderr,
         )
     await runner._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", reset_target)
+        git_worktree_command(worktree_path, "reset", "--hard", reset_target),
+        env=git_env,
     )
     return _GitPushResult(
         pushed=False,
