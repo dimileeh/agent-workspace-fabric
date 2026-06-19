@@ -12,6 +12,7 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.quality_gates import QualityGateViolation
 from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
+from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_REPAIR_FAILED_REASON
 from awf.runtime.pr_monitor_runner.remote_ops import _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
@@ -1079,6 +1080,98 @@ async def test_commit_dirty_worktree_missing_head_recovery_stops_when_protected_
     )
 
     assert result is False
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_missing_head_recovery_blocks_recovered_protected_scope(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    mirror = tmp_path / "mirrors" / "test.git"
+    mirror.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {mirror}/worktrees/{workspace_id}\n")
+    (mirror / "worktrees" / workspace_id).mkdir(parents=True)
+    (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        return False
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return False
+
+    async def _recover_missing_head_object_from_filesystem(
+        self: object,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_start_head: str,
+        task_tag: str | None = None,
+        command_evidence: object = (),
+    ) -> str | None:
+        del self, workspace_id, worktree_path, operation_start_head, task_tag
+        return "recovered_sha_12345"
+
+    async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
+        del kwargs
+        return True
+
+    async def _protected_scope_violations_for_recovered_dirty_commit(
+        *_args: object,
+        **kwargs: object,
+    ) -> list[QualityGateViolation]:
+        del kwargs
+        return [
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            )
+        ]
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair._recover_missing_head_object_from_filesystem",
+        _recover_missing_head_object_from_filesystem,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair."
+        "_protected_scope_violations_for_recovered_dirty_commit",
+        _protected_scope_violations_for_recovered_dirty_commit,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError) as exc:
+        await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="fix: test",
+            operation_start_head="base_sha_12345",
+        )
+
+    assert exc.value.reason_code == _PROTECTED_SCOPE_REPAIR_FAILED_REASON
 
 
 @pytest.mark.unit

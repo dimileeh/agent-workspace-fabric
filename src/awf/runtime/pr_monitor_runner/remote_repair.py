@@ -54,6 +54,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
     _REPAIR_START_HEAD_UNAVAILABLE_REASON,
     _REPAIR_WORKTREE_STATUS_FAILED_REASON,
     _TASK_TAG_UNSET,
@@ -693,7 +694,8 @@ async def _commit_dirty_worktree(
                     paths=[violation.path for violation in recovered_violations],
                 )
                 raise _MonitorPolicyBlockedError(
-                    quality_gate_violation_message(recovered_violations)
+                    quality_gate_violation_message(recovered_violations),
+                    reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
                 )
             if compose_project is not None and compose_file is not None:
                 recovered_status_stdout = "".join(f" M {path}\n" for path in recovered_paths)

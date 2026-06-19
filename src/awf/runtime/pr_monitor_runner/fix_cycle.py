@@ -208,6 +208,7 @@ async def _run_fix_cycle(
                     failed=True,
                     returncode=1,
                     stderr=str(exc),
+                    reason_code=exc.reason_code,
                 )
             except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
                 for item_id in publish_dependent_ids:
@@ -332,6 +333,7 @@ async def _run_fix_cycle(
                     failed=True,
                     returncode=1,
                     stderr=str(exc),
+                    reason_code=exc.reason_code,
                 )
             except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
                 for item_id in publish_dependent_ids:

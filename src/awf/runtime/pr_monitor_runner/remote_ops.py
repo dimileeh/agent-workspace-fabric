@@ -885,6 +885,7 @@ async def _run_sync_base(
                 failed=True,
                 returncode=1,
                 stderr=str(exc),
+                reason_code=exc.reason_code,
             )
         except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
             return _GitPushResult(

@@ -14,7 +14,10 @@ from awf.common.forge import ForgeClient
 from awf.runtime.logs import LogStore
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.pr_monitor_runner.config import PostMergeTargetReconciler
-from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_REASON
+from awf.runtime.pr_monitor_runner.constants import (
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _MONITOR_POLICY_BLOCKED_REASON,
+)
 from awf.runtime.validation import ValidationRunner
 
 
@@ -72,6 +75,16 @@ class ProviderRecoveryAuthError(Exception):
 
 class _MonitorPolicyBlockedError(Exception):
     """Raised when monitor-authored changes violate blocking workspace policy."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason_code: str = _MONITOR_POLICY_BLOCKED_REASON,
+    ) -> None:
+        """Store the monitor policy reason code with the exception message."""
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 class _MonitorAgentRuntimeOwnershipRepairFailedError(RuntimeError):

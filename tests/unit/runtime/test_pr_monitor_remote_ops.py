@@ -9,6 +9,7 @@ from awf.runtime.pr_monitor_runner import pre_push_validation
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _MONITOR_POLICY_BLOCKED_REASON,
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
@@ -29,6 +30,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
     _GitPushResult,
 )
+from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
@@ -153,6 +155,22 @@ def test_git_push_failure_outcome_maps_repair_and_protected_scope_reasons() -> N
     assert _git_push_failure_outcome(_make_push_result("REPAIR_WORKTREE_STATUS_FAILED")) == (
         "repair_start_blocked"
     )
+
+
+@pytest.mark.unit
+def test_monitor_policy_blocked_error_preserves_specific_reason_code() -> None:
+    """Policy exceptions default to monitor-policy but can carry protected-scope reasons."""
+    default_error = _MonitorPolicyBlockedError("supply-chain blocked")
+    protected_error = _MonitorPolicyBlockedError(
+        "protected scope blocked",
+        reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+    )
+    protected_result = _make_push_result(protected_error.reason_code)
+
+    assert default_error.reason_code == _MONITOR_POLICY_BLOCKED_REASON
+    assert protected_result.protected_scope_blocked is True
+    assert protected_result.terminal_monitor_failure is True
+    assert _git_push_failure_outcome(protected_result) == "protected_scope_push_blocked"
 
 
 @pytest.mark.unit

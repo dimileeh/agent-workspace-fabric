@@ -36,7 +36,6 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
-    _MONITOR_POLICY_BLOCKED_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
     _REPAIR_WORKTREE_STATUS_FAILED_REASON,
 )
@@ -395,7 +394,7 @@ async def _run_ci_fix(
             failed=True,
             returncode=1,
             stderr=str(exc),
-            reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+            reason_code=exc.reason_code,
         )
     except _MonitorHeadObjectMissingError as exc:
         return _GitPushResult(
