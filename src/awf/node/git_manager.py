@@ -35,6 +35,7 @@ from awf.common.logging import get_logger
 _log = get_logger(__name__)
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
+_GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
 
@@ -771,10 +772,18 @@ async def verify_head_object_exists(worktree_path: Path) -> bool:
         "HEAD^{commit}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=_git_env_without_object_lookup_overrides(),
     )
     await proc.communicate()
     assert proc.returncode is not None
     return proc.returncode == 0
+
+
+def _git_env_without_object_lookup_overrides() -> dict[str, str]:
+    env = dict(os.environ)
+    for key in _GIT_OBJECT_LOOKUP_ENV_KEYS:
+        env.pop(key, None)
+    return env
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
