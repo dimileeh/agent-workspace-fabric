@@ -953,6 +953,32 @@ def test_snapshot_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
 
 
 @pytest.mark.unit
+async def test_check_validation_worktree_clean_treats_clean_unborn_head_as_clean(
+    tmp_path: Path,
+) -> None:
+    """A clean repository with unborn HEAD has no tracked gitlinks to enumerate."""
+    worktree = tmp_path / "unborn-worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate Git status succeeding with no tracked or untracked paths."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is True
+    assert check.reason_code is None
+
+
+@pytest.mark.unit
 def test_remove_empty_untracked_dirs_treats_worktree_git_dir_as_boundary(
     tmp_path: Path,
 ) -> None:

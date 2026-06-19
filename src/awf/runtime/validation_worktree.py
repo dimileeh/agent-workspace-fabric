@@ -254,6 +254,10 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
             if isinstance(result.stderr, bytes)
             else result.stderr
         )
+        if "not a valid object name head" in (stderr or "").lower():
+            # A newly initialized repository has no HEAD tree and cannot have
+            # tracked gitlinks yet.
+            return frozenset()
         raise _GitlinkLookupError(
             "Could not enumerate tracked gitlinks with `git ls-tree`.",
             stderr=stderr,
