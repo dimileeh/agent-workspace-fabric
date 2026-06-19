@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.quality_gates import QualityGateViolation
 from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner.remote_ops import _ProtectedScopePushBlock
@@ -558,6 +559,100 @@ async def test_pre_push_validation_fix_pass_repairs_hooks_path_before_and_after_
     assert events[:2] == ["repair", "agent"]
     assert events.count("repair") >= 2
     assert len(hooks_path_repaired) >= 2
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_cleanup_error_repairs_hooks_path(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+
+    cmd = FakeCommandRunner()
+    fix_start_head = "a" * 40
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=ComposeExecCleanupError(
+            invocation_id="awf_pre_push_fix_cleanup",
+            source="agent",
+            label="monitor-pre-push-validation-fix",
+            message="tagged process still running",
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+
+    events: list[str] = []
+    hooks_path_repaired: list[Path] = []
+    adapter_run = adapter.run
+    rollback_calls: list[str] = []
+
+    async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
+        del kwargs
+        return True
+
+    async def _repair_mirror_hooks_path(mirror_path: Path) -> bool:
+        events.append("repair")
+        hooks_path_repaired.append(mirror_path)
+        return True
+
+    async def _adapter_run(**kwargs: object) -> object:
+        events.append("agent")
+        return await adapter_run(**kwargs)
+
+    async def _rollback_failed_fix_pass(_runner: object, **kwargs: object) -> str | None:
+        del _runner
+        rollback_calls.append(str(kwargs["reason"]))
+        return None
+
+    monkeypatch.setattr(
+        runner._deps.adapter,
+        "run",
+        _adapter_run,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass.repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass.repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.pre_push_validation._rollback_failed_pre_push_validation_fix_pass",
+        _rollback_failed_fix_pass,
+    )
+
+    from awf.runtime.pr_monitor_runner.pre_push_validation import _run_pre_push_validation_fix_pass
+
+    committed, failure_reason = await _run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="awf/ws_test",
+        remote_url=None,
+        state=None,
+        validation_result=_write_failed_validation_result(tmp_path),
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("ruff check",),
+    )
+
+    assert committed is False
+    assert failure_reason is None
+    assert rollback_calls == ["compose_cleanup_failed"]
+    assert events == ["repair", "agent", "repair"]
+    assert len(hooks_path_repaired) == 2
 
 
 @pytest.mark.unit
