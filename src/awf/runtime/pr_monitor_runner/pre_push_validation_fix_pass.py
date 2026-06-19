@@ -30,6 +30,7 @@ from awf.control.validation_fix_cycle import (
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     GitOperationError,
+    git_env_without_object_lookup_overrides,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
     verify_head_object_exists,
@@ -607,7 +608,8 @@ async def _run_pre_push_validation_fix_pass(
                     "--name-status",
                     "-z",
                     f"{fix_start_head}..{recovered_head_for_protected_scope}",
-                )
+                ),
+                env=git_env_without_object_lookup_overrides(),
             )
             if not recovered_delta.ok:
                 _log.warning(

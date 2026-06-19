@@ -1227,9 +1227,9 @@ async def test_pre_push_validation_fix_pass_validates_protected_scope_after_miss
     fix_start_head = "1" * 40
     recovered_head = "2" * 40
     cmd = FakeCommandRunner()
-    # Recovered protected-scope delta: ``git diff --name-only -z
+    # Recovered protected-scope delta: ``git diff --name-status -z
     # fix_start_head..recovered``.
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\0")
+    cmd.queue_result(returncode=0, stdout="M\0.github/workflows/ci.yml\0")
     adapter = FakeAdapter()
     adapter.queue(stdout="fixed validation and recovered HEAD\n")
     runner = make_runner(
@@ -1340,7 +1340,7 @@ async def test_pre_push_validation_fix_pass_validates_protected_scope_after_miss
             "workspace_id": workspace_id,
             "worktree_path": worktree,
             "base_ref": fix_start_head,
-            "changed_paths": [".github/workflows/ci.yml"],
+            "changed_paths": (".github/workflows/ci.yml",),
         }
     ]
     assert rev_parse_results == []
@@ -1389,7 +1389,7 @@ jobs:
       - run: pytest
 """
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\0")
+    cmd.queue_result(returncode=0, stdout="M\0.github/workflows/ci.yml\0")
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout=old_workflow)
     cmd.queue_result(returncode=0)
