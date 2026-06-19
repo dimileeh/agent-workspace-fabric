@@ -942,6 +942,7 @@ async def run_validation_and_fix_cycle(
             validation_run_id=validation_run_id,
             requested_tier=validation_tier,
         ):
+            _deposit_planning_artifacts_if_required()
             return ExecutionValidationResult(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
@@ -1042,6 +1043,7 @@ async def run_validation_and_fix_cycle(
             validation_run_id=validation_run_id,
             requested_tier=validation_tier,
         ):
+            _deposit_planning_artifacts_if_required()
             return ExecutionValidationResult(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
@@ -1123,6 +1125,7 @@ async def run_validation_and_fix_cycle(
             validation_run_id=validation_run_id,
             requested_tier=validation_tier,
         ):
+            _deposit_planning_artifacts_if_required()
             return ExecutionValidationResult(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
@@ -1278,6 +1281,7 @@ async def run_validation_and_fix_cycle(
                 validation_run_id=validation_run_id,
                 requested_tier=validation_tier,
             ):
+                _deposit_planning_artifacts_if_required()
                 return ExecutionValidationResult(
                     stop=True,
                     successful_validation_run_id=successful_validation_run_id,

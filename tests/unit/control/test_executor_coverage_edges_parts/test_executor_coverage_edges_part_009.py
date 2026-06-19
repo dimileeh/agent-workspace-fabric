@@ -437,6 +437,102 @@ async def test_fix_pass_status_recheck_race_before_commit_stops(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "unavailable_action",
+    [
+        "validation_fix_agent_run",
+        "validation_fix_git_add",
+        "validation_fix_git_diff",
+        "validation_fix_git_commit",
+    ],
+)
+async def test_fix_pass_worktree_guard_stops_deposit_planning_artifacts(
+    unavailable_action: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression PRRT_kwDOSJAM6s6KxQa0: fix-pass worktree guard stops must
+    deposit planning artifacts before returning stop=True.
+    """
+    profile = WorkspaceProfile.model_validate({"name": f"prof-{unavailable_action}"})
+    workspace = _workspace(f"ws_{unavailable_action}")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "find_protected_quality_gate_changes",
+        lambda **_kwargs: [],
+    )
+
+    deposit_calls: list[str] = []
+
+    def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        deposit_calls.append(str(kwargs["workspace_id"]))
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_failing_command(tmp_path)])
+
+    async def _ensure_worktree_available(**kwargs: object) -> bool:
+        return kwargs.get("action") != unavailable_action
+
+    git_in_worktree = AsyncMock(
+        side_effect=[
+            CommandResult(returncode=0, stdout="", stderr=""),  # git add -A
+            CommandResult(
+                returncode=0,
+                stdout="src/foo.py\n",
+                stderr="",
+            ),  # git diff --cached --name-only
+        ]
+    )
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=1,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value=f"vr-{unavailable_action}"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _ensure_worktree_available=AsyncMock(side_effect=_ensure_worktree_available),
+        _repair_agent_git_ownership=AsyncMock(),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False),
+        ),
+        _committed_and_staged_output_is_plan_only=AsyncMock(return_value=False),
+        _active_operator_grant_specs=AsyncMock(return_value=[]),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+        _runner=SimpleNamespace(run=AsyncMock(return_value=CommandResult(0, "", ""))),
+    )
+    adapter = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout="", stderr="")))
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=adapter,
+        git_in_worktree=git_in_worktree,
+    )
+
+    assert result.stop
+    assert deposit_calls == [workspace.id]
+
+
+@pytest.mark.unit
 async def test_fix_pass_git_add_failure_records_command_reason_code(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
