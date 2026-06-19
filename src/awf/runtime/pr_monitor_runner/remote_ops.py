@@ -28,6 +28,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
     _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
@@ -155,6 +156,7 @@ class _GitPushResult:
         """Return whether protected-scope policy blocked this push."""
         return self.failed and self.reason_code in {
             _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+            _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
             _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
         }
 

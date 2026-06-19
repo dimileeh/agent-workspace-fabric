@@ -9,6 +9,7 @@ from awf.runtime.pr_monitor_runner import pre_push_validation
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
@@ -152,6 +153,22 @@ def test_git_push_failure_outcome_maps_repair_and_protected_scope_reasons() -> N
     assert _git_push_failure_outcome(_make_push_result("REPAIR_WORKTREE_STATUS_FAILED")) == (
         "repair_start_blocked"
     )
+
+
+@pytest.mark.unit
+def test_git_push_terminal_monitor_failure_maps_recovered_protected_scope_repair_failure() -> None:
+    """Recovered protected-scope repair failures must stop monitor retry.
+
+    Missing-HEAD recovery can leave HEAD on a recovered commit that still
+    contains protected-scope changes. That pre-push validation failure must stay
+    on the protected-scope terminal path instead of retrying against the same
+    recovered commit.
+    """
+    result = _make_push_result(_PROTECTED_SCOPE_REPAIR_FAILED_REASON)
+
+    assert result.protected_scope_blocked is True
+    assert result.terminal_monitor_failure is True
+    assert _git_push_failure_outcome(result) == "protected_scope_push_blocked"
 
 
 @pytest.mark.unit
