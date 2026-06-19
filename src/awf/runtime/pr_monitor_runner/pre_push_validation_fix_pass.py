@@ -45,6 +45,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
     _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
@@ -603,7 +604,7 @@ async def _run_pre_push_validation_fix_pass(
                 git_worktree_command(
                     worktree_path,
                     "diff",
-                    "--name-only",
+                    "--name-status",
                     "-z",
                     f"{fix_start_head}..{recovered_head_for_protected_scope}",
                 )
@@ -628,7 +629,7 @@ async def _run_pre_push_validation_fix_pass(
                 if rollback_failure_reason is not None:
                     return False, rollback_failure_reason
                 return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
-            recovered_paths = [p for p in recovered_delta.stdout.split("\0") if p]
+            recovered_paths = _changed_paths_from_name_status_z(recovered_delta.stdout or "")
             if recovered_paths:
                 try:
                     violations = await _protected_scope_violations_for_recovered_commit(
