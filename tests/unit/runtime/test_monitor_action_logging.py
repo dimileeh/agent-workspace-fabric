@@ -68,6 +68,14 @@ def _name_status_z(*paths: str) -> str:
     return "".join(f"M\0{path}\0" for path in paths)
 
 
+def _call_tails(cmd: FakeCommandRunner) -> list[list[str]]:
+    return [call.args[-5:] for call in cmd.calls]
+
+
+def _call_tail_report(cmd: FakeCommandRunner) -> str:
+    return "\n".join(" ".join(tail) for tail in _call_tails(cmd))
+
+
 class TestMonitorActionLogging:
     @pytest.mark.unit
     async def test_merge_action_emits_log_line(
@@ -983,6 +991,7 @@ class TestMonitorDirtyWorktreeSalvage:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await seed_monitoring_workspace(factory)
         thread = thread_node(tid="T_dirty", author="gemini-code-assist")
@@ -995,6 +1004,8 @@ class TestMonitorDirtyWorktreeSalvage:
         adapter.queue(stdout="changed files but failed before summary", returncode=1)
         cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
         cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # commit start HEAD
+        cmd.queue_result(returncode=0)  # operation start HEAD cat-file
         cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")  # dirty check
         cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")  # stage status (untracked=all)
         cmd.queue_result(returncode=0)  # git add -A
@@ -1023,6 +1034,16 @@ class TestMonitorDirtyWorktreeSalvage:
             sleep_fn=sleep_fn,
             worktrees_root=worktrees_root,
         )
+
+        async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
+            del kwargs
+            return None
+
+        monkeypatch.setattr(
+            runner,
+            "_refresh_supply_chain_policy_before_push",
+            _refresh_supply_chain_policy_before_push,
+        )
         with structlog.testing.capture_logs() as captured:
             await runner.run(
                 workspace_id=ws_id,
@@ -1036,7 +1057,7 @@ class TestMonitorDirtyWorktreeSalvage:
             if len(call.args) >= 5
             and call.args[-3:] == ["commit", "-m", "fix: address PR review thread T_dirty"]
         ]
-        assert commit_calls
+        assert commit_calls, _call_tail_report(cmd)
         assert any(call.args[:3] == ["gh", "api", "graphql"] for call in cmd.calls)
         actions = [e["action"] for e in _action_entries(captured)]
         assert actions == ["AddressComments", "Merge"]
@@ -1050,6 +1071,7 @@ class TestMonitorDirtyWorktreeSalvage:
         adapter: FakeAdapter,
         sleep_fn: RecordedSleep,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await seed_monitoring_workspace(factory)
         async with factory() as session:
@@ -1077,6 +1099,8 @@ class TestMonitorDirtyWorktreeSalvage:
         adapter.queue(stdout="fixed by editing CI")
         cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
         cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # commit start HEAD
+        cmd.queue_result(returncode=0)  # operation start HEAD cat-file
         cmd.queue_result(
             returncode=0,
             stdout=(
@@ -1122,13 +1146,23 @@ class TestMonitorDirtyWorktreeSalvage:
             worktrees_root=worktrees_root,
         )
 
+        async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
+            del kwargs
+            return None
+
+        monkeypatch.setattr(
+            runner,
+            "_refresh_supply_chain_policy_before_push",
+            _refresh_supply_chain_policy_before_push,
+        )
+
         await runner.run(
             workspace_id=ws_id,
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
 
-        assert len(adapter.calls) == 2
+        assert len(adapter.calls) == 2, _call_tail_report(cmd)
         assert "outside this workspace's declared owned_paths" in adapter.calls[1]
         assert ".github/workflows/ci.yml" in adapter.calls[1]
         commit_calls = [

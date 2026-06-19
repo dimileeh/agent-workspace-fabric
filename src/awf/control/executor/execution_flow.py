@@ -1493,7 +1493,6 @@ async def execute(
             compose_file=compose_file,
         )
         return
-
     _log.info(
         "executor.completed",
         workspace_id=workspace_id,
