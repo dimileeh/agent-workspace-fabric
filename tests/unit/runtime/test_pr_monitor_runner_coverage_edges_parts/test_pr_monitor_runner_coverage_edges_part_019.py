@@ -596,7 +596,7 @@ async def test_recover_missing_head_object_rolls_back_after_commit_failure(
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
+    cmd.queue_result(returncode=0, stdout="A\0generated.tmp\0M\0src/recovered.py\0")
     cmd.queue_result(returncode=1, stderr="commit failed")
     runner = make_runner(
         factory=factory,
@@ -633,6 +633,18 @@ async def test_recover_missing_head_object_rolls_back_after_commit_failure(
 
     assert recovered is None
     assert any(call.args[-3:] == ["reset", "--hard", "a" * 40] for call in cmd.calls)
+    assert any(
+        call.args
+        == _git_worktree_command(
+            worktree,
+            "--literal-pathspecs",
+            "clean",
+            "-fd",
+            "--",
+            "generated.tmp",
+        )
+        for call in cmd.calls
+    )
 
 
 @pytest.mark.unit

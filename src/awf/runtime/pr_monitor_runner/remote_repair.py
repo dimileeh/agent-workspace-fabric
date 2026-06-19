@@ -339,7 +339,11 @@ async def _recover_missing_head_object_from_filesystem(
             ),
         )
 
-    async def cleanup_after_abort(reason: str) -> None:
+    async def cleanup_after_abort(
+        reason: str,
+        *,
+        untracked_cleanup_paths: Sequence[str] = (),
+    ) -> None:
         cleanup = await worktree_git(["reset", "--hard", operation_start_head])
         if not cleanup.ok:
             _log.warning(
@@ -349,6 +353,24 @@ async def _recover_missing_head_object_from_filesystem(
                 returncode=cleanup.returncode,
                 stderr=cleanup.stderr[:400],
             )
+        elif untracked_cleanup_paths:
+            clean = await worktree_git(
+                [
+                    "--literal-pathspecs",
+                    "clean",
+                    "-fd",
+                    "--",
+                    *untracked_cleanup_paths,
+                ]
+            )
+            if not clean.ok:
+                _log.warning(
+                    "monitor.head_object_missing_recovery_abort_clean_failed",
+                    workspace_id=workspace_id,
+                    reason=reason,
+                    returncode=clean.returncode,
+                    stderr=clean.stderr[:400],
+                )
 
     start_ok = await mirror_git(["cat-file", "-e", f"{operation_start_head}^{{commit}}"])
     if not start_ok.ok:
@@ -470,7 +492,10 @@ async def _recover_missing_head_object_from_filesystem(
             env=git_env_without_object_lookup_overrides(),
         )
         if not commit.ok:
-            await cleanup_after_abort("commit_failed")
+            await cleanup_after_abort(
+                "commit_failed",
+                untracked_cleanup_paths=staged_untracked_cleanup_paths,
+            )
             return None
 
     await asyncio.to_thread(repair_agent_writable_worktree, mirror_path, worktree_path)
