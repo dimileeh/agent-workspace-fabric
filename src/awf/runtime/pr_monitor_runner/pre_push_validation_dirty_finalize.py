@@ -37,6 +37,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_worktree_constants import (
@@ -451,6 +452,24 @@ async def _try_finalize_pre_push_dirty_repair_state(
             paths=check.paths,
             reason_code=exc.reason_code,
             message=str(exc) or "agent runtime ownership repair failed",
+        )
+    except _MonitorMirrorHooksPathRepairFailedError as exc:
+        # ``_commit_dirty_worktree`` raises this when the shared mirror's
+        # ``core.hooksPath`` cannot be repaired before the dirty-finalize
+        # commit. Preserve the fail-closed mirror reason instead of collapsing
+        # it into the generic pre-existing-dirty failure.
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_mirror_hooks_path_poisoned",
+            workspace_id=workspace_id,
+            error=repr(exc),
+            paths=list(check.paths),
+            reason_code=exc.reason_code,
+        )
+        return ValidationWorktreeCheck(
+            clean=False,
+            paths=check.paths,
+            reason_code=exc.reason_code,
+            message=str(exc) or "could not repair poisoned mirror hooks path",
         )
     except ProtectedScopeDiffError as exc:
         # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
