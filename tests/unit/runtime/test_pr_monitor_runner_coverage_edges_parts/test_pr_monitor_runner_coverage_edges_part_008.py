@@ -422,6 +422,78 @@ async def test_protected_scope_repair_records_remaining_violations_after_agent_f
 
 
 @pytest.mark.unit
+async def test_protected_scope_repair_cleans_mirror_before_provider_retry(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.adapter.queue(returncode=1, stderr="provider outage")
+    violation = _protected_workflow_violation()
+    events: list[str] = []
+
+    async def _violations_for_status(**_kwargs: object) -> tuple[QualityGateViolation, ...]:
+        return (violation,)
+
+    async def _prompt(**_kwargs: object) -> str:
+        return "repair protected scope"
+
+    async def _suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    def _mirror_path_for_worktree(_worktree_path: Path) -> Path:
+        return tmp_path / "mirrors" / "repo.git"
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        events.append("mirror-repair")
+        return True
+
+    async def _handle_provider_error(*_args: object, **_kwargs: object) -> None:
+        events.append("provider-recovery")
+        raise ProviderRecoveryRetryError()
+
+    monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
+    monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
+    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _suppresses_cli)
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_agent_runtime_ownership",
+        _repair_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "mirror_path_for_worktree",
+        _mirror_path_for_worktree,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(runner, "_handle_provider_agent_run_error", _handle_provider_error)
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._repair_protected_scope_changes_before_commit(
+            workspace_id="ws_delta",
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="awf_ws_delta",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
+
+    assert events == ["mirror-repair", "provider-recovery"]
+
+
+@pytest.mark.unit
 async def test_protected_scope_status_check_wraps_diff_read_failures(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

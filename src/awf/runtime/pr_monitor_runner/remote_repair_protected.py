@@ -42,6 +42,11 @@ from awf.db.repositories import (
     WorkspaceEventCreate,
     WorkspaceRepository,
 )
+from awf.node.git_manager import (
+    GitOperationError,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -54,6 +59,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_GIT_PUSH_EVENT,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
     _PROTECTED_SCOPE_PAUSED_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
@@ -82,6 +88,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _ProtectedScopeRollbackDeltaEvidence,
 )
 
@@ -835,7 +842,21 @@ async def _repair_protected_scope_changes_before_commit(
         )
     except AgentRunError as exc:
         agent_run_err = exc
-        await self._handle_provider_agent_run_error(workspace_id, exc, state=state)
+
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.protected_scope_repair_mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            )
+            raise _MonitorMirrorHooksPathRepairFailedError() from exc
+
+    if agent_run_err is not None:
+        await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
 
     worktree_path = self._worktrees_root / workspace_id
     repaired_status = await self._deps.runner.run(
