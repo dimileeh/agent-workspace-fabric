@@ -188,7 +188,10 @@ async def _repair_operation_start_head_result(
                 source=source,
             )
             return fallback_head, None
-    result = await self._deps.runner.run(git_worktree_command(worktree_path, "rev-parse", "HEAD"))
+    result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "rev-parse", "HEAD"),
+        env=git_env_without_object_lookup_overrides(),
+    )
     head_sha = result.stdout.strip()
     if result.ok and head_sha:
         return head_sha, None

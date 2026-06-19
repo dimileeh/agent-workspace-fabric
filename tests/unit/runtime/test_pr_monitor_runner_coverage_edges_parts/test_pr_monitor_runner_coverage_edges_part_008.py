@@ -625,6 +625,41 @@ async def test_repair_operation_start_head_uses_fallback_when_worktree_missing(
 
 
 @pytest.mark.unit
+async def test_repair_operation_start_head_strips_git_object_lookup_env(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    head, result = await runner._repair_operation_start_head_result(
+        workspace_id="ws_repair_start_head",
+        worktree_path=worktree,
+        operation_type="review_fix",
+    )
+
+    assert head == "a" * 40
+    assert result is None
+    assert len(cmd.calls) == 1
+    env = cmd.calls[0].env
+    assert env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in env
+
+
+@pytest.mark.unit
 async def test_repair_delta_paths_records_malformed_committed_diff_fallback_errors(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
