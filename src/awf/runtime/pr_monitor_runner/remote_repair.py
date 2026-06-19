@@ -505,9 +505,14 @@ async def _commit_dirty_worktree(
                 _log.warning(
                     "monitor.head_object_missing_recovered_diff_failed",
                     workspace_id=workspace_id,
+                    returncode=diff.returncode,
                     stderr=diff.stderr[:400],
+                    reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
                 )
-                return False
+                raise _MonitorHeadObjectMissingError(
+                    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                    f"HEAD object recovered for workspace {workspace_id} but recovered diff failed",
+                )
             if diff.ok:
                 recovered_paths = [p for p in diff.stdout.split("\0") if p]
                 if recovered_paths:

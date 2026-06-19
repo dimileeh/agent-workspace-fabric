@@ -707,13 +707,14 @@ async def test_commit_dirty_worktree_missing_head_recovery_fails_closed_when_rec
         _refresh_supply_chain_policy_before_push,
     )
 
-    result = await runner._commit_dirty_worktree(
-        workspace_id=workspace_id,
-        message="fix: test",
-        operation_start_head="base_sha_12345",
-    )
+    with pytest.raises(_MonitorHeadObjectMissingError) as exc:
+        await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="fix: test",
+            operation_start_head="base_sha_12345",
+        )
 
-    assert result is False
+    assert exc.value.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
     assert policy_calls == []
 
 
