@@ -391,10 +391,15 @@ async def test_recover_missing_head_object_verifies_final_head_in_mirror(
     assert final_rev_parse.env is not None
     assert "GIT_OBJECT_DIRECTORY" not in final_rev_parse.env
     assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in final_rev_parse.env
-    assert cmd.calls[-1].args[-3:] == ["cat-file", "-e", f"{recovered_sha}^{{commit}}"]
-    assert cmd.calls[-1].env is not None
-    assert "GIT_OBJECT_DIRECTORY" not in cmd.calls[-1].env
-    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in cmd.calls[-1].env
+    final_mirror_check = [
+        call
+        for call in cmd.calls
+        if call.args[-3:] == ["cat-file", "-e", f"{recovered_sha}^{{commit}}"]
+    ][-1]
+    assert final_mirror_check.env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in final_mirror_check.env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in final_mirror_check.env
+    assert cmd.calls[-1].args[-3:] == ["reset", "--hard", "a" * 40]
     assert repaired_worktrees
 
 
@@ -457,6 +462,59 @@ async def test_recover_missing_head_object_blocks_policy_before_recovery_commit(
         }
     ]
     assert not any("commit" in call.args for call in cmd.calls)
+    assert any(call.args[-3:] == ["reset", "--hard", "a" * 40] for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_recover_missing_head_object_rolls_back_after_commit_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
+    cmd.queue_result(returncode=1, stderr="commit failed")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _resolve_worktree_branch_ref(_worktree_path: Path) -> str | None:
+        return f"refs/heads/awf/{workspace_id}"
+
+    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
+        del kwargs
+        return None
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "_resolve_worktree_branch_ref",
+        _resolve_worktree_branch_ref,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_refresh_supply_chain_policy_before_push",
+        _refresh_supply_chain_policy_before_push,
+    )
+
+    recovered = await pr_remote_repair._recover_missing_head_object_from_filesystem(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        operation_start_head="a" * 40,
+    )
+
+    assert recovered is None
     assert any(call.args[-3:] == ["reset", "--hard", "a" * 40] for call in cmd.calls)
 
 

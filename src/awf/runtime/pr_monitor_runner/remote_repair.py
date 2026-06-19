@@ -336,6 +336,17 @@ async def _recover_missing_head_object_from_filesystem(
             ),
         )
 
+    async def cleanup_after_abort(reason: str) -> None:
+        cleanup = await worktree_git(["reset", "--hard", operation_start_head])
+        if not cleanup.ok:
+            _log.warning(
+                "monitor.head_object_missing_recovery_abort_cleanup_failed",
+                workspace_id=workspace_id,
+                reason=reason,
+                returncode=cleanup.returncode,
+                stderr=cleanup.stderr[:400],
+            )
+
     start_ok = await mirror_git(["cat-file", "-e", f"{operation_start_head}^{{commit}}"])
     if not start_ok.ok:
         return None
@@ -367,14 +378,17 @@ async def _recover_missing_head_object_from_filesystem(
 
     reset_index = await worktree_git(["reset", "--mixed", "HEAD"])
     if not reset_index.ok:
+        await cleanup_after_abort("reset_index_failed")
         return None
 
     add = await worktree_git(["add", "-A"])
     if not add.ok:
+        await cleanup_after_abort("add_failed")
         return None
 
     staged = await worktree_git(["diff", "--cached", "--name-status", "-z"])
     if not staged.ok:
+        await cleanup_after_abort("staged_diff_failed")
         return None
     staged_paths = list(_changed_paths_from_name_status_z(staged.stdout))
     excluded = [p for p in staged_paths if is_under_agent_runtime_root(p)]
@@ -383,9 +397,11 @@ async def _recover_missing_head_object_from_filesystem(
             ["--literal-pathspecs", "reset", "-q", "HEAD", "--", *excluded]
         )
         if not unstage.ok:
+            await cleanup_after_abort("runtime_path_unstage_failed")
             return None
         staged = await worktree_git(["diff", "--cached", "--name-status", "-z"])
         if not staged.ok:
+            await cleanup_after_abort("staged_diff_after_runtime_path_unstage_failed")
             return None
         staged_paths = list(_changed_paths_from_name_status_z(staged.stdout))
 
@@ -428,6 +444,7 @@ async def _recover_missing_head_object_from_filesystem(
             env=git_env_without_object_lookup_overrides(),
         )
         if not commit.ok:
+            await cleanup_after_abort("commit_failed")
             return None
 
     await asyncio.to_thread(repair_agent_writable_worktree, mirror_path, worktree_path)
@@ -435,9 +452,11 @@ async def _recover_missing_head_object_from_filesystem(
     head = await worktree_git(["rev-parse", "HEAD"])
     recovered_head_sha = head.stdout.strip()
     if not head.ok or not recovered_head_sha:
+        await cleanup_after_abort("recovered_head_unavailable")
         return None
     recovered_head_ok = await mirror_git(["cat-file", "-e", f"{recovered_head_sha}^{{commit}}"])
     if not recovered_head_ok.ok:
+        await cleanup_after_abort("recovered_head_missing_from_mirror")
         return None
     return recovered_head_sha
 
