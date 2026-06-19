@@ -31,12 +31,18 @@ from awf.node.git_manager import (
     verify_head_object_exists,
 )
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
+from awf.runtime.ownership import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_RECOVERED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
     _MONITOR_POLICY_BLOCKED_REASON,
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
@@ -727,9 +733,10 @@ async def _run_pre_push_validation(
             recovered_head=recovered[:10],
             reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
         )
+        recovered_paths: tuple[str, ...] = ()
         if recovered != recovery_head:
             try:
-                await self._changed_paths_between_ref_and_head(
+                recovered_paths = await self._changed_paths_between_ref_and_head(
                     worktree_path=worktree_path,
                     ref=recovery_head,
                     error_context="for recovered pre-push validation HEAD",
@@ -750,6 +757,58 @@ async def _run_pre_push_validation(
                     message=(
                         "PR monitor pre-push validation blocked: recovered HEAD "
                         f"diff unavailable: {exc}"
+                    ),
+                )
+        if recovered_paths:
+            if not await repair_agent_runtime_ownership(
+                logger=_log,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                reason="dirty_worktree_pre_commit",
+                event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            ):
+                _log.warning(
+                    "monitor.pre_push_validation_recovered_head_ownership_repair_failed",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+                )
+                return _PrePushValidationResult(
+                    passed=False,
+                    validation_run_id=None,
+                    workspace_head_sha=recovered,
+                    reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+                    message=(
+                        "PR monitor pre-push validation blocked: "
+                        "agent runtime ownership repair failed for recovered HEAD"
+                    ),
+                )
+            recovered_status_stdout = "".join(f" M {path}\n" for path in recovered_paths)
+            repaired_status = await self._repair_protected_scope_changes_before_commit(
+                workspace_id=workspace_id,
+                status_stdout=recovered_status_stdout,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+                protected_scope_revert_remote_branch=remote_branch,
+                remote_push_url=remote_url,
+            )
+            if repaired_status is None:
+                _log.warning(
+                    "monitor.pre_push_validation_recovered_head_protected_scope_repair_failed",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    paths=list(recovered_paths),
+                    reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                )
+                return _PrePushValidationResult(
+                    passed=False,
+                    validation_run_id=None,
+                    workspace_head_sha=recovered,
+                    reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                    message=(
+                        "PR monitor pre-push validation blocked: "
+                        "recovered HEAD protected-scope repair failed"
                     ),
                 )
         workspace_head_sha = recovered
