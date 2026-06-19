@@ -180,9 +180,51 @@ def test_remove_report_worktree_path_removes_empty_directory(tmp_path: Path) -> 
     report_path = tmp_path / "docs" / "awf-plans" / "ws_dir.conformance.json"
     report_path.mkdir(parents=True)
 
-    _planning_conformance._remove_report_worktree_path(report_path)  # noqa: SLF001
+    _planning_conformance._remove_report_worktree_path(  # noqa: SLF001
+        report_path,
+        worktree_path=tmp_path,
+    )
 
     assert not report_path.exists()
+
+
+@pytest.mark.unit
+def test_remove_report_worktree_path_removes_empty_parent_directories(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "docs" / "awf-plans" / "ws_dir.conformance.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("{}", encoding="utf-8")
+
+    _planning_conformance._remove_report_worktree_path(  # noqa: SLF001
+        report_path,
+        worktree_path=tmp_path,
+    )
+
+    assert not report_path.exists()
+    assert not report_path.parent.exists()
+    assert not (tmp_path / "docs").exists()
+    assert tmp_path.exists()
+
+
+@pytest.mark.unit
+def test_remove_report_worktree_path_preserves_non_empty_parent_directory(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "docs" / "awf-plans" / "ws_dir.conformance.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("{}", encoding="utf-8")
+    sibling_path = tmp_path / "docs" / "keep.txt"
+    sibling_path.write_text("keep", encoding="utf-8")
+
+    _planning_conformance._remove_report_worktree_path(  # noqa: SLF001
+        report_path,
+        worktree_path=tmp_path,
+    )
+
+    assert not report_path.exists()
+    assert not report_path.parent.exists()
+    assert sibling_path.exists()
 
 
 def _record_deposit_vs_mark_order(

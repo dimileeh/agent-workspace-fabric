@@ -434,7 +434,7 @@ async def _run_post_validation_conformance_check(
         )
     report_worktree_path = worktree_path / handoff.report_path
     try:
-        _remove_report_worktree_path(report_worktree_path)
+        _remove_report_worktree_path(report_worktree_path, worktree_path=worktree_path)
     except OSError as exc:
         _log.warning(
             "executor.post_validation_conformance_report_unlink_failed",
@@ -462,11 +462,22 @@ async def _run_post_validation_conformance_check(
     return None
 
 
-def _remove_report_worktree_path(path: Path) -> None:
+def _remove_report_worktree_path(path: Path, *, worktree_path: Path) -> None:
     try:
         path.unlink(missing_ok=True)
     except IsADirectoryError:
         path.rmdir()
+    _remove_empty_report_parent_dirs(path.parent, worktree_path=worktree_path)
+
+
+def _remove_empty_report_parent_dirs(path: Path, *, worktree_path: Path) -> None:
+    current = path
+    while current != worktree_path and current != current.parent:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
 
 
 async def _report_path_is_dirty(
