@@ -45,12 +45,45 @@ AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
 
 
-def _mirror_hooks_path_unset_pattern(hooks_path: str) -> str | None:
+def _mirror_hooks_path_unset_pattern(mirror_path: Path, hooks_path: str) -> str | None:
     if hooks_path in _POISONED_MIRROR_HOOKS_PATH_PATTERNS:
         return _POISONED_MIRROR_HOOKS_PATH_PATTERNS[hooks_path]
-    if hooks_path in _ALLOWED_MIRROR_HOOKS_PATHS:
+    if hooks_path in _ALLOWED_MIRROR_HOOKS_PATHS and _mirror_has_registered_hooks_path(
+        mirror_path, hooks_path
+    ):
         return None
     return f"^{re.escape(hooks_path)}$"
+
+
+def _mirror_has_registered_hooks_path(mirror_path: Path, hooks_path: str) -> bool:
+    relative_hooks_path = Path(hooks_path)
+    if relative_hooks_path.is_absolute():
+        return False
+
+    worktrees_dir = mirror_path / "worktrees"
+    if not worktrees_dir.is_dir():
+        return False
+
+    has_registered_worktree = False
+    for gitdir_file in worktrees_dir.glob("*/gitdir"):
+        try:
+            gitdir_text = gitdir_file.read_text(encoding="utf-8").strip()
+        except OSError:  # pragma: no cover - fail closed if Git metadata changes mid-repair.
+            return False
+        if not gitdir_text:
+            return False
+
+        gitdir_path = Path(gitdir_text)
+        if not gitdir_path.is_absolute():
+            gitdir_path = (gitdir_file.parent / gitdir_path).resolve()
+
+        if gitdir_path.name != ".git":
+            return False
+        if not (gitdir_path.parent / relative_hooks_path).is_dir():
+            return False
+        has_registered_worktree = True
+
+    return has_registered_worktree
 
 
 class GitOperationError(Exception):
@@ -749,7 +782,8 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         dict.fromkeys(
             (hooks_path, unset_pattern)
             for hooks_path in probe_stdout.splitlines()
-            if (unset_pattern := _mirror_hooks_path_unset_pattern(hooks_path)) is not None
+            if (unset_pattern := _mirror_hooks_path_unset_pattern(mirror_path, hooks_path))
+            is not None
         )
     )
     if not disallowed_hooks_paths:

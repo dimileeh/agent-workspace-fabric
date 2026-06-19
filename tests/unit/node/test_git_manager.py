@@ -1181,6 +1181,35 @@ class TestAgentWritableWorktreeHelpers:
 
 
 class TestRepairMirrorHooksPath:
+    @staticmethod
+    def _mirror_with_attached_worktree(
+        tmp_path: Path, *, create_hooks_dir: bool
+    ) -> tuple[Path, Path]:
+        repo = tmp_path / "origin"
+        repo.mkdir()
+        _git(["init", "-q", "-b", "main"], repo)
+        _git(["config", "user.name", "AWF Test"], repo)
+        _git(["config", "user.email", "awf@test.local"], repo)
+        (repo / "README.md").write_text("initial\n", encoding="utf-8")
+        _git(["add", "."], repo)
+        _git(["commit", "-q", "-m", "init"], repo)
+
+        mirror = tmp_path / "mirror.git"
+        subprocess.run(
+            ["git", "clone", "--bare", str(repo), str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        worktree = tmp_path / "workspace"
+        subprocess.run(
+            ["git", "--git-dir", str(mirror), "worktree", "add", str(worktree), "main"],
+            check=True,
+            capture_output=True,
+        )
+        if create_hooks_dir:
+            (worktree / ".githooks" / "Lefthook").mkdir(parents=True)
+        return mirror, worktree
+
     @pytest.mark.unit
     async def test_clears_poisoned_hooks_path(self, tmp_path: Path) -> None:
         mirror = tmp_path / "mirror.git"
@@ -1243,13 +1272,7 @@ class TestRepairMirrorHooksPath:
 
     @pytest.mark.unit
     async def test_preserves_legitimate_hooks_path(self, tmp_path: Path) -> None:
-        mirror = tmp_path / "mirror.git"
-        mirror.mkdir()
-        subprocess.run(
-            ["git", "init", "--bare", str(mirror)],
-            check=True,
-            capture_output=True,
-        )
+        mirror, _worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=True)
         subprocess.run(
             [
                 "git",
@@ -1273,6 +1296,115 @@ class TestRepairMirrorHooksPath:
         )
         assert check.returncode == 0
         assert check.stdout.splitlines() == [".githooks/Lefthook"]
+
+    @pytest.mark.unit
+    async def test_clears_allowed_hooks_path_when_attached_worktree_lacks_directory(
+        self, tmp_path: Path
+    ) -> None:
+        mirror, _worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "core.hooksPath",
+                ".githooks/Lefthook",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--get-all", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+
+    @pytest.mark.unit
+    async def test_clears_allowed_hooks_path_when_any_registered_worktree_lacks_directory(
+        self, tmp_path: Path
+    ) -> None:
+        mirror, _worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=True)
+        missing_hooks_worktree = tmp_path / "workspace-missing-hooks"
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "worktree",
+                "add",
+                "-b",
+                "missing-hooks",
+                str(missing_hooks_worktree),
+                "main",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "core.hooksPath",
+                ".githooks/Lefthook",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--get-all", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+
+    @pytest.mark.unit
+    async def test_clears_allowed_hooks_path_without_registered_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "core.hooksPath",
+                ".githooks/Lefthook",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--get-all", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
 
     @pytest.mark.unit
     async def test_clears_unrecognized_absolute_hooks_path(self, tmp_path: Path) -> None:
@@ -1344,13 +1476,7 @@ class TestRepairMirrorHooksPath:
     async def test_removes_poisoned_hooks_path_without_clearing_legitimate_hooks_path(
         self, tmp_path: Path
     ) -> None:
-        mirror = tmp_path / "mirror.git"
-        mirror.mkdir()
-        subprocess.run(
-            ["git", "init", "--bare", str(mirror)],
-            check=True,
-            capture_output=True,
-        )
+        mirror, _worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=True)
         for hooks_path in (".githooks/Lefthook", "/dev/null"):
             subprocess.run(
                 [
