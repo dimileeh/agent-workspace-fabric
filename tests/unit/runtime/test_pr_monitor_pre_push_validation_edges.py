@@ -821,6 +821,8 @@ async def test_pre_push_validation_recovered_head_rename_includes_source_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Recovered pre-push HEAD rename diffs must include protected source paths."""
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -829,6 +831,7 @@ async def test_pre_push_validation_recovered_head_rename_includes_source_path(
     recovered_head = "7" * 40
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{recovery_base}\n")
+    cmd.queue_result(returncode=0)
     cmd.queue_result(
         returncode=0,
         stdout="R100\0.github/workflows/ci.yml\0docs/ci.yml\0",
@@ -914,9 +917,12 @@ async def test_pre_push_validation_recovered_head_rename_includes_source_path(
         operation_start_head=recovery_base,
     )
 
-    recovered_diff_call = cmd.calls[1].args
-    assert "--name-status" in recovered_diff_call
+    recovered_diff_command = next(call for call in cmd.calls if "--name-status" in call.args)
+    recovered_diff_call = recovered_diff_command.args
     assert "--name-only" not in recovered_diff_call
+    assert recovered_diff_command.env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in recovered_diff_command.env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in recovered_diff_command.env
     assert result.passed is False
     assert result.workspace_head_sha == recovered_head
     assert result.reason_code == "PROTECTED_SCOPE_REPAIR_FAILED"
