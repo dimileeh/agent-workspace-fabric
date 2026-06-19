@@ -735,7 +735,7 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         "--git-dir",
         str(mirror_path),
         "config",
-        "--unset",
+        "--unset-all",
         "core.hooksPath",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

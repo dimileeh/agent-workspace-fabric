@@ -1247,6 +1247,41 @@ class TestRepairMirrorHooksPath:
         assert check.returncode != 0
 
     @pytest.mark.unit
+    async def test_clears_duplicate_poisoned_hooks_paths(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        for hooks_path in ("/dev/null", "/tmp/awf-poisoned-hooks"):
+            subprocess.run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(mirror),
+                    "config",
+                    "--add",
+                    "core.hooksPath",
+                    hooks_path,
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--get-all", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+
+    @pytest.mark.unit
     async def test_noop_when_hooks_path_not_set(self, tmp_path: Path) -> None:
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
