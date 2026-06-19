@@ -470,6 +470,75 @@ async def _commit_dirty_worktree(
                     )
                     if policy_message is not None:
                         raise _MonitorPolicyBlockedError(policy_message)
+                    if not await repair_agent_runtime_ownership(
+                        logger=_log,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        reason="dirty_worktree_pre_commit",
+                        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+                        reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+                    ):
+                        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+                            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+                        )
+                    if compose_project is not None and compose_file is not None:
+                        recovered_status_stdout = "".join(
+                            f" M {path}\n" for path in recovered_paths
+                        )
+                        repaired_status = await self._repair_protected_scope_changes_before_commit(
+                            workspace_id=workspace_id,
+                            status_stdout=recovered_status_stdout,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            state=state,
+                            protected_scope_revert_remote_branch=(
+                                protected_scope_revert_remote_branch
+                            ),
+                            remote_push_url=remote_push_url,
+                        )
+                        if repaired_status is None:
+                            return False
+                        post_repair_status = await self._deps.runner.run(
+                            git_worktree_command(
+                                worktree_path,
+                                "status",
+                                "--porcelain",
+                                "--untracked-files=all",
+                            )
+                        )
+                        if not post_repair_status.ok:
+                            _log.warning(
+                                "monitor.dirty_stage_status_failed",
+                                workspace_id=workspace_id,
+                                stderr=post_repair_status.stderr[:400],
+                            )
+                            return False
+                        post_repair_untracked = set(
+                            _untracked_paths_from_porcelain(post_repair_status.stdout)
+                        )
+                        post_repair_paths = tuple(
+                            path
+                            for path in _changed_paths_from_porcelain(post_repair_status.stdout)
+                            if not (
+                                path in post_repair_untracked and is_under_agent_runtime_root(path)
+                            )
+                        )
+                        if post_repair_paths:
+                            repair_residue_committed = await self._commit_dirty_worktree(
+                                workspace_id=workspace_id,
+                                message=message,
+                                command_evidence=command_evidence,
+                                compose_project=compose_project,
+                                compose_file=compose_file,
+                                state=state,
+                                protected_scope_revert_remote_branch=(
+                                    protected_scope_revert_remote_branch
+                                ),
+                                remote_push_url=remote_push_url,
+                                operation_start_head=recovered,
+                                task_tag=task_tag,
+                            )
+                            return bool(repair_residue_committed)
             return True
     # Decide dirtiness with the SAME untracked AWF-agent-runtime exclusion the
     # pre-existing-dirty guard and the staging filter below apply. A worktree
