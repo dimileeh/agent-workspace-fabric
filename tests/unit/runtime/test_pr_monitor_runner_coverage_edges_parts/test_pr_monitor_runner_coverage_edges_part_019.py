@@ -271,7 +271,7 @@ async def test_recover_missing_head_object_sanitizes_recovery_write_env(
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout="src/recovered.py\0")
+    cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="b" * 40)
     cmd.queue_result(returncode=0)
@@ -412,7 +412,7 @@ async def test_recover_missing_head_object_blocks_policy_before_recovery_commit(
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout="package-lock.json\0")
+    cmd.queue_result(returncode=0, stdout="R100\0package-lock.json\0docs/notlock.txt\0")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -453,7 +453,7 @@ async def test_recover_missing_head_object_blocks_policy_before_recovery_commit(
         {
             "workspace_id": workspace_id,
             "command_evidence": ("npm install",),
-            "changed_paths": ["package-lock.json"],
+            "changed_paths": ["package-lock.json", "docs/notlock.txt"],
         }
     ]
     assert not any("commit" in call.args for call in cmd.calls)
@@ -475,7 +475,7 @@ async def test_recover_missing_head_object_unstages_runtime_paths_without_deleti
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout=f"{runtime_path}\0src/recovered.py\0")
+    cmd.queue_result(returncode=0, stdout=f"A\0{runtime_path}\0M\0src/recovered.py\0")
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
     cmd.queue_result(returncode=0)
@@ -752,7 +752,7 @@ async def test_commit_dirty_worktree_recovers_missing_head_object(
     (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
 
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")
+    cmd.queue_result(returncode=0, stdout="M\0src/foo.py\0")
     cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
@@ -831,6 +831,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_runs_precommit_gates(
     (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
 
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
     runner = make_runner(
         factory=factory,
@@ -922,6 +923,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_fails_closed_when_rec
     (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
 
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=2, stderr="diff failed")
     runner = make_runner(
         factory=factory,
@@ -1000,6 +1002,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_blocks_on_ownership_f
     (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
 
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
     runner = make_runner(
         factory=factory,
@@ -1081,6 +1084,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_stops_when_protected_
     (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
 
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
     runner = make_runner(
         factory=factory,

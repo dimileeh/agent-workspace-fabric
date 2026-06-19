@@ -373,10 +373,10 @@ async def _recover_missing_head_object_from_filesystem(
     if not add.ok:
         return None
 
-    staged = await worktree_git(["diff", "--cached", "--name-only", "-z"])
+    staged = await worktree_git(["diff", "--cached", "--name-status", "-z"])
     if not staged.ok:
         return None
-    staged_paths = [p for p in staged.stdout.split("\0") if p]
+    staged_paths = list(_changed_paths_from_name_status_z(staged.stdout))
     excluded = [p for p in staged_paths if is_under_agent_runtime_root(p)]
     if excluded:
         unstage = await worktree_git(
@@ -384,10 +384,10 @@ async def _recover_missing_head_object_from_filesystem(
         )
         if not unstage.ok:
             return None
-        staged = await worktree_git(["diff", "--cached", "--name-only", "-z"])
+        staged = await worktree_git(["diff", "--cached", "--name-status", "-z"])
         if not staged.ok:
             return None
-        staged_paths = [p for p in staged.stdout.split("\0") if p]
+        staged_paths = list(_changed_paths_from_name_status_z(staged.stdout))
 
     if staged_paths:
         policy_message = await self._refresh_supply_chain_policy_before_push(
