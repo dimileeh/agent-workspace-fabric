@@ -1110,7 +1110,11 @@ def test_deposit_satisfied_conformance_report_rejects_oversized_report(
     tmp_path: Path,
 ) -> None:
     """PRRT_kwDOSJAM6s6KxUlq regression: the stdout-derived fallback report
-    deposit must not write artifacts larger than the served artifact cap."""
+    deposit must not write artifacts larger than the served artifact cap.
+
+    PRRT_kwDOSJAM6s6KznT8 regression: rejecting an oversized report must still
+    deposit the safe plan artifact through the hardened plan copy path.
+    """
     work_dir = tmp_path / "work_dir"
     worktree_path = tmp_path / "worktree"
     plan_path = Path("docs/awf-plans/ws_deposit.md")
@@ -1139,7 +1143,7 @@ def test_deposit_satisfied_conformance_report_rejects_oversized_report(
 
     assert not (artifact_dir / "conformance.json").exists()
     assert not (artifact_dir / ".conformance.json.tmp").exists()
-    assert not (artifact_dir / "plan.md").exists()
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan"
     assert any(
         entry["event"] == "executor.satisfied_conformance_report_deposit_rejected"
         and entry["workspace_id"] == "ws_deposit"
