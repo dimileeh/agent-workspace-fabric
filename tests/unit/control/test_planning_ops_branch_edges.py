@@ -1234,8 +1234,8 @@ async def test_post_validation_conformance_staged_deletion_restored_from_head(
     assert report_abs.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source HEAD --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     assert all("add" not in call.args for call in runner.calls)
