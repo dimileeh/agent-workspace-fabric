@@ -71,6 +71,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
+    _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -860,6 +861,82 @@ class TestMiscMonitorHelpers:
             "-z",
             f"{operation_start_head}..{recovered_head}",
         ]
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_missing_head_recovery_blocks_protected_commit(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovered commits validate protected scope as committed diffs.
+
+        Regression for PRRT_kwDOSJAM6s6KzfXh: after filesystem recovery advances
+        HEAD, dirty-status diff loading compares the new HEAD to the matching
+        worktree and cannot see protected-file changes in the recovered commit.
+        This must block even when no compose context exists for a repair pass.
+        """
+        workspace_id = await seed_monitoring_workspace(factory)
+        operation_start_head = "1" * 40
+        recovered_head = "2" * 40
+        protected_path = ".github/workflows/ci.yml"
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=f"{protected_path}\0")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="name: ci\npermissions: read-all\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(
+            returncode=0,
+            stdout="name: ci\npermissions: write-all\n",
+        )
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            return recovered_head
+
+        async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+        )
+
+        with pytest.raises(_MonitorPolicyBlockedError) as exc_info:
+            await runner._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message="awf: monitor dirty worktree",
+                operation_start_head=operation_start_head,
+            )
+
+        assert protected_path in str(exc_info.value)
+        assert len(fake.calls) == 5
+        assert fake.calls[0].args[-4:] == [
+            "diff",
+            "--name-only",
+            "-z",
+            f"{operation_start_head}..{recovered_head}",
+        ]
+        assert any(f"{operation_start_head}:{protected_path}" in call.args for call in fake.calls)
+        assert any(f"HEAD:{protected_path}" in call.args for call in fake.calls)
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_truncates_subject_to_72(

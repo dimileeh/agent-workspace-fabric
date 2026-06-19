@@ -21,6 +21,12 @@ from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
 from awf.common.task_tag import commit_message_with_task_tag
+from awf.control.protected_file_diffs import protected_file_diffs_for_committed_paths
+from awf.control.quality_gates import (
+    QualityGateViolation,
+    find_protected_quality_gate_changes,
+    quality_gate_violation_message,
+)
 from awf.db.repositories import (
     MergeCandidateRepository,
     WorkspaceRepository,
@@ -65,6 +71,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
@@ -216,6 +223,42 @@ async def _open_merge_candidate_head_sha(self: Any, workspace_id: str) -> str | 
         repository = MergeCandidateRepository(session)
         candidate = await repository.get_open_for_workspace_with_merge_inputs(workspace_id)
         return candidate.head_sha if candidate is not None else None
+
+
+async def _protected_scope_violations_for_recovered_dirty_commit(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    base_ref: str,
+    changed_paths: Sequence[str],
+) -> list[QualityGateViolation]:
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:
+            raise ProtectedScopeDiffError(
+                f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
+                "for recovered dirty-worktree commit validation."
+            )
+        owned_paths = list(workspace.owned_paths)
+    try:
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._deps.runner,
+            worktree_path=worktree_path,
+            base_ref=base_ref,
+            changed_paths=changed_paths,
+            owned_paths=owned_paths,
+        )
+    except RuntimeError as exc:
+        raise ProtectedScopeDiffError(
+            "Could not read recovered dirty-worktree committed protected-scope "
+            f"file contents for validation before treating the recovery as fixed: {exc}"
+        ) from exc
+    return find_protected_quality_gate_changes(
+        changed_paths=tuple(changed_paths),
+        owned_paths=owned_paths,
+        protected_file_diffs=protected_file_diffs,
+    )
 
 
 async def _resolve_task_tag(self: Any, workspace_id: str) -> str | None:
@@ -538,6 +581,23 @@ async def _commit_dirty_worktree(
             ):
                 raise _MonitorAgentRuntimeOwnershipRepairFailedError(
                     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+                )
+            recovered_violations = await _protected_scope_violations_for_recovered_dirty_commit(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_ref=recovery_head,
+                changed_paths=tuple(recovered_paths),
+            )
+            if recovered_violations:
+                _log.warning(
+                    "monitor.head_object_missing_recovered_protected_scope_blocked",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    paths=[violation.path for violation in recovered_violations],
+                )
+                raise _MonitorPolicyBlockedError(
+                    quality_gate_violation_message(recovered_violations)
                 )
             if compose_project is not None and compose_file is not None:
                 recovered_status_stdout = "".join(f" M {path}\n" for path in recovered_paths)
