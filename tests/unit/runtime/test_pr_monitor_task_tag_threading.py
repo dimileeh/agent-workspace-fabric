@@ -322,6 +322,115 @@ async def test_invoke_cli_for_verdict_result_default_forwards_sentinel() -> None
     assert sink_task_tags == [_TASK_TAG_UNSET]
 
 
+@pytest.mark.unit
+async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_before_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    workspace_id = "ws_hooks"
+    (tmp_path / workspace_id).mkdir()
+
+    async def _suppress(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _repair_mirror_hooks_path(mirror_path: Path) -> bool:
+        assert mirror_path == tmp_path / "mirror.git"
+        calls.append("repair_mirror_hooks_path")
+        return True
+
+    async def _adapter_run(**_kwargs: object) -> AgentRunResult:
+        calls.append("adapter.run")
+        return AgentRunResult(returncode=0, stdout="AWF-VERDICT: FIXED: ok", stderr="")
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        calls.append("_commit_dirty_worktree")
+        return True
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    monkeypatch.setattr(
+        comments,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: tmp_path / "mirror.git",
+    )
+    monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_suppress,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
+    )
+
+    await comments._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id=workspace_id,
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+    )
+
+    assert calls == ["repair_mirror_hooks_path", "adapter.run", "_commit_dirty_worktree"]
+
+
+@pytest.mark.unit
+async def test_invoke_cli_for_verdict_result_blocks_agent_when_mirror_hook_repair_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    workspace_id = "ws_hooks_failed"
+    (tmp_path / workspace_id).mkdir()
+
+    async def _suppress(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        calls.append("repair_mirror_hooks_path")
+        raise OSError("poisoned hooks path")
+
+    async def _adapter_run(**_kwargs: object) -> AgentRunResult:
+        pytest.fail("comment agent must not launch when mirror hook repair fails")
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        pytest.fail("dirty-worktree sink must not run when pre-launch repair fails")
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    monkeypatch.setattr(
+        comments,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: tmp_path / "mirror.git",
+    )
+    monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_suppress,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
+    )
+
+    with pytest.raises(comments._MonitorMirrorHooksPathRepairFailedError) as raised:
+        await comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+        )
+
+    assert raised.value.reason_code == "MIRROR_HOOKS_PATH_POISONED"
+    assert calls == ["repair_mirror_hooks_path"]
+
+
 def _verdict_wrapper_runner(invoke_tags: list[object]) -> SimpleNamespace:
     async def _invoke(**kwargs: object) -> VerdictResult:
         invoke_tags.append(kwargs.get("task_tag"))

@@ -12,6 +12,11 @@ from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
+from awf.node.git_manager import (
+    GitOperationError,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+)
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
@@ -21,10 +26,15 @@ from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
-from awf.runtime.pr_monitor_runner.constants import _TASK_TAG_UNSET, _TaskTagUnset
+from awf.runtime.pr_monitor_runner.constants import (
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _TASK_TAG_UNSET,
+    _TaskTagUnset,
+)
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorMirrorHooksPathRepairFailedError,
 )
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
@@ -274,6 +284,18 @@ async def _invoke_cli_for_verdict_result(
         raise _MonitorAgentRuntimeOwnershipRepairFailedError(
             "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
         )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                error_type=exc.__class__.__name__,
+            )
+            raise _MonitorMirrorHooksPathRepairFailedError() from exc
     agent_run_err = None
     try:
         result = await runner._deps.adapter.run(
