@@ -62,6 +62,11 @@ from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     _setup_dependency_network_failure_details,
 )
+from awf.control.executor.mirror_hooks_repair import (
+    MirrorHooksPathRepairAbortedError,
+    repair_mirror_hooks_path_after_agent_cleanup_failure,
+    repair_mirror_hooks_path_or_mark_failed,
+)
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
@@ -94,7 +99,6 @@ from awf.db.enums import (
 )
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
-    GitOperationError,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
@@ -108,10 +112,6 @@ from awf.runtime.ownership import (
 from awf.runtime.validation import (
     ValidationResult,
 )
-
-
-class _MirrorHooksPathRepairAbortedError(RuntimeError):
-    """Raised after mirror hooks repair already marked the workspace failed."""
 
 
 async def execute(
@@ -338,75 +338,29 @@ async def execute(
             )
             return
         mirror_path = mirror_path_for_worktree(worktree_path)
+        recovery_active = recovery is not None
 
         async def _repair_mirror_hooks_path_or_mark_failed(
             *,
             failure_stage: str,
             before_mark_failed: Any = None,
         ) -> bool:
-            if mirror_path is None:
-                return True
-            mirror_repair_failure_reason_code: str | None = None
-            try:
-                await repair_mirror_hooks_path(mirror_path)
-            except GitOperationError as exc:
-                mirror_repair_failure_reason_code = exc.reason_code
-                _log.warning(
-                    "executor.mirror_hooks_path_repair_failed",
-                    workspace_id=workspace_id,
-                    reason_code=exc.reason_code,
-                    stderr=exc.stderr[:400],
-                )
-            except OSError as exc:
-                mirror_repair_failure_reason_code = "MIRROR_HOOKS_PATH_REPAIR_FAILED"
-                _log.warning(
-                    "executor.mirror_hooks_path_repair_failed",
-                    workspace_id=workspace_id,
-                    reason_code=mirror_repair_failure_reason_code,
-                    error=repr(exc)[:400],
-                )
-            if mirror_repair_failure_reason_code is not None:
-                failure_message = f"could not repair poisoned mirror hooks path {failure_stage}"
-                if before_mark_failed is not None:
-                    before_mark_failed()
-                if recovery is not None:
-                    await self._finish_active_recovery_operations(
-                        workspace_id=workspace_id,
-                        status=OperationStatus.failed,
-                        reason_code=mirror_repair_failure_reason_code,
-                        error_message=failure_message,
-                    )
-                await self._mark_failed(
-                    workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.running,
-                    failure_reason=FailureReason.infrastructure_failure,
-                    message=failure_message,
-                    reason_code=mirror_repair_failure_reason_code,
-                )
-                return False
-            return True
+            return await repair_mirror_hooks_path_or_mark_failed(
+                executor=self,
+                workspace_id=workspace_id,
+                mirror_path=mirror_path,
+                repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+                recovery_active=recovery_active,
+                failure_stage=failure_stage,
+                before_mark_failed=before_mark_failed,
+            )
 
         async def _repair_mirror_hooks_path_after_agent_cleanup_failure() -> None:
-            if mirror_path is None:
-                return
-            try:
-                await repair_mirror_hooks_path(mirror_path)
-            except GitOperationError as exc:
-                _log.warning(
-                    "executor.mirror_hooks_path_repair_failed",
-                    workspace_id=workspace_id,
-                    reason_code=exc.reason_code,
-                    stderr=exc.stderr[:400],
-                    failure_stage="after agent cleanup failure",
-                )
-            except OSError as exc:
-                _log.warning(
-                    "executor.mirror_hooks_path_repair_failed",
-                    workspace_id=workspace_id,
-                    reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
-                    error=repr(exc)[:400],
-                    failure_stage="after agent cleanup failure",
-                )
+            await repair_mirror_hooks_path_after_agent_cleanup_failure(
+                workspace_id=workspace_id,
+                mirror_path=mirror_path,
+                repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+            )
 
         if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
             return
@@ -897,7 +851,7 @@ async def execute(
                         failure_stage="before post-agent commit",
                         before_mark_failed=_deposit_planning_artifacts,
                     ):
-                        raise _MirrorHooksPathRepairAbortedError
+                        raise MirrorHooksPathRepairAbortedError
                     return cast(
                         CommandResult,
                         await self._runner.run(
@@ -1077,7 +1031,7 @@ async def execute(
                     reason_code="MONITOR_RECOVERY_REBASE_FAILED",
                 )
                 return
-    except _MirrorHooksPathRepairAbortedError:
+    except MirrorHooksPathRepairAbortedError:
         return
     except _PostAgentCommitStepError as exc:
         # Planning ran before the commit step, so the worktree (preserved on
