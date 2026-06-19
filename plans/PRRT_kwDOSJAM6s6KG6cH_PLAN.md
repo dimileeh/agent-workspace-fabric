@@ -12,7 +12,7 @@ The post-validation conformance report cleanup in `_run_post_validation_conforma
 
 `git rm` of a tracked file stages the deletion (`D  ...`), and a tracked file with local modifications makes `git rm` fail, which falls back to `unlink`, leaving an unstaged deletion (` D ...`). Both cases still leave a porcelain entry, so `check_validation_worktree_clean()` and the PR monitor pre-push guard see a dirty worktree.
 
-The desired behavior is to restore the report path to its state in the index (i.e. the tracked content, if any), and then remove the on-worktree copy, so the worktree is actually clean for tracked projects. For untracked/gitignored reports we keep a plain `unlink` fallback.
+The desired behavior is to restore a tracked report path back to clean tracked content, leaving that restored copy in place so the worktree is clean. For paths that are not tracked at the restore source, we keep a plain `unlink` fallback so untracked/gitignored report artifacts are still removed.
 
 ## Requirements checklist
 
@@ -26,9 +26,10 @@ The desired behavior is to restore the report path to its state in the index (i.
 ## Implementation steps
 
 1. In `src/awf/control/executor/planning_ops.py`, replace the `git rm` logic with:
-   - First attempt `git restore --source=base_commit --worktree --staged -- <report_path>` to put the index/worktree back to the pre-workspace baseline state. Restoring from HEAD would resurrect any stale AWF-authored report committed by an earlier fix pass; base_commit is the safe pre-workspace baseline.
+   - First attempt `git restore --source=base_commit --worktree --staged -- <report_path>` to put the index/worktree back to the pre-workspace baseline state. The final implementation uses `base_commit` as the primary restore source rather than the initial HEAD-based design, because `base_commit` is the safe pre-workspace baseline.
    - For tracked reports, the restore leaves the committed copy in place and the worktree is clean.
-   - If `git restore` fails (e.g. path is not tracked at base_commit), fall back to plain `unlink` and log.
+   - If the `base_commit` restore succeeds but the path is still dirty relative to the current commit, try a conditional `HEAD` restore to preserve the current committed report state.
+   - If restore fails or the path remains dirty, fall back to plain `unlink` and log.
 2. Update the docstring / inline comment to explain why we restore instead of stage-delete.
 3. Update test doubles that simulate git behavior:
    - `_GitRmFakeRunner` in `test_executor_coverage_edges_part_001.py` to simulate `git restore` and unlink instead of `git rm`.
