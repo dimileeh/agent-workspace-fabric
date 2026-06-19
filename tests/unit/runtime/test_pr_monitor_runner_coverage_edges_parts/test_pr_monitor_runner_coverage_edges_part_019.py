@@ -149,6 +149,50 @@ async def test_recover_missing_head_object_fails_closed_on_branch_ref_mismatch(
 
 
 @pytest.mark.unit
+async def test_recover_missing_head_object_fails_closed_during_merge(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+    (tmp_path / "mirrors" / "test.git" / "worktrees" / workspace_id / "MERGE_HEAD").write_text(
+        "b" * 40
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _resolve_worktree_branch_ref(_worktree_path: Path) -> str | None:
+        return f"refs/heads/awf/{workspace_id}"
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "_resolve_worktree_branch_ref",
+        _resolve_worktree_branch_ref,
+    )
+
+    recovered = await pr_remote_repair._recover_missing_head_object_from_filesystem(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        operation_start_head="a" * 40,
+    )
+
+    assert recovered is None
+    assert not any("update-ref" in call.args for call in cmd.calls)
+    assert not any(call.args[-3:] == ["reset", "--mixed", "HEAD"] for call in cmd.calls)
+    assert not any("commit" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
 async def test_recover_missing_head_object_updates_expected_branch_ref(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

@@ -343,6 +343,14 @@ async def _recover_missing_head_object_from_filesystem(
         )
         return None
 
+    if _worktree_has_merge_head(worktree_path):
+        _log.warning(
+            "monitor.head_object_missing_recovery_merge_in_progress",
+            workspace_id=workspace_id,
+            branch_ref=branch_ref,
+        )
+        return None
+
     reset_ref = await mirror_git(["update-ref", branch_ref, operation_start_head])
     if not reset_ref.ok:
         return None
@@ -418,6 +426,28 @@ async def _recover_missing_head_object_from_filesystem(
     if not head.ok or not recovered_head_sha:
         return None
     return recovered_head_sha
+
+
+def _worktree_git_dir(worktree_path: Path) -> Path | None:
+    git_path = worktree_path / ".git"
+    if git_path.is_dir():
+        return git_path
+    try:
+        git_file = git_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    prefix = "gitdir:"
+    if not git_file.startswith(prefix):
+        return None
+    git_dir = Path(git_file[len(prefix) :].strip())
+    if not git_dir.is_absolute():
+        git_dir = worktree_path / git_dir
+    return git_dir
+
+
+def _worktree_has_merge_head(worktree_path: Path) -> bool:
+    git_dir = _worktree_git_dir(worktree_path)
+    return git_dir is not None and (git_dir / "MERGE_HEAD").exists()
 
 
 async def _resolve_worktree_branch_ref(worktree_path: Path) -> str | None:
