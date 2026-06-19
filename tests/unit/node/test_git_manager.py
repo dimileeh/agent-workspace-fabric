@@ -1282,6 +1282,47 @@ class TestRepairMirrorHooksPath:
         assert check.stdout == ""
 
     @pytest.mark.unit
+    async def test_treats_concurrent_hooks_path_cleanup_as_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "core.hooksPath", "/dev/null"],
+            check=True,
+            capture_output=True,
+        )
+
+        original_exec = asyncio.create_subprocess_exec
+        unset_calls = 0
+
+        async def _fake_exec(*args: object, **kwargs: object) -> object:
+            nonlocal unset_calls
+            if "--unset-all" in args and "core.hooksPath" in args:
+                unset_calls += 1
+                concurrent_unset = await original_exec(*args, **kwargs)
+                await concurrent_unset.communicate()
+            return await original_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        assert unset_calls == 1
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--local", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+
+    @pytest.mark.unit
     async def test_ignores_git_object_lookup_envs_for_config_repair(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
