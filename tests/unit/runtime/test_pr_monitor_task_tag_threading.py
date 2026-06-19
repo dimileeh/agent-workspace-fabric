@@ -609,6 +609,160 @@ async def test_run_ci_fix_resolves_once_and_threads_to_sink(
 
 
 @pytest.mark.unit
+async def test_run_ci_fix_repairs_mirror_hooks_before_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def _resolve_task_tag(_workspace_id: str) -> None:
+        return None
+
+    async def _pre_existing(**_kwargs: object) -> None:
+        return None
+
+    async def _suppress(_workspace_id: str) -> bool:
+        return False
+
+    async def _head(**_kwargs: object) -> tuple[str, None]:
+        return "headsha", None
+
+    async def _owned_paths(_self: object, _workspace_id: str) -> list[str]:
+        return []
+
+    async def _repair_mirror_hooks_path(mirror_path: Path) -> bool:
+        assert mirror_path == tmp_path / "mirror.git"
+        calls.append("repair_mirror_hooks_path")
+        return True
+
+    async def _adapter_run(**_kwargs: object) -> AgentRunResult:
+        calls.append("adapter.run")
+        return AgentRunResult(returncode=0, stdout="", stderr="")
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return "headsha"
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        calls.append("_commit_dirty_worktree")
+        return True
+
+    async def _psb(**_kwargs: object) -> None:
+        return None
+
+    async def _validated(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    monkeypatch.setattr(ci_ops, "_owned_paths_for_prompt", _owned_paths)
+    monkeypatch.setattr(ci_ops, "fix_ci_prompt", lambda **_kwargs: "PROMPT")
+    monkeypatch.setattr(
+        ci_ops,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: tmp_path / "mirror.git",
+    )
+    monkeypatch.setattr(ci_ops, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    self = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _workspace_runtime_context=None,
+        _resolve_task_tag=_resolve_task_tag,
+        _pre_existing_dirty_repair_worktree_result=_pre_existing,
+        _provider_recovery_suppresses_cli=_suppress,
+        _repair_operation_start_head_result=_head,
+        _rev_parse_head=_rev_parse_head,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _protected_scope_push_block=_psb,
+        _validated_git_push_result=_validated,
+        _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
+    )
+
+    await ci_ops._run_ci_fix(
+        self,
+        repo=_FAKE_REPO,
+        pr_number=1,
+        failures=(),
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        workspace_id="ws_ci",
+        remote_branch="awf/ws_ci",
+    )
+
+    assert calls == [
+        "repair_mirror_hooks_path",
+        "adapter.run",
+        "_commit_dirty_worktree",
+    ]
+
+
+@pytest.mark.unit
+async def test_run_ci_fix_blocks_agent_when_mirror_hook_repair_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def _resolve_task_tag(_workspace_id: str) -> None:
+        return None
+
+    async def _pre_existing(**_kwargs: object) -> None:
+        return None
+
+    async def _suppress(_workspace_id: str) -> bool:
+        return False
+
+    async def _head(**_kwargs: object) -> tuple[str, None]:
+        return "headsha", None
+
+    async def _owned_paths(_self: object, _workspace_id: str) -> list[str]:
+        return []
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        calls.append("repair_mirror_hooks_path")
+        raise OSError("poisoned hooks path")
+
+    async def _adapter_run(**_kwargs: object) -> AgentRunResult:
+        pytest.fail("CI fix agent must not launch when mirror hook repair fails")
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        pytest.fail("dirty-worktree sink must not run when pre-launch repair fails")
+
+    monkeypatch.setattr(ci_ops, "_owned_paths_for_prompt", _owned_paths)
+    monkeypatch.setattr(ci_ops, "fix_ci_prompt", lambda **_kwargs: "PROMPT")
+    monkeypatch.setattr(
+        ci_ops,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: tmp_path / "mirror.git",
+    )
+    monkeypatch.setattr(ci_ops, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    self = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _workspace_runtime_context=None,
+        _resolve_task_tag=_resolve_task_tag,
+        _pre_existing_dirty_repair_worktree_result=_pre_existing,
+        _provider_recovery_suppresses_cli=_suppress,
+        _repair_operation_start_head_result=_head,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
+    )
+
+    result = await ci_ops._run_ci_fix(
+        self,
+        repo=_FAKE_REPO,
+        pr_number=1,
+        failures=(),
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        workspace_id="ws_ci",
+        remote_branch="awf/ws_ci",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "MIRROR_HOOKS_PATH_POISONED"
+    assert "before CI fix agent launch" in (result.stderr or "")
+    assert calls == ["repair_mirror_hooks_path"]
+
+
+@pytest.mark.unit
 async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

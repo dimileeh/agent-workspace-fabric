@@ -20,6 +20,11 @@ from awf.common.command_evidence import (
     append_command_evidence,
 )
 from awf.common.github_client import RepoRef
+from awf.node.git_manager import (
+    GitOperationError,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import (
     fix_ci_prompt,
@@ -36,6 +41,7 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
     _REPAIR_WORKTREE_STATUS_FAILED_REASON,
 )
@@ -236,6 +242,24 @@ async def _run_ci_fix(
             stderr="agent runtime ownership repair failed before CI fix agent launch",
             reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
         )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.ci_fix_mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                error_type=exc.__class__.__name__,
+            )
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr="could not repair poisoned mirror hooks path before CI fix agent launch",
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            )
     try:
         result = await self._deps.adapter.run(
             compose_project=compose_project,
