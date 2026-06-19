@@ -270,6 +270,35 @@ async def _repair_operation_start_head_result(
     )
     head_sha = result.stdout.strip()
     if result.ok and head_sha:
+        mirror_path = mirror_path_for_worktree(worktree_path)
+        if mirror_path is not None and not await _mirror_commit_object_exists(
+            self, mirror_path, head_sha
+        ):
+            stdout = result.stdout[:400]
+            stderr = result.stderr[:400]
+            _log.warning(
+                "monitor.repair_operation_start_head_primary_unavailable",
+                workspace_id=workspace_id,
+                operation_type=operation_type,
+                head_sha=head_sha[:10],
+                mirror_path=str(mirror_path),
+                returncode=result.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+            if fallback_head_sha:
+                return await validated_fallback_result(
+                    fallback_head_sha,
+                    source="status",
+                    returncode=result.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            return "", failure_result(
+                returncode=result.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
         return head_sha, None
 
     stdout = result.stdout[:400]
