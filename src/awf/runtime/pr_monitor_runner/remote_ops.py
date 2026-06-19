@@ -914,6 +914,22 @@ async def _run_sync_base(
                 stdout=exc.result.stdout,
                 stderr=exc.result.stderr,
             )
+        except Exception as exc:
+            # Runtime plumbing can fail outside ``AgentRunError`` after the agent
+            # has already mutated the shared sync-base mirror. Repair once, then
+            # preserve the original failure for the monitor loop.
+            if mirror_path is not None:
+                try:
+                    await repair_mirror_hooks_path(mirror_path)
+                except (GitOperationError, OSError) as repair_exc:
+                    _log.warning(
+                        "monitor.sync_base_post_agent_mirror_hooks_path_repair_failed",
+                        workspace_id=workspace_id,
+                        reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                        error_type=repair_exc.__class__.__name__,
+                        original_error_type=exc.__class__.__name__,
+                    )
+            raise
 
         try:
             await runner._commit_dirty_worktree(
