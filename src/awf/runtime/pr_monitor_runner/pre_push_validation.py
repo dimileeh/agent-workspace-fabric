@@ -668,6 +668,58 @@ async def _run_pre_push_validation(
             recovered_head=recovered[:10],
             reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
         )
+        if recovered != recovery_head:
+            try:
+                recovered_paths = await self._changed_paths_between_ref_and_head(
+                    worktree_path=worktree_path,
+                    ref=recovery_head,
+                    error_context="for recovered pre-push validation HEAD",
+                )
+            except ProtectedScopeDiffError as exc:
+                _log.warning(
+                    "monitor.pre_push_validation_recovered_head_diff_unavailable",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                    error=repr(exc),
+                )
+                return _PrePushValidationResult(
+                    passed=False,
+                    validation_run_id=None,
+                    workspace_head_sha=recovered,
+                    reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                    message=(
+                        "PR monitor pre-push validation blocked: recovered HEAD "
+                        f"diff unavailable: {exc}"
+                    ),
+                )
+            if recovered_paths:
+                command_evidence = tuple(
+                    step.command.command
+                    for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
+                )
+                policy_message = await self._refresh_supply_chain_policy_before_push(
+                    workspace_id=workspace_id,
+                    command_evidence=command_evidence,
+                    changed_paths=recovered_paths,
+                )
+                if policy_message is not None:
+                    _log.warning(
+                        "monitor.pre_push_validation_recovered_head_policy_blocked",
+                        workspace_id=workspace_id,
+                        recovered_head=recovered[:10],
+                        reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+                    )
+                    return _PrePushValidationResult(
+                        passed=False,
+                        validation_run_id=None,
+                        workspace_head_sha=recovered,
+                        reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+                        message=(
+                            "PR monitor pre-push validation blocked: "
+                            f"recovered HEAD failed supply-chain policy: {policy_message}"
+                        ),
+                    )
         workspace_head_sha = recovered
 
     pre_validation_check = await _pre_push_validation_worktree_check(
