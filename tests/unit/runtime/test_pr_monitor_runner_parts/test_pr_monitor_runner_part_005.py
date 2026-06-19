@@ -879,6 +879,8 @@ class TestMiscMonitorHelpers:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Runtime-only recovered diffs are not PR-worthy committed fixes."""
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
         workspace_id = "ws_missing_head_runtime_only"
         operation_start_head = "1" * 40
         recovered_head = "2" * 40
@@ -930,6 +932,9 @@ class TestMiscMonitorHelpers:
             f"{operation_start_head}..{recovered_head}",
             "--",
         ]
+        assert fake.calls[0].env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in fake.calls[0].env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[0].env
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_missing_head_recovery_blocks_protected_commit(

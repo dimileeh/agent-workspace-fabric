@@ -626,7 +626,8 @@ async def _commit_dirty_worktree(
                     "-z",
                     f"{recovery_head}..{recovered}",
                     "--",
-                )
+                ),
+                env=git_env_without_object_lookup_overrides(),
             )
             if not diff.ok:
                 _log.warning(
