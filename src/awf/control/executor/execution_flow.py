@@ -385,6 +385,28 @@ async def execute(
                 return False
             return True
 
+        async def _repair_mirror_hooks_path_after_agent_cleanup_failure() -> None:
+            if mirror_path is None:
+                return
+            try:
+                await repair_mirror_hooks_path(mirror_path)
+            except GitOperationError as exc:
+                _log.warning(
+                    "executor.mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                    reason_code=exc.reason_code,
+                    stderr=exc.stderr[:400],
+                    failure_stage="after agent cleanup failure",
+                )
+            except OSError as exc:
+                _log.warning(
+                    "executor.mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                    reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+                    error=repr(exc)[:400],
+                    failure_stage="after agent cleanup failure",
+                )
+
         if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
             return
         setup_result = await self._validation.run_profile_phases(
@@ -523,16 +545,20 @@ async def execute(
                 failure_stage="before agent launch"
             ):
                 return
-            planning_failure = await self._run_agent_task_with_optional_planning(
-                adapter=adapter,
-                workspace=ws,
-                profile=profile,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                worktree_path=worktree_path,
-                model=run_model,
-                command_evidence=agent_command_evidence,
-            )
+            try:
+                planning_failure = await self._run_agent_task_with_optional_planning(
+                    adapter=adapter,
+                    workspace=ws,
+                    profile=profile,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    worktree_path=worktree_path,
+                    model=run_model,
+                    command_evidence=agent_command_evidence,
+                )
+            except ComposeExecCleanupError:
+                await _repair_mirror_hooks_path_after_agent_cleanup_failure()
+                raise
             (
                 planning_validation_handoff,
                 planning_should_return,
