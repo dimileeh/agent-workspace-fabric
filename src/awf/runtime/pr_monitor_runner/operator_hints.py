@@ -185,6 +185,7 @@ async def _run_operator_hint_cycle(
                 compose_file=compose_file,
                 state=state,
                 task_tag=task_tag,
+                operation_start_head=operation_start_head,
             )
         except ProtectedScopeDiffError as exc:
             push_result = cast(

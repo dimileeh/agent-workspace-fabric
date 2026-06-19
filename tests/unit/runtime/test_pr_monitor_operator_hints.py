@@ -468,7 +468,8 @@ async def test_operator_hint_repair_marks_head_object_missing_as_needs_human(
     async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
         return ("abc1234567890def", None)
 
-    async def _head_object_missing(**_kwargs: object) -> VerdictResult:
+    async def _head_object_missing(**kwargs: object) -> VerdictResult:
+        assert kwargs["operation_start_head"] == "abc1234567890def"
         raise _MonitorHeadObjectMissingError(
             _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
             "HEAD commit object is missing from the canonical mirror",
