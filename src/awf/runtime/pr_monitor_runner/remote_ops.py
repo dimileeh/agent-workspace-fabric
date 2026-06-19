@@ -938,6 +938,7 @@ async def _run_sync_base(
         compose_file=compose_file,
         remote_url=remote_push_url,
         state=state,
+        operation_start_head=operation_start_head,
     )
 
 
