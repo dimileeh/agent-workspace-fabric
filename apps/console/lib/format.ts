@@ -26,6 +26,11 @@ export const lifecycleStages: WorkspaceStatus[] = [
   "running",
   "validating",
   "pushing",
+  // `blocked` is the non-terminal operator-pause state (protected-file violation).
+  // It sits just before monitoring_pr — the push→monitor boundary where both the
+  // pre-PR and post-PR pauses cluster — so the status filter and fallback progress
+  // bar treat it as in-flight, not terminal.
+  "blocked",
   "monitoring_pr",
   "completed",
 ];
@@ -38,6 +43,13 @@ export function fallbackLifecycleStages(
   const terminal = status === "failed" || status === "cancelled";
   const terminalSourceIndex = lifecycleStages.indexOf(terminalSourceStage as WorkspaceStatus);
   const completedThroughIndex = terminal ? Math.max(-1, terminalSourceIndex) : activeIndex - 1;
+  // `blocked` can be entered from running/validating/pushing, but it sits at a
+  // fixed position (after `pushing`) in this linear list. Without the real
+  // lifecycle data we can't tell which execution stage it paused at, so we must
+  // NOT claim the execution stages completed (a validating-time pause would
+  // otherwise falsely render `pushing` as done). Stages before execution
+  // (requested/provisioning/ready) are still safely "completed".
+  const executionStartIndex = lifecycleStages.indexOf("running");
 
   return lifecycleStages.map((stage, index): WorkspaceLifecycleStage => {
     let stageStatus: WorkspaceLifecycleStage["status"];
@@ -45,6 +57,8 @@ export function fallbackLifecycleStages(
       stageStatus = index <= completedThroughIndex ? "completed" : "terminal_skipped";
     } else if (stage === status) {
       stageStatus = "active";
+    } else if (status === "blocked" && index >= executionStartIndex) {
+      stageStatus = "pending";
     } else if (index < activeIndex) {
       stageStatus = "completed";
     } else {
@@ -59,6 +73,37 @@ export function fallbackLifecycleStages(
       status: stageStatus,
     };
   });
+}
+
+// The backend lifecycle (`LIFECYCLE_STAGES`, workspace_observability.py) omits the
+// non-terminal `blocked` pause. So a real blocked workspace arrives with its linear
+// stages and NO active stage: the stage it paused at is marked `completed` once left,
+// and `blocked` isn't a lifecycle stage, so `_stage_summary` never marks anything
+// active. Inject a synthetic active `blocked` stage at its canonical position (after
+// `pushing`) so the operator sees the workspace is paused awaiting them, instead of a
+// rail with no active step. No-op unless the workspace is blocked and the supplied
+// lifecycle lacks a blocked stage (idempotent + safe for every other status).
+export function normalizeLifecycle(
+  status: WorkspaceStatus,
+  lifecycle: WorkspaceLifecycleStage[],
+): WorkspaceLifecycleStage[] {
+  if (status !== "blocked" || lifecycle.some((stage) => stage.stage === "blocked")) {
+    return lifecycle;
+  }
+  const blockedStage: WorkspaceLifecycleStage = {
+    stage: "blocked",
+    started_at: null,
+    ended_at: null,
+    duration_seconds: null,
+    status: "active",
+  };
+  const blockedOrder = lifecycleStages.indexOf("blocked");
+  const insertAt = lifecycle.findIndex(
+    (stage) => lifecycleStages.indexOf(stage.stage as WorkspaceStatus) > blockedOrder,
+  );
+  return insertAt === -1
+    ? [...lifecycle, blockedStage]
+    : [...lifecycle.slice(0, insertAt), blockedStage, ...lifecycle.slice(insertAt)];
 }
 
 export function fallbackLlmUsage(
@@ -377,7 +422,14 @@ export function statusTone(status: string): StatusTone {
   if (status === "failed" || status === "destroyed" || status === "error" || status === "dead") {
     return "bad";
   }
-  if (status === "cancelled" || status === "destroying" || status === "unhealthy") {
+  // `blocked` is operator-attention (awaiting a guide decision), distinct from the
+  // `info` in-flight states and the `bad` failure states.
+  if (
+    status === "cancelled" ||
+    status === "destroying" ||
+    status === "unhealthy" ||
+    status === "blocked"
+  ) {
     return "warn";
   }
   if (
@@ -418,6 +470,10 @@ export function statusGlyph(status: string): string {
       return "✕";
     case "cancelled":
       return "⊘";
+    case "blocked":
+      // Pause glyph — a distinct shape (used nowhere else) so the operator-pause
+      // state reads as "halted, awaiting you" without relying on color alone.
+      return "⏸";
     case "destroying":
       return "◌";
     case "monitoring_pr":

@@ -15,5 +15,10 @@ class _MonitorRunnerProto(Protocol):
     (merge queue, release-PR monitor, etc.)."""
 
     async def run(
-        self: Any, *, workspace_id: str, compose_project: str, compose_file: Path
+        self: Any,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        monitor_owner_id: str | None = None,
     ) -> None: ...

@@ -122,6 +122,10 @@ async def test_mixed_127_fix_pass_exhaustion_reports_real_pre_push_details(
     workspace_id, worktree, cmd, adapter = await _mixed_failure_setup(factory, tmp_path)
     cmd.queue_result(returncode=0, stdout=f"{'5' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'6' * 40}\n")
+    # The commit sink then advances HEAD to ``{'7' * 40}``. The commit-sink
+    # ``except`` clauses capture HEAD INSIDE each clause (after the sink
+    # raised), not before the sink (review thread ``PRRT_kwDOSJAM6s6Klf78``
+    # / ``PRRT_kwDOSJAM6s6KpAD6``).
     cmd.queue_result(returncode=0, stdout=f"{'7' * 40}\n")
     # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
     cmd.queue_result(returncode=0)

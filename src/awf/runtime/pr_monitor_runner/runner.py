@@ -112,14 +112,26 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         # ``<work_dir>/artifacts`` directory; since ``worktrees_root`` there
         # is ``<work_dir>/git/worktrees``, go up two levels.
         self._artifacts_root = artifacts_root or (worktrees_root.parents[1] / "artifacts")
+        # Identity of the worker holding the monitor claim for this run, set per
+        # invocation by ``run``. Used to epoch-fence the protected-scope pause CAS
+        # against a stale monitor whose lease was reclaimed (PRRT_kwDOSJAM6s6KHtX5).
+        # ``None`` on the inline initial handoff, where the executor still holds
+        # the execution claim rather than a monitor claim.
+        self._monitor_owner_id: str | None = None
 
     # ── Entry point ────────────────────────────────────────────────────────
 
     async def run(
-        self: Any, *, workspace_id: str, compose_project: str, compose_file: Path
+        self: Any,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        monitor_owner_id: str | None = None,
     ) -> None:
         """Drive the monitor phase until a terminal ``MonitorAction`` fires."""
 
+        self._monitor_owner_id = monitor_owner_id
         monitor_log = await self._open_monitor_log(workspace_id)
         state: MonitorState | None = None
         try:

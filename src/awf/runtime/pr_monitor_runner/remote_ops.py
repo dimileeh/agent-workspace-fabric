@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
@@ -15,14 +15,19 @@ from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.common.task_tag import commit_message_with_task_tag
+from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
+    _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
+    _REPAIR_DIRTY_COMMIT_FAILED_REASON,
     _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
+    _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
@@ -45,6 +50,8 @@ from awf.runtime.validation_worktree_constants import (
 
 if TYPE_CHECKING:
     from awf.common.github_client import RepoRef
+    from awf.runtime.logs import WorkspaceLogSink
+    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
 _log = get_logger(__name__)
@@ -122,6 +129,11 @@ class _GitPushResult:
     recovered_by_resync: bool = False
     reason_code: str = _GIT_PUSH_FAILED_REASON
     details: Mapping[str, object] | None = None
+    paused_into_blocked: bool = False
+    """The push site paused the workspace into ``blocked`` for an operator
+    decision (a protected-scope violation in an unpushed commit, WS-2). The row
+    already left ``monitoring_pr``; the monitor loop ends this cycle WITHOUT
+    terminally failing the workspace and the offending commit is preserved."""
 
     @property
     def error_message(self: Any) -> str | None:
@@ -151,6 +163,11 @@ class _GitPushResult:
     @property
     def terminal_monitor_failure(self: Any) -> bool:
         """Return whether the push failure should end monitor recovery."""
+        # A pause into ``blocked`` is NOT a terminal failure: the workspace is
+        # preserved for an operator decision, not failed. The loop ends the
+        # cycle via the dedicated paused-into-blocked handling instead.
+        if self.paused_into_blocked:
+            return False
         return self.failed and (
             self.protected_scope_blocked
             or self.reason_code
@@ -158,10 +175,13 @@ class _GitPushResult:
                 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
                 _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
                 _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
+                _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+                _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
                 _PRE_EXISTING_DIRTY_WORKTREE_REASON,
                 _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
                 _REPAIR_START_HEAD_UNAVAILABLE_REASON,
                 _REPAIR_WORKTREE_STATUS_FAILED_REASON,
+                _REPAIR_DIRTY_COMMIT_FAILED_REASON,
                 VALIDATION_WORKTREE_CLEANUP_FAILED,
                 VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
                 VALIDATION_WORKTREE_STATUS_FAILED,
@@ -211,6 +231,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
         _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
         _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
+        _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+        _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
         VALIDATION_WORKTREE_CLEANUP_FAILED,
         VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
         VALIDATION_WORKTREE_STATUS_FAILED,
@@ -498,8 +520,21 @@ async def _git_push_result(
     remote_branch: str,
     remote_url: str | None = None,
     refspec: str | None = None,
+    allow_resync_on_rejection: bool = True,
 ) -> _GitPushResult:
-    """Push HEAD and return detailed failure or resync information."""
+    """Push HEAD and return detailed failure or resync information.
+
+    ``allow_resync_on_rejection`` gates the non-fast-forward divergence recovery
+    (``git fetch`` + ``git reset --hard`` to the remote head). It defaults to
+    ``True`` (every ordinary monitor/merge push resyncs a stale local branch). The
+    operator-hint approve-and-keep resume sets it ``False``: that recovery would
+    drop the preserved protected commit the grant is meant to land BEFORE the grant
+    is consumed, then no-op the next cycle and wedge the hint at ``monitoring_pr``
+    where ``guide --grant`` is rejected. When ``False`` and the push is rejected
+    non-fast-forward, return the failure WITHOUT resetting — HEAD (and the preserved
+    commit) is kept — tagged with ``_GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON`` so
+    the caller can re-block instead (PRRT_kwDOSJAM6s6KZK1v).
+    """
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     remote = remote_url or "origin"
@@ -565,6 +600,26 @@ async def _git_push_result(
             returncode=r.returncode,
             stdout=r.stdout,
             stderr=r.stderr,
+        )
+
+    if not allow_resync_on_rejection:
+        # The caller (an approve-and-keep operator-hint resume) must KEEP the
+        # preserved protected commit; resyncing here would reset --hard it away
+        # before the grant is consumed. Surface the rejection unrecovered so the
+        # caller re-blocks. ``recovered_by_resync`` stays False — no recovery ran.
+        _log.warning(
+            "monitor.push_rejected_resync_suppressed",
+            worktree_path=str(worktree_path),
+            remote_branch=remote_branch,
+            stderr=(r.stderr or "")[:400],
+        )
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=r.returncode,
+            stdout=r.stdout,
+            stderr=r.stderr,
+            reason_code=_GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
         )
 
     _log.warning(
@@ -674,11 +729,15 @@ async def _run_sync_base(
     state: object | None = None,
     repo: RepoRef,
     pr_number: int,
+    pr_head_sha: str | None = None,
     base_branch: str,
     remote_branch: str,
     remote_push_url: str | None = None,
     compose_project: str,
     compose_file: Path,
+    operation_id: str | None = None,
+    operation_type: str | None = None,
+    monitor_log: WorkspaceLogSink | None = None,
 ) -> _GitPushResult:
     """Merge the latest base branch into the workspace and push the repair."""
     from awf.runtime.monitor_prompts import sync_base_conflict_prompt
@@ -792,6 +851,30 @@ async def _run_sync_base(
         base_branch=base_branch,
     )
     if protected_scope_block is not None:
+        if protected_scope_block.violations:
+            # A real protected-scope violation in the base-conflict resolution
+            # commit PAUSES the workspace into ``blocked`` for an operator
+            # decision (WS-2), preserving the offending commit, instead of
+            # terminally failing the monitor. Without this, sync-base was the
+            # one POST-PR push path still outside WS-2: it returned a plain
+            # failed ``PROTECTED_SCOPE_PUSH_BLOCKED`` result that the loop's
+            # SyncBase branch treated as terminal. A diff-unavailable block (no
+            # violations) keeps the terminal failed handling below.
+            return await runner._pause_monitor_for_protected_scope_block(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                pr_head_sha=pr_head_sha or "",
+                protected_scope_block=protected_scope_block,
+                worktree_path=worktree_path,
+                resume_phase=MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+                state=cast("MonitorState | None", state),
+                remote_branch=remote_branch,
+                base_branch=base_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
+                source_head_sha=pr_head_sha,
+            )
         return _GitPushResult(
             pushed=False,
             failed=True,

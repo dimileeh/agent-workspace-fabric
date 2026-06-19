@@ -7,6 +7,7 @@ import time
 import pytest
 
 from awf.runtime.pr_monitor import (
+    _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     Abort,
     AbortReason,
     AddressComments,
@@ -301,6 +302,124 @@ class TestOperatorHints:
         state = MonitorState(pending_operator_hint=hint)
 
         action = decide(status, state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        (
+            _status(base_behind=2),
+            _status(merge_state_status=MergeStateStatus.BEHIND),
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+        ),
+    )
+    def test_pending_directive_with_preserved_block_runs_before_sync_base(
+        self,
+        status: PRStatus,
+    ) -> None:
+        """A monitor-origin protected-block DIRECTIVE resume must beat SyncBase.
+
+        If SyncBase ran first it would re-validate the still-preserved protected
+        commit (the directive guide revoked its grants) and pause the workspace
+        back into ``blocked`` before the directive ever runs — a re-block loop on
+        every base update (PRRT_kwDOSJAM6s6KFgtj)."""
+        hint = OperatorHint(
+            reason="operator resolved the protected-scope block",
+            directive="revert the change to the protected file",
+            reason_code="OPERATOR_GUIDE",
+        )
+        state = MonitorState(
+            pending_operator_hint=hint,
+            threads_addressed_ids={_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "deadbeefcafef00d"},
+        )
+
+        action = decide(status, state, MonitorConfig(auto_merge=True))
+
+        assert action == AddressOperatorHint(hint=hint)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        (
+            _status(base_behind=2),
+            _status(merge_state_status=MergeStateStatus.BEHIND),
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+        ),
+    )
+    def test_grant_only_resume_with_preserved_block_runs_before_sync_base(
+        self,
+        status: PRStatus,
+    ) -> None:
+        """A grant-only (no directive) approve-and-keep resume must ALSO beat
+        SyncBase. The path-scoped grant is only consumed when the hint runs, so
+        if SyncBase ran first and its conflict-resolution agent edited the same
+        granted protected path, ``_protected_scope_violations_for_sync_base_push``
+        would honor the still-active grant and push that NEW protected edit under
+        an approval meant only for the preserved commit — a grant leak. Running
+        the hint first pushes the preserved commit and spends the grant before any
+        sync-base repair can author additional protected changes
+        (PRRT_kwDOSJAM6s6KGX2A)."""
+        hint = OperatorHint(
+            reason="operator approved keeping the protected change",
+            directive=None,
+            reason_code="OPERATOR_GUIDE",
+        )
+        state = MonitorState(
+            pending_operator_hint=hint,
+            threads_addressed_ids={_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "deadbeefcafef00d"},
+        )
+
+        action = decide(status, state, MonitorConfig(auto_merge=True))
+
+        assert action == AddressOperatorHint(hint=hint)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("status_value", ("needs_human", "agent_failed"))
+    def test_terminal_directive_with_preserved_block_notifies_before_sync_base(
+        self, status_value: str
+    ) -> None:
+        """A directive that already resolved to a TERMINAL status must NOT be
+        re-dispatched as a repair, but it ALSO must not fall through to SyncBase
+        while the preserved protected commit and its single-use grant remain
+        unfinalized. SyncBase's push path loads the still-active grant, so it would
+        push the preserved protected commit — or a conflict-resolution edit on the
+        granted path — under an approval meant only for the original preserved
+        commit before the failed hint is resolved or the grant consumed. The
+        unfinalized block outranks SyncBase: surface NotifyHuman instead
+        (PRRT_kwDOSJAM6s6KHtX0)."""
+        hint = OperatorHint(
+            reason="operator resolved the protected-scope block",
+            directive="revert the change to the protected file",
+            reason_code="OPERATOR_GUIDE",
+            status=status_value,  # type: ignore[arg-type]
+            status_reason="agent could not revert",
+        )
+        state = MonitorState(
+            pending_operator_hint=hint,
+            threads_addressed_ids={_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "deadbeefcafef00d"},
+        )
+
+        action = decide(_status(base_behind=2), state, MonitorConfig(auto_merge=True))
+
+        assert not isinstance(action, AddressOperatorHint)
+        assert not isinstance(action, SyncBase)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "agent could not revert" in action.message
+
+    @pytest.mark.unit
+    def test_pending_directive_without_preserved_block_keeps_sync_base_first(self) -> None:
+        """No preserved protected commit → SyncBase would not re-block, so the
+        documented SyncBase-before-hint ordering still wins for a stale base."""
+        hint = OperatorHint(
+            reason="operator guidance recorded",
+            directive="implement the forge-neutral fix",
+            reason_code="OPERATOR_GUIDE",
+        )
+        state = MonitorState(pending_operator_hint=hint)
+
+        action = decide(_status(base_behind=2), state, MonitorConfig(auto_merge=True))
 
         assert isinstance(action, SyncBase)
 
