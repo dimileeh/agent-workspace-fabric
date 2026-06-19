@@ -88,6 +88,7 @@ class _MonitorMirrorHooksPathRepairFailedError(RuntimeError):
 
     @property
     def reason_code(self: Any) -> str:
+        """Return the fixed reason code for poisoned mirror hook-path failures."""
         return _MIRROR_HOOKS_PATH_POISONED_REASON
 
 
@@ -95,5 +96,6 @@ class _MonitorHeadObjectMissingError(Exception):
     """HEAD ref exists but commit object is missing from canonical mirror."""
 
     def __init__(self, reason_code: str, message: str = "") -> None:
+        """Store the terminal monitor reason code with the exception message."""
         super().__init__(message)
         self.reason_code = reason_code
