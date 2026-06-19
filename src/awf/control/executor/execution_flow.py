@@ -361,6 +361,15 @@ async def execute(
                     error=repr(exc)[:400],
                 )
             if mirror_repair_failure_reason_code is not None:
+                if recovery is not None:
+                    await self._finish_active_recovery_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        reason_code=mirror_repair_failure_reason_code,
+                        error_message=(
+                            "could not repair poisoned mirror hooks path before profile setup"
+                        ),
+                    )
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,

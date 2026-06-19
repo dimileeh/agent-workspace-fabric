@@ -10,16 +10,24 @@ import pytest
 import structlog
 
 from awf.control.executor import execution_flow
-from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.enums import (
+    AgentRuntime,
+    FailureReason,
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
+from awf.db.models import Operation, Workspace
 from awf.node.git_manager import GitOperationError
 from awf.profiles.models import WorkspaceProfile
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("with_recovery", [False, True])
 async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    with_recovery: bool,
 ) -> None:
     profile_snapshot = WorkspaceProfile(name="mirror-hooks").model_dump(
         mode="json",
@@ -38,8 +46,19 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
         profile_ref="auto",
         resolved_profile=profile_snapshot,
     )
+    if with_recovery:
+        workspace.operations = [
+            Operation(
+                id="op_mirror_hooks_recovery",
+                workspace_id=workspace.id,
+                type=OperationType.validate.value,
+                status=OperationStatus.running.value,
+                payload={"source": "pr_monitor", "recovery_mode": "validate_only"},
+            )
+        ]
     mirror_path = tmp_path / "mirror.git"
     mark_failed_calls: list[dict[str, Any]] = []
+    finish_recovery_calls: list[dict[str, Any]] = []
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
@@ -82,6 +101,9 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
 
         async def _mark_failed(self, **kwargs: Any) -> None:
             mark_failed_calls.append(kwargs)
+
+        async def _finish_active_recovery_operations(self, **kwargs: Any) -> None:
+            finish_recovery_calls.append(kwargs)
 
     async def _repair_agent_runtime_ownership(*_args: object, **_kwargs: object) -> bool:
         return True
@@ -137,3 +159,18 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
             "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
         }
     ]
+    expected_finish_recovery_calls = (
+        [
+            {
+                "workspace_id": workspace.id,
+                "status": OperationStatus.failed,
+                "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+                "error_message": (
+                    "could not repair poisoned mirror hooks path before profile setup"
+                ),
+            }
+        ]
+        if with_recovery
+        else []
+    )
+    assert finish_recovery_calls == expected_finish_recovery_calls
