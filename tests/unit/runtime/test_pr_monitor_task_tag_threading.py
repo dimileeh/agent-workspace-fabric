@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -375,6 +376,66 @@ async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_before_agent(
     )
 
     assert calls == ["repair_mirror_hooks_path", "adapter.run", "_commit_dirty_worktree"]
+
+
+@pytest.mark.unit
+async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_after_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    workspace_id = "ws_hooks_cleanup_failed"
+    (tmp_path / workspace_id).mkdir()
+
+    async def _suppress(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _repair_mirror_hooks_path(mirror_path: Path) -> bool:
+        assert mirror_path == tmp_path / "mirror.git"
+        calls.append("repair_mirror_hooks_path")
+        return True
+
+    async def _adapter_run(**_kwargs: object) -> AgentRunResult:
+        calls.append("adapter.run")
+        raise ComposeExecCleanupError(
+            invocation_id="cleanup-failed",
+            source="recovery",
+            label="agent",
+            message="cleanup failed",
+        )
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        pytest.fail("dirty-worktree sink must not run after cleanup failure")
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    monkeypatch.setattr(
+        comments,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: tmp_path / "mirror.git",
+    )
+    monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _provider_recovery_suppresses_cli=_suppress,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
+    )
+
+    with pytest.raises(ComposeExecCleanupError):
+        await comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="p",
+            commit_message="fix: x",
+            compose_project="proj",
+            compose_file=Path("compose.yml"),
+        )
+
+    assert calls == ["repair_mirror_hooks_path", "adapter.run", "repair_mirror_hooks_path"]
 
 
 @pytest.mark.unit

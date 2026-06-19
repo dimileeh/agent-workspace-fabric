@@ -320,6 +320,19 @@ async def _invoke_cli_for_verdict_result(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+    except Exception:
+        if mirror_path is not None:
+            try:
+                await repair_mirror_hooks_path(mirror_path)
+            except (GitOperationError, OSError) as exc:
+                _log.warning(
+                    "monitor.mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    error_type=exc.__class__.__name__,
+                )
+                raise _MonitorMirrorHooksPathRepairFailedError() from exc
+        raise
 
     committed_dirty_changes = await runner._commit_dirty_worktree(
         workspace_id=workspace_id,
