@@ -96,7 +96,9 @@ local checks above target only the files and behaviors changed.
 
 ## Remaining gaps
 
-None identified in the owned paths. Pre-existing coverage gaps in unrelated
-modules were not addressed because they are outside this agent's owned scope; AWF/GitHub
-CI owns the combined-coverage gate and will determine whether the owned-path fixes lift
-the combined total above the threshold.
+None identified in the owned paths. The combined coverage metric recorded from
+CI remains `77256 / 78042 = 98.99 %`, which is 6 covered units below the
+99 % gate, so this validation does not claim the combined total is above the
+threshold. Pre-existing coverage gaps in unrelated modules were not addressed
+because they are outside this agent's owned scope; AWF/GitHub CI owns the final
+combined-coverage gate.
