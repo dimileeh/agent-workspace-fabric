@@ -432,8 +432,9 @@ async def _run_post_validation_conformance_check(
             report_path=handoff.report_path.as_posix(),
             stderr=restore_result.stderr,
         )
+    report_worktree_path = worktree_path / handoff.report_path
     try:
-        (worktree_path / handoff.report_path).unlink(missing_ok=True)
+        _remove_report_worktree_path(report_worktree_path)
     except OSError as exc:
         _log.warning(
             "executor.post_validation_conformance_report_unlink_failed",
@@ -461,6 +462,13 @@ async def _run_post_validation_conformance_check(
     return None
 
 
+def _remove_report_worktree_path(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except IsADirectoryError:
+        path.rmdir()
+
+
 async def _report_path_is_dirty(
     self: Any,
     worktree_path: Path,
@@ -474,6 +482,8 @@ async def _report_path_is_dirty(
     previous fix pass). Treating the command exit code alone as success would
     publish that stale report, so we inspect the actual worktree state.
     """
+    if (worktree_path / report_path).is_dir():
+        return True
     changed = await self._changed_paths(worktree_path)
     return report_path in changed
 

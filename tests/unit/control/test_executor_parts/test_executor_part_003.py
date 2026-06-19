@@ -25,6 +25,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
 )
 from awf.control.executor import planning_artifacts as _planning_artifacts
+from awf.control.executor import planning_conformance as _planning_conformance
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -153,6 +154,35 @@ def _adapter_prompt_calls(fake: FakeCommandRunner) -> list[tuple[int, str]]:
 
 def _adapter_prompts(fake: FakeCommandRunner) -> list[str]:
     return [prompt for _, prompt in _adapter_prompt_calls(fake)]
+
+
+class _ChangedPathsStub:
+    async def _changed_paths(self, _worktree_path: Path) -> tuple[Path, ...]:
+        return ()
+
+
+@pytest.mark.unit
+async def test_report_path_is_dirty_treats_leftover_directory_as_dirty(tmp_path: Path) -> None:
+    report_path = Path("docs/awf-plans/ws_dir.conformance.json")
+    (tmp_path / report_path).mkdir(parents=True)
+
+    dirty = await _planning_conformance._report_path_is_dirty(  # noqa: SLF001
+        _ChangedPathsStub(),
+        tmp_path,
+        report_path,
+    )
+
+    assert dirty is True
+
+
+@pytest.mark.unit
+def test_remove_report_worktree_path_removes_empty_directory(tmp_path: Path) -> None:
+    report_path = tmp_path / "docs" / "awf-plans" / "ws_dir.conformance.json"
+    report_path.mkdir(parents=True)
+
+    _planning_conformance._remove_report_worktree_path(report_path)  # noqa: SLF001
+
+    assert not report_path.exists()
 
 
 def _record_deposit_vs_mark_order(
