@@ -21,6 +21,7 @@ import structlog
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.executor import planning_conformance as planning_conformance
 from awf.control.executor import planning_ops as planning_ops
 from awf.control.executor.types import _PlanningValidationHandoff
 from awf.db.enums import AgentRuntime
@@ -757,6 +758,128 @@ class _PlanningAdapter:
         self.prompts.append(prompt)
         stdout = self.stdout_values.pop(0) if self.stdout_values else ""
         return SimpleNamespace(stdout=stdout, stderr="")
+
+
+@pytest.mark.unit
+def test_empty_report_parent_residue_treats_oserror_as_dirty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If AWF cannot inspect an otherwise empty report parent, treat it as
+    dirty so cleanup residue cannot be silently ignored."""
+    worktree_path = tmp_path / "worktree"
+    report_parent = worktree_path / "docs" / "awf-plans"
+    report_parent.mkdir(parents=True)
+
+    real_iterdir = Path.iterdir
+
+    def _raise_on_report_parent(self: Path) -> Any:
+        if self == report_parent:
+            raise OSError(5, "I/O error")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _raise_on_report_parent)
+
+    assert (
+        planning_conformance._empty_report_parent_residue_is_dirty(  # noqa: SLF001
+            report_parent,
+            worktree_path=worktree_path,
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_remove_stale_satisfied_conformance_artifacts_logs_unlink_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stale served conformance artifacts are best-effort cleanup; unlink
+    failures should preserve diagnostic logs and not fail the deposit path."""
+    artifact_dir = tmp_path / "artifacts" / "ws_deposit"
+    dest = artifact_dir / "conformance.json"
+    tmp_dest = artifact_dir / ".conformance.json.tmp"
+    artifact_dir.mkdir(parents=True)
+    dest.write_text('{"status":"needs_iteration"}\n', encoding="utf-8")
+    tmp_dest.write_text('{"status":"needs_iteration"}\n', encoding="utf-8")
+
+    def _raise_on_stale_artifact(self: Path, missing_ok: bool = False) -> None:
+        if self in {dest, tmp_dest}:
+            raise OSError(13, "Permission denied")
+        raise AssertionError(f"unexpected unlink for {self}")
+
+    monkeypatch.setattr(Path, "unlink", _raise_on_stale_artifact)
+
+    with structlog.testing.capture_logs() as captured:
+        planning_conformance._remove_stale_satisfied_conformance_artifacts(  # noqa: SLF001
+            workspace_id="ws_deposit",
+            dest=dest,
+            tmp_dest=tmp_dest,
+        )
+
+    cleanup_failures = [
+        entry
+        for entry in captured
+        if entry["event"] == "executor.satisfied_conformance_report_deposit_cleanup_failed"
+    ]
+    assert [
+        (entry["workspace_id"], entry["artifact_name"], entry["error_type"], entry["errno"])
+        for entry in cleanup_failures
+    ] == [
+        ("ws_deposit", "conformance.json", "PermissionError", 13),
+        ("ws_deposit", ".conformance.json.tmp", "PermissionError", 13),
+    ]
+    assert dest.exists()
+    assert tmp_dest.exists()
+
+
+@pytest.mark.unit
+def test_deposit_satisfied_conformance_report_mkdir_oserror_is_non_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Creating the served artifact directory is best-effort; a filesystem
+    failure should be logged without failing the satisfied conformance outcome."""
+    work_dir = tmp_path / "work_dir"
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_deposit.md")
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="validated evidence satisfies plan",
+        gaps=(),
+    )
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(work_dir, "ws_deposit")
+    real_mkdir = Path.mkdir
+
+    def _raise_on_artifact_dir_mkdir(
+        self: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if self == artifact_dir:
+            raise OSError(13, "Permission denied")
+        return real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", _raise_on_artifact_dir_mkdir)
+
+    with structlog.testing.capture_logs() as captured:
+        planning_ops._deposit_satisfied_conformance_report(
+            work_dir=work_dir,
+            workspace_id="ws_deposit",
+            worktree_path=worktree_path,
+            plan_path=plan_path,
+            report=report,
+        )
+
+    assert not artifact_dir.exists()
+    assert any(
+        entry["event"] == "executor.satisfied_conformance_report_deposit_failed"
+        and entry["workspace_id"] == "ws_deposit"
+        and entry["error_type"] == "PermissionError"
+        and entry["errno"] == 13
+        for entry in captured
+    )
 
 
 @pytest.mark.unit

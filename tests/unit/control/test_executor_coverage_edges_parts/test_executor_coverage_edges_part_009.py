@@ -363,6 +363,78 @@ async def test_fix_pass_status_recheck_race_before_agent_run_stops(
 
 
 @pytest.mark.unit
+async def test_unexpected_validation_cleanup_guard_deposits_planning_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When an unexpected validation exception is terminally handled by the
+    cleanup guard, successful cleanup still deposits planning artifacts before
+    returning."""
+    profile = WorkspaceProfile.model_validate(
+        {"name": "prof-unexpected-cleanup", "planning": {"required": True}}
+    )
+    workspace = _workspace("ws_unexpected_cleanup")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    guard_result = executor_execution_validation.ExecutionValidationResult(
+        stop=True,
+        successful_validation_run_id=None,
+        successful_validation_workspace_head_sha=None,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_handle_validation_cleanup_guard",
+        AsyncMock(return_value=guard_result),
+    )
+
+    deposit_calls: list[str] = []
+
+    def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        deposit_calls.append(str(kwargs["workspace_id"]))
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            raise RuntimeError("validation runner exploded")
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-unexpected-cleanup"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+    )
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=SimpleNamespace(run=AsyncMock()),
+    )
+
+    assert result is guard_result
+    assert deposit_calls == [workspace.id]
+    executor._finish_validation_run.assert_not_awaited()
+    executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_fix_pass_status_recheck_race_before_commit_stops(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

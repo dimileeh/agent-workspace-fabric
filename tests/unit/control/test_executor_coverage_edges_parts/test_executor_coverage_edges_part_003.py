@@ -21,6 +21,7 @@ from awf.control.executor import planning_conformance as executor_planning_confo
 from awf.control.executor import planning_ops as executor_planning_ops
 from awf.control.executor import quality_gates as executor_quality_gates
 from awf.db.enums import (
+    AgentRuntime,
     FailureReason,
     OperationStatus,
 )
@@ -39,6 +40,16 @@ from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
 )
 from awf.service import artifacts as executor_service_artifacts
+
+
+@pytest.mark.unit
+def test_agent_runtime_or_none_parses_supported_values_and_rejects_unknown() -> None:
+    """Agent runtime coercion accepts known enum/string values and treats
+    unknown or non-string values as absent rather than raising."""
+    assert executor_helpers._agent_runtime_or_none(AgentRuntime.codex) is AgentRuntime.codex  # noqa: SLF001
+    assert executor_helpers._agent_runtime_or_none("opencode") is AgentRuntime.opencode  # noqa: SLF001
+    assert executor_helpers._agent_runtime_or_none("not-a-runtime") is None  # noqa: SLF001
+    assert executor_helpers._agent_runtime_or_none(object()) is None  # noqa: SLF001
 
 
 def _command_result(tmp_path: Path, *, returncode: int = 1) -> ValidationCommandResult:
