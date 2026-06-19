@@ -53,6 +53,8 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.remote_repair import (
+    _mirror_commit_object_exists,
+    _open_merge_candidate_head_sha,
     _recover_missing_head_object_from_filesystem,
 )
 from awf.runtime.pr_monitor_runner.types import (
@@ -562,11 +564,26 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
         )
+        recovery_head = fix_start_head
+        if mirror_path is not None:
+            recovery_head_exists = await _mirror_commit_object_exists(
+                self, mirror_path, recovery_head
+            )
+            if not recovery_head_exists:
+                _log.warning(
+                    "monitor.pre_push_validation_fix_head_object_missing_recovery_anchor_missing",
+                    workspace_id=workspace_id,
+                    pass_number=pass_number,
+                    operation_start_head=recovery_head[:10],
+                )
+                recovery_head = await _open_merge_candidate_head_sha(self, workspace_id)
+        if recovery_head is None:
+            return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
         recovered = await _recover_missing_head_object_from_filesystem(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            operation_start_head=fix_start_head,
+            operation_start_head=recovery_head,
             task_tag=task_tag,
             command_evidence=command_evidence,
         )
