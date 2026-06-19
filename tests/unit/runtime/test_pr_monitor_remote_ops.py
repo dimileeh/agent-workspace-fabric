@@ -79,6 +79,21 @@ def test_git_push_terminal_monitor_failure_maps_rollback_failed_as_terminal() ->
 
 
 @pytest.mark.unit
+def test_git_push_terminal_monitor_failure_does_not_treat_blocked_pause_as_terminal() -> None:
+    """A protected-scope pause preserves the workspace for operator action."""
+    result = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+        paused_into_blocked=True,
+    )
+
+    assert result.protected_scope_blocked is True
+    assert result.terminal_monitor_failure is False
+
+
+@pytest.mark.unit
 def test_git_push_terminal_monitor_failure_maps_reparent_failed_as_terminal() -> None:
     """Re-parent failure leaves HEAD on a non-descendant commit with no rollback, so it
     must end monitor recovery rather than let a later iteration push the orphaning HEAD
