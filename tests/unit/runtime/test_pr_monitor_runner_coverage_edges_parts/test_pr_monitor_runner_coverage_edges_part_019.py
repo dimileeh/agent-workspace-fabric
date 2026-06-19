@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.quality_gates import QualityGateViolation
 from awf.node.git_manager import GitOperationError
+from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner.remote_ops import _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
@@ -104,6 +105,104 @@ def _write_worktree_with_mirror(tmp_path: Path, workspace_id: str) -> None:
     (worktree / ".git").write_text(f"gitdir: {mirror}/worktrees/{workspace_id}\n")
     (mirror / "worktrees" / workspace_id).mkdir(parents=True)
     (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
+
+
+@pytest.mark.unit
+async def test_recover_missing_head_object_fails_closed_on_branch_ref_mismatch(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _resolve_worktree_branch_ref(_worktree_path: Path) -> str | None:
+        return "refs/heads/unrelated-agent-branch"
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "_resolve_worktree_branch_ref",
+        _resolve_worktree_branch_ref,
+    )
+
+    recovered = await pr_remote_repair._recover_missing_head_object_from_filesystem(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        operation_start_head="a" * 40,
+    )
+
+    assert recovered is None
+    assert not any("update-ref" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_recover_missing_head_object_updates_expected_branch_ref(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="b" * 40)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _resolve_worktree_branch_ref(_worktree_path: Path) -> str | None:
+        return f"refs/heads/awf/{workspace_id}"
+
+    repaired_worktrees: list[tuple[Path, Path]] = []
+
+    def _repair_agent_writable_worktree(mirror_path: Path, worktree_path: Path) -> None:
+        repaired_worktrees.append((mirror_path, worktree_path))
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "_resolve_worktree_branch_ref",
+        _resolve_worktree_branch_ref,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    recovered = await pr_remote_repair._recover_missing_head_object_from_filesystem(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        operation_start_head="a" * 40,
+    )
+
+    assert recovered == "b" * 40
+    assert any(
+        call.args[-3:] == ["update-ref", f"refs/heads/awf/{workspace_id}", "a" * 40]
+        for call in cmd.calls
+    )
+    assert repaired_worktrees
 
 
 @pytest.mark.unit

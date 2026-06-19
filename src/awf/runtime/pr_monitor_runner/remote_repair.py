@@ -224,6 +224,19 @@ async def _resolve_task_tag(self: Any, workspace_id: str) -> str | None:
         return workspace.task_tag if workspace is not None else None
 
 
+def _branch_name_to_ref(branch_name: str) -> str:
+    return branch_name if branch_name.startswith("refs/") else f"refs/heads/{branch_name}"
+
+
+async def _resolve_workspace_branch_ref(self: Any, workspace_id: str) -> str | None:
+    """Load the workspace's expected local branch ref."""
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None or not workspace.branch_name:
+            return None
+        return _branch_name_to_ref(workspace.branch_name)
+
+
 async def _recover_missing_head_object_from_filesystem(
     self: Any,
     *,
@@ -231,6 +244,7 @@ async def _recover_missing_head_object_from_filesystem(
     worktree_path: Path,
     operation_start_head: str,
     task_tag: str | None = None,
+    expected_branch_ref: str | None = None,
 ) -> str | None:
     """Rebuild a valid branch commit from filesystem state when HEAD's object is missing."""
     mirror_path = mirror_path_for_worktree(worktree_path)
@@ -263,6 +277,15 @@ async def _recover_missing_head_object_from_filesystem(
 
     branch_ref = await _resolve_worktree_branch_ref(worktree_path)
     if branch_ref is None:
+        return None
+    expected_ref = expected_branch_ref or await _resolve_workspace_branch_ref(self, workspace_id)
+    if expected_ref is None or branch_ref != expected_ref:
+        _log.warning(
+            "monitor.head_object_missing_recovery_branch_ref_mismatch",
+            workspace_id=workspace_id,
+            branch_ref=branch_ref,
+            expected_branch_ref=expected_ref,
+        )
         return None
 
     reset_ref = await mirror_git(["update-ref", branch_ref, operation_start_head])
