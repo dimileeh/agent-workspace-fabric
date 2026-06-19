@@ -1261,6 +1261,18 @@ class TestRepairMirrorHooksPath:
         assert result is False
 
     @pytest.mark.unit
+    async def test_raises_on_probe_failure(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "missing.git"
+
+        with pytest.raises(GitOperationError) as exc:
+            await git_module.repair_mirror_hooks_path(mirror)
+
+        assert exc.value.operation == "mirror.hooks_path_probe"
+        assert exc.value.returncode != 1
+        assert exc.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert exc.value.stderr
+
+    @pytest.mark.unit
     async def test_raises_on_unset_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

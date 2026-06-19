@@ -701,7 +701,7 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
     """Clear a poisoned ``core.hooksPath`` from the shared bare mirror config.
 
     Returns ``True`` if repair was needed and succeeded, ``False`` if no repair
-    was needed. Raises ``GitOperationError`` if the unset fails.
+    was needed. Raises ``GitOperationError`` if the probe or unset fails.
     """
     proc = await asyncio.create_subprocess_exec(
         "git",
@@ -713,11 +713,21 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await proc.communicate()
+    probe_stdout_bytes, probe_stderr_bytes = await proc.communicate()
+    probe_stdout = probe_stdout_bytes.decode("utf-8", errors="replace")
+    probe_stderr = probe_stderr_bytes.decode("utf-8", errors="replace")
     assert proc.returncode is not None
 
-    if proc.returncode != 0:
+    if proc.returncode == 1:
         return False
+    if proc.returncode != 0:
+        raise GitOperationError(
+            operation="mirror.hooks_path_probe",
+            returncode=proc.returncode,
+            stdout=probe_stdout,
+            stderr=probe_stderr,
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
 
     unset = await asyncio.create_subprocess_exec(
         "git",
