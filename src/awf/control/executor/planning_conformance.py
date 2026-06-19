@@ -431,10 +431,8 @@ async def _run_post_validation_conformance_check(
             report_path=handoff.report_path.as_posix(),
             stderr=restore_result.stderr,
         )
-    unlink_succeeded = False
     try:
         (worktree_path / handoff.report_path).unlink(missing_ok=True)
-        unlink_succeeded = True
     except OSError as exc:
         _log.warning(
             "executor.post_validation_conformance_report_unlink_failed",
@@ -444,7 +442,7 @@ async def _run_post_validation_conformance_check(
             error_type=type(exc).__name__,
             errno=exc.errno,
         )
-    if unlink_succeeded and await _report_path_is_dirty(self, worktree_path, handoff.report_path):
+    if await _report_path_is_dirty(self, worktree_path, handoff.report_path):
         _log.warning(
             "executor.post_validation_conformance_report_unlink_left_dirty",
             workspace_id=workspace.id,
