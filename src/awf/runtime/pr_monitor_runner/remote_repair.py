@@ -66,6 +66,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _untracked_paths_from_porcelain,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.path_parsing import (
+    _changed_paths_from_name_status_z,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
@@ -608,9 +611,10 @@ async def _commit_dirty_worktree(
                 git_worktree_command(
                     worktree_path,
                     "diff",
-                    "--name-only",
+                    "--name-status",
                     "-z",
                     f"{recovery_head}..{recovered}",
+                    "--",
                 )
             )
             if not diff.ok:
@@ -625,8 +629,22 @@ async def _commit_dirty_worktree(
                     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
                     f"HEAD object recovered for workspace {workspace_id} but recovered diff failed",
                 )
+            try:
+                recovered_diff_paths = _changed_paths_from_name_status_z(diff.stdout)
+            except ProtectedScopeDiffError as exc:
+                _log.warning(
+                    "monitor.head_object_missing_recovered_diff_failed",
+                    workspace_id=workspace_id,
+                    returncode=diff.returncode,
+                    stderr=str(exc)[:400],
+                    reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                )
+                raise _MonitorHeadObjectMissingError(
+                    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                    f"HEAD object recovered for workspace {workspace_id} but recovered diff was malformed",
+                ) from exc
             recovered_paths = [
-                p for p in diff.stdout.split("\0") if p and not is_under_agent_runtime_root(p)
+                p for p in recovered_diff_paths if not is_under_agent_runtime_root(p)
             ]
             if not recovered_paths:
                 return False
