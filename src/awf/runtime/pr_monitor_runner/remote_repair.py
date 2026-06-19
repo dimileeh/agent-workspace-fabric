@@ -317,19 +317,11 @@ async def _recover_missing_head_object_from_filesystem(
             CommandResult,
             await self._deps.runner.run(
                 ["git", "--git-dir", str(mirror_path), *args],
-                env=(
-                    git_env_without_object_lookup_overrides()
-                    if args[:2] == ["cat-file", "-e"]
-                    else None
-                ),
+                env=git_env_without_object_lookup_overrides(),
             ),
         )
 
-    async def worktree_git(
-        args: list[str],
-        *,
-        strip_object_lookup_env: bool = False,
-    ) -> CommandResult:
+    async def worktree_git(args: list[str]) -> CommandResult:
         return cast(
             CommandResult,
             await self._deps.runner.run(
@@ -340,9 +332,7 @@ async def _recover_missing_head_object_from_filesystem(
                     str(worktree_path),
                     *args,
                 ],
-                env=(
-                    git_env_without_object_lookup_overrides() if strip_object_lookup_env else None
-                ),
+                env=git_env_without_object_lookup_overrides(),
             ),
         )
 
@@ -434,14 +424,15 @@ async def _recover_missing_head_object_from_filesystem(
                     "squashes the workspace filesystem state onto operation start "
                     f"head {operation_start_head[:10]}."
                 ),
-            ]
+            ],
+            env=git_env_without_object_lookup_overrides(),
         )
         if not commit.ok:
             return None
 
     await asyncio.to_thread(repair_agent_writable_worktree, mirror_path, worktree_path)
 
-    head = await worktree_git(["rev-parse", "HEAD"], strip_object_lookup_env=True)
+    head = await worktree_git(["rev-parse", "HEAD"])
     recovered_head_sha = head.stdout.strip()
     if not head.ok or not recovered_head_sha:
         return None

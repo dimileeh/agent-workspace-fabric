@@ -256,6 +256,83 @@ async def test_recover_missing_head_object_updates_expected_branch_ref(
 
 
 @pytest.mark.unit
+async def test_recover_missing_head_object_sanitizes_recovery_write_env(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="src/recovered.py\0")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="b" * 40)
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _resolve_worktree_branch_ref(_worktree_path: Path) -> str | None:
+        return f"refs/heads/awf/{workspace_id}"
+
+    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
+        del kwargs
+        return None
+
+    def _repair_agent_writable_worktree(_mirror_path: Path, _worktree_path: Path) -> None:
+        return None
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "_resolve_worktree_branch_ref",
+        _resolve_worktree_branch_ref,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_refresh_supply_chain_policy_before_push",
+        _refresh_supply_chain_policy_before_push,
+    )
+
+    recovered = await pr_remote_repair._recover_missing_head_object_from_filesystem(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        operation_start_head="a" * 40,
+    )
+
+    assert recovered == "b" * 40
+    write_calls = [
+        call
+        for call in cmd.calls
+        if call.args[-3:] == ["update-ref", f"refs/heads/awf/{workspace_id}", "a" * 40]
+        or call.args[-3:] == ["reset", "--mixed", "HEAD"]
+        or call.args[-2:] == ["add", "-A"]
+        or "commit" in call.args
+    ]
+    assert len(write_calls) == 4
+    for call in write_calls:
+        assert call.env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in call.env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+
+
+@pytest.mark.unit
 async def test_recover_missing_head_object_verifies_final_head_in_mirror(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
