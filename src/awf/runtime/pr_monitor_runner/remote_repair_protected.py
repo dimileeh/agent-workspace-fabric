@@ -44,6 +44,7 @@ from awf.db.repositories import (
 )
 from awf.node.git_manager import (
     GitOperationError,
+    git_env_without_object_lookup_overrides,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
@@ -869,7 +870,8 @@ async def _repair_protected_scope_changes_before_commit(
 
     worktree_path = self._worktrees_root / workspace_id
     repaired_status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain")
+        git_worktree_command(worktree_path, "status", "--porcelain"),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not repaired_status.ok:
         return None

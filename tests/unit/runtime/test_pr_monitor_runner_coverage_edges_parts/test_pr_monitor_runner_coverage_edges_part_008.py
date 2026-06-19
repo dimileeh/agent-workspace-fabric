@@ -377,7 +377,10 @@ async def test_protected_scope_violations_skip_empty_status(
 async def test_protected_scope_repair_records_remaining_violations_after_agent_failure(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
@@ -421,6 +424,12 @@ async def test_protected_scope_repair_records_remaining_violations_after_agent_f
     assert events[0].reason_code == "PROTECTED_SCOPE_REPAIR_FAILED"
     assert events[0].payload is not None
     assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+    repaired_status_call = next(
+        call for call in cmd.calls if call.args[-2:] == ["status", "--porcelain"]
+    )
+    assert repaired_status_call.env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in repaired_status_call.env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in repaired_status_call.env
 
 
 @pytest.mark.unit
