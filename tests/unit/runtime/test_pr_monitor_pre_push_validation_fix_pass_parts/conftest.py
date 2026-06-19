@@ -30,3 +30,7 @@ def _mock_verify_head_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
         "awf.runtime.pr_monitor_runner.remote_repair.repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass.repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
