@@ -986,6 +986,98 @@ async def test_repair_operation_start_head_uses_fallback_when_rev_parse_fails(
 
 
 @pytest.mark.unit
+async def test_repair_operation_start_head_accepts_mocked_no_mirror_fallback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fallback_head = "e" * 40
+    checked_paths: list[Path] = []
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _fallback_exists(worktree_path: Path) -> bool:
+        checked_paths.append(worktree_path)
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: None,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "verify_head_object_exists",
+        _fallback_exists,
+    )
+
+    worktree = tmp_path / "does-not-exist"
+    head, result = await runner._repair_operation_start_head_result(
+        workspace_id="ws_no_mirror_fallback",
+        worktree_path=worktree,
+        operation_type="comment_repair",
+        fallback_head_sha=fallback_head,
+    )
+
+    assert head == fallback_head
+    assert result is None
+    assert checked_paths == [worktree]
+    assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_repair_operation_start_head_rejects_no_mirror_fallback_when_guard_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fallback_head = "e" * 40
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _fallback_missing(_worktree_path: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: None,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "verify_head_object_exists",
+        _fallback_missing,
+    )
+
+    head, result = await runner._repair_operation_start_head_result(
+        workspace_id="ws_no_mirror_missing_fallback",
+        worktree_path=tmp_path / "does-not-exist",
+        operation_type="comment_repair",
+        fallback_head_sha=fallback_head,
+    )
+
+    assert head == ""
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "REPAIR_START_HEAD_UNAVAILABLE"
+    assert result.details["fallback_head_sha"] == fallback_head
+    assert result.details["fallback_source"] == "status"
+    assert cmd.calls == []
+
+
+@pytest.mark.unit
 async def test_repair_operation_start_head_rejects_dangling_candidate_fallback(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
