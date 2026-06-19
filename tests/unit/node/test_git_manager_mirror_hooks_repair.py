@@ -84,6 +84,31 @@ class TestRepairMirrorHooksPath:
         assert check.returncode != 0
 
     @pytest.mark.unit
+    async def test_clears_poisoned_worktree_local_hooks_path(self, tmp_path: Path) -> None:
+        mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        subprocess.run(
+            ["git", "-C", str(worktree), "config", "extensions.worktreeConfig", "true"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(worktree), "config", "--worktree", "core.hooksPath", "/dev/null"],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "-C", str(worktree), "config", "--worktree", "--get-all", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+
+    @pytest.mark.unit
     async def test_clears_duplicate_poisoned_hooks_paths(self, tmp_path: Path) -> None:
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()

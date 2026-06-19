@@ -50,6 +50,106 @@ def _mirror_hooks_path_unset_pattern(hooks_path: str) -> str:
     return f"^{re.escape(hooks_path)}$"
 
 
+async def _repair_hooks_path_config(
+    *,
+    git_args: tuple[str, ...],
+    config_scope_args: tuple[str, ...],
+    operation_prefix: str,
+) -> bool:
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        *git_args,
+        "config",
+        *config_scope_args,
+        "--get-all",
+        "core.hooksPath",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=git_env_without_object_lookup_overrides(),
+    )
+    probe_stdout_bytes, probe_stderr_bytes = await proc.communicate()
+    probe_stdout = probe_stdout_bytes.decode("utf-8", errors="replace")
+    probe_stderr = probe_stderr_bytes.decode("utf-8", errors="replace")
+    assert proc.returncode is not None
+
+    if proc.returncode == 1:
+        return False
+    if proc.returncode != 0:
+        raise GitOperationError(
+            operation=f"{operation_prefix}.hooks_path_probe",
+            returncode=proc.returncode,
+            stdout=probe_stdout,
+            stderr=probe_stderr,
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+
+    disallowed_hooks_paths = tuple(
+        dict.fromkeys(
+            (hooks_path, _mirror_hooks_path_unset_pattern(hooks_path))
+            for hooks_path in probe_stdout.splitlines()
+        )
+    )
+    if not disallowed_hooks_paths:
+        return False
+
+    for hooks_path, unset_pattern in disallowed_hooks_paths:
+        unset = await asyncio.create_subprocess_exec(
+            "git",
+            *git_args,
+            "config",
+            *config_scope_args,
+            "--unset-all",
+            "core.hooksPath",
+            unset_pattern,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=git_env_without_object_lookup_overrides(),
+        )
+        unset_stdout_bytes, unset_stderr_bytes = await unset.communicate()
+        unset_stdout = unset_stdout_bytes.decode("utf-8", errors="replace")
+        unset_stderr = unset_stderr_bytes.decode("utf-8", errors="replace")
+        assert unset.returncode is not None
+
+        if unset.returncode == 5:
+            reprobe = await asyncio.create_subprocess_exec(
+                "git",
+                *git_args,
+                "config",
+                *config_scope_args,
+                "--get-all",
+                "core.hooksPath",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=git_env_without_object_lookup_overrides(),
+            )
+            reprobe_stdout_bytes, reprobe_stderr_bytes = await reprobe.communicate()
+            reprobe_stdout = reprobe_stdout_bytes.decode("utf-8", errors="replace")
+            reprobe_stderr = reprobe_stderr_bytes.decode("utf-8", errors="replace")
+            assert reprobe.returncode is not None
+            if reprobe.returncode == 1:
+                return True
+            if reprobe.returncode != 0:
+                raise GitOperationError(
+                    operation=f"{operation_prefix}.hooks_path_repair_reprobe",
+                    returncode=reprobe.returncode,
+                    stdout=reprobe_stdout,
+                    stderr=reprobe_stderr,
+                    reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+                )
+            if hooks_path not in reprobe_stdout.splitlines():
+                continue
+
+        if unset.returncode != 0:
+            raise GitOperationError(
+                operation=f"{operation_prefix}.hooks_path_repair",
+                returncode=unset.returncode,
+                stdout=unset_stdout,
+                stderr=unset_stderr,
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+    return True
+
+
 class GitOperationError(Exception):
     """Raised when a git subprocess exits non-zero or a precondition fails.
 
@@ -709,105 +809,28 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
 
 
 async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
-    """Remove poisoned ``core.hooksPath`` values from the shared bare mirror config.
+    """Remove poisoned ``core.hooksPath`` values from mirror and worktree config.
 
     Returns ``True`` if repair was needed and succeeded, ``False`` if no repair
     was needed. Raises ``GitOperationError`` if the probe or unset fails.
     """
-    proc = await asyncio.create_subprocess_exec(
-        "git",
-        "--git-dir",
-        str(mirror_path),
-        "config",
-        "--local",
-        "--get-all",
-        "core.hooksPath",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=git_env_without_object_lookup_overrides(),
+    repaired = await _repair_hooks_path_config(
+        git_args=("--git-dir", str(mirror_path)),
+        config_scope_args=("--local",),
+        operation_prefix="mirror",
     )
-    probe_stdout_bytes, probe_stderr_bytes = await proc.communicate()
-    probe_stdout = probe_stdout_bytes.decode("utf-8", errors="replace")
-    probe_stderr = probe_stderr_bytes.decode("utf-8", errors="replace")
-    assert proc.returncode is not None
 
-    if proc.returncode == 1:
-        return False
-    if proc.returncode != 0:
-        raise GitOperationError(
-            operation="mirror.hooks_path_probe",
-            returncode=proc.returncode,
-            stdout=probe_stdout,
-            stderr=probe_stderr,
-            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
-        )
-
-    disallowed_hooks_paths = tuple(
-        dict.fromkeys(
-            (hooks_path, _mirror_hooks_path_unset_pattern(hooks_path))
-            for hooks_path in probe_stdout.splitlines()
-        )
-    )
-    if not disallowed_hooks_paths:
-        return False
-
-    for hooks_path, unset_pattern in disallowed_hooks_paths:
-        unset = await asyncio.create_subprocess_exec(
-            "git",
-            "--git-dir",
-            str(mirror_path),
-            "config",
-            "--unset-all",
-            "core.hooksPath",
-            unset_pattern,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=git_env_without_object_lookup_overrides(),
-        )
-        unset_stdout_bytes, unset_stderr_bytes = await unset.communicate()
-        unset_stdout = unset_stdout_bytes.decode("utf-8", errors="replace")
-        unset_stderr = unset_stderr_bytes.decode("utf-8", errors="replace")
-        assert unset.returncode is not None
-
-        if unset.returncode == 5:
-            reprobe = await asyncio.create_subprocess_exec(
-                "git",
-                "--git-dir",
-                str(mirror_path),
-                "config",
-                "--local",
-                "--get-all",
-                "core.hooksPath",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=git_env_without_object_lookup_overrides(),
+    worktrees_dir = mirror_path / "worktrees"
+    for config_path in sorted(worktrees_dir.glob("*/config.worktree")):
+        repaired = (
+            await _repair_hooks_path_config(
+                git_args=(),
+                config_scope_args=("--file", str(config_path)),
+                operation_prefix="worktree",
             )
-            reprobe_stdout_bytes, reprobe_stderr_bytes = await reprobe.communicate()
-            reprobe_stdout = reprobe_stdout_bytes.decode("utf-8", errors="replace")
-            reprobe_stderr = reprobe_stderr_bytes.decode("utf-8", errors="replace")
-            assert reprobe.returncode is not None
-            if reprobe.returncode == 1:
-                return True
-            if reprobe.returncode != 0:
-                raise GitOperationError(
-                    operation="mirror.hooks_path_repair_reprobe",
-                    returncode=reprobe.returncode,
-                    stdout=reprobe_stdout,
-                    stderr=reprobe_stderr,
-                    reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
-                )
-            if hooks_path not in reprobe_stdout.splitlines():
-                continue
-
-        if unset.returncode != 0:
-            raise GitOperationError(
-                operation="mirror.hooks_path_repair",
-                returncode=unset.returncode,
-                stdout=unset_stdout,
-                stderr=unset_stderr,
-                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
-            )
-    return True
+            or repaired
+        )
+    return repaired
 
 
 async def verify_head_object_exists(worktree_path: Path) -> bool:
