@@ -20,10 +20,13 @@ def _mock_pr_monitor_git_mirror_guards(monkeypatch: pytest.MonkeyPatch) -> None:
         return True
 
     for module_name in (
+        "awf.runtime.pr_monitor_runner.ci_ops",
         "awf.runtime.pr_monitor_runner.comments",
         "awf.runtime.pr_monitor_runner.pre_push_validation",
         "awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass",
+        "awf.runtime.pr_monitor_runner.remote_ops",
         "awf.runtime.pr_monitor_runner.remote_repair",
+        "awf.runtime.pr_monitor_runner.remote_repair_protected",
     ):
         monkeypatch.setattr(
             f"{module_name}.verify_head_object_exists",
