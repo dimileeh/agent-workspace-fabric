@@ -36,6 +36,10 @@ _log = get_logger(__name__)
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+_POISONED_MIRROR_HOOKS_PATH_PATTERNS = {
+    "/dev/null": "^/dev/null$",
+    "/tmp/awf-poisoned-hooks": "^/tmp/awf-poisoned-hooks$",
+}
 AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
 
@@ -699,7 +703,7 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
 
 
 async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
-    """Clear a poisoned ``core.hooksPath`` from the shared bare mirror config.
+    """Remove poisoned ``core.hooksPath`` values from the shared bare mirror config.
 
     Returns ``True`` if repair was needed and succeeded, ``False`` if no repair
     was needed. Raises ``GitOperationError`` if the probe or unset fails.
@@ -710,6 +714,7 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         str(mirror_path),
         "config",
         "--local",
+        "--get-all",
         "core.hooksPath",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -731,57 +736,72 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
             reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
         )
 
-    unset = await asyncio.create_subprocess_exec(
-        "git",
-        "--git-dir",
-        str(mirror_path),
-        "config",
-        "--unset-all",
-        "core.hooksPath",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=git_env_without_object_lookup_overrides(),
+    poisoned_hooks_paths = tuple(
+        dict.fromkeys(
+            hooks_path
+            for hooks_path in probe_stdout.splitlines()
+            if hooks_path in _POISONED_MIRROR_HOOKS_PATH_PATTERNS
+        )
     )
-    unset_stdout_bytes, unset_stderr_bytes = await unset.communicate()
-    unset_stdout = unset_stdout_bytes.decode("utf-8", errors="replace")
-    unset_stderr = unset_stderr_bytes.decode("utf-8", errors="replace")
-    assert unset.returncode is not None
+    if not poisoned_hooks_paths:
+        return False
 
-    if unset.returncode == 5:
-        reprobe = await asyncio.create_subprocess_exec(
+    for hooks_path in poisoned_hooks_paths:
+        unset = await asyncio.create_subprocess_exec(
             "git",
             "--git-dir",
             str(mirror_path),
             "config",
-            "--local",
+            "--unset-all",
             "core.hooksPath",
+            _POISONED_MIRROR_HOOKS_PATH_PATTERNS[hooks_path],
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=git_env_without_object_lookup_overrides(),
         )
-        reprobe_stdout_bytes, reprobe_stderr_bytes = await reprobe.communicate()
-        reprobe_stdout = reprobe_stdout_bytes.decode("utf-8", errors="replace")
-        reprobe_stderr = reprobe_stderr_bytes.decode("utf-8", errors="replace")
-        assert reprobe.returncode is not None
-        if reprobe.returncode == 1:
-            return True
-        if reprobe.returncode != 0:
+        unset_stdout_bytes, unset_stderr_bytes = await unset.communicate()
+        unset_stdout = unset_stdout_bytes.decode("utf-8", errors="replace")
+        unset_stderr = unset_stderr_bytes.decode("utf-8", errors="replace")
+        assert unset.returncode is not None
+
+        if unset.returncode == 5:
+            reprobe = await asyncio.create_subprocess_exec(
+                "git",
+                "--git-dir",
+                str(mirror_path),
+                "config",
+                "--local",
+                "--get-all",
+                "core.hooksPath",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=git_env_without_object_lookup_overrides(),
+            )
+            reprobe_stdout_bytes, reprobe_stderr_bytes = await reprobe.communicate()
+            reprobe_stdout = reprobe_stdout_bytes.decode("utf-8", errors="replace")
+            reprobe_stderr = reprobe_stderr_bytes.decode("utf-8", errors="replace")
+            assert reprobe.returncode is not None
+            if reprobe.returncode == 1:
+                return True
+            if reprobe.returncode != 0:
+                raise GitOperationError(
+                    operation="mirror.hooks_path_repair_reprobe",
+                    returncode=reprobe.returncode,
+                    stdout=reprobe_stdout,
+                    stderr=reprobe_stderr,
+                    reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+                )
+            if hooks_path not in reprobe_stdout.splitlines():
+                continue
+
+        if unset.returncode != 0:
             raise GitOperationError(
-                operation="mirror.hooks_path_repair_reprobe",
-                returncode=reprobe.returncode,
-                stdout=reprobe_stdout,
-                stderr=reprobe_stderr,
+                operation="mirror.hooks_path_repair",
+                returncode=unset.returncode,
+                stdout=unset_stdout,
+                stderr=unset_stderr,
                 reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
             )
-
-    if unset.returncode != 0:
-        raise GitOperationError(
-            operation="mirror.hooks_path_repair",
-            returncode=unset.returncode,
-            stdout=unset_stdout,
-            stderr=unset_stderr,
-            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
-        )
     return True
 
 
