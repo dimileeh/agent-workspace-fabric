@@ -7,10 +7,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
 
 from awf.control.executor import execution_flow
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
+from awf.node.git_manager import GitOperationError
 from awf.profiles.models import WorkspaceProfile
 
 
@@ -86,7 +88,13 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
 
     async def _repair_mirror_hooks_path(path: Path) -> bool:
         assert path == mirror_path
-        raise RuntimeError("poisoned hooks path")
+        raise GitOperationError(
+            operation="mirror.hooks_path_repair",
+            returncode=128,
+            stdout="",
+            stderr="could not lock config file\n",
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
 
     monkeypatch.setattr(
         execution_flow,
@@ -109,7 +117,16 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
         _repair_mirror_hooks_path,
     )
 
-    await execution_flow.execute(_Executor(), workspace.id)
+    with structlog.testing.capture_logs() as captured:
+        await execution_flow.execute(_Executor(), workspace.id)
+
+    assert {
+        "event": "executor.mirror_hooks_path_repair_failed",
+        "workspace_id": workspace.id,
+        "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        "stderr": "could not lock config file\n",
+        "log_level": "warning",
+    } in captured
 
     assert mark_failed_calls == [
         {
@@ -117,6 +134,6 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
             "from_status": WorkspaceStatus.running,
             "failure_reason": FailureReason.infrastructure_failure,
             "message": "could not repair poisoned mirror hooks path before profile setup",
-            "reason_code": "MIRROR_HOOKS_PATH_POISONED",
+            "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
         }
     ]

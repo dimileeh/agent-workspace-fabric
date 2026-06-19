@@ -94,6 +94,7 @@ from awf.db.enums import (
 )
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
+    GitOperationError,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
@@ -104,7 +105,6 @@ from awf.runtime.ownership import (
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
-from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_REASON
 from awf.runtime.validation import (
     ValidationResult,
 )
@@ -341,20 +341,32 @@ async def execute(
             return
         mirror_path = mirror_path_for_worktree(worktree_path)
         if mirror_path is not None:
+            mirror_repair_failure_reason_code: str | None = None
             try:
                 await repair_mirror_hooks_path(mirror_path)
-            except Exception:
+            except GitOperationError as exc:
+                mirror_repair_failure_reason_code = exc.reason_code
                 _log.warning(
                     "executor.mirror_hooks_path_repair_failed",
                     workspace_id=workspace_id,
-                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    reason_code=exc.reason_code,
+                    stderr=exc.stderr[:400],
                 )
+            except OSError as exc:
+                mirror_repair_failure_reason_code = "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+                _log.warning(
+                    "executor.mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                    reason_code=mirror_repair_failure_reason_code,
+                    error=repr(exc)[:400],
+                )
+            if mirror_repair_failure_reason_code is not None:
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
                     failure_reason=FailureReason.infrastructure_failure,
                     message="could not repair poisoned mirror hooks path before profile setup",
-                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    reason_code=mirror_repair_failure_reason_code,
                 )
                 return
         setup_result = await self._validation.run_profile_phases(
