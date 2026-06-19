@@ -957,9 +957,10 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
     # The in-memory deposit branch ran because the synthesized write failed;
     # ``deposit_workspace_planning_artifacts`` is not invoked in that branch.
     assert deposited == []
-    # The on-worktree report copy is removed last; the directory at the report
-    # path cannot be removed by the unlink fallback, so it remains.
-    assert report_abs.exists()
+    # The on-worktree report copy is removed last; the fallback cleanup also
+    # removes directory residue at the report path so later cleanliness checks
+    # do not see an untracked artifact.
+    assert not report_abs.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
         "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
