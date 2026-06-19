@@ -41,6 +41,7 @@ _POISONED_MIRROR_HOOKS_PATH_PATTERNS = {
     "/tmp/awf-poisoned-hooks": "^/tmp/awf-poisoned-hooks$",
 }
 _ALLOWED_MIRROR_HOOKS_PATHS = {".githooks/Lefthook"}
+_REQUIRED_MIRROR_HOOK_FILES = {".githooks/Lefthook": frozenset({"pre-commit"})}
 AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
 
@@ -58,6 +59,9 @@ def _mirror_hooks_path_unset_pattern(mirror_path: Path, hooks_path: str) -> str 
 def _mirror_has_registered_hooks_path(mirror_path: Path, hooks_path: str) -> bool:
     relative_hooks_path = Path(hooks_path)
     if relative_hooks_path.is_absolute():
+        return False
+    required_hook_files = _REQUIRED_MIRROR_HOOK_FILES.get(hooks_path)
+    if required_hook_files is None:
         return False
 
     worktrees_dir = mirror_path / "worktrees"
@@ -79,11 +83,29 @@ def _mirror_has_registered_hooks_path(mirror_path: Path, hooks_path: str) -> boo
 
         if gitdir_path.name != ".git":
             return False
-        if not (gitdir_path.parent / relative_hooks_path).is_dir():
+        hooks_dir = gitdir_path.parent / relative_hooks_path
+        if not _hooks_dir_has_executable_files(hooks_dir, required_hook_files):
             return False
         has_registered_worktree = True
 
     return has_registered_worktree
+
+
+def _hooks_dir_has_executable_files(hooks_dir: Path, filenames: frozenset[str]) -> bool:
+    if not hooks_dir.is_dir():
+        return False
+
+    for hook_name in filenames:
+        hook_path = hooks_dir / hook_name
+        try:
+            hook_mode = hook_path.stat().st_mode
+        except FileNotFoundError:
+            return False
+        except OSError:  # pragma: no cover - fail closed if hook metadata changes mid-repair.
+            return False
+        if not hook_path.is_file() or not hook_mode & 0o111:
+            return False
+    return True
 
 
 class GitOperationError(Exception):

@@ -11,6 +11,13 @@ import pytest
 from awf.node import git_manager as git_module
 
 
+def _write_executable_hook(hooks_dir: Path, name: str = "pre-commit") -> None:
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hook = hooks_dir / name
+    hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+
 def _git(args: list[str], cwd: Path) -> None:
     """Run a synchronous git command for fixture setup; fail loudly on error."""
     subprocess.run(
@@ -48,7 +55,7 @@ class TestRepairMirrorHooksPath:
             capture_output=True,
         )
         if create_hooks_dir:
-            (worktree / ".githooks" / "Lefthook").mkdir(parents=True)
+            _write_executable_hook(worktree / ".githooks" / "Lefthook")
         return mirror, worktree
 
     @pytest.mark.unit
@@ -143,6 +150,70 @@ class TestRepairMirrorHooksPath:
         self, tmp_path: Path
     ) -> None:
         mirror, _worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "core.hooksPath",
+                ".githooks/Lefthook",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--get-all", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+
+    @pytest.mark.unit
+    async def test_clears_allowed_hooks_path_when_attached_worktree_hooks_directory_is_empty(
+        self, tmp_path: Path
+    ) -> None:
+        mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        (worktree / ".githooks" / "Lefthook").mkdir(parents=True)
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "core.hooksPath",
+                ".githooks/Lefthook",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--get-all", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+
+    @pytest.mark.unit
+    async def test_clears_allowed_hooks_path_when_attached_worktree_hook_is_not_executable(
+        self, tmp_path: Path
+    ) -> None:
+        mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        hooks_dir = worktree / ".githooks" / "Lefthook"
+        hooks_dir.mkdir(parents=True)
+        hook = hooks_dir / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        hook.chmod(0o644)
         subprocess.run(
             [
                 "git",
@@ -453,7 +524,7 @@ class TestMirrorHasRegisteredHooksPath:
         gitdir_file.parent.mkdir(parents=True)
         worktree = tmp_path / "workspace"
         (worktree / ".git").mkdir(parents=True)
-        (worktree / ".githooks" / "Lefthook").mkdir(parents=True)
+        _write_executable_hook(worktree / ".githooks" / "Lefthook")
         gitdir_file.write_text("../../../workspace/.git\n", encoding="utf-8")
 
         assert git_module._mirror_has_registered_hooks_path(mirror, ".githooks/Lefthook") is True
