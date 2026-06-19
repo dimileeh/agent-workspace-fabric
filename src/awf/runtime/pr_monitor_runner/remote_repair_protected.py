@@ -832,7 +832,10 @@ async def _repair_protected_scope_changes_before_commit(
             "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
         )
     mirror_path = mirror_path_for_worktree(worktree_path)
-    if mirror_path is not None:
+
+    async def _repair_recovery_mirror_hooks_path() -> None:
+        if mirror_path is None:
+            return
         try:
             await repair_mirror_hooks_path(mirror_path)
         except (GitOperationError, OSError) as exc:
@@ -842,6 +845,8 @@ async def _repair_protected_scope_changes_before_commit(
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
             )
             raise _MonitorMirrorHooksPathRepairFailedError() from exc
+
+    await _repair_recovery_mirror_hooks_path()
     agent_run_err = None
     try:
         await self._deps.adapter.run(
@@ -853,17 +858,11 @@ async def _repair_protected_scope_changes_before_commit(
         )
     except AgentRunError as exc:
         agent_run_err = exc
+    except Exception:
+        await _repair_recovery_mirror_hooks_path()
+        raise
 
-    if mirror_path is not None:
-        try:
-            await repair_mirror_hooks_path(mirror_path)
-        except (GitOperationError, OSError) as exc:
-            _log.warning(
-                "monitor.protected_scope_repair_mirror_hooks_path_repair_failed",
-                workspace_id=workspace_id,
-                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-            )
-            raise _MonitorMirrorHooksPathRepairFailedError() from exc
+    await _repair_recovery_mirror_hooks_path()
 
     if agent_run_err is not None:
         await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
