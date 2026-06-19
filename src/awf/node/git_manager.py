@@ -40,6 +40,7 @@ _POISONED_MIRROR_HOOKS_PATH_PATTERNS = {
     "/dev/null": "^/dev/null$",
     "/tmp/awf-poisoned-hooks": "^/tmp/awf-poisoned-hooks$",
 }
+_ALLOWED_MIRROR_HOOKS_PATHS = {".githooks/Lefthook"}
 AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
 
@@ -47,9 +48,9 @@ AGENT_RUNTIME_GID = 1000
 def _mirror_hooks_path_unset_pattern(hooks_path: str) -> str | None:
     if hooks_path in _POISONED_MIRROR_HOOKS_PATH_PATTERNS:
         return _POISONED_MIRROR_HOOKS_PATH_PATTERNS[hooks_path]
-    if not hooks_path or Path(hooks_path).is_absolute():
-        return f"^{re.escape(hooks_path)}$"
-    return None
+    if hooks_path in _ALLOWED_MIRROR_HOOKS_PATHS:
+        return None
+    return f"^{re.escape(hooks_path)}$"
 
 
 class GitOperationError(Exception):
