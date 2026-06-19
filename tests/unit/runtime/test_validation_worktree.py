@@ -670,6 +670,41 @@ def test_remove_empty_untracked_dirs_honors_ignored_roots(
 
 
 @pytest.mark.unit
+def test_remove_empty_untracked_dirs_does_not_partially_clean_when_check_ignore_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed ignore probe must leave earlier cleanup candidates untouched."""
+    worktree = _init_fake_worktree(tmp_path)
+    earlier_empty_dir = worktree / "aaa"
+    later_empty_dir = worktree / "zzz"
+    earlier_empty_dir.mkdir()
+    later_empty_dir.mkdir()
+
+    original_run = subprocess.run
+
+    def fail_later_check_ignore(
+        cmd: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if "check-ignore" in cmd and cmd[-1] == "zzz/":
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=128, stdout="", stderr="check-ignore exploded"
+            )
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fail_later_check_ignore)
+
+    with pytest.raises(validation_worktree._IgnoreCheckError):
+        validation_worktree._remove_empty_untracked_dirs(
+            worktree_path=worktree,
+            ignored_paths=(),
+        )
+
+    assert earlier_empty_dir.exists()
+    assert later_empty_dir.exists()
+
+
+@pytest.mark.unit
 def test_remove_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
     tmp_path: Path,
 ) -> None:

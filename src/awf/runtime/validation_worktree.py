@@ -338,12 +338,12 @@ def _remove_empty_untracked_dirs(
     left alone so the cleanup/provenance contract continues to treat them as
     setup-owned or ignored state.
     """
-    removed: list[str] = []
+    candidates: list[tuple[Path, str]] = []
     ignored_path_set = {_normalize_porcelain_path(path) for path in ignored_paths}
     gitlink_paths = _gitlink_paths(worktree_path)
 
-    def maybe_remove_empty(directory: Path) -> bool:
-        """Return True when the directory was removed because it was empty."""
+    def collect_empty_candidate(directory: Path) -> bool:
+        """Return True when the directory can be removed because it is empty."""
         try:
             children = tuple(sorted(directory.iterdir(), key=lambda child: child.name))
         except OSError:
@@ -373,7 +373,7 @@ def _remove_empty_untracked_dirs(
             if child.name == ".git" or (child / ".git").exists() or relative_child in gitlink_paths:
                 had_descendant = True
                 continue
-            if maybe_remove_empty(child):
+            if collect_empty_candidate(child):
                 continue
             had_descendant = True
 
@@ -390,16 +390,20 @@ def _remove_empty_untracked_dirs(
                 return False
         except _IgnoreCheckError:
             raise
+        candidates.append((directory, dir_path))
+        return True
+
+    collect_empty_candidate(worktree_path)
+
+    removed: list[str] = []
+    for directory, dir_path in candidates:
         try:
             directory.rmdir()
         except FileNotFoundError:
-            return False
+            continue
         except OSError:
-            return False
+            continue
         removed.append(dir_path)
-        return True
-
-    maybe_remove_empty(worktree_path)
     return tuple(dict.fromkeys(removed))
 
 
