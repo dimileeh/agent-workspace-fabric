@@ -48,6 +48,13 @@ from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationW
 from awf.service import artifacts as executor_service_artifacts
 
 
+def _strip_git_literal_pathspec(path_arg: str) -> str:
+    prefix = ":(literal)"
+    if path_arg.startswith(prefix):
+        return path_arg[len(prefix) :]
+    return path_arg
+
+
 def _command_result(tmp_path: Path, *, returncode: int = 1) -> ValidationCommandResult:
     stdout = tmp_path / "cmd.stdout"
     stderr = tmp_path / "cmd.stderr"
@@ -187,7 +194,7 @@ class _GitRestoreFakeRunner(FakeCommandRunner):
             return result
         sep_index = args.index("--")
         for path_arg in args[sep_index + 1 :]:
-            target = self._worktree_path / path_arg
+            target = self._worktree_path / _strip_git_literal_pathspec(path_arg)
             if target.exists():
                 # Tracked path: restore leaves the committed copy in place.
                 continue
@@ -750,8 +757,8 @@ async def test_satisfied_post_validation_conformance_report_write_failure_procee
     assert not report_abs.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source base-commit-sha --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
@@ -833,8 +840,8 @@ async def test_satisfied_post_validation_conformance_report_untracked_fallback_t
     assert not report_file.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source base-commit-sha --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
@@ -963,8 +970,8 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
     assert not report_abs.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source base-commit-sha --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
@@ -978,6 +985,71 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
     assert deposited_report["status"] == "satisfied"
     assert deposited_report["summary"] == "validated evidence satisfies plan"
     assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan\n"
+
+
+@pytest.mark.unit
+async def test_satisfied_post_validation_conformance_cleanup_uses_literal_report_pathspec(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6K0EnS: report cleanup must treat Git pathspec
+    metacharacters in profile-rendered report paths as literal filename bytes.
+    """
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post*.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    report_file.write_text('{"status":"satisfied","summary":"stale","gaps":[]}', encoding="utf-8")
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")  # before_compare
+    runner.queue_result(returncode=0, stdout="validated-head\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    runner.queue_result(returncode=128, stderr="fatal: pathspec did not match any files\n")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    event_markers: list[str] = []
+
+    async def record_event(**_kwargs: object) -> None:
+        event_markers.append("record")
+
+    executor._record_post_validation_conformance_event = record_event  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+    )
+
+    assert failure is None
+    assert event_markers == ["record"]
+    restore_calls = [call.args for call in runner.calls if "restore" in call.args]
+    assert restore_calls
+    assert restore_calls[0][-1] == ":(literal)docs/awf-plans/ws_post*.conformance.json"
+    assert not report_file.exists()
 
 
 @pytest.mark.unit

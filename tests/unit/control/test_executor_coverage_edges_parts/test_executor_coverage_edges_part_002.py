@@ -35,6 +35,13 @@ from awf.runtime.validation import (
 )
 
 
+def _strip_git_literal_pathspec(path_arg: str) -> str:
+    prefix = ":(literal)"
+    if path_arg.startswith(prefix):
+        return path_arg[len(prefix) :]
+    return path_arg
+
+
 def _command_result(tmp_path: Path, *, returncode: int = 1) -> ValidationCommandResult:
     stdout = tmp_path / "cmd.stdout"
     stderr = tmp_path / "cmd.stderr"
@@ -174,7 +181,7 @@ class _GitRestoreFakeRunner(FakeCommandRunner):
             return result
         sep_index = args.index("--")
         for path_arg in args[sep_index + 1 :]:
-            target = self._worktree_path / path_arg
+            target = self._worktree_path / _strip_git_literal_pathspec(path_arg)
             if target.exists():
                 # Tracked path: restore leaves the committed copy in place.
                 continue
@@ -591,8 +598,8 @@ async def test_satisfied_post_validation_conformance_report_is_written_not_commi
     assert event_markers == ["record"]
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source base-commit-sha --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
@@ -863,8 +870,8 @@ async def test_satisfied_post_validation_conformance_report_restores_from_base_c
     assert report_file.read_text(encoding="utf-8") == base_content
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source base-commit-sha --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
@@ -940,8 +947,8 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
     executor._record_post_validation_conformance_event.assert_awaited_once()  # type: ignore[attr-defined]
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source base-commit-sha --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
@@ -1312,8 +1319,8 @@ async def test_satisfied_post_validation_conformance_report_restores_tracked_rep
     assert report_file.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source base-commit-sha --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
@@ -1405,13 +1412,13 @@ async def test_satisfied_post_validation_conformance_report_restores_from_head_w
     assert report_file.read_text(encoding="utf-8") == committed_report
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source base-commit-sha --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     assert any(
-        "restore --source HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source HEAD --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     # No staging or committing of the AWF artifact.
@@ -1489,8 +1496,8 @@ async def test_satisfied_post_validation_conformance_report_unlinks_when_head_re
     assert not report_file.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
-        in call
+        "restore --source HEAD --worktree --staged -- "
+        ":(literal)docs/awf-plans/ws_post.conformance.json" in call
         for call in joined_calls
     )
     # No staging or committing of the AWF artifact.

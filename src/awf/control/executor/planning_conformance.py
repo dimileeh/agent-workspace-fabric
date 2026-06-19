@@ -70,6 +70,10 @@ from awf.service.artifacts import (
 )
 
 
+def _git_literal_pathspec(path: Path) -> str:
+    return f":(literal){path.as_posix()}"
+
+
 async def _prepare_conformance_salvage_for_execution(
     self: Any,
     *,
@@ -360,8 +364,9 @@ async def _run_post_validation_conformance_check(
     # re-delete the restored file and leave an unstaged deletion
     # (`` D ...``). For paths that do not exist at base_commit or are
     # untracked/gitignored, the restore will fail; fall back to a plain unlink
-    # in that case. Use ``--`` to avoid mis-interpreting report paths that
-    # start with a dash.
+    # in that case. Use a literal pathspec to avoid interpreting report paths
+    # that contain Git pathspec metacharacters.
+    report_pathspec = _git_literal_pathspec(handoff.report_path)
     restore_result = await self._runner.run(
         [
             "git",
@@ -374,7 +379,7 @@ async def _run_post_validation_conformance_check(
             "--worktree",
             "--staged",
             "--",
-            handoff.report_path.as_posix(),
+            report_pathspec,
         ]
     )
     restore_succeeded = restore_result.ok and not await _report_path_is_dirty(
@@ -407,7 +412,7 @@ async def _run_post_validation_conformance_check(
                 "--worktree",
                 "--staged",
                 "--",
-                handoff.report_path.as_posix(),
+                report_pathspec,
             ]
         )
         if head_restore_result.ok and not await _report_path_is_dirty(
