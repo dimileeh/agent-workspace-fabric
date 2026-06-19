@@ -914,6 +914,7 @@ async def run_validation_and_fix_cycle(
             expected=WorkspaceStatus.validating,
             action="validation_fix_agent_run",
         ):
+            _deposit_planning_artifacts_if_required()
             return ExecutionValidationResult(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
@@ -1013,6 +1014,7 @@ async def run_validation_and_fix_cycle(
             expected=WorkspaceStatus.validating,
             action="validation_fix_commit",
         ):
+            _deposit_planning_artifacts_if_required()
             return ExecutionValidationResult(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,

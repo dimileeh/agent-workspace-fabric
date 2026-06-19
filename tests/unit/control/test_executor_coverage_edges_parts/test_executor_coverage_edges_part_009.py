@@ -315,6 +315,16 @@ async def test_fix_pass_status_recheck_race_before_agent_run_stops(
     workspace = _workspace("ws_fix_recheck_agent")
     _patch_profile(monkeypatch, profile)
     _patch_clean_worktree(monkeypatch)
+    deposit_calls: list[str] = []
+
+    def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        deposit_calls.append(str(kwargs["workspace_id"]))
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
@@ -356,6 +366,7 @@ async def test_fix_pass_status_recheck_race_before_agent_run_stops(
     assert recheck.await_count == 2
     last_recheck_kwargs = recheck.await_args.kwargs
     assert last_recheck_kwargs["action"] == "validation_fix_agent_run"
+    assert deposit_calls == [workspace.id]
 
 
 @pytest.mark.unit
@@ -368,6 +379,16 @@ async def test_fix_pass_status_recheck_race_before_commit_stops(
     workspace = _workspace("ws_fix_recheck_commit")
     _patch_profile(monkeypatch, profile)
     _patch_clean_worktree(monkeypatch)
+    deposit_calls: list[str] = []
+
+    def _spy_deposit(*_args: object, **kwargs: object) -> None:
+        deposit_calls.append(str(kwargs["workspace_id"]))
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
@@ -409,6 +430,7 @@ async def test_fix_pass_status_recheck_race_before_commit_stops(
     adapter.run.assert_awaited_once()
     assert recheck.await_count == 3
     assert recheck.await_args.kwargs["action"] == "validation_fix_commit"
+    assert deposit_calls == [workspace.id]
 
 
 @pytest.mark.unit
