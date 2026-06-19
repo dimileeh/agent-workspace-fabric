@@ -420,6 +420,10 @@ async def execute(
                 details=setup_dependency_details,
             )
             return
+        if not await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="after successful profile setup"
+        ):
+            return
         await self._record_runtime_toolchain_findings_safe(
             workspace_id=workspace_id,
             compose_project=compose_project,
