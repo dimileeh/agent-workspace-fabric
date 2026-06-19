@@ -524,6 +524,16 @@ async def execute(
             except ComposeExecCleanupError:
                 await _repair_mirror_hooks_path_after_agent_cleanup_failure()
                 raise
+            except AgentRunError:
+                raise
+            except Exception:
+                if not await _repair_mirror_hooks_path_or_mark_failed(
+                    failure_stage="after agent run",
+                    before_mark_failed=_deposit_planning_artifacts,
+                ):
+                    return
+                post_agent_mirror_repair_done = True
+                raise
             (
                 planning_validation_handoff,
                 planning_should_return,
