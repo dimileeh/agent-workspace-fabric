@@ -752,6 +752,7 @@ class TestMiscMonitorHelpers:
         """Dirty-worktree writes never inherit alternate object stores."""
         monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
         monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "awf-agent@example.invalid")
         workspace_id = "ws_object_env"
         fake = FakeCommandRunner()
         fixed_path = "src/awf/foo.py"
@@ -804,6 +805,7 @@ class TestMiscMonitorHelpers:
             assert call.env is not None
             assert "GIT_OBJECT_DIRECTORY" not in call.env
             assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+            assert call.env["GIT_AUTHOR_EMAIL"] == "awf-agent@example.invalid"
         assert repair_reasons == [
             "dirty_worktree_pre_commit",
             "dirty_worktree_post_commit_failed",
