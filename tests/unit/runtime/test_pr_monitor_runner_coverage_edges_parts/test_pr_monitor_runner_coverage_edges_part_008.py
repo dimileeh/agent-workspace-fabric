@@ -902,14 +902,22 @@ async def test_sync_base_protected_scope_wraps_committed_diff_read_failure(
 async def test_repair_operation_start_head_uses_fallback_when_worktree_missing(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    mirror_path = tmp_path / "mirror.git"
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: mirror_path,
     )
 
     head, result = await runner._repair_operation_start_head_result(
@@ -921,24 +929,40 @@ async def test_repair_operation_start_head_uses_fallback_when_worktree_missing(
 
     assert head == "f" * 40
     assert result is None
-    assert cmd.calls == []
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args == [
+        "git",
+        "--git-dir",
+        str(mirror_path),
+        "cat-file",
+        "-e",
+        f"{'f' * 40}^{{commit}}",
+    ]
 
 
 @pytest.mark.unit
 async def test_repair_operation_start_head_uses_fallback_when_rev_parse_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
+    mirror_path = tmp_path / "mirror.git"
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=128, stderr="fatal: not a git repository\n")
+    cmd.queue_result(returncode=0)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: mirror_path,
     )
 
     head, result = await runner._repair_operation_start_head_result(
@@ -950,7 +974,113 @@ async def test_repair_operation_start_head_uses_fallback_when_rev_parse_fails(
 
     assert head == "b" * 40
     assert result is None
-    assert len(cmd.calls) == 1
+    assert len(cmd.calls) == 2
+    assert cmd.calls[1].args == [
+        "git",
+        "--git-dir",
+        str(mirror_path),
+        "cat-file",
+        "-e",
+        f"{'b' * 40}^{{commit}}",
+    ]
+
+
+@pytest.mark.unit
+async def test_repair_operation_start_head_rejects_dangling_candidate_fallback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mirror_path = tmp_path / "mirror.git"
+    candidate_head = "c" * 40
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stderr="missing commit\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _open_merge_candidate_head_sha(_workspace_id: str) -> str:
+        return candidate_head
+
+    monkeypatch.setattr(
+        runner,
+        "_open_merge_candidate_head_sha",
+        _open_merge_candidate_head_sha,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: mirror_path,
+    )
+
+    head, result = await runner._repair_operation_start_head_result(
+        workspace_id="ws_dangling_candidate",
+        worktree_path=tmp_path / "does-not-exist",
+        operation_type="sync_base",
+    )
+
+    assert head == ""
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "REPAIR_START_HEAD_UNAVAILABLE"
+    assert result.details["fallback_head_sha"] == candidate_head
+    assert result.details["fallback_source"] == "candidate"
+    assert cmd.calls[0].args[-3:] == [
+        "cat-file",
+        "-e",
+        f"{candidate_head}^{{commit}}",
+    ]
+
+
+@pytest.mark.unit
+async def test_repair_operation_start_head_rejects_dangling_status_fallback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    mirror_path = tmp_path / "mirror.git"
+    status_head = "d" * 40
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: bad object HEAD\n")
+    cmd.queue_result(returncode=1, stderr="missing commit\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "mirror_path_for_worktree",
+        lambda _worktree_path: mirror_path,
+    )
+
+    head, result = await runner._repair_operation_start_head_result(
+        workspace_id="ws_dangling_status",
+        worktree_path=worktree,
+        operation_type="ci_fix",
+        fallback_head_sha=status_head,
+    )
+
+    assert head == ""
+    assert result is not None
+    assert result.failed is True
+    assert result.reason_code == "REPAIR_START_HEAD_UNAVAILABLE"
+    assert result.details["fallback_head_sha"] == status_head
+    assert result.details["fallback_source"] == "status"
+    assert len(cmd.calls) == 2
+    assert cmd.calls[1].args[-3:] == [
+        "cat-file",
+        "-e",
+        f"{status_head}^{{commit}}",
+    ]
 
 
 @pytest.mark.unit

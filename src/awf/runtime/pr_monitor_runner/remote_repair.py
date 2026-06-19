@@ -176,18 +176,91 @@ async def _repair_operation_start_head_result(
     operation_type: str,
     fallback_head_sha: str | None = None,
 ) -> tuple[str, _GitPushResult | None]:
-    if not worktree_path.exists():
-        source = "status" if fallback_head_sha else "candidate"
-        fallback_head = fallback_head_sha or await self._open_merge_candidate_head_sha(workspace_id)
-        if fallback_head:
-            _log.info(
-                "monitor.repair_operation_start_head_from_fallback",
+    def failure_result(
+        *,
+        returncode: int,
+        stdout: str,
+        stderr: str,
+        fallback_head: str | None = None,
+        fallback_source: str | None = None,
+    ) -> _GitPushResult:
+        details: dict[str, object] = {
+            "phase": "repair_start",
+            "operation_type": operation_type,
+            "head_stdout": stdout,
+            "head_stderr": stderr,
+            "pushed": False,
+        }
+        if fallback_head is not None:
+            details["fallback_head_sha"] = fallback_head
+        if fallback_source is not None:
+            details["fallback_source"] = fallback_source
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=returncode if returncode != 0 else 1,
+            stderr=(
+                "Could not capture repair operation start HEAD before starting the agent; "
+                "refusing to start repair because protected-scope rollback would not have "
+                "a stable baseline."
+            ),
+            reason_code=_REPAIR_START_HEAD_UNAVAILABLE_REASON,
+            details=details,
+        )
+
+    async def validated_fallback_result(
+        fallback_head: str,
+        *,
+        source: str,
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> tuple[str, _GitPushResult | None]:
+        mirror_path = mirror_path_for_worktree(worktree_path)
+        if mirror_path is None or not await _mirror_commit_object_exists(
+            self, mirror_path, fallback_head
+        ):
+            _log.warning(
+                "monitor.repair_operation_start_head_fallback_unavailable",
                 workspace_id=workspace_id,
                 operation_type=operation_type,
                 head_sha=fallback_head[:10],
                 source=source,
+                mirror_path=str(mirror_path) if mirror_path is not None else None,
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
             )
-            return fallback_head, None
+            return "", failure_result(
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+                fallback_head=fallback_head,
+                fallback_source=source,
+            )
+        _log.info(
+            "monitor.repair_operation_start_head_from_fallback",
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            head_sha=fallback_head[:10],
+            source=source,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return fallback_head, None
+
+    if not worktree_path.exists():
+        source = "status" if fallback_head_sha else "candidate"
+        fallback_head = fallback_head_sha or await self._open_merge_candidate_head_sha(workspace_id)
+        if fallback_head:
+            return await validated_fallback_result(
+                fallback_head,
+                source=source,
+                returncode=1,
+                stdout="",
+                stderr="repair worktree is missing",
+            )
     result = await self._deps.runner.run(
         git_worktree_command(worktree_path, "rev-parse", "HEAD"),
         env=git_env_without_object_lookup_overrides(),
@@ -199,17 +272,13 @@ async def _repair_operation_start_head_result(
     stdout = result.stdout[:400]
     stderr = result.stderr[:400]
     if fallback_head_sha:
-        _log.info(
-            "monitor.repair_operation_start_head_from_fallback",
-            workspace_id=workspace_id,
-            operation_type=operation_type,
-            head_sha=fallback_head_sha[:10],
+        return await validated_fallback_result(
+            fallback_head_sha,
             source="status",
             returncode=result.returncode,
             stdout=stdout,
             stderr=stderr,
         )
-        return fallback_head_sha, None
 
     _log.warning(
         "monitor.repair_operation_start_head_unavailable",
@@ -219,23 +288,10 @@ async def _repair_operation_start_head_result(
         stdout=stdout,
         stderr=stderr,
     )
-    return "", _GitPushResult(
-        pushed=False,
-        failed=True,
+    return "", failure_result(
         returncode=result.returncode if result.returncode != 0 else 1,
-        stderr=(
-            "Could not capture repair operation start HEAD before starting the agent; "
-            "refusing to start repair because protected-scope rollback would not have "
-            "a stable baseline."
-        ),
-        reason_code=_REPAIR_START_HEAD_UNAVAILABLE_REASON,
-        details={
-            "phase": "repair_start",
-            "operation_type": operation_type,
-            "head_stdout": stdout,
-            "head_stderr": stderr,
-            "pushed": False,
-        },
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
