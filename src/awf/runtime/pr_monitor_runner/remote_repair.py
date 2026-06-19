@@ -827,7 +827,8 @@ async def _commit_dirty_worktree(
                         "status",
                         "--porcelain",
                         "--untracked-files=all",
-                    )
+                    ),
+                    env=git_env_without_object_lookup_overrides(),
                 )
                 if not post_repair_status.ok:
                     _log.warning(

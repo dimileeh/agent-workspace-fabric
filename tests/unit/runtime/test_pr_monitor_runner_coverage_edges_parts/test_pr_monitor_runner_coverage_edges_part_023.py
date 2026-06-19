@@ -404,6 +404,14 @@ async def test_commit_dirty_worktree_returns_false_when_recovered_repair_status_
 
     assert result is False
     assert runner.protected_repair_calls == 1
+    post_repair_status_call = next(
+        call
+        for call in cmd.calls
+        if call.args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    )
+    assert post_repair_status_call.env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in post_repair_status_call.env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in post_repair_status_call.env
 
 
 @pytest.mark.unit
