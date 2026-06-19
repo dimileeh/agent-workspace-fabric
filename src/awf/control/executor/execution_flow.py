@@ -248,6 +248,7 @@ async def execute(
     defaults: AgentDefaults | None = None
     run_model: str | None = None
     agent_command_evidence: list[str] = []
+    post_agent_mirror_repair_done = False
     try:
         agent = AgentRuntime(ws.agent)
         defaults = self._defaults_for(agent)
@@ -556,6 +557,12 @@ async def execute(
                     model=run_model,
                     command_evidence=agent_command_evidence,
                 )
+                if not await _repair_mirror_hooks_path_or_mark_failed(
+                    failure_stage="after agent run",
+                    before_mark_failed=_deposit_planning_artifacts,
+                ):
+                    return
+                post_agent_mirror_repair_done = True
             except ComposeExecCleanupError:
                 await _repair_mirror_hooks_path_after_agent_cleanup_failure()
                 raise
@@ -679,6 +686,16 @@ async def execute(
                 message=f"unexpected error during agent run: {exc!r}"[:2000],
             )
             return
+    if (
+        recovery is None
+        and not resume_skip_agent
+        and not post_agent_mirror_repair_done
+        and not await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="after agent run",
+            before_mark_failed=_deposit_planning_artifacts,
+        )
+    ):
+        return
     if adapter is None:
         await self._mark_failed(
             workspace_id=workspace_id,
