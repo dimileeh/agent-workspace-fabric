@@ -881,6 +881,23 @@ async def _run_sync_base(
                 stderr="agent runtime ownership repair failed before sync-base agent launch",
                 reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
             )
+        if mirror_path is not None:
+            try:
+                await repair_mirror_hooks_path(mirror_path)
+            except (GitOperationError, OSError) as exc:
+                _log.warning(
+                    "monitor.sync_base_mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    error_type=exc.__class__.__name__,
+                )
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr="could not repair poisoned mirror hooks path before sync-base agent launch",
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                )
         try:
             result = await runner._deps.adapter.run(
                 compose_project=compose_project,

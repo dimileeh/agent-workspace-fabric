@@ -519,6 +519,251 @@ async def test_run_sync_base_threads_compose_context_to_conflict_commit(
 
 
 @pytest.mark.unit
+async def test_run_sync_base_repairs_mirror_hooks_before_conflict_agent_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Conflict agents must launch only after a fresh mirror hooks repair."""
+
+    events: list[str] = []
+
+    class _FakeCommandRunner:
+        def __init__(self) -> None:
+            self.results = [
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=1, stdout="", stderr="merge conflict"),
+                CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+            ]
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
+            if "merge" in args:
+                events.append("git:" + " ".join(args[args.index("merge") :]))
+            elif "status" in args:
+                events.append("git:status --porcelain")
+            return self.results.pop(0)
+
+    async def _repair_operation_start_head_result(
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_type: str,
+        fallback_head_sha: str | None = None,
+    ) -> tuple[str, None]:
+        del workspace_id, worktree_path, operation_type, fallback_head_sha
+        return "operation-start-sha", None
+
+    async def _resolve_task_tag(_workspace_id: str) -> str | None:
+        return None
+
+    async def _fetch_base(**_kwargs: object) -> None:
+        events.append("fetch-base")
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        events.append("ownership-repair")
+        return True
+
+    def _mirror_path_for_worktree(_worktree_path: Path) -> Path:
+        return tmp_path / "mirror.git"
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        events.append("repair-hooks")
+        return True
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        events.append("commit")
+        return True
+
+    async def _protected_scope_push_block(**_kwargs: object) -> None:
+        events.append("protected-scope")
+
+    async def _validated_git_push_result(**_kwargs: object) -> _GitPushResult:
+        events.append("validated-push")
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    class _Adapter:
+        async def run(self, **_kwargs: object) -> SimpleNamespace:
+            events.append("adapter.run")
+            return SimpleNamespace(stdout="", stderr="")
+
+    monkeypatch.setattr(remote_ops, "mirror_path_for_worktree", _mirror_path_for_worktree)
+    monkeypatch.setattr(remote_ops, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+    monkeypatch.setattr(
+        remote_ops,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _workspace_runtime_context="",
+        _repair_operation_start_head_result=_repair_operation_start_head_result,
+        _resolve_task_tag=_resolve_task_tag,
+        _fetch_base=_fetch_base,
+        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
+        _commit_dirty_worktree=_commit_dirty_worktree,
+        _protected_scope_push_block=_protected_scope_push_block,
+        _validated_git_push_result=_validated_git_push_result,
+        _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
+    )
+
+    result = await remote_ops._run_sync_base(
+        runner,
+        workspace_id="ws-sync",
+        repo=SimpleNamespace(slug=lambda: "owner/repo"),
+        pr_number=614,
+        base_branch="main",
+        remote_branch="awf/ws-sync",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert events == [
+        "git:merge --abort",
+        "fetch-base",
+        "repair-hooks",
+        "git:merge --no-edit origin/main",
+        "git:status --porcelain",
+        "ownership-repair",
+        "repair-hooks",
+        "adapter.run",
+        "commit",
+        "protected-scope",
+        "validated-push",
+    ]
+
+
+@pytest.mark.unit
+async def test_run_sync_base_fails_closed_when_conflict_prelaunch_mirror_repair_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poisoned mirror detected after merge conflicts must block agent launch."""
+
+    events: list[str] = []
+
+    class _FakeCommandRunner:
+        def __init__(self) -> None:
+            self.results = [
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=1, stdout="", stderr="merge conflict"),
+                CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+            ]
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
+            if "merge" in args:
+                events.append("git:" + " ".join(args[args.index("merge") :]))
+            elif "status" in args:
+                events.append("git:status --porcelain")
+            return self.results.pop(0)
+
+    async def _repair_operation_start_head_result(
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_type: str,
+        fallback_head_sha: str | None = None,
+    ) -> tuple[str, None]:
+        del workspace_id, worktree_path, operation_type, fallback_head_sha
+        return "operation-start-sha", None
+
+    async def _resolve_task_tag(_workspace_id: str) -> str | None:
+        return None
+
+    async def _fetch_base(**_kwargs: object) -> None:
+        events.append("fetch-base")
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        events.append("ownership-repair")
+        return True
+
+    def _mirror_path_for_worktree(_worktree_path: Path) -> Path:
+        return tmp_path / "mirror.git"
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        events.append("repair-hooks")
+        if events.count("repair-hooks") == 2:
+            raise OSError("poisoned mirror")
+        return True
+
+    async def _unexpected_commit_dirty_worktree(**_kwargs: object) -> bool:
+        pytest.fail("sync-base must stop before committing conflict repair")
+
+    async def _unexpected_protected_scope(**_kwargs: object) -> None:
+        pytest.fail("sync-base must stop before protected-scope push checks")
+
+    async def _unexpected_validated_push(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("sync-base must stop before push")
+
+    class _Adapter:
+        async def run(self, **_kwargs: object) -> SimpleNamespace:
+            pytest.fail("sync-base must not launch conflict agent with poisoned hooks")
+
+    monkeypatch.setattr(remote_ops, "mirror_path_for_worktree", _mirror_path_for_worktree)
+    monkeypatch.setattr(remote_ops, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+    monkeypatch.setattr(
+        remote_ops,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _workspace_runtime_context="",
+        _repair_operation_start_head_result=_repair_operation_start_head_result,
+        _resolve_task_tag=_resolve_task_tag,
+        _fetch_base=_fetch_base,
+        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
+        _commit_dirty_worktree=_unexpected_commit_dirty_worktree,
+        _protected_scope_push_block=_unexpected_protected_scope,
+        _validated_git_push_result=_unexpected_validated_push,
+        _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
+    )
+
+    result = await remote_ops._run_sync_base(
+        runner,
+        workspace_id="ws-sync",
+        repo=SimpleNamespace(slug=lambda: "owner/repo"),
+        pr_number=614,
+        base_branch="main",
+        remote_branch="awf/ws-sync",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == _MIRROR_HOOKS_PATH_POISONED_REASON
+    assert "before sync-base agent launch" in (result.stderr or "")
+    assert events == [
+        "git:merge --abort",
+        "fetch-base",
+        "repair-hooks",
+        "git:merge --no-edit origin/main",
+        "git:status --porcelain",
+        "ownership-repair",
+        "repair-hooks",
+    ]
+
+
+@pytest.mark.unit
 async def test_run_sync_base_runs_post_agent_guard_before_provider_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
