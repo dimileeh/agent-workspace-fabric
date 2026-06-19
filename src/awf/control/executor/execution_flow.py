@@ -249,6 +249,31 @@ async def execute(
     run_model: str | None = None
     agent_command_evidence: list[str] = []
     post_agent_mirror_repair_done = False
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    recovery_active = recovery is not None
+
+    async def _repair_mirror_hooks_path_or_mark_failed(
+        *,
+        failure_stage: str,
+        before_mark_failed: Any = None,
+    ) -> bool:
+        return await repair_mirror_hooks_path_or_mark_failed(
+            executor=self,
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+            recovery_active=recovery_active,
+            failure_stage=failure_stage,
+            before_mark_failed=before_mark_failed,
+        )
+
+    async def _repair_mirror_hooks_path_after_agent_cleanup_failure() -> None:
+        await repair_mirror_hooks_path_after_agent_cleanup_failure(
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+        )
+
     try:
         agent = AgentRuntime(ws.agent)
         defaults = self._defaults_for(agent)
@@ -337,31 +362,6 @@ async def execute(
                 reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
             )
             return
-        mirror_path = mirror_path_for_worktree(worktree_path)
-        recovery_active = recovery is not None
-
-        async def _repair_mirror_hooks_path_or_mark_failed(
-            *,
-            failure_stage: str,
-            before_mark_failed: Any = None,
-        ) -> bool:
-            return await repair_mirror_hooks_path_or_mark_failed(
-                executor=self,
-                workspace_id=workspace_id,
-                mirror_path=mirror_path,
-                repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
-                recovery_active=recovery_active,
-                failure_stage=failure_stage,
-                before_mark_failed=before_mark_failed,
-            )
-
-        async def _repair_mirror_hooks_path_after_agent_cleanup_failure() -> None:
-            await repair_mirror_hooks_path_after_agent_cleanup_failure(
-                workspace_id=workspace_id,
-                mirror_path=mirror_path,
-                repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
-            )
-
         if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
             return
         setup_result = await self._validation.run_profile_phases(
