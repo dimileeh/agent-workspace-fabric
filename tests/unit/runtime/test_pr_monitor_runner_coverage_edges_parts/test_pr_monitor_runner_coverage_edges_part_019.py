@@ -257,6 +257,72 @@ async def test_recover_missing_head_object_updates_expected_branch_ref(
 
 
 @pytest.mark.unit
+async def test_recover_missing_head_object_verifies_final_head_in_mirror(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+    recovered_sha = "b" * 40
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{recovered_sha}\n")
+    cmd.queue_result(returncode=1, stderr="missing recovered commit")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _resolve_worktree_branch_ref(_worktree_path: Path) -> str | None:
+        return f"refs/heads/awf/{workspace_id}"
+
+    repaired_worktrees: list[tuple[Path, Path]] = []
+
+    def _repair_agent_writable_worktree(mirror_path: Path, worktree_path: Path) -> None:
+        repaired_worktrees.append((mirror_path, worktree_path))
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "_resolve_worktree_branch_ref",
+        _resolve_worktree_branch_ref,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    recovered = await pr_remote_repair._recover_missing_head_object_from_filesystem(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        operation_start_head="a" * 40,
+    )
+
+    assert recovered is None
+    final_rev_parse = [call for call in cmd.calls if call.args[-2:] == ["rev-parse", "HEAD"]][-1]
+    assert final_rev_parse.env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in final_rev_parse.env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in final_rev_parse.env
+    assert cmd.calls[-1].args[-3:] == ["cat-file", "-e", f"{recovered_sha}^{{commit}}"]
+    assert cmd.calls[-1].env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in cmd.calls[-1].env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in cmd.calls[-1].env
+    assert repaired_worktrees
+
+
+@pytest.mark.unit
 async def test_recover_missing_head_object_blocks_policy_before_recovery_commit(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

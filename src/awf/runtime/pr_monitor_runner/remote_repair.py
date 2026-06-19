@@ -324,7 +324,11 @@ async def _recover_missing_head_object_from_filesystem(
             ),
         )
 
-    async def worktree_git(args: list[str]) -> CommandResult:
+    async def worktree_git(
+        args: list[str],
+        *,
+        strip_object_lookup_env: bool = False,
+    ) -> CommandResult:
         return cast(
             CommandResult,
             await self._deps.runner.run(
@@ -334,7 +338,10 @@ async def _recover_missing_head_object_from_filesystem(
                     "-C",
                     str(worktree_path),
                     *args,
-                ]
+                ],
+                env=(
+                    git_env_without_object_lookup_overrides() if strip_object_lookup_env else None
+                ),
             ),
         )
 
@@ -433,9 +440,12 @@ async def _recover_missing_head_object_from_filesystem(
 
     await asyncio.to_thread(repair_agent_writable_worktree, mirror_path, worktree_path)
 
-    head = await worktree_git(["rev-parse", "HEAD"])
+    head = await worktree_git(["rev-parse", "HEAD"], strip_object_lookup_env=True)
     recovered_head_sha = head.stdout.strip()
     if not head.ok or not recovered_head_sha:
+        return None
+    recovered_head_ok = await mirror_git(["cat-file", "-e", f"{recovered_head_sha}^{{commit}}"])
+    if not recovered_head_ok.ok:
         return None
     return recovered_head_sha
 
