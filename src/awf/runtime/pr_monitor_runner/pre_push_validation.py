@@ -25,6 +25,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.node.git_manager import (
+    GitOperationError,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
     verify_head_object_exists,
@@ -651,11 +652,12 @@ async def _run_pre_push_validation(
     if mirror_path is not None:
         try:
             await repair_mirror_hooks_path(mirror_path)
-        except Exception:
+        except (GitOperationError, OSError) as exc:
             _log.warning(
                 "monitor.mirror_hooks_path_repair_failed",
                 workspace_id=workspace_id,
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                error_type=exc.__class__.__name__,
             )
             return _PrePushValidationResult(
                 passed=False,

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.db.session import make_session_factory
+from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner import pre_push_validation
 from awf.runtime.validation_types import ValidationCommandResult, ValidationResult
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
@@ -52,6 +53,21 @@ def _failed_validation_result(tmp_path: Path) -> ValidationResult:
             )
         ]
     )
+
+
+def _write_worktree_with_mirror(tmp_path: Path, workspace_id: str) -> Path:
+    """Create a linked worktree shape backed by a bare mirror path."""
+    worktree = tmp_path / "worktrees" / workspace_id
+    mirror = tmp_path / "mirrors" / "test.git"
+    linked_git_dir = mirror / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+    (worktree / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    return worktree
 
 
 @pytest.mark.unit
@@ -132,6 +148,94 @@ async def test_pre_push_validation_fix_pass_returns_without_head_capture(
     assert committed is False
     assert failure_reason is None
     assert runner.rev_parse_calls == [runner._worktrees_root / "ws_missing_head"]
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fails_closed_on_git_mirror_hooks_repair_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expected mirror repair failures should produce the poisoned-path reason."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'1' * 40}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        raise GitOperationError(
+            operation="mirror.hooks_path_repair",
+            returncode=1,
+            stdout="",
+            stderr="failed",
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+
+    result = await pre_push_validation._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.passed is False
+    assert result.reason_code == "MIRROR_HOOKS_PATH_POISONED"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_does_not_mislabel_unexpected_mirror_repair_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unexpected mirror repair bugs must not be reported as poisoned hooks paths."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'2' * 40}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        raise RuntimeError("repair exploded")
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+
+    with pytest.raises(RuntimeError, match="repair exploded"):
+        await pre_push_validation._run_pre_push_validation(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch=f"awf/{workspace_id}",
+        )
 
 
 @pytest.mark.unit
