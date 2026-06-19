@@ -902,6 +902,44 @@ def test_deposit_satisfied_conformance_report_rejects_plan_escaping_worktree(
 
 
 @pytest.mark.unit
+def test_deposit_satisfied_conformance_report_rejects_oversized_report(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KxUlq regression: the stdout-derived fallback report
+    deposit must not write artifacts larger than the served artifact cap."""
+    work_dir = tmp_path / "work_dir"
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_deposit.md")
+    (worktree_path / plan_path.parent).mkdir(parents=True, exist_ok=True)
+    (worktree_path / plan_path).write_text("# plan", encoding="utf-8")
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="x" * executor_service_artifacts.MAX_ARTIFACT_CONTENT_BYTES,
+        gaps=(),
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        planning_ops._deposit_satisfied_conformance_report(
+            work_dir=work_dir,
+            workspace_id="ws_deposit",
+            worktree_path=worktree_path,
+            plan_path=plan_path,
+            report=report,
+        )
+
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(work_dir, "ws_deposit")
+    assert not (artifact_dir / "conformance.json").exists()
+    assert not (artifact_dir / ".conformance.json.tmp").exists()
+    assert not (artifact_dir / "plan.md").exists()
+    assert any(
+        entry["event"] == "executor.satisfied_conformance_report_deposit_rejected"
+        and entry["workspace_id"] == "ws_deposit"
+        and entry["reason"] == "oversized"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
 async def test_post_validation_conformance_staged_deletion_restored_from_head(
     tmp_path: Path,
 ) -> None:

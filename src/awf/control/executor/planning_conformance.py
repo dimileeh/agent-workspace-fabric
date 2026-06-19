@@ -63,6 +63,7 @@ from awf.runtime.planning import (
 from awf.service.artifacts import (
     DEPOSITED_CONFORMANCE_NAME,
     DEPOSITED_PLAN_NAME,
+    MAX_ARTIFACT_CONTENT_BYTES,
     _deposit_one_planning_artifact,
     deposit_workspace_planning_artifacts,
     workspace_artifact_dir,
@@ -591,6 +592,16 @@ def _deposit_satisfied_conformance_report(
         )
         + "\n"
     )
+    content_size = len(content.encode("utf-8"))
+    if content_size > MAX_ARTIFACT_CONTENT_BYTES:
+        _log.warning(
+            "executor.satisfied_conformance_report_deposit_rejected",
+            workspace_id=workspace_id,
+            reason="oversized",
+            size_bytes=content_size,
+            max_size_bytes=MAX_ARTIFACT_CONTENT_BYTES,
+        )
+        return
     try:
         tmp_dest.write_text(content, encoding="utf-8")
         tmp_dest.replace(dest)
