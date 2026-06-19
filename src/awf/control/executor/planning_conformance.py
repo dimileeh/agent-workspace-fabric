@@ -601,6 +601,17 @@ def _deposit_satisfied_conformance_report(
             size_bytes=content_size,
             max_size_bytes=MAX_ARTIFACT_CONTENT_BYTES,
         )
+        for stale_path in (dest, tmp_dest):
+            try:
+                stale_path.unlink(missing_ok=True)
+            except OSError as exc:
+                _log.warning(
+                    "executor.satisfied_conformance_report_deposit_cleanup_failed",
+                    workspace_id=workspace_id,
+                    artifact_name=stale_path.name,
+                    error_type=type(exc).__name__,
+                    errno=exc.errno,
+                )
         return
     try:
         tmp_dest.write_text(content, encoding="utf-8")

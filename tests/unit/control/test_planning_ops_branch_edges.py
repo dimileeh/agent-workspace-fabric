@@ -917,6 +917,12 @@ def test_deposit_satisfied_conformance_report_rejects_oversized_report(
         summary="x" * executor_service_artifacts.MAX_ARTIFACT_CONTENT_BYTES,
         gaps=(),
     )
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(work_dir, "ws_deposit")
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "conformance.json").write_text(
+        '{"status":"needs_iteration","summary":"stale","gaps":["old gap"]}\n',
+        encoding="utf-8",
+    )
 
     with structlog.testing.capture_logs() as captured:
         planning_ops._deposit_satisfied_conformance_report(
@@ -927,7 +933,6 @@ def test_deposit_satisfied_conformance_report_rejects_oversized_report(
             report=report,
         )
 
-    artifact_dir = executor_service_artifacts.workspace_artifact_dir(work_dir, "ws_deposit")
     assert not (artifact_dir / "conformance.json").exists()
     assert not (artifact_dir / ".conformance.json.tmp").exists()
     assert not (artifact_dir / "plan.md").exists()
