@@ -329,6 +329,44 @@ def _is_ignored_path(worktree_path: Path, path: str) -> bool:
     )
 
 
+def _ignored_paths(worktree_path: Path, paths: tuple[str, ...]) -> frozenset[str]:
+    """Return candidate paths that match a gitignore rule."""
+    if not paths:
+        return frozenset()
+    result = subprocess.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "check-ignore",
+            "--no-index",
+            "-z",
+            "--stdin",
+        ],
+        input=("\0".join(paths) + "\0").encode("utf-8", errors="surrogateescape"),
+        capture_output=True,
+    )
+    stdout = (
+        result.stdout.decode("utf-8", errors="surrogateescape")
+        if isinstance(result.stdout, bytes)
+        else result.stdout
+    )
+    stderr = (
+        result.stderr.decode("utf-8", errors="surrogateescape")
+        if isinstance(result.stderr, bytes)
+        else result.stderr
+    )
+    if result.returncode == 0:
+        return frozenset(path for path in stdout.split("\0") if path)
+    if result.returncode == 1:
+        return frozenset()
+    raise _IgnoreCheckError(
+        "Could not determine whether paths are ignored with `git check-ignore`.",
+        stderr=stderr or "",
+    )
+
+
 def _remove_empty_untracked_dirs(
     *,
     worktree_path: Path,
@@ -389,18 +427,19 @@ def _remove_empty_untracked_dirs(
         except ValueError:
             return False
         dir_path = f"{relative}/"
-        try:
-            if _is_ignored_path(worktree_path, dir_path):
-                return False
-        except _IgnoreCheckError:
-            raise
         candidates.append((directory, dir_path))
         return True
 
     collect_empty_candidate(worktree_path)
 
+    ignored_candidate_paths = _ignored_paths(
+        worktree_path,
+        tuple(dir_path for _directory, dir_path in candidates),
+    )
     removed: list[str] = []
     for directory, dir_path in candidates:
+        if dir_path in ignored_candidate_paths:
+            continue
         try:
             directory.rmdir()
         except FileNotFoundError:

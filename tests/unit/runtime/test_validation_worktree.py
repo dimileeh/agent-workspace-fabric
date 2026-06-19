@@ -674,7 +674,7 @@ def test_remove_empty_untracked_dirs_does_not_partially_clean_when_check_ignore_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed ignore probe must leave earlier cleanup candidates untouched."""
+    """A failed ignore probe must leave all cleanup candidates untouched."""
     worktree = _init_fake_worktree(tmp_path)
     earlier_empty_dir = worktree / "aaa"
     later_empty_dir = worktree / "zzz"
@@ -683,16 +683,14 @@ def test_remove_empty_untracked_dirs_does_not_partially_clean_when_check_ignore_
 
     original_run = subprocess.run
 
-    def fail_later_check_ignore(
-        cmd: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        if "check-ignore" in cmd and cmd[-1] == "zzz/":
+    def fail_check_ignore(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "check-ignore" in cmd:
             return subprocess.CompletedProcess(
                 args=cmd, returncode=128, stdout="", stderr="check-ignore exploded"
             )
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", fail_later_check_ignore)
+    monkeypatch.setattr(subprocess, "run", fail_check_ignore)
 
     with pytest.raises(validation_worktree._IgnoreCheckError):
         validation_worktree._remove_empty_untracked_dirs(
@@ -926,6 +924,41 @@ def test_remove_empty_untracked_dirs_batch_gitlink_checks(
     assert "-r" in ls_tree_calls[0]
     assert "-d" in ls_tree_calls[0]
     assert "-z" in ls_tree_calls[0]
+    assert len(removed) == 5
+
+
+@pytest.mark.unit
+def test_remove_empty_untracked_dirs_batch_check_ignore_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only one ``git check-ignore`` call should be issued for many candidates."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    for name in ("a", "b", "c", "a/nested", "b/nested"):
+        (worktree / name).mkdir(parents=True)
+
+    captured: list[tuple[list[str], object]] = []
+    original_run = subprocess.run
+
+    def capture_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append((list(cmd), kwargs.get("input")))
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
+    removed = validation_worktree._remove_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    check_ignore_calls = [call for call in captured if "check-ignore" in call[0]]
+    assert len(check_ignore_calls) == 1
+    check_ignore_cmd, check_ignore_input = check_ignore_calls[0]
+    assert "--stdin" in check_ignore_cmd
+    assert "-z" in check_ignore_cmd
+    assert isinstance(check_ignore_input, bytes)
+    assert check_ignore_input.count(b"\0") == 5
     assert len(removed) == 5
 
 
