@@ -45,6 +45,7 @@ async def _run_recovered_fix_pass(
     protected_error: ProtectedScopeDiffError | None = None,
     rollback_reason: str | None = None,
     recorded_rollback_reasons: list[str] | None = None,
+    repair_runtime_ownership_result: bool = True,
 ) -> tuple[bool, str | None, list[str]]:
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
     import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass_module
@@ -94,7 +95,7 @@ async def _run_recovered_fix_pass(
         return rollback_reason
 
     async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
-        return True
+        return repair_runtime_ownership_result
 
     monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
     monkeypatch.setattr(fix_pass_module, "mirror_path_for_worktree", lambda _path: None)
@@ -167,6 +168,28 @@ async def test_recovered_fix_pass_returns_unrecoverable_when_delta_diff_fails(
 
 
 @pytest.mark.unit
+async def test_recovered_fix_pass_returns_rollback_failure_when_delta_rollback_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stderr="bad diff")
+
+    committed, failure_reason, rollback_reasons = await _run_recovered_fix_pass(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        cmd=cmd,
+        rollback_reason="ROLLBACK_FAILED",
+    )
+
+    assert committed is False
+    assert failure_reason == "ROLLBACK_FAILED"
+    assert rollback_reasons == ["recovered_delta_failed"]
+
+
+@pytest.mark.unit
 async def test_recovered_fix_pass_reraises_protected_diff_error_after_rollback(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -185,6 +208,29 @@ async def test_recovered_fix_pass_reraises_protected_diff_error_after_rollback(
             protected_error=ProtectedScopeDiffError("diff unavailable"),
             recorded_rollback_reasons=rollback_reasons,
         )
+    assert rollback_reasons == ["recovered_protected_scope_diff_unavailable"]
+
+
+@pytest.mark.unit
+async def test_recovered_fix_pass_returns_rollback_failure_for_protected_diff_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="M\0.github/workflows/ci.yml\0")
+
+    committed, failure_reason, rollback_reasons = await _run_recovered_fix_pass(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        cmd=cmd,
+        protected_error=ProtectedScopeDiffError("diff unavailable"),
+        rollback_reason="ROLLBACK_FAILED",
+    )
+
+    assert committed is False
+    assert failure_reason == "ROLLBACK_FAILED"
     assert rollback_reasons == ["recovered_protected_scope_diff_unavailable"]
 
 
@@ -212,3 +258,51 @@ async def test_recovered_fix_pass_returns_protected_scope_reason_for_violations(
     assert committed is False
     assert failure_reason == _PROTECTED_SCOPE_REPAIR_FAILED_REASON
     assert rollback_reasons == ["recovered_protected_scope_repair_failed"]
+
+
+@pytest.mark.unit
+async def test_recovered_fix_pass_returns_rollback_failure_for_protected_violations(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="M\0.github/workflows/ci.yml\0")
+    violation = QualityGateViolation(
+        path=".github/workflows/ci.yml",
+        protected_pattern=".github/workflows/",
+    )
+
+    committed, failure_reason, rollback_reasons = await _run_recovered_fix_pass(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        cmd=cmd,
+        protected_result=[violation],
+        rollback_reason="ROLLBACK_FAILED",
+    )
+
+    assert committed is False
+    assert failure_reason == "ROLLBACK_FAILED"
+    assert rollback_reasons == ["recovered_protected_scope_repair_failed"]
+
+
+@pytest.mark.unit
+async def test_recovered_fix_pass_returns_agent_runtime_ownership_repair_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+
+    committed, failure_reason, rollback_reasons = await _run_recovered_fix_pass(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        cmd=cmd,
+        repair_runtime_ownership_result=False,
+    )
+
+    assert committed is False
+    assert failure_reason == "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+    assert rollback_reasons == []

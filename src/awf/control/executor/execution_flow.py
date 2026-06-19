@@ -144,11 +144,8 @@ async def execute(
     )
     if begin is None:
         return
-    # ``baseline_coverage`` is the pre-agent base reused on a blocked-resume.
-    # ``resume_skip_agent`` gates the *main* agent run; ``resume_disable_fix_passes``
-    # separately gates the secondary fix passes + pre-commit repair so a combined
-    # directive+grant resume can run the directive agent while keeping the
-    # grant-suppressed fix passes off.
+    # ``baseline_coverage`` is reused on blocked-resume; the resume flags
+    # independently gate the main agent and secondary fix passes.
     ws, resume_skip_agent, resume_disable_fix_passes, baseline_coverage = begin
 
     compose_file = (
@@ -160,11 +157,7 @@ async def execute(
     worktree_path = self._config.worktrees_root / workspace_id
 
     def _deposit_planning_artifacts() -> None:
-        # Best-effort, idempotent deposit of the plan + conformance report the
-        # agent may have written into the (preserved-FAILED) worktree, for the
-        # many handlers that mark the workspace FAILED and return before the
-        # post-validation deposit block. ``profile`` is bound by the time any of
-        # those handlers run, matching the inline call sites this replaces.
+        # Best-effort deposit before handlers return with a preserved FAILED worktree.
         _planning_artifacts._deposit_planning_artifacts_best_effort(
             self,
             profile=profile,
@@ -553,21 +546,14 @@ async def execute(
             )
             if planning_should_return:
                 return
-            # Persist the (possibly None) handoff so a later pause into ``blocked``
-            # can reconstruct it on an approve-and-keep resume — that resume skips
-            # this whole block, the only place the handoff is produced, and would
-            # otherwise lose the pending post-validation conformance requirement
-            # (mirrors ``_measure_and_persist_baseline_coverage``).
+            # Persist even ``None`` so approve-and-keep resumes preserve the
+            # original post-validation conformance behavior.
             await self._persist_block_planning_conformance_handoff(
                 workspace_id,
                 handoff=planning_validation_handoff,
             )
         elif recovery is not None:
-            # Recovery dispatch created the validate Operation in ``pending``;
-            # flush it to ``running`` before validation so observability
-            # tooling sees a real ``started_at`` (otherwise the row jumps
-            # straight from pending → succeeded/failed when the validate
-            # finalizer fires, with started_at == finished_at).
+            # Move the recovery validate operation from pending to running before validation.
             await self._start_pending_recovery_operations(
                 workspace_id=workspace_id,
             )
@@ -584,15 +570,7 @@ async def execute(
                 recovery_payload=recovery,
             )
         elif resume_skip_agent:
-            # Approve-and-keep grant resume (recovery is None, agent block
-            # skipped): the in-memory handoff that the run which blocked threaded
-            # into validation is gone. Reconstruct it from the value persisted at
-            # block time so the post-validation plan conformance check (gated on a
-            # non-None handoff) still runs — otherwise a planning-required
-            # workspace whose conformance was still pending AWF-validation evidence
-            # could be revalidated and pushed without the required conformance
-            # gate. ``None`` (conformance satisfied inline) faithfully reproduces
-            # the original run, which skipped the check.
+            # Reconstruct the blocked run's persisted conformance handoff.
             planning_validation_handoff = _planning_validation_handoff_from_metadata(
                 ws.block_planning_conformance_handoff
             )
@@ -605,13 +583,7 @@ async def execute(
             invocation_id=exc.invocation_id,
             reason_code=exc.reason_code,
         )
-        # A cleanup failure during the agent/planning run leaves the worktree
-        # (preserved on the FAILED workspace) potentially holding the plan +
-        # conformance report the agent already wrote. This handler marks the
-        # workspace FAILED and returns before the post-validation deposit
-        # block, so deposit them now — otherwise the artifacts are stranded in
-        # the worktree and the console can never surface them. Best-effort and
-        # idempotent, mirroring the generic agent-phase failure paths.
+        # Deposit possible plan artifacts before returning with a FAILED workspace.
         _deposit_planning_artifacts()
         await self._mark_failed(
             workspace_id=workspace_id,
@@ -627,21 +599,8 @@ async def execute(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
-        # Do NOT bail out yet. A CLI that exits non-zero — typically
-        # ``claude_code`` hitting a 1-hour internal session cap and
-        # returning 137 (SIGKILL), or a timeout against a flaky
-        # dependency — may have left valuable uncommitted work in the
-        # worktree. Coding CLIs in general don't commit on their own;
-        # AWF's post-agent auto-commit is the only thing that captures
-        # their edits. Log the exit code, remember it for the final
-        # failure message, but let the commit + validate pipeline run.
-        # If there's nothing to commit, the existing no-work check
-        # fails the workspace with ``agent_failure`` below. If there
-        # IS work, validation decides whether it's pushable.
-        # Structured provider-failure metadata is preserved in
-        # ``agent_run_details``. If salvage finds no commits, the
-        # no-work failure path below persists that metadata before
-        # preparing the authorized provider retry/fallback workspace.
+        # Salvage uncommitted work after non-zero CLI exits; the later no-work
+        # path preserves structured provider-failure metadata if salvage is empty.
         agent_exit_note = (
             f"agent CLI exited {exc.result.returncode} ({exc.reason_code}); "
             f"continuing to salvage any uncommitted work"
@@ -680,21 +639,12 @@ async def execute(
                 agent_run_reason_code = GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
                 agent_run_details = {"recovered_stage": "agent_run"}
             else:
-                # Missing-HEAD recovery failed and already marked the workspace
-                # FAILED with its worktree preserved. The agent may have written
-                # the plan + conformance report before the HEAD object went
-                # missing, so deposit them now — this returns before the post-
-                # validation deposit block, mirroring the ComposeExecCleanupError
-                # handler above. Best-effort and idempotent.
+                # Recovery already marked FAILED; deposit possible plan artifacts now.
                 _deposit_planning_artifacts()
                 return
         else:
             _log.exception("executor.unexpected_in_agent", workspace_id=workspace_id)
-            # An unexpected agent-run error marks the workspace FAILED and returns
-            # before the post-validation deposit block, stranding any plan +
-            # conformance report the agent already wrote into the preserved-FAILED
-            # worktree. Deposit them first, mirroring the ComposeExecCleanupError
-            # handler. Best-effort and idempotent.
+            # Avoid stranding plan artifacts before returning with a FAILED workspace.
             _deposit_planning_artifacts()
             await self._mark_failed(
                 workspace_id=workspace_id,
@@ -1446,9 +1396,7 @@ async def execute(
             source_head_sha=pr.head_sha,
             evidence=pr.open_metadata,
         )
-        # Resolve which monitor (if any) to hand off to. Pre-constructed
-        # ``pr_monitor`` wins (tests); otherwise the factory builds one
-        # from the per-task adapter now that we have it.
+        # Resolve which monitor (if any) to hand off to.
         monitor: _MonitorRunnerProto | None = self._pr_monitor
         if monitor is None and self._pr_monitor_factory is not None:
             monitor = _call_pr_monitor_factory(
@@ -1465,8 +1413,7 @@ async def execute(
             )
 
         if monitor is not None:
-            # Hand off to the monitor — it will transition to completed
-            # (on merge) or failed (on abort / cap / close).
+            # The monitor owns the final completed/failed transition.
             await repo.transition(
                 persisted,
                 to=WorkspaceStatus.monitoring_pr,
@@ -1474,8 +1421,7 @@ async def execute(
             )
             await session.commit()
         else:
-            # No monitor wired (legacy executor path / unit-test shim) —
-            # preserve the original ``pushing → completed`` contract.
+            # Preserve the legacy no-monitor ``pushing -> completed`` contract.
             await repo.transition(
                 persisted,
                 to=WorkspaceStatus.completed,
