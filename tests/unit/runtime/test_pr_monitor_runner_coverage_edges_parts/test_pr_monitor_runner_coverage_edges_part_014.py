@@ -156,6 +156,8 @@ async def test_fix_cycle_pauses_into_blocked_and_preserves_protected_commit(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="start-sha\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout="start-sha\n")  # per-item recovery anchor
+    cmd.queue_result(returncode=0)  # per-item recovery anchor object check
     cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # preserved HEAD
     gh = _RecordingGh()
     runner = make_runner(

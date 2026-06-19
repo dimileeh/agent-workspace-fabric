@@ -75,6 +75,16 @@ def _write_worktree_with_mirror(tmp_path: Path, workspace_id: str) -> Path:
     return worktree
 
 
+async def _existing_mirror_commit(
+    self: object,
+    mirror_path: Path,
+    commit_sha: str,
+) -> bool:
+    """Treat scripted recovery anchors as present in the fake mirror."""
+    del self, mirror_path, commit_sha
+    return True
+
+
 @pytest.mark.unit
 def test_pre_push_side_effect_failure_result_preserves_result_when_artifact_write_fails(
     tmp_path: Path,
@@ -660,6 +670,11 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
         _recover_missing_head_object_from_filesystem,
     )
     monkeypatch.setattr(
+        pre_push_validation,
+        "_mirror_commit_object_exists",
+        _existing_mirror_commit,
+    )
+    monkeypatch.setattr(
         runner,
         "_refresh_supply_chain_policy_before_push",
         _refresh_supply_chain_policy_before_push,
@@ -762,6 +777,11 @@ async def test_pre_push_validation_recovered_head_blocks_committed_protected_sco
         pre_push_validation,
         "_recover_missing_head_object_from_filesystem",
         _recover_missing_head_object_from_filesystem,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_mirror_commit_object_exists",
+        _existing_mirror_commit,
     )
     monkeypatch.setattr(
         pre_push_validation,
@@ -898,6 +918,11 @@ async def test_pre_push_validation_recovered_head_rename_includes_source_path(
     )
     monkeypatch.setattr(
         pre_push_validation,
+        "_mirror_commit_object_exists",
+        _existing_mirror_commit,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
@@ -1011,6 +1036,11 @@ async def test_pre_push_validation_recovered_head_ownership_repair_failure_block
     )
     monkeypatch.setattr(
         pre_push_validation,
+        "_mirror_commit_object_exists",
+        _existing_mirror_commit,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
@@ -1106,6 +1136,11 @@ async def test_pre_push_validation_recovered_head_committed_diff_error_blocks_va
         pre_push_validation,
         "_recover_missing_head_object_from_filesystem",
         _recover_missing_head_object_from_filesystem,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_mirror_commit_object_exists",
+        _existing_mirror_commit,
     )
     monkeypatch.setattr(
         pre_push_validation,

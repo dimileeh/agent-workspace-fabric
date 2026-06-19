@@ -761,13 +761,16 @@ async def _run_sync_base(
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     worktree_path = runner._worktrees_root / workspace_id
-    operation_start_head, head_result = await runner._repair_operation_start_head_result(
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        operation_type="sync_base",
-    )
-    if head_result is not None:
-        return head_result
+    if pr_head_sha:
+        operation_start_head = pr_head_sha
+    else:
+        operation_start_head, head_result = await runner._repair_operation_start_head_result(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            operation_type="sync_base",
+        )
+        if head_result is not None:
+            return head_result
 
     async def _git(*args: str) -> tuple[int, str, str]:
         """Run a git command in the sync-base worktree."""

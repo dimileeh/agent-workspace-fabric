@@ -514,11 +514,15 @@ async def test_fix_cycle_uses_current_head_as_per_item_recovery_anchor(
     async def _validated_git_push_result(**_kwargs: object) -> _GitPushResult:
         return _GitPushResult(pushed=False, failed=False, returncode=0)
 
+    async def _fetch_pr_status(**_kwargs: object) -> object:
+        return _status()
+
     monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
     monkeypatch.setattr(runner, "_address_thread", _address_thread)
     monkeypatch.setattr(runner, "_address_review_comment_result", _address_review_comment_result)
     monkeypatch.setattr(runner, "_protected_scope_push_block", _protected_scope_push_block)
     monkeypatch.setattr(runner, "_validated_git_push_result", _validated_git_push_result)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _fetch_pr_status, raising=False)
 
     await runner._run_fix_cycle(
         workspace_id=workspace_id,

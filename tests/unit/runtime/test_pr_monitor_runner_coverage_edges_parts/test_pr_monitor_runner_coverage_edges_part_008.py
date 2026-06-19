@@ -900,12 +900,13 @@ async def test_protected_scope_repair_raises_on_ownership_repair_failure(
         worktree_path: Path,
         reason: str,
         event_name: str,
+        reason_code: str,
     ) -> bool:
-        del logger, workspace_id, worktree_path, reason, event_name
+        del logger, workspace_id, worktree_path, reason, event_name, reason_code
         return False
 
     monkeypatch.setattr(
-        pr_remote_repair,
+        pr_remote_repair_protected,
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )

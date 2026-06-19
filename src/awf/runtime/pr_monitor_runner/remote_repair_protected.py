@@ -43,6 +43,10 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     MonitorState,
@@ -77,6 +81,7 @@ from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
     _ProtectedScopeRollbackDeltaEvidence,
 )
 
@@ -807,6 +812,18 @@ async def _repair_protected_scope_changes_before_commit(
     )
     if await self._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
+    worktree_path = self._worktrees_root / workspace_id
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="protected_scope_repair",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+        reason_code="AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
+    ):
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+        )
     agent_run_err = None
     try:
         await self._deps.adapter.run(
