@@ -736,18 +736,26 @@ async def run_validation_and_fix_cycle(
                             coverage=validation_coverage,
                             error_message=conformance_failure.message,
                         )
-                        await _mark_failed_preserving_planning_artifacts(
-                            workspace_id=workspace_id,
-                            from_status=WorkspaceStatus.validating,
-                            failure_reason=(
+                        mark_failed_kwargs = {
+                            "workspace_id": workspace_id,
+                            "from_status": WorkspaceStatus.validating,
+                            "failure_reason": (
                                 FailureReason.infrastructure_failure
                                 if conformance_report_cleanup_failed
                                 else FailureReason.agent_failure
                             ),
-                            message=conformance_failure.message[:2000],
-                            reason_code=conformance_failure.reason_code,
-                            details=conformance_failure.details,
-                        )
+                            "message": conformance_failure.message[:2000],
+                            "reason_code": conformance_failure.reason_code,
+                            "details": conformance_failure.details,
+                        }
+                        if conformance_report_cleanup_failed:
+                            # ``_run_post_validation_conformance_check`` already
+                            # deposited the correct served report before cleanup.
+                            # Re-depositing from the dirty worktree here can
+                            # overwrite that satisfied report with stale content.
+                            await self._mark_failed(**mark_failed_kwargs)
+                        else:
+                            await _mark_failed_preserving_planning_artifacts(**mark_failed_kwargs)
                         return ExecutionValidationResult(
                             stop=True,
                             successful_validation_run_id=successful_validation_run_id,

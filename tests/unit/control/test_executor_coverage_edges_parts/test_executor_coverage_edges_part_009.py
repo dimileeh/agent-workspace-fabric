@@ -840,6 +840,16 @@ async def test_post_validation_conformance_report_cleanup_failure_skips_fix_pass
     workspace = _workspace("ws_conf_cleanup")
     _patch_profile(monkeypatch, profile)
     _patch_clean_worktree(monkeypatch)
+    deposit_calls: list[str] = []
+
+    def _spy_deposit(*_args: object, **_kwargs: object) -> None:
+        deposit_calls.append("deposit")
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
@@ -895,6 +905,7 @@ async def test_post_validation_conformance_report_cleanup_failure_skips_fix_pass
     assert result.stop
     assert conformance_check.await_count == 1
     assert adapter.run.await_count == 0
+    assert deposit_calls == []
     executor._mark_failed.assert_awaited_once()
     finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
     assert finish_kwargs["status"] == OperationStatus.failed
