@@ -709,7 +709,6 @@ def _deposit_satisfied_conformance_report(
                 dest=dest,
                 tmp_dest=tmp_dest,
             )
-            return
 
     # Best-effort copy of the worktree plan so the served artifact contains
     # both planning documents, mirroring ``deposit_workspace_planning_artifacts``.

@@ -993,7 +993,9 @@ async def test_post_validation_conformance_report_deposit_oserror_is_non_fatal(
 
     monkeypatch.setattr(Path, "write_text", _raise_on_report_tmp)
 
-    # Make sure the best-effort plan copy is not executed after the early return.
+    # Make sure the best-effort plan copy still runs after the report write
+    # failure so callers can serve the plan even when the convenience
+    # conformance artifact cannot be rewritten.
     plan_source = worktree_path / plan_path
     plan_source.parent.mkdir(parents=True, exist_ok=True)
     plan_source.write_text("# plan", encoding="utf-8")
@@ -1010,8 +1012,7 @@ async def test_post_validation_conformance_report_deposit_oserror_is_non_fatal(
     # The served report and temp report are absent because the rewrite failed.
     assert not (artifact_dir / "conformance.json").exists()
     assert not (artifact_dir / ".conformance.json.tmp").exists()
-    # The best-effort plan copy is skipped when the report deposit returns early.
-    assert not (artifact_dir / "plan.md").exists()
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan"
 
     assert any(
         entry["event"] == "executor.satisfied_conformance_report_deposit_failed"
