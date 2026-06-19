@@ -505,7 +505,8 @@ async def _rev_parse_head(self: Any, worktree_path: Path) -> str | None:
             str(worktree_path),
             "rev-parse",
             "HEAD",
-        ]
+        ],
+        env=git_env_without_object_lookup_overrides(),
     )
     if not result.ok:
         return None

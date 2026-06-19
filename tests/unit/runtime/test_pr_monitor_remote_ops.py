@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from awf.common.commands import CommandResult
-from awf.runtime.pr_monitor_runner import pre_push_validation
+from awf.runtime.pr_monitor_runner import pre_push_validation, remote_ops
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
@@ -140,6 +144,41 @@ def test_remote_ops_worktree_constants_match_validation_worktree() -> None:
     assert (
         pre_push_validation.VALIDATION_WORKTREE_STATUS_FAILED == VALIDATION_WORKTREE_STATUS_FAILED
     )
+
+
+@pytest.mark.unit
+async def test_rev_parse_head_strips_git_object_lookup_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HEAD anchors must not resolve through inherited private git object stores."""
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/alternate-objects")
+    monkeypatch.setenv("AWF_REV_PARSE_ENV_SENTINEL", "kept")
+
+    class _FakeCommandRunner:
+        def __init__(self) -> None:
+            self.env: Mapping[str, str] | None = None
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            self.env = env
+            return CommandResult(returncode=0, stdout=f"{'a' * 40}\n", stderr="")
+
+    command_runner = _FakeCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    result = await remote_ops._rev_parse_head(runner, tmp_path)
+
+    assert result == "a" * 40
+    assert command_runner.env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in command_runner.env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in command_runner.env
+    assert command_runner.env["AWF_REV_PARSE_ENV_SENTINEL"] == "kept"
 
 
 @pytest.mark.unit
