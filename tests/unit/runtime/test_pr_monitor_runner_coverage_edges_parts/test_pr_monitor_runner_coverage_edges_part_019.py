@@ -18,6 +18,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -162,7 +163,6 @@ async def test_recover_missing_head_object_updates_expected_branch_ref(
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="b" * 40)
     runner = make_runner(
         factory=factory,
@@ -207,6 +207,67 @@ async def test_recover_missing_head_object_updates_expected_branch_ref(
 
 
 @pytest.mark.unit
+async def test_recover_missing_head_object_blocks_policy_before_recovery_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="package-lock.json\0")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    refresh_calls: list[dict[str, object]] = []
+
+    async def _resolve_worktree_branch_ref(_worktree_path: Path) -> str | None:
+        return f"refs/heads/awf/{workspace_id}"
+
+    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
+        refresh_calls.append(dict(kwargs))
+        return "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION (package-lock.json)"
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "_resolve_worktree_branch_ref",
+        _resolve_worktree_branch_ref,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_refresh_supply_chain_policy_before_push",
+        _refresh_supply_chain_policy_before_push,
+    )
+
+    with pytest.raises(_MonitorPolicyBlockedError):
+        await pr_remote_repair._recover_missing_head_object_from_filesystem(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            operation_start_head="a" * 40,
+            command_evidence=("npm install",),
+        )
+
+    assert refresh_calls == [
+        {
+            "workspace_id": workspace_id,
+            "command_evidence": ("npm install",),
+            "changed_paths": ["package-lock.json"],
+        }
+    ]
+    assert not any("commit" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
 async def test_recover_missing_head_object_unstages_runtime_paths_without_deletion(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -223,6 +284,7 @@ async def test_recover_missing_head_object_unstages_runtime_paths_without_deleti
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout=f"{runtime_path}\0src/recovered.py\0")
     cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="src/recovered.py\0")
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="b" * 40)
     runner = make_runner(
@@ -237,9 +299,14 @@ async def test_recover_missing_head_object_unstages_runtime_paths_without_deleti
         return f"refs/heads/awf/{workspace_id}"
 
     repaired_worktrees: list[tuple[Path, Path]] = []
+    refresh_calls: list[dict[str, object]] = []
 
     def _repair_agent_writable_worktree(mirror_path: Path, worktree_path: Path) -> None:
         repaired_worktrees.append((mirror_path, worktree_path))
+
+    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
+        refresh_calls.append(dict(kwargs))
+        return None
 
     monkeypatch.setattr(
         pr_remote_repair,
@@ -250,6 +317,11 @@ async def test_recover_missing_head_object_unstages_runtime_paths_without_deleti
         pr_remote_repair,
         "repair_agent_writable_worktree",
         _repair_agent_writable_worktree,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_refresh_supply_chain_policy_before_push",
+        _refresh_supply_chain_policy_before_push,
     )
 
     recovered = await pr_remote_repair._recover_missing_head_object_from_filesystem(
@@ -274,6 +346,13 @@ async def test_recover_missing_head_object_unstages_runtime_paths_without_deleti
         for call in cmd.calls
     )
     assert not any(call.args[-4:-2] == ["rm", "--cached"] for call in cmd.calls)
+    assert refresh_calls == [
+        {
+            "workspace_id": workspace_id,
+            "command_evidence": (),
+            "changed_paths": ["src/recovered.py"],
+        }
+    ]
     assert repaired_worktrees
 
 
@@ -508,6 +587,7 @@ async def test_commit_dirty_worktree_recovers_missing_head_object(
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
         recovery_called.append(workspace_id)
         return "recovered_sha_12345"
@@ -582,13 +662,11 @@ async def test_commit_dirty_worktree_missing_head_recovery_runs_precommit_gates(
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
         del self, workspace_id, worktree_path, operation_start_head, task_tag
+        assert command_evidence == ()
         return "recovered_sha_12345"
-
-    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
-        calls.append(("supply_chain", tuple(kwargs["changed_paths"])))  # type: ignore[index]
-        return None
 
     async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
         calls.append(("ownership", kwargs["reason"]))
@@ -611,11 +689,6 @@ async def test_commit_dirty_worktree_missing_head_recovery_runs_precommit_gates(
         _recover_missing_head_object_from_filesystem,
     )
     monkeypatch.setattr(
-        runner,
-        "_refresh_supply_chain_policy_before_push",
-        _refresh_supply_chain_policy_before_push,
-    )
-    monkeypatch.setattr(
         "awf.runtime.pr_monitor_runner.remote_repair.repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
@@ -635,7 +708,6 @@ async def test_commit_dirty_worktree_missing_head_recovery_runs_precommit_gates(
 
     assert result is True
     assert calls == [
-        ("supply_chain", ("src/recovered.py",)),
         ("ownership", "dirty_worktree_pre_commit"),
         ("protected_scope", " M src/recovered.py\n"),
     ]
@@ -681,6 +753,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_fails_closed_when_rec
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
@@ -756,6 +829,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_blocks_on_ownership_f
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
@@ -836,6 +910,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_stops_when_protected_
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
@@ -938,6 +1013,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_commits_protected_rep
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
         del self, workspace_id, worktree_path, operation_start_head, task_tag
         return "recovered_sha_12345"
@@ -1033,6 +1109,7 @@ async def test_commit_dirty_worktree_fails_closed_on_unrecoverable_head(
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
         return None
 
@@ -1781,10 +1858,15 @@ async def test_pre_push_validation_fix_pass_recovers_missing_head(
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
         recovery_called.append(workspace_id)
         return "recovered_sha_12345"
 
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
     monkeypatch.setattr(
         "awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass.repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
@@ -1897,6 +1979,7 @@ async def test_pre_push_validation_fix_pass_fails_closed_on_unrecoverable_head(
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
         return None
 

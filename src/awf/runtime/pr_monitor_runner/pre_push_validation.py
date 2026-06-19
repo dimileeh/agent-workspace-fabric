@@ -684,12 +684,35 @@ async def _run_pre_push_validation(
                 reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
                 message="HEAD object missing before PR monitor pre-push validation",
             )
-        recovered = await _recover_missing_head_object_from_filesystem(
-            self,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            operation_start_head=recovery_head,
+        command_evidence = tuple(
+            step.command.command
+            for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
         )
+        try:
+            recovered = await _recover_missing_head_object_from_filesystem(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                operation_start_head=recovery_head,
+                command_evidence=command_evidence,
+            )
+        except _MonitorPolicyBlockedError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_recovered_head_policy_blocked",
+                workspace_id=workspace_id,
+                recovered_head=recovery_head[:10],
+                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+            )
+            return _PrePushValidationResult(
+                passed=False,
+                validation_run_id=None,
+                workspace_head_sha=recovery_head,
+                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+                message=(
+                    "PR monitor pre-push validation blocked: "
+                    f"recovered HEAD failed supply-chain policy: {exc}"
+                ),
+            )
         if recovered is None:
             return _PrePushValidationResult(
                 passed=False,
@@ -706,7 +729,7 @@ async def _run_pre_push_validation(
         )
         if recovered != recovery_head:
             try:
-                recovered_paths = await self._changed_paths_between_ref_and_head(
+                await self._changed_paths_between_ref_and_head(
                     worktree_path=worktree_path,
                     ref=recovery_head,
                     error_context="for recovered pre-push validation HEAD",
@@ -729,33 +752,6 @@ async def _run_pre_push_validation(
                         f"diff unavailable: {exc}"
                     ),
                 )
-            if recovered_paths:
-                command_evidence = tuple(
-                    step.command.command
-                    for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
-                )
-                policy_message = await self._refresh_supply_chain_policy_before_push(
-                    workspace_id=workspace_id,
-                    command_evidence=command_evidence,
-                    changed_paths=recovered_paths,
-                )
-                if policy_message is not None:
-                    _log.warning(
-                        "monitor.pre_push_validation_recovered_head_policy_blocked",
-                        workspace_id=workspace_id,
-                        recovered_head=recovered[:10],
-                        reason_code=_MONITOR_POLICY_BLOCKED_REASON,
-                    )
-                    return _PrePushValidationResult(
-                        passed=False,
-                        validation_run_id=None,
-                        workspace_head_sha=recovered,
-                        reason_code=_MONITOR_POLICY_BLOCKED_REASON,
-                        message=(
-                            "PR monitor pre-push validation blocked: "
-                            f"recovered HEAD failed supply-chain policy: {policy_message}"
-                        ),
-                    )
         workspace_head_sha = recovered
 
     pre_validation_check = await _pre_push_validation_worktree_check(

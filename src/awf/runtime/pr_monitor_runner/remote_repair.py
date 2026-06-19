@@ -246,6 +246,7 @@ async def _recover_missing_head_object_from_filesystem(
     operation_start_head: str,
     task_tag: str | None = None,
     expected_branch_ref: str | None = None,
+    command_evidence: Sequence[str] = (),
 ) -> str | None:
     """Rebuild a valid branch commit from filesystem state when HEAD's object is missing."""
     mirror_path = mirror_path_for_worktree(worktree_path)
@@ -302,21 +303,29 @@ async def _recover_missing_head_object_from_filesystem(
         return None
 
     staged = await worktree_git(["diff", "--cached", "--name-only", "-z"])
-    if staged.ok:
-        staged_paths = [p for p in staged.stdout.split("\0") if p]
-        excluded = [p for p in staged_paths if is_under_agent_runtime_root(p)]
-        if excluded:
-            unstage = await worktree_git(
-                ["--literal-pathspecs", "reset", "-q", "HEAD", "--", *excluded]
-            )
-            if not unstage.ok:
-                return None
-
-    diff = await worktree_git(["diff", "--cached", "--quiet"])
-    if diff.returncode not in {0, 1}:
+    if not staged.ok:
         return None
+    staged_paths = [p for p in staged.stdout.split("\0") if p]
+    excluded = [p for p in staged_paths if is_under_agent_runtime_root(p)]
+    if excluded:
+        unstage = await worktree_git(
+            ["--literal-pathspecs", "reset", "-q", "HEAD", "--", *excluded]
+        )
+        if not unstage.ok:
+            return None
+        staged = await worktree_git(["diff", "--cached", "--name-only", "-z"])
+        if not staged.ok:
+            return None
+        staged_paths = [p for p in staged.stdout.split("\0") if p]
 
-    if diff.returncode == 1:
+    if staged_paths:
+        policy_message = await self._refresh_supply_chain_policy_before_push(
+            workspace_id=workspace_id,
+            command_evidence=command_evidence,
+            changed_paths=staged_paths,
+        )
+        if policy_message is not None:
+            raise _MonitorPolicyBlockedError(policy_message)
         commit = await self._deps.runner.run(
             [
                 "git",
@@ -474,6 +483,7 @@ async def _commit_dirty_worktree(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             operation_start_head=recovery_head,
+            command_evidence=command_evidence,
             task_tag=(
                 await _resolve_task_tag(self, workspace_id)
                 if isinstance(task_tag, _TaskTagUnset)
@@ -516,13 +526,6 @@ async def _commit_dirty_worktree(
             if diff.ok:
                 recovered_paths = [p for p in diff.stdout.split("\0") if p]
                 if recovered_paths:
-                    policy_message = await self._refresh_supply_chain_policy_before_push(
-                        workspace_id=workspace_id,
-                        command_evidence=command_evidence,
-                        changed_paths=recovered_paths,
-                    )
-                    if policy_message is not None:
-                        raise _MonitorPolicyBlockedError(policy_message)
                     if not await repair_agent_runtime_ownership(
                         logger=_log,
                         workspace_id=workspace_id,

@@ -12,6 +12,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner import pre_push_validation
+from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 from awf.runtime.validation_types import ValidationCommandResult, ValidationResult
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
 from tests.postgres import postgres_test_engine
@@ -250,10 +251,8 @@ async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     recovery_base = "1" * 40
-    recovered_head = "2" * 40
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{recovery_base}\n")
-    cmd.queue_result(returncode=0, stdout="M\0package-lock.json\0")
     validation = _FakeValidation(_validation_result(tmp_path, ok=True))
     runner = make_runner(
         factory=factory,
@@ -263,9 +262,12 @@ async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
         worktrees_root=tmp_path / "worktrees",
     )
     runner._deps.validation = validation  # type: ignore[assignment]
-    refresh_calls: list[dict[str, object]] = []
+    recovery_calls: list[dict[str, object]] = []
 
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return False
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
         return False
 
     async def _recover_missing_head_object_from_filesystem(
@@ -275,36 +277,23 @@ async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
-        del self, workspace_id, worktree_path, task_tag
+        del self, worktree_path, task_tag
         assert operation_start_head == recovery_base
-        return recovered_head
-
-    async def _pre_push_validation_worktree_check(
-        _self: object,
-        *,
-        worktree_path: Path,
-    ) -> ValidationWorktreeCheck:
-        del _self, worktree_path
-        return ValidationWorktreeCheck(clean=True)
-
-    async def _pre_push_validation_cleanup(
-        _self: object,
-        *,
-        worktree_path: Path,
-        restore_ref: str,
-    ) -> ValidationWorktreeCleanup:
-        del _self, worktree_path
-        return ValidationWorktreeCleanup(
-            cleaned=False,
-            check=ValidationWorktreeCheck(clean=True),
-            restore_ref=restore_ref,
+        recovery_calls.append(
+            {
+                "workspace_id": workspace_id,
+                "command_evidence": command_evidence,
+            }
         )
+        raise _MonitorPolicyBlockedError("SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION (package-lock.json)")
 
-    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
-        refresh_calls.append(dict(kwargs))
-        return "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION (package-lock.json)"
-
+    monkeypatch.setattr(
+        pre_push_validation,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
     monkeypatch.setattr(
         pre_push_validation,
         "verify_head_object_exists",
@@ -315,22 +304,6 @@ async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
         "_recover_missing_head_object_from_filesystem",
         _recover_missing_head_object_from_filesystem,
     )
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_worktree_check",
-        _pre_push_validation_worktree_check,
-    )
-    monkeypatch.setattr(
-        pre_push_validation,
-        "_pre_push_validation_cleanup",
-        _pre_push_validation_cleanup,
-    )
-    monkeypatch.setattr(
-        runner,
-        "_refresh_supply_chain_policy_before_push",
-        _refresh_supply_chain_policy_before_push,
-    )
-
     result = await pre_push_validation._run_pre_push_validation(
         runner,
         workspace_id=workspace_id,
@@ -343,11 +316,11 @@ async def test_pre_push_validation_recovered_head_refreshes_supply_chain_policy(
     assert result.passed is False
     assert result.reason_code == "MONITOR_POLICY_BLOCKED"
     assert "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION" in result.message
-    assert refresh_calls == [
+    assert result.workspace_head_sha == recovery_base
+    assert recovery_calls == [
         {
             "workspace_id": workspace_id,
             "command_evidence": ("pytest -q",),
-            "changed_paths": ("package-lock.json",),
         }
     ]
     assert validation.calls == []
@@ -383,6 +356,9 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
         return False
 
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        return False
+
     async def _recover_missing_head_object_from_filesystem(
         self: object,
         *,
@@ -390,6 +366,7 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
         worktree_path: Path,
         operation_start_head: str,
         task_tag: str | None = None,
+        command_evidence: object = (),
     ) -> str | None:
         del self, workspace_id, worktree_path, task_tag
         assert operation_start_head == recovery_base
@@ -399,6 +376,11 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
         refresh_calls.append(dict(kwargs))
         return None
 
+    monkeypatch.setattr(
+        pre_push_validation,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
     monkeypatch.setattr(
         pre_push_validation,
         "verify_head_object_exists",

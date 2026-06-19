@@ -520,6 +520,7 @@ async def _run_pre_push_validation_fix_pass(
             worktree_path=worktree_path,
             operation_start_head=fix_start_head,
             task_tag=task_tag,
+            command_evidence=command_evidence,
         )
         if recovered is None:
             return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
