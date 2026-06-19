@@ -368,6 +368,82 @@ async def test_commit_dirty_worktree_missing_head_recovery_runs_precommit_gates(
 
 
 @pytest.mark.unit
+async def test_commit_dirty_worktree_missing_head_recovery_fails_closed_when_recovered_diff_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    mirror = tmp_path / "mirrors" / "test.git"
+    mirror.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {mirror}/worktrees/{workspace_id}\n")
+    (mirror / "worktrees" / workspace_id).mkdir(parents=True)
+    (mirror / "worktrees" / workspace_id / "commondir").write_text("../..\n")
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=2, stderr="diff failed")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    policy_calls: list[object] = []
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        return False
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return False
+
+    async def _recover_missing_head_object_from_filesystem(
+        self: object,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_start_head: str,
+        task_tag: str | None = None,
+    ) -> str | None:
+        del self, workspace_id, worktree_path, operation_start_head, task_tag
+        return "recovered_sha_12345"
+
+    async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
+        policy_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair._recover_missing_head_object_from_filesystem",
+        _recover_missing_head_object_from_filesystem,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_refresh_supply_chain_policy_before_push",
+        _refresh_supply_chain_policy_before_push,
+    )
+
+    result = await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: test",
+        operation_start_head="base_sha_12345",
+    )
+
+    assert result is False
+    assert policy_calls == []
+
+
+@pytest.mark.unit
 async def test_commit_dirty_worktree_missing_head_recovery_blocks_on_ownership_failure(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
