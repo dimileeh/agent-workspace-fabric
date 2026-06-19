@@ -21,6 +21,7 @@ import pytest_mock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.runtime.pr_monitor_runner.remote_repair as remote_repair
 from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
 from awf.common.commands import CommandResult, FakeCommandRunner
@@ -758,6 +759,107 @@ class TestMiscMonitorHelpers:
         assert fake.calls[0].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
         assert not any("add" in call.args for call in fake.calls)
         assert not any("commit" in call.args for call in fake.calls)
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_missing_head_recovery_same_head_returns_false(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No-op missing-HEAD recovery is not a committed fix."""
+        workspace_id = "ws_missing_head_noop"
+        operation_start_head = "1" * 40
+        fake = FakeCommandRunner()
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            return operation_start_head
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+            operation_start_head=operation_start_head,
+        )
+
+        assert committed is False
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_missing_head_recovery_runtime_only_returns_false(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Runtime-only recovered diffs are not PR-worthy committed fixes."""
+        workspace_id = "ws_missing_head_runtime_only"
+        operation_start_head = "1" * 40
+        recovered_head = "2" * 40
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=".claude/agent-memory/reviewer/bug.md\0")
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            return recovered_head
+
+        async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+            raise AssertionError("runtime-only recovery should skip ownership repair")
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+        )
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+            operation_start_head=operation_start_head,
+        )
+
+        assert committed is False
+        assert len(fake.calls) == 1
+        assert fake.calls[0].args[-4:] == [
+            "diff",
+            "--name-only",
+            "-z",
+            f"{operation_start_head}..{recovered_head}",
+        ]
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_truncates_subject_to_72(
