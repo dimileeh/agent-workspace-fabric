@@ -777,8 +777,19 @@ async def test_post_validation_conformance_report_deposit_oserror_is_non_fatal(
         gaps=(),
     )
 
+    artifact_dir = work_dir / "artifacts" / "ws_deposit"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "conformance.json").write_text(
+        '{"status":"needs_iteration","summary":"stale","gaps":["old gap"]}\n',
+        encoding="utf-8",
+    )
+    (artifact_dir / ".conformance.json.tmp").write_text(
+        '{"status":"needs_iteration","summary":"stale tmp","gaps":["old gap"]}\n',
+        encoding="utf-8",
+    )
+
     # Ensure the artifact directory parent exists so mkdir passes; block only
-    # the temporary report write so we exercise the new error path.
+    # the temporary report rewrite so we exercise the new error path.
     real_write_text = Path.write_text
 
     def _raise_on_report_tmp(self: Path, content: str, *, encoding: str | None = None) -> int:
@@ -802,12 +813,11 @@ async def test_post_validation_conformance_report_deposit_oserror_is_non_fatal(
             report=report,
         )
 
-    # The artifact dir is created before the deposit attempt.
-    assert (work_dir / "artifacts" / "ws_deposit").is_dir()
-    # The served report is absent because the deposit failed.
-    assert not (work_dir / "artifacts" / "ws_deposit" / "conformance.json").exists()
+    # The served report and temp report are absent because the rewrite failed.
+    assert not (artifact_dir / "conformance.json").exists()
+    assert not (artifact_dir / ".conformance.json.tmp").exists()
     # The best-effort plan copy is skipped when the report deposit returns early.
-    assert not (work_dir / "artifacts" / "ws_deposit" / "plan.md").exists()
+    assert not (artifact_dir / "plan.md").exists()
 
     assert any(
         entry["event"] == "executor.satisfied_conformance_report_deposit_failed"

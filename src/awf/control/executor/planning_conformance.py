@@ -543,6 +543,25 @@ def _write_satisfied_post_validation_conformance_report(
     )
 
 
+def _remove_stale_satisfied_conformance_artifacts(
+    *,
+    workspace_id: str,
+    dest: Path,
+    tmp_dest: Path,
+) -> None:
+    for stale_path in (dest, tmp_dest):
+        try:
+            stale_path.unlink(missing_ok=True)
+        except OSError as exc:
+            _log.warning(
+                "executor.satisfied_conformance_report_deposit_cleanup_failed",
+                workspace_id=workspace_id,
+                artifact_name=stale_path.name,
+                error_type=type(exc).__name__,
+                errno=exc.errno,
+            )
+
+
 def _deposit_satisfied_conformance_report(
     *,
     work_dir: str | Path,
@@ -601,17 +620,11 @@ def _deposit_satisfied_conformance_report(
             size_bytes=content_size,
             max_size_bytes=MAX_ARTIFACT_CONTENT_BYTES,
         )
-        for stale_path in (dest, tmp_dest):
-            try:
-                stale_path.unlink(missing_ok=True)
-            except OSError as exc:
-                _log.warning(
-                    "executor.satisfied_conformance_report_deposit_cleanup_failed",
-                    workspace_id=workspace_id,
-                    artifact_name=stale_path.name,
-                    error_type=type(exc).__name__,
-                    errno=exc.errno,
-                )
+        _remove_stale_satisfied_conformance_artifacts(
+            workspace_id=workspace_id,
+            dest=dest,
+            tmp_dest=tmp_dest,
+        )
         return
     try:
         tmp_dest.write_text(content, encoding="utf-8")
@@ -625,6 +638,11 @@ def _deposit_satisfied_conformance_report(
             workspace_id=workspace_id,
             error_type=type(exc).__name__,
             errno=exc.errno,
+        )
+        _remove_stale_satisfied_conformance_artifacts(
+            workspace_id=workspace_id,
+            dest=dest,
+            tmp_dest=tmp_dest,
         )
         return
 
