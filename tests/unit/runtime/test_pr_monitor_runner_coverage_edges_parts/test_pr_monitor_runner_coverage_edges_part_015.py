@@ -241,6 +241,7 @@ async def test_execute_sync_base_protected_violation_pauses_into_blocked_not_ter
         await s.commit()
 
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="abc123\n")
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge (clean)
