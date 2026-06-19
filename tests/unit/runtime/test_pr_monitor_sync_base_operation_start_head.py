@@ -80,6 +80,72 @@ async def test_run_sync_base_threads_operation_start_head_to_validated_push(
 
 
 @pytest.mark.unit
+async def test_run_sync_base_uses_pr_head_sha_only_as_start_head_fallback(
+    tmp_path: Path,
+) -> None:
+    """Forge PR head state must not bypass local start-head verification."""
+
+    class _FakeCommandRunner:
+        async def run(self, _args: list[str]) -> CommandResult:
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    fallback_head_shas: list[str | None] = []
+    captured_operation_start_heads: list[object] = []
+
+    async def _repair_operation_start_head_result(
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_type: str,
+        fallback_head_sha: str | None = None,
+    ) -> tuple[str, None]:
+        assert workspace_id == "ws-sync"
+        assert worktree_path == tmp_path / "ws-sync"
+        assert operation_type == "sync_base"
+        fallback_head_shas.append(fallback_head_sha)
+        return "verified-local-head", None
+
+    async def _resolve_task_tag(_workspace_id: str) -> str | None:
+        return None
+
+    async def _fetch_base(**_kwargs: object) -> None:
+        return None
+
+    async def _protected_scope_push_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated_git_push_result(**kwargs: object) -> _GitPushResult:
+        captured_operation_start_heads.append(kwargs.get("operation_start_head"))
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _repair_operation_start_head_result=_repair_operation_start_head_result,
+        _resolve_task_tag=_resolve_task_tag,
+        _fetch_base=_fetch_base,
+        _protected_scope_push_block=_protected_scope_push_block,
+        _validated_git_push_result=_validated_git_push_result,
+        _deps=SimpleNamespace(runner=_FakeCommandRunner()),
+    )
+
+    result = await remote_ops._run_sync_base(
+        runner,
+        workspace_id="ws-sync",
+        repo=SimpleNamespace(slug=lambda: "owner/repo"),
+        pr_number=614,
+        pr_head_sha="forge-head-sha",
+        base_branch="main",
+        remote_branch="awf/ws-sync",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+    )
+
+    assert result.pushed is True
+    assert fallback_head_shas == ["forge-head-sha"]
+    assert captured_operation_start_heads == ["verified-local-head"]
+
+
+@pytest.mark.unit
 async def test_run_sync_base_repairs_mirror_hooks_before_clean_merge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
