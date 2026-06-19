@@ -1,14 +1,4 @@
-"""Focused branch-coverage tests for the validation fix-cycle.
-
-These drive ``run_validation_and_fix_cycle`` directly with a lightweight
-``SimpleNamespace`` fake executor (same pattern as
-``test_executor_coverage_edges_part_007``) to exercise narrow branches in
-``execution_validation.py`` that the heavier full-pipeline executor suites do
-not reach: the post-validation conformance report error detail enrichment, the
-fix-pass status-recheck races, the fix-pass git-failure ``command_reason_code``
-detail, the plan-only fix-pass guard, and the budget-exhausted loop fall
-through.
-"""
+"""Focused branch-coverage tests for the validation fix-cycle."""
 
 from __future__ import annotations
 

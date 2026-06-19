@@ -645,9 +645,9 @@ async def test_validation_cycle_syncs_profile_before_command_planning(
 
     assert result.stop is True
     assert events == [
-        ("transition", "start_validation"),
         ("resolve", 6),
         ("sync", 6),
+        ("transition", "start_validation"),
         ("plan", "first-writer"),
         ("tier", "first-writer"),
         ("recheck", "validate"),

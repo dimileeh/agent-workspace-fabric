@@ -1,5 +1,3 @@
-"""Focused branch-coverage tests for executor helper behavior."""
-
 from __future__ import annotations
 
 import json
@@ -1245,10 +1243,6 @@ async def test_post_validation_conformance_rejects_edits_to_pre_dirty_paths(
 async def test_satisfied_post_validation_conformance_report_restores_tracked_report_from_base_commit(
     tmp_path: Path,
 ) -> None:
-    """`#604` regression: for tracked conformance paths, satisfied cleanup must
-    restore from ``base_commit`` so the baseline tracked copy remains on disk
-    without dirtying the tree. The conformance event is still recorded and no
-    git add/commit runs."""
     worktree_path = tmp_path / "worktree"
     runner = _GitRestoreFakeRunner(worktree_path)
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
@@ -1332,13 +1326,6 @@ async def test_satisfied_post_validation_conformance_report_restores_tracked_rep
 async def test_satisfied_post_validation_conformance_report_restores_from_head_when_base_differs(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6KKSZU regression: a successful ``git restore`` from
-    ``base_commit`` can leave the report path staged relative to HEAD when
-    HEAD differs from ``base_commit`` (e.g. an earlier fix pass committed the
-    AWF-authored report). The executor must restore the path from HEAD so both
-    the index and worktree match the current commit, leaving the committed
-    report in place and the tree clean instead of publishing a staged change.
-    """
     worktree_path = tmp_path / "worktree"
     runner = _GitRestoreFakeRunner(worktree_path)
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
@@ -1436,10 +1423,6 @@ async def test_satisfied_post_validation_conformance_report_restores_from_head_w
 async def test_satisfied_post_validation_conformance_report_unlinks_when_head_restore_fails(
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6KKSZU regression: if the staged residue cannot be
-    reconciled from HEAD, the executor must fall back to unlink() so the stale
-    report is not published.
-    """
     worktree_path = tmp_path / "worktree"
     runner = _GitRestoreFakeRunner(worktree_path)
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
