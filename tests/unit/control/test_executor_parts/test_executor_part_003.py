@@ -25,6 +25,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
 )
 from awf.control.executor import planning_artifacts as _planning_artifacts
+from awf.control.executor import planning_conformance as _planning_conformance
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -153,6 +154,93 @@ def _adapter_prompt_calls(fake: FakeCommandRunner) -> list[tuple[int, str]]:
 
 def _adapter_prompts(fake: FakeCommandRunner) -> list[str]:
     return [prompt for _, prompt in _adapter_prompt_calls(fake)]
+
+
+class _ChangedPathsStub:
+    async def _changed_paths(self, _worktree_path: Path) -> tuple[Path, ...]:
+        return ()
+
+
+@pytest.mark.unit
+async def test_report_path_is_dirty_treats_leftover_directory_as_dirty(tmp_path: Path) -> None:
+    report_path = Path("docs/awf-plans/ws_dir.conformance.json")
+    (tmp_path / report_path).mkdir(parents=True)
+
+    dirty = await _planning_conformance._report_path_is_dirty(  # noqa: SLF001
+        _ChangedPathsStub(),
+        tmp_path,
+        report_path,
+    )
+
+    assert dirty is True
+
+
+@pytest.mark.unit
+async def test_report_path_is_dirty_treats_empty_parent_residue_as_dirty(
+    tmp_path: Path,
+) -> None:
+    report_path = Path("docs/awf-plans/ws_dir.conformance.json")
+    (tmp_path / report_path.parent).mkdir(parents=True)
+
+    dirty = await _planning_conformance._report_path_is_dirty(  # noqa: SLF001
+        _ChangedPathsStub(),
+        tmp_path,
+        report_path,
+    )
+
+    assert dirty is True
+
+
+@pytest.mark.unit
+def test_remove_report_worktree_path_removes_empty_directory(tmp_path: Path) -> None:
+    report_path = tmp_path / "docs" / "awf-plans" / "ws_dir.conformance.json"
+    report_path.mkdir(parents=True)
+
+    _planning_conformance._remove_report_worktree_path(  # noqa: SLF001
+        report_path,
+        worktree_path=tmp_path,
+    )
+
+    assert not report_path.exists()
+
+
+@pytest.mark.unit
+def test_remove_report_worktree_path_removes_empty_parent_directories(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "docs" / "awf-plans" / "ws_dir.conformance.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("{}", encoding="utf-8")
+
+    _planning_conformance._remove_report_worktree_path(  # noqa: SLF001
+        report_path,
+        worktree_path=tmp_path,
+    )
+
+    assert not report_path.exists()
+    assert not report_path.parent.exists()
+    assert not (tmp_path / "docs").exists()
+    assert tmp_path.exists()
+
+
+@pytest.mark.unit
+def test_remove_report_worktree_path_preserves_non_empty_parent_directory(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "docs" / "awf-plans" / "ws_dir.conformance.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("{}", encoding="utf-8")
+    sibling_path = tmp_path / "docs" / "keep.txt"
+    sibling_path.write_text("keep", encoding="utf-8")
+
+    _planning_conformance._remove_report_worktree_path(  # noqa: SLF001
+        report_path,
+        worktree_path=tmp_path,
+    )
+
+    assert not report_path.exists()
+    assert not report_path.parent.exists()
+    assert sibling_path.exists()
 
 
 def _record_deposit_vs_mark_order(
@@ -537,6 +625,8 @@ class TestHappyPathPart002:
             stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
         )
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        fake.queue_result(returncode=0, stdout="")  # git restore report path
+        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -658,6 +748,7 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=post_validation_gap_report)
         fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        # No restore on unsatisfied conformance; the next runner call is the fix adapter.
         fake.queue_result(returncode=0, stdout="implemented missing behavior")  # fix adapter
         fake.queue_result(returncode=0)  # fix git add
         fake.queue_result(returncode=0, stdout="src/x.py\n")  # fix cached diff
@@ -669,6 +760,8 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=satisfied_report)
         fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        fake.queue_result(returncode=0, stdout="")  # git restore report path after satisfaction
+        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
         _queue_pre_push_diagnostics(fake, head="c" * 40)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -818,6 +911,8 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
         fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        fake.queue_result(returncode=0, stdout="")  # git restore report path
+        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
         _queue_pre_push_diagnostics(fake, head="d" * 40)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")

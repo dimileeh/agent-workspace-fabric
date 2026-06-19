@@ -1147,11 +1147,6 @@ async def execute(
         execution_owner_id=execution_owner_id,
         resume_disable_fix_passes=resume_disable_fix_passes,
     )
-    # Deposit the worktree plan + conformance report into the served artifact
-    # dir before teardown so the console can surface them (best-effort; see the
-    # helper). Runs on the success path and the validation/conformance stop
-    # paths (preserved FAILED workspaces) while the worktree still exists.
-    _deposit_planning_artifacts()
     if validation_result.stop:
         return
     assert profile is not None
