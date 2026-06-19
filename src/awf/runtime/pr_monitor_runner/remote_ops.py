@@ -20,6 +20,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.node.git_manager import (
     GitOperationError,
+    git_env_without_object_lookup_overrides,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
@@ -772,7 +773,10 @@ async def _run_sync_base(
 
     async def _git(*args: str) -> tuple[int, str, str]:
         """Run a git command in the sync-base worktree."""
-        r = await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
+        r = await runner._deps.runner.run(
+            git_worktree_command(worktree_path, *args),
+            env=git_env_without_object_lookup_overrides(),
+        )
         return r.returncode, r.stdout, r.stderr
 
     task_tag = await runner._resolve_task_tag(workspace_id)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,7 +26,13 @@ async def test_run_sync_base_threads_operation_start_head_to_validated_push(
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self,
+            args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
             self.calls.append(args)
             return CommandResult(returncode=0, stdout="", stderr="")
 
@@ -86,7 +93,13 @@ async def test_run_sync_base_uses_pr_head_sha_only_as_start_head_fallback(
     """Forge PR head state must not bypass local start-head verification."""
 
     class _FakeCommandRunner:
-        async def run(self, _args: list[str]) -> CommandResult:
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
             return CommandResult(returncode=0, stdout="", stderr="")
 
     fallback_head_shas: list[str | None] = []
@@ -155,7 +168,13 @@ async def test_run_sync_base_repairs_mirror_hooks_before_clean_merge(
     events: list[str] = []
 
     class _FakeCommandRunner:
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self,
+            args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
             if "merge" in args:
                 events.append("git:" + " ".join(args[args.index("merge") :]))
             return CommandResult(returncode=0, stdout="", stderr="")
@@ -236,7 +255,13 @@ async def test_run_sync_base_mirror_hooks_repair_failure_blocks_clean_merge(
     events: list[str] = []
 
     class _FakeCommandRunner:
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self,
+            args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
             if "merge" in args:
                 events.append("git:" + " ".join(args[args.index("merge") :]))
             return CommandResult(returncode=0, stdout="", stderr="")
@@ -307,6 +332,83 @@ async def test_run_sync_base_mirror_hooks_repair_failure_blocks_clean_merge(
 
 
 @pytest.mark.unit
+async def test_run_sync_base_strips_git_object_lookup_env_from_worktree_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sync-base git commands must not inherit private object lookup overrides."""
+
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/alternate-objects")
+    monkeypatch.setenv("AWF_SYNC_BASE_ENV_SENTINEL", "kept")
+
+    class _FakeCommandRunner:
+        def __init__(self) -> None:
+            self.envs: list[Mapping[str, str] | None] = []
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            self.envs.append(env)
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    async def _repair_operation_start_head_result(
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_type: str,
+        fallback_head_sha: str | None = None,
+    ) -> tuple[str, None]:
+        del workspace_id, worktree_path, operation_type, fallback_head_sha
+        return "operation-start-sha", None
+
+    async def _resolve_task_tag(_workspace_id: str) -> str | None:
+        return None
+
+    async def _fetch_base(**_kwargs: object) -> None:
+        return None
+
+    async def _protected_scope_push_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated_git_push_result(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    command_runner = _FakeCommandRunner()
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _repair_operation_start_head_result=_repair_operation_start_head_result,
+        _resolve_task_tag=_resolve_task_tag,
+        _fetch_base=_fetch_base,
+        _protected_scope_push_block=_protected_scope_push_block,
+        _validated_git_push_result=_validated_git_push_result,
+        _deps=SimpleNamespace(runner=command_runner),
+    )
+
+    result = await remote_ops._run_sync_base(
+        runner,
+        workspace_id="ws-sync",
+        repo=SimpleNamespace(slug=lambda: "owner/repo"),
+        pr_number=614,
+        base_branch="main",
+        remote_branch="awf/ws-sync",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+    )
+
+    assert result.pushed is True
+    assert command_runner.envs
+    for env in command_runner.envs:
+        assert env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in env
+        assert env["AWF_SYNC_BASE_ENV_SENTINEL"] == "kept"
+
+
+@pytest.mark.unit
 async def test_run_sync_base_threads_compose_context_to_conflict_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -321,7 +423,13 @@ async def test_run_sync_base_threads_compose_context_to_conflict_commit(
                 CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
             ]
 
-        async def run(self, _args: list[str]) -> CommandResult:
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
             return self.results.pop(0)
 
     async def _repair_operation_start_head_result(

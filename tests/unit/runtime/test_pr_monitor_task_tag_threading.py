@@ -10,7 +10,7 @@ the tag value that reaches a commit/branch/PR.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -830,7 +830,13 @@ async def test_run_sync_base_resolves_once_and_threads_to_sink(
             self._results = results
             self.calls: list[list[str]] = []
 
-        async def run(self, args: list[str]) -> CommandResult:
+        async def run(
+            self,
+            args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
             self.calls.append(args)
             return self._results.pop(0)
 
