@@ -7,6 +7,7 @@ parent module re-exports these symbols to preserve its existing public surface.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,11 +17,17 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.git_identity import git_identity_config_args
 from awf.common.logging import get_logger
 from awf.common.task_tag import commit_message_with_task_tag
+from awf.control.protected_file_diffs import protected_file_diffs_for_committed_paths
+from awf.control.quality_gates import (
+    QualityGateViolation,
+    find_protected_quality_gate_changes,
+)
 from awf.control.validation_fix_cycle import (
     ValidationFixContext,
     build_fix_prompt,
     read_output_tail,
 )
+from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     GitOperationError,
     mirror_path_for_worktree,
@@ -64,6 +71,43 @@ _log = get_logger(__name__)
 
 PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON = _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
 PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON = _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+
+
+async def _protected_scope_violations_for_recovered_commit(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    base_ref: str,
+    changed_paths: Sequence[str],
+) -> list[QualityGateViolation]:
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:
+            raise ProtectedScopeDiffError(
+                f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
+                "for recovered protected-scope validation."
+            )
+        owned_paths = list(workspace.owned_paths)
+    try:
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._deps.runner,
+            worktree_path=worktree_path,
+            base_ref=base_ref,
+            changed_paths=changed_paths,
+            owned_paths=owned_paths,
+        )
+    except RuntimeError as exc:
+        raise ProtectedScopeDiffError(
+            "Could not read recovered committed protected-scope file contents "
+            "for validation before push: "
+            f"{exc}"
+        ) from exc
+    return find_protected_quality_gate_changes(
+        changed_paths=tuple(changed_paths),
+        owned_paths=owned_paths,
+        protected_file_diffs=protected_file_diffs,
+    )
 
 
 async def _head_descends_from(
@@ -585,35 +629,33 @@ async def _run_pre_push_validation_fix_pass(
                 return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
             recovered_paths = [p for p in recovered_delta.stdout.split("\0") if p]
             if recovered_paths:
-                if not await repair_agent_runtime_ownership(
-                    logger=_log,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    reason="dirty_worktree_pre_commit",
-                    event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
-                ):
+                try:
+                    violations = await _protected_scope_violations_for_recovered_commit(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        base_ref=fix_start_head,
+                        changed_paths=recovered_paths,
+                    )
+                except ProtectedScopeDiffError:
                     rollback_failure_reason = await _rollback_failed_fix_pass(
                         self,
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
                         restore_ref=fix_start_head,
                         pass_number=pass_number,
-                        reason="recovered_protected_scope_ownership_failed",
+                        reason="recovered_protected_scope_diff_unavailable",
                     )
                     if rollback_failure_reason is not None:
                         return False, rollback_failure_reason
-                    return False, "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
-                recovered_status_stdout = "".join(f" M {path}\n" for path in recovered_paths)
-                repaired_status = await self._repair_protected_scope_changes_before_commit(
-                    workspace_id=workspace_id,
-                    status_stdout=recovered_status_stdout,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    state=state,
-                    protected_scope_revert_remote_branch=remote_branch,
-                    remote_push_url=remote_url,
-                )
-                if repaired_status is None:
+                    raise
+                if violations:
+                    _log.warning(
+                        "monitor.pre_push_validation_fix_recovered_protected_scope_blocked",
+                        workspace_id=workspace_id,
+                        pass_number=pass_number,
+                        paths=[violation.path for violation in violations],
+                    )
                     rollback_failure_reason = await _rollback_failed_fix_pass(
                         self,
                         workspace_id=workspace_id,
