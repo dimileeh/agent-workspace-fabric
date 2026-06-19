@@ -152,10 +152,17 @@ async def _run_fix_cycle(
             queued_id for queued_id in threads_to_resolve if queued_id != item_id
         ]
 
+    async def _current_item_operation_start_head() -> str:
+        if not worktree_path.exists():
+            return cast(str, operation_start_head)
+        current_head = cast(str | None, await self._rev_parse_head(worktree_path))
+        return current_head or cast(str, operation_start_head)
+
     for _pass_num in range(self._runner_config.max_fix_cycle_passes):
         # 1) Address each item in the current batch.
         for t in threads:
             try:
+                item_operation_start_head = await _current_item_operation_start_head()
                 verdict = await self._address_thread(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -166,7 +173,7 @@ async def _run_fix_cycle(
                     state=state,
                     owned_paths=owned_paths,
                     task_tag=task_tag,
-                    operation_start_head=operation_start_head,
+                    operation_start_head=item_operation_start_head,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
@@ -279,6 +286,7 @@ async def _run_fix_cycle(
                     workflow_scope_resolution_dependent_ids.append(t.thread_id)
         for c in reviews:
             try:
+                item_operation_start_head = await _current_item_operation_start_head()
                 verdict_result = await self._address_review_comment_result(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -289,7 +297,7 @@ async def _run_fix_cycle(
                     state=state,
                     owned_paths=owned_paths,
                     task_tag=task_tag,
-                    operation_start_head=operation_start_head,
+                    operation_start_head=item_operation_start_head,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
