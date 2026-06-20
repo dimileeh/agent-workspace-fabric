@@ -782,6 +782,34 @@ class TestFindOrCreateReleasePr:
         assert detail["reason_code"] == "OPEN_PR_LOOKUP_FAILED"
         assert detail["returncode"] == 1
 
+    @pytest.mark.unit
+    async def test_lookup_failure_detail_redacts_credentials_in_message(self) -> None:
+        # ``gh pr list`` stderr reaches ``_lookup_release_pr_after_create_failure``
+        # via ``PullRequestMetadataError.message``, which — unlike
+        # ``GitHubClientError.stderr`` — is *not* redacted at construction. The
+        # failed-lookup detail is stored in ``reconcile_lookups`` and emitted by
+        # the retry/exhausted logs, so credentials in the message must be redacted
+        # before they land in the detail (no-secret logging rule).
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=1,
+            stderr="fatal: unable to access https://x-access-token:ghs_supersecret@github.com/o/r",
+        )
+
+        number, detail = await _lookup_release_pr_after_create_failure(
+            runner=fake,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+        )
+
+        assert number is None
+        assert detail["status"] == "failed"
+        error_message = detail["error_message"]
+        assert isinstance(error_message, str)
+        assert "ghs_supersecret" not in error_message
+        assert "[redacted]" in error_message
+
 
 class TestPrepareReleasePrSync:
     @pytest.mark.unit

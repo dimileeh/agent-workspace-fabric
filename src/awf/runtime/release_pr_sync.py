@@ -23,6 +23,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeClient
 from awf.common.github_client import (
@@ -273,7 +274,11 @@ async def _lookup_release_pr_after_create_failure(
             # carry it into the reconcile-lookup record so the retry/audit metadata
             # keeps the policy-relevant failure semantics (reason codes flow end-to-end).
             "reason_code": exc.reason_code,
-            "error_message": exc.message.strip(),
+            # ``exc.message`` is raw ``gh pr list`` stderr — unlike
+            # ``GitHubClientError.stderr`` it is *not* redacted at construction, so
+            # redact it here before it lands in ``reconcile_lookups`` and the
+            # retry/exhausted logs (no-secret logging rule).
+            "error_message": redact_audit_text(exc.message.strip()),
         }
     return number, {"status": "found" if number is not None else "not_found", "number": number}
 
