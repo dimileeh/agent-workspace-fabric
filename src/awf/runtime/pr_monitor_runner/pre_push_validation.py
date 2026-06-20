@@ -893,7 +893,7 @@ async def _run_pre_push_validation(
                 return _PrePushValidationResult(
                     passed=False,
                     validation_run_id=None,
-                    workspace_head_sha=recovery_head,
+                    workspace_head_sha=recovered,
                     reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
                     message=(
                         "PR monitor pre-push validation blocked: "

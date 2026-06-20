@@ -1220,7 +1220,7 @@ async def test_pre_push_validation_recovered_head_blocks_committed_protected_sco
     )
 
     assert result.passed is False
-    assert result.workspace_head_sha == recovery_base
+    assert result.workspace_head_sha == recovered_head
     assert result.reason_code == "PROTECTED_SCOPE_REPAIR_FAILED"
     assert "recovered HEAD protected-scope repair failed" in result.message
     assert ownership_calls == [

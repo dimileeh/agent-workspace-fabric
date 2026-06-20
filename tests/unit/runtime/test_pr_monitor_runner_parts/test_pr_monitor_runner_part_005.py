@@ -1377,7 +1377,7 @@ class TestMiscMonitorHelpers:
             )
 
         assert protected_path in str(exc_info.value)
-        assert len(fake.calls) == 5
+        assert len(fake.calls) == 6
         assert fake.calls[0].args[-5:] == [
             "diff",
             "--name-status",
@@ -1387,6 +1387,7 @@ class TestMiscMonitorHelpers:
         ]
         assert any(f"{operation_start_head}:{protected_path}" in call.args for call in fake.calls)
         assert any(f"HEAD:{protected_path}" in call.args for call in fake.calls)
+        assert fake.calls[-1].args[-3:] == ["reset", "--hard", operation_start_head]
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_missing_head_recovery_includes_rename_sources(
