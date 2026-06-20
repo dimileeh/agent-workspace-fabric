@@ -507,6 +507,30 @@ async def test_workspace_reliability_reports_stuck_count(
 
 
 @pytest.mark.unit
+async def test_recovering_excluded_from_reliability_stuck_count(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # ``recovering`` is an intentional auto-retry pause (#612): even an
+    # active row past the 2×SLA cutoff with no failure_reason must not be
+    # reported as a stuck workspace by /v1/metrics/reliability. This mirrors
+    # the same exclusion applied to the SLO ``_count_stuck_detailed`` query.
+    from awf.service.metrics import summarize_workspace_reliability
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    settings = Settings(_env_file=None, agent_wall_timeout_seconds=3600)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.recovering,
+        updated_at=now - timedelta(hours=2),
+        created_at=now - timedelta(hours=3),
+    )
+
+    summary = await summarize_workspace_reliability(session_factory, settings=settings, now=now)
+
+    assert summary.stuck_count == 0
+
+
+@pytest.mark.unit
 async def test_workspace_reliability_reports_cleanup_failure_reason_code_coverage(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
