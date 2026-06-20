@@ -85,6 +85,256 @@ class TestRepairMirrorHooksPath:
         assert check.returncode != 0
 
     @pytest.mark.unit
+    async def test_repair_waits_for_shared_mirror_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        started = False
+
+        async def _repair_hooks_path_config(**_kwargs: object) -> bool:
+            nonlocal started
+            started = True
+            return False
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        lock = git_module.GitManager._lock_for_mirror(mirror)  # noqa: SLF001
+        await lock.acquire()
+        task = asyncio.create_task(git_module.repair_mirror_hooks_path(mirror))
+        try:
+            await asyncio.sleep(0)
+            assert started is False
+            assert task.done() is False
+        finally:
+            lock.release()
+
+        assert await task is False
+        assert started is True
+
+    @pytest.mark.unit
+    async def test_prunes_and_retries_when_linked_worktree_metadata_disappears(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        linked_git_dir = mirror / "worktrees" / "workspace"
+        linked_git_dir.mkdir(parents=True)
+        repair_calls = 0
+        prune_calls = 0
+
+        async def _repair_hooks_path_config(**_kwargs: object) -> bool:
+            nonlocal repair_calls
+            repair_calls += 1
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            nonlocal prune_calls
+            prune_calls += 1
+            assert path == mirror
+            # Real ``git worktree prune`` removes the dead linked-worktree metadata,
+            # so the retry pass no longer reports it as stale.
+            shutil.rmtree(linked_git_dir)
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+
+        # Both scan passes report nothing to repair, so the corrected contract
+        # returns ``False`` even though stale metadata was pruned between them.
+        assert await git_module.repair_mirror_hooks_path(mirror) is False
+        assert prune_calls == 1
+        assert repair_calls == 2
+
+    @pytest.mark.unit
+    async def test_fails_closed_when_stale_metadata_survives_retry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        linked_git_dir = mirror / "worktrees" / "workspace"
+        linked_git_dir.mkdir(parents=True)
+        prune_calls = 0
+
+        async def _repair_hooks_path_config(**_kwargs: object) -> bool:
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            nonlocal prune_calls
+            prune_calls += 1
+            # Prune cannot clear metadata whose gitdir back-reference stays
+            # missing (the empty linked-worktree dir survives the prune).
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module.repair_mirror_hooks_path(mirror)
+
+        assert prune_calls == 1
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert raised.value.operation == "mirror.worktree_metadata_stale"
+
+    @pytest.mark.unit
+    async def test_run_git_worktree_prune_raises_when_prune_subprocess_fails(
+        self, tmp_path: Path
+    ) -> None:
+        # A path that is not a git directory makes ``git worktree prune`` exit
+        # non-zero, which must surface as a repair failure rather than being
+        # swallowed.
+        not_a_mirror = tmp_path / "not-a-git-dir"
+        not_a_mirror.mkdir()
+
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module._run_git_worktree_prune(not_a_mirror)
+
+        assert raised.value.operation == "mirror.worktree_prune"
+        assert raised.value.returncode != 0
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+
+    @pytest.mark.unit
+    async def test_fails_closed_when_worktrees_dir_is_unreadable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        worktrees_dir = mirror / "worktrees"
+        worktrees_dir.mkdir()
+
+        async def _repair_hooks_path_config(**_kwargs: object) -> bool:
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            assert path == mirror
+
+        real_iterdir = Path.iterdir
+
+        def _iterdir(self: Path):  # type: ignore[no-untyped-def]
+            if self == worktrees_dir:
+                raise OSError("permission denied scanning worktrees")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+        monkeypatch.setattr(Path, "iterdir", _iterdir)
+
+        # An unreadable ``worktrees`` directory persists across the prune retry,
+        # so a poisoned worktree ``core.hooksPath`` cannot be verified-clean and
+        # repair must fail closed.
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module.repair_mirror_hooks_path(mirror)
+
+        assert raised.value.operation == "mirror.worktree_metadata_stale"
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+
+    @pytest.mark.unit
+    async def test_propagates_non_stale_linked_worktree_probe_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        linked_git_dir = mirror / "worktrees" / "workspace"
+        linked_git_dir.mkdir(parents=True)
+
+        async def _repair_hooks_path_config(**_kwargs: object) -> bool:
+            return False
+
+        probe_error = git_module.GitOperationError(
+            operation="worktree.hooks_path_probe",
+            returncode=1,
+            stdout="",
+            stderr="fatal: some other probe failure",
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+
+        def _linked_worktree_path_from_git_dir(_path: Path) -> Path:
+            raise probe_error
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(
+            git_module,
+            "_linked_worktree_path_from_git_dir",
+            _linked_worktree_path_from_git_dir,
+        )
+
+        # A probe error that is not the stale-metadata sentinel is a genuine
+        # failure and must propagate instead of being treated as stale metadata.
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module.repair_mirror_hooks_path(mirror)
+
+        assert raised.value is probe_error
+
+    @pytest.mark.unit
+    async def test_unreadable_live_worktree_gitdir_fails_closed_without_prune(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        linked_git_dir = mirror / "worktrees" / "workspace"
+        linked_git_dir.mkdir(parents=True)
+        gitdir_ref = linked_git_dir / "gitdir"
+        gitdir_ref.write_text(str(tmp_path / "live-worktree" / ".git"), encoding="utf-8")
+        prune_calls = 0
+
+        async def _repair_hooks_path_config(**_kwargs: object) -> bool:
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            nonlocal prune_calls
+            prune_calls += 1
+
+        real_read_text = Path.read_text
+
+        def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+            if self == gitdir_ref:
+                raise PermissionError("unable to read gitdir file (Permission denied)")
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+        monkeypatch.setattr(Path, "read_text", _read_text)
+
+        # A permission-denied gitdir back-reference belongs to a live worktree we
+        # merely cannot inspect; it is NOT stale metadata. Pruning it would delete
+        # the live worktree's admin files, so repair must fail closed and never
+        # reach ``git worktree prune``.
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module.repair_mirror_hooks_path(mirror)
+
+        assert prune_calls == 0
+        assert raised.value.operation == "worktree.hooks_path_probe"
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert "cannot access linked-worktree gitdir back-reference" in raised.value.stderr
+
+    @pytest.mark.unit
     async def test_removes_include_exposing_poisoned_hooks_path(self, tmp_path: Path) -> None:
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
