@@ -491,6 +491,69 @@ async def test_planning_required_recovers_single_ignored_near_miss_plan_file(
 
 
 @pytest.mark.unit
+async def test_planning_required_near_miss_refuses_recovery_on_dirty_baseline(
+    tmp_path: Path,
+) -> None:
+    """A pre-dirty source path masks ``after_plan - before_plan``; refuse the move."""
+    worktree = tmp_path / "worktree"
+    required_path = worktree / "docs" / "awf-plans" / "ws_dirty_base.md"
+    near_miss_path = worktree / "docs" / "awf-plans" / "ws_dirty_basf.md"
+
+    class _DirtyBaselinePlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                near_miss_path.parent.mkdir(parents=True, exist_ok=True)
+                near_miss_path.write_text(
+                    "# Plan\n\nWritten under a dirty baseline.\n",
+                    encoding="utf-8",
+                )
+            return result
+
+    runner = FakeCommandRunner()
+    # ``src/app.py`` is dirty *before* planning and stays dirty after, so the
+    # caller's ``after_plan - before_plan`` diff masks the planning agent's edit.
+    runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # before_plan (pre-dirty)
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+    runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # dirty_paths after planning
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _DirtyBaselinePlanAdapter("plan written elsewhere")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(
+            id="ws_dirty_base",
+            task_prompt="do it",
+            task_tag=None,
+        ),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-dirty-baseline-near-miss"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.details is not None
+    assert message.details["near_miss_plan_artifacts"] == [
+        {
+            "path": "docs/awf-plans/ws_dirty_basf.md",
+            "required_path": "docs/awf-plans/ws_dirty_base.md",
+            "reason": "dirty_baseline_before_planning",
+            "filename_hamming_distance": 1,
+            "dirty_baseline_paths": ["src/app.py"],
+        }
+    ]
+    # The elevated-trust move must not have happened.
+    assert near_miss_path.exists()
+    assert not required_path.exists()
+    assert len(adapter.prompts) == 1
+
+
+@pytest.mark.unit
 async def test_planning_required_near_miss_fails_when_multiple_candidates(
     tmp_path: Path,
 ) -> None:

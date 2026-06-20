@@ -229,6 +229,7 @@ def _recover_plan_artifact_near_miss(
     workspace_id: str,
     required_plan_path: Path,
     required_plan_digest_before: str | None,
+    dirty_paths_before_planning: Sequence[Path],
     changed_paths_during_planning: Sequence[Path],
     candidates_before: Mapping[Path, str],
     candidates_after: Mapping[Path, str],
@@ -245,6 +246,26 @@ def _recover_plan_artifact_near_miss(
     )
     if not changed_candidates:
         return False, []
+
+    # The caller's clean check is ``after_plan - before_plan``, so any path that
+    # was already dirty before planning is subtracted out and treated as clean.
+    # In a preserved/resumed workspace that lets the planning agent edit a
+    # pre-dirty source file while only writing an ignored near-miss plan: the
+    # diff stays empty and the plan-only scope guard would be bypassed by the
+    # elevated-trust move. Refuse recovery unless the worktree started clean.
+    dirty_baseline_strings = [path.as_posix() for path in dirty_paths_before_planning]
+    if dirty_baseline_strings:
+        evidence = [
+            _near_miss_plan_artifact_evidence(
+                candidate=candidate,
+                required_plan_path=required_plan_path,
+                reason="dirty_baseline_before_planning",
+            )
+            for candidate in changed_candidates
+        ]
+        for item in evidence:
+            item["dirty_baseline_paths"] = dirty_baseline_strings[:20]
+        return False, evidence
 
     changed_path_strings = [path.as_posix() for path in changed_paths_during_planning]
     if changed_path_strings:
@@ -770,6 +791,7 @@ async def _run_agent_task_with_optional_planning(
                 workspace_id=workspace.id,
                 required_plan_path=plan_path,
                 required_plan_digest_before=plan_file_digest_before,
+                dirty_paths_before_planning=sorted(before_plan),
                 changed_paths_during_planning=sorted(after_plan - before_plan),
                 candidates_before=plan_candidates_before,
                 candidates_after=plan_candidates_after,
