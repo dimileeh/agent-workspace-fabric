@@ -567,6 +567,33 @@ async def test_check_validation_worktree_clean_keeps_tracked_plan_readme_edit_vi
 
 
 @pytest.mark.unit
+async def test_check_validation_worktree_clean_flags_untracked_plan_readme(
+    tmp_path: Path,
+) -> None:
+    """A genuinely untracked canonical README must stay visible, not be suppressed.
+
+    The canonical ``docs/awf-plans/README.md`` is tracked via the
+    ``!docs/awf-plans/README.md`` .gitignore negation, so git reports a
+    re-created untracked copy as ``??`` (not ``!!``). The plan-artifact dirty
+    guard suppresses internal plan artifacts unconditionally, so it must exempt
+    this tracked canonical file rather than silently hide the dirty worktree.
+    """
+    worktree = _init_fake_worktree(tmp_path)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status reporting an untracked canonical plan README."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "?? docs/awf-plans/README.md\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert check.untracked_paths == ("docs/awf-plans/README.md",)
+
+
+@pytest.mark.unit
 async def test_check_validation_worktree_clean_suppresses_empty_nested_plan_dir(
     tmp_path: Path,
 ) -> None:

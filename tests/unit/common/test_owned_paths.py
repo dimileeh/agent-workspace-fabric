@@ -107,7 +107,9 @@ def test_real_docs_and_repo_plan_paths_are_not_internal_plan_artifacts(path: str
         "apps/console/docs/awf-plans/",
         "deep/a/b/docs/awf-plans/x.json",
         "./apps/console/docs/awf-plans/ws_x.md",
-        "docs/awf-plans/README.md",
+        # A nested README is gitignored and not the tracked canonical file, so it
+        # is still a stray artifact that stays matched (#620).
+        "apps/console/docs/awf-plans/README.md",
     ],
 )
 def test_is_under_internal_plan_artifact_dir_matches_dir_and_descendants_any_depth(
@@ -115,6 +117,26 @@ def test_is_under_internal_plan_artifact_dir_matches_dir_and_descendants_any_dep
 ) -> None:
     """The internal plan dir and anything beneath it match at ANY depth (#620)."""
     assert is_under_internal_plan_artifact_dir(path) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/awf-plans/README.md",
+        "./docs/awf-plans/README.md",
+    ],
+)
+def test_is_under_internal_plan_artifact_dir_exempts_canonical_root_readme(
+    path: str,
+) -> None:
+    """The tracked canonical root README is exempt so a stray untracked copy is flagged.
+
+    The dirty guard suppresses matches here on untracked paths unconditionally,
+    so a genuinely untracked ``docs/awf-plans/README.md`` must stay visible
+    rather than be silently hidden.
+    """
+    assert is_under_internal_plan_artifact_dir(path) is False
 
 
 @pytest.mark.unit

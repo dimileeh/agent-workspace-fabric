@@ -14,6 +14,9 @@ from awf.common.ids import (
 
 INTERNAL_PLAN_ARTIFACT_DIR: Final = "docs/awf-plans"
 _INTERNAL_PLAN_ARTIFACT_DIR_SEGMENTS: Final = tuple(INTERNAL_PLAN_ARTIFACT_DIR.split("/"))
+# The canonical README is a TRACKED repository file, kept via the
+# ``!docs/awf-plans/README.md`` .gitignore negation, not an ephemeral artifact.
+INTERNAL_PLAN_ARTIFACT_README: Final = f"{INTERNAL_PLAN_ARTIFACT_DIR}/README.md"
 _PLANNING_PATH_FIELDS: Final = ("plan_path", "conformance_report_path")
 _WORKSPACE_ID_PLACEHOLDER: Final = "{workspace_id}"
 _WORKSPACE_ID_GLOB: Final = f"{WORKSPACE_ID_PREFIX}*"
@@ -38,8 +41,21 @@ def is_under_internal_plan_artifact_dir(path: str) -> bool:
     ``docs/awf-plans-archive`` and unrelated ``awf-plans``/``xdocs`` paths are
     NOT matched. These artifacts are AWF-internal ephemeral state, never user
     files, so callers may treat them as always-ignorable.
+
+    The canonical root ``docs/awf-plans/README.md`` is the one exception: it is a
+    TRACKED repository file (kept via the ``!docs/awf-plans/README.md`` .gitignore
+    negation), not an ephemeral artifact, so it is NOT matched. The dirty guard
+    applies this helper to *untracked* paths unconditionally, so matching the root
+    README would silently hide a genuinely untracked root README (e.g. one
+    re-created on disk after ``git rm --cached``) instead of flagging the worktree
+    dirty. Only the exact root path is exempt; a nested copy
+    (``apps/console/docs/awf-plans/README.md``) is itself gitignored and remains a
+    stray artifact, so it stays matched (#620).
     """
-    segments = normalize_owned_path(path).split("/")
+    normalized = normalize_owned_path(path)
+    if normalized == INTERNAL_PLAN_ARTIFACT_README:
+        return False
+    segments = normalized.split("/")
     window = len(_INTERNAL_PLAN_ARTIFACT_DIR_SEGMENTS)
     for start in range(len(segments) - window + 1):
         if tuple(segments[start : start + window]) == _INTERNAL_PLAN_ARTIFACT_DIR_SEGMENTS:
