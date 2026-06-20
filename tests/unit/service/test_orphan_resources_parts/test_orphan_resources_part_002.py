@@ -501,6 +501,77 @@ def test_reaper_removes_volumes_for_fully_terminal_workspace(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
+def test_reaper_reaps_missing_volume_via_name_fallback_and_leaves_expected(
+    tmp_path: Path,
+) -> None:
+    """A row-less ``missing`` volume + worktree are reclaimed; a live volume is left.
+
+    The no-DB-record orphan class #637 targets: ``awf-ws_dead-postgres_data`` has lost its
+    compose-project label after its workspace row was pruned, so the name fallback recovers
+    ``ws_dead``, the reaper enumerates it, classifies it ``missing`` (no DB row), and tears
+    the stack down with ``remove_volumes=True`` (the volume record is itself cleanup-ready)
+    while also removing the orphaned worktree. A parallel ``ws_live`` volume whose row is
+    active classifies ``expected`` and must not be touched.
+    """
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    (tmp_path / "git" / "worktrees" / "ws_dead").mkdir(parents=True)
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            volumes=_jsonl(
+                {"name": "awf-ws_dead-postgres_data", "project": "", "driver": "local"},
+                {
+                    "name": "awf-ws_live-postgres_data",
+                    "project": "awf-ws_live",
+                    "driver": "local",
+                },
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(active={"ws_live"}),  # ws_dead has no row -> missing
+        auto_cleanup_orphans=True,
+    )
+    dead_volume = next(
+        record
+        for record in summary.records
+        if record.kind == "volume" and record.workspace_id == "ws_dead"
+    )
+    assert dead_volume.classification == "missing"
+    assert dead_volume.compose_project == "awf-ws_dead"
+    live_volume = next(
+        record
+        for record in summary.records
+        if record.kind == "volume" and record.workspace_id == "ws_live"
+    )
+    assert live_volume.classification == "expected"
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,  # isolate the reap from the row-less age guard
+        )
+    )
+
+    assert result.status == "ok"
+    # Only the dead stack is torn down, and with --volumes (its volume is cleanup-ready);
+    # the live workspace's expected volume is never touched.
+    assert teardown.calls == [
+        ("awf-ws_dead", tmp_path / "compose" / "ws_dead" / "compose.yml", "ws_dead")
+    ]
+    assert teardown.remove_volumes_calls == [True]
+    assert not (tmp_path / "git" / "worktrees" / "ws_dead").exists()
+    assert sorted(outcome.kind for outcome in result.reaped) == ["compose", "worktree"]
+
+
+@pytest.mark.unit
 def test_reaper_compose_teardown_failure_is_loud(tmp_path: Path) -> None:
     from awf.node.compose_manager import ComposeTeardownResult
     from awf.service.orphan_resources import reap_classified_orphans

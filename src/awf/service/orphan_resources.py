@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -37,6 +38,15 @@ _log = get_logger(__name__)
 CHECK_TIMEOUT_SECONDS = 5.0
 ORPHAN_EXAMPLE_LIMIT = 5
 AWF_PROJECT_PREFIXES = ("awf_", "awf-")
+
+# Row-less volume name fallback (#637). Mirrors :mod:`awf.service.orphans`'s managed
+# name parsing so a pruned ``awf-ws_<id>-postgres_data`` volume whose compose-project
+# label is gone is still enumerated by the classification-driven reaper. A row-less
+# orphan has no DB row to match against, so the ``known_workspace_ids`` branch the
+# status path carries is intentionally dropped here.
+_WORKSPACE_ID_PATTERN = r"ws_[A-Za-z0-9][A-Za-z0-9_]*"
+_WORKSPACE_ID_RE = re.compile(rf"^{_WORKSPACE_ID_PATTERN}$")
+_HYPHEN_DELIMITED_MANAGED_TAIL_RE = re.compile(rf"^(?P<workspace_id>{_WORKSPACE_ID_PATTERN})-")
 
 # Reason codes for the flag-gated readiness-driven reaper.
 ORPHAN_REAP_DISABLED = "ORPHAN_REAP_DISABLED"
@@ -498,16 +508,28 @@ def parse_docker_resource_rows(kind: ResourceKind, stdout: str) -> tuple[Detecte
         if not isinstance(row, dict):
             continue
         project = str(row.get("project") or "")
+        name = _optional_str(row.get("name"))
         workspace_id = workspace_id_from_project(project)
+        compose_project: str | None = project
+        # Row-less volume name fallback (#637): once a workspace row is pruned the
+        # volume can lose its compose-project label, so recover the id from the
+        # managed name and infer the project the reaper must tear down. Volume-only:
+        # containers/networks always carry the project label under the scan filter,
+        # so an empty project on those kinds is genuinely unmanaged.
+        if workspace_id is None and kind == "volume" and not project and name is not None:
+            fallback_id = workspace_id_from_managed_volume_name(name)
+            if fallback_id is not None:
+                workspace_id = fallback_id
+                compose_project = _infer_project_from_managed_name(name, fallback_id)
         if workspace_id is None:
             continue
         resources.append(
             DetectedResource(
                 kind=kind,
                 workspace_id=workspace_id,
-                compose_project=project,
+                compose_project=compose_project,
                 id=_optional_str(row.get("id")),
-                name=_optional_str(row.get("name")),
+                name=name,
                 service=_optional_str(row.get("service")),
                 state=_optional_str(row.get("state")),
                 status_text=_optional_str(row.get("status")),
@@ -1123,6 +1145,60 @@ def workspace_id_from_project(project: str) -> str | None:
             if workspace_id.startswith("ws_"):
                 return workspace_id
     return None
+
+
+def workspace_id_from_managed_volume_name(name: str) -> str | None:
+    """Recover a workspace id from a managed volume name when the project label is gone.
+
+    Mirrors :func:`awf.service.orphans._workspace_id_from_managed_name`'s legacy
+    fallback (hyphen-delimited tail, then an underscore-walk) so a row-less
+    ``awf-ws_<id>-postgres_data`` volume whose ``com.docker.compose.project`` label was
+    pruned is still enumerated by the reaper. Returns ``None`` for any name that does not
+    carry an ``awf_``/``awf-`` managed prefix wrapping a ``ws_`` id (#637, layer 2).
+    """
+    tail = _managed_name_tail(name)
+    if tail is None:
+        return None
+    workspace_id = _legacy_workspace_id_from_managed_tail(tail)
+    if workspace_id is not None and _looks_like_workspace_id(workspace_id):
+        return workspace_id
+    return None
+
+
+def _managed_name_tail(name: str) -> str | None:
+    for prefix in AWF_PROJECT_PREFIXES:
+        if name.startswith(prefix):
+            return name.removeprefix(prefix)
+    return None
+
+
+def _legacy_workspace_id_from_managed_tail(tail: str) -> str | None:
+    match = _HYPHEN_DELIMITED_MANAGED_TAIL_RE.match(tail)
+    if match is not None:
+        return match.group("workspace_id")
+
+    if not tail.startswith("ws_"):
+        return None
+
+    suffix = tail.removeprefix("ws_")
+    workspace_suffix = ""
+    for char in suffix:
+        if not char.isalnum():
+            break
+        workspace_suffix += char
+    if not workspace_suffix:
+        return None
+    return f"ws_{workspace_suffix}"
+
+
+def _infer_project_from_managed_name(name: str, workspace_id: str) -> str:
+    if name.startswith("awf-"):
+        return f"awf-{workspace_id}"
+    return f"awf_{workspace_id}"
+
+
+def _looks_like_workspace_id(value: str) -> bool:
+    return bool(_WORKSPACE_ID_RE.match(value))
 
 
 async def workspace_id_view_from_session(

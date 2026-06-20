@@ -824,9 +824,15 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     assert created["classified_sweep_kwargs"]["work_dir"] == Path(settings.work_dir).resolve()
     assert created["classified_sweep_kwargs"]["docker_host"] == settings.docker_host
     assert created["classified_sweep_kwargs"]["compose_teardown"] is classified_teardown
+    # No-arg call (the periodic backstop) resolves ``enabled`` to the flag default.
     assert created["classified_sweep_kwargs"]["enabled"] is auto_cleanup_orphans
     assert created["classified_sweep_kwargs"]["min_age_hours"] == 4.0
     assert created["classified_sweep_kwargs"]["min_retention_hours"] == 72.0
+
+    # On-demand override (#637): forcing ``enabled=True`` for an operator-requested gc
+    # run must pass through to the sweep regardless of the ``auto_cleanup_orphans`` flag.
+    asyncio.run(classified_reaper(enabled=True))
+    assert created["classified_sweep_kwargs"]["enabled"] is True
 
 
 @pytest.mark.unit

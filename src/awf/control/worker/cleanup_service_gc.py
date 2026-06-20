@@ -191,6 +191,16 @@ async def _run_claimed_service_gc_trigger(
     polling API does not hang on a row stuck ``running`` until ``deadline_at`` and never
     reports false success (PRRT_kwDOSJAM6s6JdSy-). Param parsing therefore lives *inside*
     the guarded block, not before it.
+
+    After the DB-row-driven terminal reaper, the same guarded run also drives the
+    classification-driven orphan reaper with ``enabled=True`` *forced* (regardless of the
+    default-off ``auto_cleanup_orphans`` flag) so this operator-requested ``gc`` reclaims
+    no-DB-record ("row-less") orphaned volumes/worktrees the DB-row-driven candidate set
+    can never see (#637). Its ``OrphanReapResult`` is folded into the combined report under
+    ``classified_orphan_reap`` (flowing untouched into the API's
+    ``worker_reclaim.report``). The fold sits inside the same ``try`` so an orphan-sweep
+    raise is recorded on the row like any reaper failure rather than surfacing a false
+    success; it is skipped when no orphan reaper is wired (back-compat).
     """
     try:
         reaper_kwargs: dict[str, Any] = {}
@@ -217,6 +227,13 @@ async def _run_claimed_service_gc_trigger(
             reaper_kwargs["exclude_statuses"] = exclude_statuses
 
         report = await self._terminal_gc_reaper(**reaper_kwargs)
+        # Additive on-demand sweep of no-DB-record orphans (#637). ``enabled=True`` is
+        # forced for the explicit operator request; the same retention/min-age scope the
+        # closure already passes is reused. Guarded on the dependency being wired so the
+        # DB-only gc path stays unchanged when no orphan reaper is present.
+        if self._classified_orphan_reaper is not None:
+            orphan_result = await self._classified_orphan_reaper(enabled=True)
+            report = {**report, "classified_orphan_reap": orphan_result.to_dict()}
     except asyncio.CancelledError:
         raise
     except Exception as exc:

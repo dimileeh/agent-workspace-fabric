@@ -38,12 +38,14 @@ def _make_worker(
     *,
     terminal_gc_reaper: object | None,
     claude_base_reaper: object | None = None,
+    classified_orphan_reaper: object | None = None,
 ) -> ControlWorker:
     return ControlWorker(
         session_factory=session_factory,
         provisioner=object(),  # type: ignore[arg-type]
         terminal_gc_reaper=terminal_gc_reaper,  # type: ignore[arg-type]
         claude_base_reaper=claude_base_reaper,  # type: ignore[arg-type]
+        classified_orphan_reaper=classified_orphan_reaper,  # type: ignore[arg-type]
         config=WorkerConfig(
             poll_interval_seconds=0.01,
             max_concurrent_provisions=0,
@@ -111,6 +113,127 @@ async def test_consume_runs_terminal_reaper_once_and_completes(
         assert finished.status == "completed"
         assert finished.result == report
         assert finished.error_code is None
+
+
+async def test_consume_folds_classified_orphan_reaper_with_enabled_forced(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The on-demand gc run also reaps no-DB-record orphans with ``enabled`` forced (#637).
+
+    ``awf service gc`` is DB-row-driven and never sees row-less ("no-DB-record") orphaned
+    volumes/worktrees. After the DB-driven terminal reaper, the trigger consumer also drives
+    the classification-driven orphan reaper with ``enabled=True`` forced (regardless of the
+    default-off ``auto_cleanup_orphans`` flag) and folds its report into the combined gc
+    result under ``classified_orphan_reap``.
+    """
+    from awf.service.orphan_resources import (
+        ORPHAN_REAP_OK,
+        OrphanReapOutcome,
+        OrphanReapResult,
+    )
+
+    request_id = await _seed_pending(session_factory)
+    terminal_report = {"status": "succeeded", "deleted_path_count": 2}
+    orphan_calls: list[bool] = []
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return terminal_report
+
+    async def _classified_orphan_reaper(*, enabled: bool) -> OrphanReapResult:
+        orphan_calls.append(enabled)
+        return OrphanReapResult(
+            enabled=enabled,
+            status="ok",
+            reason_code=ORPHAN_REAP_OK,
+            reaped=(
+                OrphanReapOutcome(
+                    kind="worktree",
+                    workspace_id="ws_dead",
+                    status="reaped",
+                    reason_code="PATH_DELETED",
+                ),
+            ),
+        )
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    # The orphan reaper ran exactly once with enabled forced True for the operator request.
+    assert orphan_calls == [True]
+    async with session_factory() as session:
+        finished = await ServiceGCRequestRepository(session).get(request_id)
+        assert finished is not None
+        assert finished.status == "completed"
+        assert finished.error_code is None
+        result = finished.result or {}
+        # The terminal-reaper keys are preserved and the orphan report is folded in.
+        assert result["status"] == "succeeded"
+        assert result["deleted_path_count"] == 2
+        assert result["classified_orphan_reap"]["status"] == "ok"
+        assert result["classified_orphan_reap"]["enabled"] is True
+        assert result["classified_orphan_reap"]["reaped"][0]["workspace_id"] == "ws_dead"
+
+
+async def test_consume_omits_orphan_report_when_no_orphan_reaper_wired(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """With no classified-orphan reaper wired the report has no ``classified_orphan_reap`` key.
+
+    The orphan-reap fold is guarded on the dependency being present, so the existing
+    DB-only gc behaviour is preserved when the reaper is absent (back-compat, #637).
+    """
+    request_id = await _seed_pending(session_factory)
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    async with session_factory() as session:
+        finished = await ServiceGCRequestRepository(session).get(request_id)
+        assert finished is not None
+        assert finished.status == "completed"
+        assert "classified_orphan_reap" not in (finished.result or {})
+
+
+async def test_consume_marks_failed_when_orphan_reaper_raises(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An orphan-reaper raise inside the guarded run marks the row ``failed`` (#637).
+
+    Folding the orphan sweep into the same guarded ``try`` as the terminal reaper means a
+    raise is recorded on the row with the worker-reclaim reason code rather than surfacing a
+    false success — matching the no-false-success contract the consumer already guarantees.
+    """
+    request_id = await _seed_pending(session_factory)
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    async def _classified_orphan_reaper(*, enabled: bool) -> object:
+        raise RuntimeError("orphan sweep blew up")
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    async with session_factory() as session:
+        failed = await ServiceGCRequestRepository(session).get(request_id)
+        assert failed is not None
+        assert failed.status == "failed"
+        assert failed.error_code == "SERVICE_GC_WORKER_RECLAIM_FAILED"
+        assert "orphan sweep blew up" in (failed.error_message or "")
 
 
 async def test_consume_threads_operator_params_into_reaper(
