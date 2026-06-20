@@ -159,3 +159,65 @@ class TestVerifyHeadObjectExists:
         result = await git_module.verify_head_object_exists(layout.worktree_path)
 
         assert result is False
+        assert not alternates_path.exists()
+
+    @pytest.mark.unit
+    async def test_clears_repository_alternates_before_valid_head_probe(
+        self,
+        origin_repo: Path,
+        work_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        manager = GitManager(work_dir)
+        layout = await manager.add_worktree(
+            workspace_id="ws_valid_repo_alternates",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_valid_repo_alternates",
+        )
+
+        alternate_repo = tmp_path / "alternate"
+        alternate_repo.mkdir()
+        _git(["init", "-q", "-b", "development"], alternate_repo)
+
+        alternates_path = layout.mirror_path / "objects" / "info" / "alternates"
+        alternates_path.parent.mkdir(parents=True, exist_ok=True)
+        alternates_path.write_text(str(alternate_repo / ".git" / "objects") + "\n")
+
+        result = await git_module.verify_head_object_exists(layout.worktree_path)
+
+        assert result is True
+        assert not alternates_path.exists()
+
+    @pytest.mark.unit
+    async def test_fails_closed_when_repository_alternates_cannot_be_removed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        origin_repo: Path,
+        work_dir: Path,
+    ) -> None:
+        manager = GitManager(work_dir)
+        layout = await manager.add_worktree(
+            workspace_id="ws_stuck_repo_alternates",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_stuck_repo_alternates",
+        )
+
+        alternates_path = layout.mirror_path / "objects" / "info" / "alternates"
+        alternates_path.parent.mkdir(parents=True, exist_ok=True)
+        alternates_path.write_text("/tmp/awf-alternate-objects\n")
+
+        real_unlink = Path.unlink
+
+        def _unlink(self: Path, missing_ok: bool = False) -> None:
+            if self == alternates_path:
+                raise OSError("permission denied")
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", _unlink)
+
+        result = await git_module.verify_head_object_exists(layout.worktree_path)
+
+        assert result is False
+        assert alternates_path.exists()

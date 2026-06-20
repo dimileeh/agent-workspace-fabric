@@ -1069,10 +1069,10 @@ async def verify_head_object_exists(worktree_path: Path) -> bool:
 
     Uses ``git cat-file -e HEAD^{commit}`` which exits 0 when the object exists
     and non-zero when the ref exists but the commit object is missing. Repository
-    alternates are rejected before probing because they can make a shared mirror
+    alternates are cleared before probing because they can make a shared mirror
     appear to contain objects that only exist in a workspace-private store.
     """
-    if _repository_declares_object_alternates(worktree_path):
+    if not _clear_repository_object_alternates(worktree_path):
         return False
 
     proc = await asyncio.create_subprocess_exec(
@@ -1092,16 +1092,22 @@ async def verify_head_object_exists(worktree_path: Path) -> bool:
     return proc.returncode == 0
 
 
-def _repository_declares_object_alternates(worktree_path: Path) -> bool:
+def _clear_repository_object_alternates(worktree_path: Path) -> bool:
     alternates_path = _repository_alternates_path_for_worktree(worktree_path)
     if alternates_path is None:
-        return False
-    try:
-        alternates_path.stat()
-    except FileNotFoundError:
-        return False
-    except OSError:
         return True
+    try:
+        alternates_path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        _log.warning(
+            "git.repository_alternates_clear_failed",
+            path=str(alternates_path),
+            error=str(exc),
+        )
+        return False
+    _log.warning("git.repository_alternates_cleared", path=str(alternates_path))
     return True
 
 
