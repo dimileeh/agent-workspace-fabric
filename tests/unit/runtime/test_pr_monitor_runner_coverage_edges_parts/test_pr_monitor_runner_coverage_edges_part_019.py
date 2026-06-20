@@ -1241,7 +1241,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_blocks_recovered_prot
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout="M\0src/recovered.py\0")
+    cmd.queue_result(returncode=0, stdout="A\0generated.tmp\0M\0src/recovered.py\0")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1314,6 +1314,19 @@ async def test_commit_dirty_worktree_missing_head_recovery_blocks_recovered_prot
         )
 
     assert exc.value.reason_code == _PROTECTED_SCOPE_REPAIR_FAILED_REASON
+    assert any(call.args[-3:] == ["reset", "--hard", "base_sha_12345"] for call in cmd.calls)
+    assert any(
+        call.args
+        == _git_worktree_command(
+            worktree,
+            "--literal-pathspecs",
+            "clean",
+            "-fd",
+            "--",
+            "generated.tmp",
+        )
+        for call in cmd.calls
+    )
 
 
 @pytest.mark.unit

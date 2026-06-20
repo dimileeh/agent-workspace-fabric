@@ -639,6 +639,51 @@ async def _recover_missing_head_object_from_filesystem(
     return recovered_head_sha
 
 
+async def _cleanup_recovered_missing_head_delta(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    recovery_head: str,
+    reason: str,
+    untracked_cleanup_paths: Sequence[str] = (),
+) -> None:
+    cleanup = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "reset", "--hard", recovery_head),
+        env=git_env_without_object_lookup_overrides(),
+    )
+    if not cleanup.ok:
+        _log.warning(
+            "monitor.head_object_missing_recovered_cleanup_failed",
+            workspace_id=workspace_id,
+            reason=reason,
+            returncode=cleanup.returncode,
+            stderr=cleanup.stderr[:400],
+        )
+        return
+    if not untracked_cleanup_paths:
+        return
+    clean = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "--literal-pathspecs",
+            "clean",
+            "-fd",
+            "--",
+            *untracked_cleanup_paths,
+        ),
+        env=git_env_without_object_lookup_overrides(),
+    )
+    if not clean.ok:
+        _log.warning(
+            "monitor.head_object_missing_recovered_clean_failed",
+            workspace_id=workspace_id,
+            reason=reason,
+            returncode=clean.returncode,
+            stderr=clean.stderr[:400],
+        )
+
+
 def _untracked_cleanup_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
     if not diff_stdout:
         return ()
@@ -935,6 +980,9 @@ async def _commit_dirty_worktree(
                     f"HEAD object recovered for workspace {workspace_id} but recovered diff failed",
                 )
             try:
+                recovered_untracked_cleanup_paths = _untracked_cleanup_paths_from_name_status_z(
+                    diff.stdout
+                )
                 recovered_diff_paths = _changed_paths_from_name_status_z(diff.stdout)
             except ProtectedScopeDiffError as exc:
                 _log.warning(
@@ -977,6 +1025,14 @@ async def _commit_dirty_worktree(
                     workspace_id=workspace_id,
                     recovered_head=recovered[:10],
                     paths=[violation.path for violation in recovered_violations],
+                )
+                await _cleanup_recovered_missing_head_delta(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    recovery_head=recovery_head,
+                    reason="protected_scope_blocked",
+                    untracked_cleanup_paths=recovered_untracked_cleanup_paths,
                 )
                 raise _MonitorPolicyBlockedError(
                     quality_gate_violation_message(recovered_violations),
