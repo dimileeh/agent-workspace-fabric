@@ -68,6 +68,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _untracked_paths_from_porcelain,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.path_parsing import (
     _changed_paths_from_name_status_z,
 )
@@ -838,24 +839,15 @@ async def _commit_dirty_worktree(
         try:
             await repair_mirror_hooks_path(mirror_path)
         except (GitOperationError, OSError) as exc:
-            log_kwargs: dict[str, object] = {
-                "workspace_id": workspace_id,
-                "reason_code": _MIRROR_HOOKS_PATH_POISONED_REASON,
-                "error_type": exc.__class__.__name__,
-            }
-            if isinstance(exc, GitOperationError):
-                log_kwargs.update(
-                    {
-                        "repair_reason_code": exc.reason_code,
-                        "git_operation": exc.operation,
-                        "git_returncode": exc.returncode,
-                        "stderr": exc.stderr[:1000],
-                    }
-                )
-            else:
-                log_kwargs["error"] = str(exc)
+            log_kwargs = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="commit_dirty_worktree",
+                mirror_path=mirror_path,
+            )
             _log.warning(
                 "monitor.mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                 **log_kwargs,
             )
             raise _MonitorMirrorHooksPathRepairFailedError() from exc

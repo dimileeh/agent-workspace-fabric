@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 
 from awf.common.github_transient import (
-    AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS,
     NON_TRANSIENT_GITHUB_ERROR_MARKERS,
     TRANSIENT_GITHUB_ERROR_MARKERS,
 )
@@ -50,19 +49,6 @@ _TASK_TAG_UNSET = _TaskTagUnset()
 # 401 combined with e.g. ``Bad credentials`` still fails fast.
 _NON_TRANSIENT_GITHUB_ERROR_MARKERS = NON_TRANSIENT_GITHUB_ERROR_MARKERS
 _TRANSIENT_GITHUB_ERROR_MARKERS = TRANSIENT_GITHUB_ERROR_MARKERS
-
-# Ambiguous auth blips: a bare ``HTTP 401`` / ``Requires authentication`` with no
-# strong permanent marker is a recoverable transient on the GitHub *API* client
-# path (a GraphQL blip on a valid token, #515). The strong markers above are
-# checked first and win, so a genuine bad-credentials 401 still fails fast.
-#
-# These markers apply ONLY to ``_is_transient_github_client_error``, never to raw
-# git base-fetch stderr: git's smart-HTTP transport surfaces genuine credential
-# failures as ``error: RPC failed; HTTP 401`` (a contiguous ``HTTP 401``
-# substring), which must fail fast rather than be bounded-retried. They are
-# therefore deliberately kept out of ``_TRANSIENT_GITHUB_ERROR_MARKERS`` so
-# ``_is_transient_base_fetch_error`` never matches them.
-_AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS
 
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 

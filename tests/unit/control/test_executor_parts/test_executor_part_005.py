@@ -928,7 +928,12 @@ class TestFailurePaths:
         fake.queue_result(returncode=0)
         fake.queue_result(
             returncode=1,
-            stderr='Post "https://api.github.com/graphql": dial tcp: i/o timeout',
+            stderr=(
+                "pull request create failed: HTTP 400: We received a malformed request "
+                "from your client. Sorry about that. Please try resubmitting your "
+                "request and contact us if the problem persists. "
+                "(https://api.github.com/graphql)"
+            ),
         )
         fake.queue_result(returncode=0, stdout="[]")
 
