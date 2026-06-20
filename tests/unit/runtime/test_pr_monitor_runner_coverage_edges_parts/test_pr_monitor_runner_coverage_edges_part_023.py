@@ -84,6 +84,9 @@ class _ProtectedRepairRunner:
     async def _provider_recovery_suppresses_cli(self, _workspace_id: str) -> bool:
         return False
 
+    async def _rev_parse_head(self, _worktree_path: Path) -> str | None:
+        return None
+
 
 class _UnexpectedFailureAdapter:
     async def run(self, **_kwargs: object) -> None:
