@@ -239,6 +239,51 @@ class TestRepairMirrorHooksPath:
         assert check.stdout == ""
 
     @pytest.mark.unit
+    async def test_linked_worktree_config_probes_include_safe_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        linked_git_dir = mirror / "worktrees" / "workspace"
+        linked_git_dir.mkdir(parents=True)
+        worktree = tmp_path / "workspace"
+        worktree.mkdir()
+        (linked_git_dir / "gitdir").write_text(str(worktree / ".git"), encoding="utf-8")
+        (linked_git_dir / "config.worktree").write_text("", encoding="utf-8")
+        calls: list[tuple[tuple[str, ...], tuple[str, ...], Path, str]] = []
+
+        async def _repair_hooks_path_config(
+            *,
+            git_args: tuple[str, ...],
+            config_scope_args: tuple[str, ...],
+            config_path: Path,
+            operation_prefix: str,
+        ) -> bool:
+            calls.append((git_args, config_scope_args, config_path, operation_prefix))
+            return False
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        safe_args = tuple(git_module.git_safe_directory_config_args(worktree))
+        assert result is False
+        assert calls == [
+            (("--git-dir", str(mirror)), ("--local",), mirror / "config", "mirror"),
+            (
+                (*safe_args, "-C", str(worktree)),
+                ("--local",),
+                mirror / "config",
+                "mirror",
+            ),
+            (
+                (*safe_args, "-C", str(worktree)),
+                ("--worktree",),
+                linked_git_dir / "config.worktree",
+                "worktree",
+            ),
+        ]
+
+    @pytest.mark.unit
     async def test_removes_worktree_include_exposing_poisoned_hooks_path(
         self, tmp_path: Path
     ) -> None:

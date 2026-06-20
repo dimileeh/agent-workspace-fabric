@@ -994,7 +994,11 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
             continue
         repaired = (
             await _repair_hooks_path_config(
-                git_args=("-C", str(worktree_path)),
+                git_args=(
+                    *git_safe_directory_config_args(worktree_path),
+                    "-C",
+                    str(worktree_path),
+                ),
                 config_scope_args=("--local",),
                 config_path=mirror_path / "config",
                 operation_prefix="mirror",
@@ -1006,7 +1010,11 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
             continue
         repaired = (
             await _repair_hooks_path_config(
-                git_args=("-C", str(worktree_path)),
+                git_args=(
+                    *git_safe_directory_config_args(worktree_path),
+                    "-C",
+                    str(worktree_path),
+                ),
                 config_scope_args=("--worktree",),
                 config_path=config_path,
                 operation_prefix="worktree",
