@@ -26,7 +26,7 @@ jobs:
       manifest_generated: ${{ steps.build.outputs.manifest_generated }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-tags: true
           # This is the most release-sensitive checkout in the repo (it builds
@@ -140,7 +140,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout source
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # Match the build job and ci.yml: do not persist GITHUB_TOKEN in
           # .git/config for the artifact-verification smoke checkout.
