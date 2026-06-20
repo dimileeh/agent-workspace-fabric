@@ -128,6 +128,72 @@ class TestRepairMirrorHooksPath:
         assert include_check.returncode != 0
 
     @pytest.mark.unit
+    async def test_tolerates_concurrent_include_repair(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        included_config = tmp_path / "included-hooks.conf"
+        included_config.write_text("[core]\n\thooksPath = /dev/null\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "include.path", str(included_config)],
+            check=True,
+            capture_output=True,
+        )
+        original_unset = git_module._unset_matching_include_path
+
+        async def _concurrent_unset(
+            *,
+            git_args: tuple[str, ...],
+            config_scope_args: tuple[str, ...],
+            config_path: Path,
+            included_origin: Path,
+            operation_prefix: str,
+        ) -> bool:
+            removed = await original_unset(
+                git_args=git_args,
+                config_scope_args=config_scope_args,
+                config_path=config_path,
+                included_origin=included_origin,
+                operation_prefix=operation_prefix,
+            )
+            assert removed is True
+            return False
+
+        monkeypatch.setattr(git_module, "_unset_matching_include_path", _concurrent_unset)
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "--local",
+                "--includes",
+                "--get-all",
+                "core.hooksPath",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+        include_check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--local", "--get-all", "include.path"],
+            capture_output=True,
+            text=True,
+        )
+        assert include_check.returncode != 0
+
+    @pytest.mark.unit
     async def test_removes_include_with_multiple_hooks_paths_from_same_included_origin(
         self, tmp_path: Path
     ) -> None:

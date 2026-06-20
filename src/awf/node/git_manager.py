@@ -265,13 +265,22 @@ async def _repair_hooks_path_config(
                 included_origin=included_origin,
                 operation_prefix=operation_prefix,
             ):
-                raise GitOperationError(
-                    operation=f"{operation_prefix}.hooks_path_include_repair",
-                    returncode=1,
-                    stdout=value.hooks_path,
-                    stderr="included core.hooksPath origin is not directly included",
-                    reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+                current_disallowed_hooks_paths = await _probe_hooks_path_config(
+                    git_args=git_args,
+                    config_scope_args=config_scope_args,
+                    operation_prefix=f"{operation_prefix}.hooks_path_include_repair_reprobe",
                 )
+                if any(
+                    _paths_match(current.origin_path, included_origin)
+                    for current in current_disallowed_hooks_paths
+                ):
+                    raise GitOperationError(
+                        operation=f"{operation_prefix}.hooks_path_include_repair",
+                        returncode=1,
+                        stdout=value.hooks_path,
+                        stderr="included core.hooksPath origin is not directly included",
+                        reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+                    )
             repaired_included_origins.add(included_origin)
             continue
 
