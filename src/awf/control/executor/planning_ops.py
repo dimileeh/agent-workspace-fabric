@@ -201,13 +201,25 @@ def _filename_hamming_distance(left: str, right: str) -> int | None:
     )
 
 
+class _UnsetFilenameDistance:
+    """Sentinel marking that the Hamming distance was not pre-computed."""
+
+
+_UNSET_FILENAME_DISTANCE = _UnsetFilenameDistance()
+
+
 def _near_miss_plan_artifact_evidence(
     *,
     candidate: Path,
     required_plan_path: Path,
     reason: str,
+    filename_distance: int | None | _UnsetFilenameDistance = _UNSET_FILENAME_DISTANCE,
 ) -> dict[str, object]:
-    distance = _filename_hamming_distance(candidate.name, required_plan_path.name)
+    distance = (
+        _filename_hamming_distance(candidate.name, required_plan_path.name)
+        if isinstance(filename_distance, _UnsetFilenameDistance)
+        else filename_distance
+    )
     evidence: dict[str, object] = {
         "path": candidate.as_posix(),
         "required_path": required_plan_path.as_posix(),
@@ -218,9 +230,13 @@ def _near_miss_plan_artifact_evidence(
     return evidence
 
 
-def _is_safe_plan_artifact_near_miss(candidate: Path, required_plan_path: Path) -> bool:
+def _classify_plan_artifact_near_miss(
+    candidate: Path, required_plan_path: Path
+) -> tuple[bool, int | None]:
+    """Return ``(is_safe, distance)`` so callers can forward the pre-computed distance."""
     distance = _filename_hamming_distance(candidate.name, required_plan_path.name)
-    return distance is not None and 0 < distance <= _PLAN_ARTIFACT_NEAR_MISS_MAX_DISTANCE
+    is_safe = distance is not None and 0 < distance <= _PLAN_ARTIFACT_NEAR_MISS_MAX_DISTANCE
+    return is_safe, distance
 
 
 def _recover_plan_artifact_near_miss(
@@ -308,7 +324,8 @@ def _recover_plan_artifact_near_miss(
         )
 
     candidate = changed_candidates[0]
-    if not _is_safe_plan_artifact_near_miss(candidate, required_plan_path):
+    is_safe, filename_distance = _classify_plan_artifact_near_miss(candidate, required_plan_path)
+    if not is_safe:
         return (
             False,
             [
@@ -316,6 +333,7 @@ def _recover_plan_artifact_near_miss(
                     candidate=candidate,
                     required_plan_path=required_plan_path,
                     reason="filename_not_close_enough",
+                    filename_distance=filename_distance,
                 )
             ],
         )
