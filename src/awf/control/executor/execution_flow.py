@@ -291,6 +291,7 @@ async def execute(
             stage="agent_run_cleanup_failure",
             error=exc,
             task_tag=ws.task_tag,
+            mark_failed_on_failure=False,
         ):
             return False
         recovered_commit_verified = await self._verify_recovered_post_agent_commit_or_mark_failed(
@@ -570,7 +571,7 @@ async def execute(
                 if not await _repair_hooks_after_agent_cleanup_failure():
                     return
                 if not await _recover_missing_head_after_agent_cleanup_failure(exc):
-                    return
+                    raise
                 raise
             except AgentRunError:
                 raise

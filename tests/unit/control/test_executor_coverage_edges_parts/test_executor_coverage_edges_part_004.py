@@ -440,6 +440,28 @@ async def test_missing_head_recovery_marks_failed_when_base_commit_is_unavailabl
 
 
 @pytest.mark.unit
+async def test_missing_head_recovery_can_return_false_without_marking_failed(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    ok = await executor._recover_missing_git_head_or_mark_failed(
+        workspace_id="ws_missing_base_cleanup",
+        worktree_path=tmp_path / "worktree",
+        base_commit=None,
+        branch_name="awf/ws_missing_base_cleanup",
+        from_status=WorkspaceStatus.running,
+        stage="agent_run_cleanup_failure",
+        error=RuntimeError("bad object HEAD"),
+        mark_failed_on_failure=False,
+    )
+
+    assert ok is False
+    executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
 async def test_missing_head_recovery_marks_failed_when_filesystem_recovery_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
