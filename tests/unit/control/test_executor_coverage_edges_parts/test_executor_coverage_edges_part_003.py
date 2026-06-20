@@ -775,6 +775,56 @@ async def test_planning_required_near_miss_does_not_overwrite_existing_plan(
 
 
 @pytest.mark.unit
+async def test_planning_required_near_miss_recovers_when_existing_plan_deleted(
+    tmp_path: Path,
+) -> None:
+    """A preserved pre-planning digest must not block recovery once the required
+    plan is deleted during planning and only a typo sibling remains."""
+    worktree = tmp_path / "worktree"
+    required_path = worktree / "docs" / "awf-plans" / "ws_resumed.md"
+    near_miss_path = worktree / "docs" / "awf-plans" / "ws_resumef.md"
+    required_path.parent.mkdir(parents=True, exist_ok=True)
+    required_path.write_text("# Stale prior-run plan\n", encoding="utf-8")
+
+    class _DeleteThenTypoPlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                required_path.unlink()
+                near_miss_path.write_text(
+                    "# Plan\n\nReplanned after deleting the stale artifact.\n",
+                    encoding="utf-8",
+                )
+            return result
+
+    runner = FakeCommandRunner()
+    _queue_planning_success_with_conformance_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _DeleteThenTypoPlanAdapter(
+        "plan written",
+        "implementation",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_resumed", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-resumed-near-miss"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 3
+    assert required_path.read_text(encoding="utf-8") == (
+        "# Plan\n\nReplanned after deleting the stale artifact.\n"
+    )
+    assert not near_miss_path.exists()
+
+
+@pytest.mark.unit
 async def test_planning_required_skips_digest_fallback_when_git_reports_plan_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

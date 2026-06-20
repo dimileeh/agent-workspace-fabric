@@ -244,7 +244,7 @@ def _recover_plan_artifact_near_miss(
     worktree_path: Path,
     workspace_id: str,
     required_plan_path: Path,
-    required_plan_digest_before: str | None,
+    required_plan_digest_after: str | None,
     dirty_paths_before_planning: Sequence[Path],
     changed_paths_during_planning: Sequence[Path],
     candidates_before: Mapping[Path, str],
@@ -297,7 +297,13 @@ def _recover_plan_artifact_near_miss(
             item["offending_paths"] = changed_path_strings[:20]
         return False, evidence
 
-    if required_plan_digest_before is not None:
+    # Key this guard on the required path's *current* presence, not on a stale
+    # pre-planning snapshot. A preserved/resumed workspace can carry a plan
+    # digest from a prior run; if the planning agent deletes that plan and only
+    # a typo sibling remains, the required path is genuinely gone and recovery
+    # must proceed. Refuse only when the required plan still exists after
+    # planning (``digest_after is not None``) so we never clobber a live plan.
+    if required_plan_digest_after is not None:
         return (
             False,
             [
@@ -808,7 +814,7 @@ async def _run_agent_task_with_optional_planning(
                 worktree_path=worktree_path,
                 workspace_id=workspace.id,
                 required_plan_path=plan_path,
-                required_plan_digest_before=plan_file_digest_before,
+                required_plan_digest_after=plan_file_digest_after,
                 dirty_paths_before_planning=sorted(before_plan),
                 changed_paths_during_planning=sorted(after_plan - before_plan),
                 candidates_before=plan_candidates_before,
