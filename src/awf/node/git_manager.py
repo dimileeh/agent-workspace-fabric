@@ -243,13 +243,26 @@ async def _repair_hooks_path_config(
     if not disallowed_hooks_paths:
         return False
 
+    repaired_included_origins: set[Path] = set()
     for value in dict.fromkeys(disallowed_hooks_paths):
         if not _paths_match(value.origin_path, config_path):
-            if value.origin_path is None or not await _unset_matching_include_path(
+            if value.origin_path is None:
+                raise GitOperationError(
+                    operation=f"{operation_prefix}.hooks_path_include_repair",
+                    returncode=1,
+                    stdout=value.hooks_path,
+                    stderr="included core.hooksPath origin is not directly included",
+                    reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+                )
+
+            included_origin = value.origin_path.resolve()
+            if included_origin in repaired_included_origins:
+                continue
+            if not await _unset_matching_include_path(
                 git_args=git_args,
                 config_scope_args=config_scope_args,
                 config_path=config_path,
-                included_origin=value.origin_path,
+                included_origin=included_origin,
                 operation_prefix=operation_prefix,
             ):
                 raise GitOperationError(
@@ -259,6 +272,7 @@ async def _repair_hooks_path_config(
                     stderr="included core.hooksPath origin is not directly included",
                     reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
                 )
+            repaired_included_origins.add(included_origin)
             continue
 
         unset_returncode, unset_stdout, unset_stderr = await _run_git_config(
