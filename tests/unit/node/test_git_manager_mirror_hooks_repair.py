@@ -822,3 +822,190 @@ class TestRepairMirrorHooksPath:
         result = await git_module.repair_mirror_hooks_path(mirror)
 
         assert result is False
+
+    @pytest.mark.unit
+    async def test_repair_fails_when_poisoned_hooks_origin_is_unmapped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "mirror.git" / "config"
+        config_path.parent.mkdir()
+        probe_value = git_module._HooksPathConfigValue(  # noqa: SLF001
+            hooks_path="/dev/null",
+            origin_path=None,
+        )
+
+        async def _probe_hooks_path_config(**_kwargs: object) -> tuple[object, ...]:
+            return (probe_value,)
+
+        monkeypatch.setattr(git_module, "_probe_hooks_path_config", _probe_hooks_path_config)
+
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module._repair_hooks_path_config(  # noqa: SLF001
+                git_args=("--git-dir", str(config_path.parent)),
+                config_scope_args=("--local",),
+                config_path=config_path,
+                operation_prefix="mirror",
+            )
+
+        assert raised.value.operation == "mirror.hooks_path_include_repair"
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert raised.value.stdout == "/dev/null"
+        assert "origin is not directly included" in raised.value.stderr
+
+    @pytest.mark.unit
+    async def test_repair_fails_when_include_path_probe_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "mirror.git" / "config"
+        config_path.parent.mkdir()
+
+        async def _run_git_config(**_kwargs: object) -> tuple[int, str, str]:
+            return 2, "", "config read failed"
+
+        monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
+
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module._unset_matching_include_path(  # noqa: SLF001
+                git_args=("--git-dir", str(config_path.parent)),
+                config_scope_args=("--local",),
+                config_path=config_path,
+                included_origin=tmp_path / "included-hooks.conf",
+                operation_prefix="mirror",
+            )
+
+        assert raised.value.operation == "mirror.hooks_path_include_probe"
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert raised.value.returncode == 2
+        assert raised.value.stderr == "config read failed"
+
+    @pytest.mark.unit
+    async def test_repair_fails_when_includeif_probe_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "mirror.git" / "config"
+        config_path.parent.mkdir()
+        calls: list[tuple[str, ...]] = []
+
+        async def _run_git_config(
+            *, args: tuple[str, ...], **_kwargs: object
+        ) -> tuple[int, str, str]:
+            calls.append(args)
+            if args == ("--get-all", "include.path"):
+                return 1, "", ""
+            return 2, "", "includeIf probe failed"
+
+        monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
+
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module._unset_matching_include_path(  # noqa: SLF001
+                git_args=("--git-dir", str(config_path.parent)),
+                config_scope_args=("--local",),
+                config_path=config_path,
+                included_origin=tmp_path / "included-hooks.conf",
+                operation_prefix="mirror",
+            )
+
+        assert calls == [
+            ("--get-all", "include.path"),
+            ("--get-regexp", r"^includeIf\..*\.path$"),
+        ]
+        assert raised.value.operation == "mirror.hooks_path_include_probe"
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert raised.value.returncode == 2
+        assert raised.value.stderr == "includeIf probe failed"
+
+    @pytest.mark.unit
+    async def test_repair_ignores_malformed_includeif_probe_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "mirror.git" / "config"
+        config_path.parent.mkdir()
+
+        async def _run_git_config(
+            *, args: tuple[str, ...], **_kwargs: object
+        ) -> tuple[int, str, str]:
+            if args == ("--get-all", "include.path"):
+                return 1, "", ""
+            if args == ("--get-regexp", r"^includeIf\..*\.path$"):
+                return 0, "includeIf.gitdir:bad.path\n", ""
+            raise AssertionError(f"unexpected git config args: {args!r}")
+
+        monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
+
+        removed = await git_module._unset_matching_include_path(  # noqa: SLF001
+            git_args=("--git-dir", str(config_path.parent)),
+            config_scope_args=("--local",),
+            config_path=config_path,
+            included_origin=tmp_path / "included-hooks.conf",
+            operation_prefix="mirror",
+        )
+
+        assert removed is False
+
+    @pytest.mark.unit
+    async def test_repair_fails_when_matching_include_unset_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "mirror.git" / "config"
+        config_path.parent.mkdir()
+        included_config = tmp_path / "included-hooks.conf"
+        included_config.write_text("[core]\n\thooksPath = /dev/null\n", encoding="utf-8")
+
+        async def _run_git_config(
+            *, args: tuple[str, ...], **_kwargs: object
+        ) -> tuple[int, str, str]:
+            if args == ("--get-all", "include.path"):
+                return 0, f"not-it.conf\n{included_config}\n", ""
+            if args == ("--get-regexp", r"^includeIf\..*\.path$"):
+                return 1, "", ""
+            assert args[0] == "--unset-all"
+            return 2, "", "include unset failed"
+
+        monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
+
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module._unset_matching_include_path(  # noqa: SLF001
+                git_args=("--git-dir", str(config_path.parent)),
+                config_scope_args=("--local",),
+                config_path=config_path,
+                included_origin=included_config,
+                operation_prefix="mirror",
+            )
+
+        assert raised.value.operation == "mirror.hooks_path_include_repair"
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert raised.value.returncode == 2
+        assert raised.value.stderr == "include unset failed"
+
+    @pytest.mark.unit
+    async def test_repair_fails_when_hooks_path_unset_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "mirror.git" / "config"
+        config_path.parent.mkdir()
+        probe_value = git_module._HooksPathConfigValue(  # noqa: SLF001
+            hooks_path="/dev/null",
+            origin_path=config_path,
+        )
+
+        async def _probe_hooks_path_config(**_kwargs: object) -> tuple[object, ...]:
+            return (probe_value,)
+
+        async def _run_git_config(**_kwargs: object) -> tuple[int, str, str]:
+            return 2, "", "hooksPath unset failed"
+
+        monkeypatch.setattr(git_module, "_probe_hooks_path_config", _probe_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
+
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module._repair_hooks_path_config(  # noqa: SLF001
+                git_args=("--git-dir", str(config_path.parent)),
+                config_scope_args=("--local",),
+                config_path=config_path,
+                operation_prefix="mirror",
+            )
+
+        assert raised.value.operation == "mirror.hooks_path_repair"
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert raised.value.returncode == 2
+        assert raised.value.stderr == "hooksPath unset failed"

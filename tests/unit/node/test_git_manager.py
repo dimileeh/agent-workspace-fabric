@@ -769,6 +769,112 @@ def test_mirror_path_for_worktree_handles_commondir_and_unreadable_commondir(
     assert git_manager.mirror_path_for_worktree(no_git) is None
 
 
+@pytest.mark.unit
+def test_linked_worktree_path_from_git_dir_rejects_invalid_back_reference(
+    tmp_path: Path,
+) -> None:
+    linked_git_dir = tmp_path / "mirror.git" / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    (linked_git_dir / "gitdir").write_text("\n", encoding="utf-8")
+
+    with pytest.raises(GitOperationError) as raised:
+        git_manager._linked_worktree_path_from_git_dir(linked_git_dir)  # noqa: SLF001
+
+    assert raised.value.operation == "worktree.hooks_path_probe"
+    assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    assert "empty linked-worktree gitdir back-reference" in raised.value.stderr
+
+
+@pytest.mark.unit
+def test_linked_worktree_path_from_git_dir_resolves_relative_back_reference(
+    tmp_path: Path,
+) -> None:
+    linked_git_dir = tmp_path / "mirror.git" / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    git_file = worktree / ".git"
+    relative_git_file = Path("../../../worktree/.git")
+    (linked_git_dir / "gitdir").write_text(f"{relative_git_file}\n", encoding="utf-8")
+
+    resolved = git_manager._linked_worktree_path_from_git_dir(linked_git_dir)  # noqa: SLF001
+
+    assert resolved == git_file.resolve().parent
+
+
+@pytest.mark.unit
+def test_linked_worktree_path_from_git_dir_wraps_metadata_read_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    linked_git_dir = tmp_path / "mirror.git" / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    metadata_gitdir = linked_git_dir / "gitdir"
+    metadata_gitdir.write_text("/tmp/worktree/.git\n", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def _raise_for_metadata(path: Path, *args: object, **kwargs: object) -> str:
+        if path == metadata_gitdir:
+            raise OSError("permission denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_metadata)
+
+    with pytest.raises(GitOperationError) as raised:
+        git_manager._linked_worktree_path_from_git_dir(linked_git_dir)  # noqa: SLF001
+
+    assert raised.value.operation == "worktree.hooks_path_probe"
+    assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    assert "cannot read linked-worktree gitdir back-reference" in raised.value.stderr
+
+
+@pytest.mark.unit
+def test_linked_worktree_path_from_git_dir_wraps_resolution_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    linked_git_dir = tmp_path / "mirror.git" / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    (linked_git_dir / "gitdir").write_text("../../../worktree/.git\n", encoding="utf-8")
+    original_resolve = Path.resolve
+
+    def _raise_for_resolved_git_file(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == linked_git_dir / "../../../worktree/.git":
+            raise RuntimeError("symlink loop")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _raise_for_resolved_git_file)
+
+    with pytest.raises(GitOperationError) as raised:
+        git_manager._linked_worktree_path_from_git_dir(linked_git_dir)  # noqa: SLF001
+
+    assert raised.value.operation == "worktree.hooks_path_probe"
+    assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    assert "cannot resolve linked-worktree gitdir back-reference" in raised.value.stderr
+
+
+@pytest.mark.unit
+def test_hooks_path_config_helpers_normalize_git_config_edges(tmp_path: Path) -> None:
+    config_path = tmp_path / "mirror.git" / "config"
+    relative_include = "hooks.conf"
+
+    parsed = git_manager._parse_hooks_path_config_values(  # noqa: SLF001
+        f"file:{config_path}\0/dev/null"
+    )
+
+    assert parsed == (
+        git_manager._HooksPathConfigValue("/dev/null", config_path),  # noqa: SLF001
+    )
+    assert git_manager._config_origin_path("command line:") is None  # noqa: SLF001
+    assert git_manager._paths_match(None, config_path) is False  # noqa: SLF001
+    assert (
+        git_manager._resolve_git_include_path(relative_include, config_path)
+        == (  # noqa: SLF001
+            config_path.parent / relative_include
+        ).resolve()
+    )
+
+
 class TestAgentWorktreeWritable:
     """Regression coverage for the local UID/GID strategy.
 
@@ -849,6 +955,44 @@ class TestAgentWorktreeWritable:
         assert mirror / "refs" in target_paths
         assert mirror / "objects" in target_paths
         assert mirror / "worktrees" in target_paths
+
+    @pytest.mark.unit
+    def test_agent_writable_targets_skips_linked_git_dir_when_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        worktree = tmp_path / "wt"
+        mirror.mkdir()
+        worktree.mkdir()
+        monkeypatch.setattr(git_manager, "linked_worktree_git_dir", lambda _worktree: None)
+
+        targets = _agent_writable_git_targets(layout_mirror=mirror, worktree_path=worktree)
+
+        assert targets == (
+            git_manager._ChownTarget(worktree, recursive=True),  # noqa: SLF001
+            git_manager._ChownTarget(mirror, recursive=False),  # noqa: SLF001
+        )
+
+    @pytest.mark.unit
+    def test_agent_writable_targets_uses_explicit_linked_git_dir(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "mirror.git"
+        worktree = tmp_path / "wt"
+        linked_git_dir = tmp_path / "linked.git"
+        mirror.mkdir()
+        worktree.mkdir()
+        linked_git_dir.mkdir()
+
+        targets = _agent_writable_git_targets(
+            layout_mirror=mirror,
+            worktree_path=worktree,
+            linked_git_dir=linked_git_dir,
+        )
+
+        assert targets == (
+            git_manager._ChownTarget(worktree, recursive=True),  # noqa: SLF001
+            git_manager._ChownTarget(linked_git_dir, recursive=True),  # noqa: SLF001
+            git_manager._ChownTarget(mirror, recursive=False),  # noqa: SLF001
+        )
 
     @pytest.mark.unit
     async def test_prepared_worktree_supports_agent_git_status_add_commit(

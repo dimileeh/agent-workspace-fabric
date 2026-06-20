@@ -234,6 +234,67 @@ def test_validation_run_command_records_include_alembic_policy_before_healthchec
     }
 
 
+@pytest.mark.unit
+def test_validation_run_command_records_delay_healthchecks_until_validate_phase() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-db-health-coverage",
+            "phases": {
+                "post_agent": ["ruff check"],
+                "validate": ["pytest -q"],
+            },
+            "database": {"pre_validation_refresh": ["python refresh.py"]},
+            "validation": {
+                "strategy": {"final_gate": "coverage"},
+                "healthchecks": [{"name": "api", "command": "curl -fsS localhost/health"}],
+                "coverage": {"command": "pytest --cov=awf"},
+            },
+        }
+    )
+
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("post_agent", "validate"),
+        run_healthchecks=True,
+        coverage_evidence_status="reused",
+        coverage_evidence_reason_code="fresh",
+    )
+
+    assert [(record["phase"], record["command"]) for record in records] == [
+        ("post_agent", "ruff check"),
+        ("db_refresh", "python refresh.py"),
+        ("healthcheck", "curl -fsS localhost/health"),
+        ("validate", "pytest -q"),
+        ("coverage", "pytest --cov=awf"),
+    ]
+    assert records[1]["database_hook"] is True
+    assert records[1]["hook_kind"] == "pre_validation_refresh"
+    assert records[1]["timeout_seconds"] is None
+    assert records[4]["evidence_status"] == "reused"
+    assert records[4]["evidence_reason_code"] == "fresh"
+
+    refresh_only_profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-db-health-trailing",
+            "database": {"pre_validation_refresh": ["python refresh.py"]},
+            "validation": {
+                "healthchecks": [{"name": "api", "command": "curl -fsS localhost/health"}],
+            },
+        }
+    )
+
+    trailing_records = _validation_run_command_records(
+        profile=refresh_only_profile,
+        phase_names=("validate",),
+        run_healthchecks=True,
+    )
+
+    assert [(record["phase"], record["command"]) for record in trailing_records] == [
+        ("db_refresh", "python refresh.py"),
+        ("healthcheck", "curl -fsS localhost/health"),
+    ]
+
+
 def test_validation_run_command_records_skips_alembic_policy_if_validation_alembic_is_none() -> (
     None
 ):
