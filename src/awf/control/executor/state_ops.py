@@ -67,6 +67,7 @@ from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
 from awf.runtime.validation import ValidationCommandResult, ValidationCoverageResult
 from awf.service.provider_recovery import (
     _policy_model,
+    _record_provider_circuit_breaker,
     in_place_recovery_task_policy,
     should_recover_in_place,
 )
@@ -677,6 +678,18 @@ async def enter_recovering_for_provider_failure(
         transitioned.task_policy = in_place_recovery_task_policy(
             transitioned.task_policy,
             decision=decision,
+        )
+        # Count this capacity failure against the provider/model circuit breaker —
+        # the SAME record the terminal ``_prepare_provider_recovery`` path makes
+        # (#612). Without it, a failure diverted into this in-place pause is skipped
+        # by the breaker, so a default threshold of 2 never opens and the scheduler
+        # keeps dispatching to a saturated provider/model. Self-guards to capacity
+        # failures with complete metadata.
+        await _record_provider_circuit_breaker(
+            session,
+            transitioned,
+            decision.metadata,
+            now=decision_now,
         )
         # A provider failure mid-recovery (a validate/rebase recovery fix pass) must
         # not leave the recovery Operation active — mirror the blocked enter so a

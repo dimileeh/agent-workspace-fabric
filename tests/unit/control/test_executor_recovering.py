@@ -23,7 +23,7 @@ from awf.control.executor.quality_gates import _PostAgentCommitStepError
 from awf.control.executor.state_ops import ProviderFailureDivert
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ProviderModelCircuitBreakerRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.provider_recovery import provider_cooldown_not_before
 from tests.postgres import postgres_test_engine
@@ -106,6 +106,75 @@ async def test_enter_recovering_diverts_retryable_failure_with_budget(
         # The cooldown deadline is persisted for the worker resume gate.
         assert provider_cooldown_not_before(ws.task_policy) is not None
         assert ws.task_policy["provider_recovery_state"]["retry_attempt_number"] == 1
+
+
+_CAPACITY_DETAILS = {"provider": "openai", "model": "gpt-5"}
+
+
+@pytest.mark.unit
+async def test_enter_recovering_capacity_failure_records_circuit_breaker(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A capacity failure diverted into the in-place ``recovering`` pause must still
+    # count toward the provider/model circuit breaker — the same breaker the
+    # terminal ``_prepare_provider_recovery`` path records. Without this the first
+    # capacity failure (now paused instead of failed) is skipped, so a threshold
+    # of 2 never opens and the scheduler keeps dispatching to the saturated model.
+    ws_id = await _seed_running(factory, task_policy={"agent_model": "gpt-5"})
+    executor = _make_executor(fake, factory, tmp_path)
+
+    diverted = await executor.enter_recovering_for_provider_failure(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        message="model capacity exhausted; retry later",
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        details=_CAPACITY_DETAILS,
+        execution_owner_id="worker-A",
+    )
+
+    assert diverted is ProviderFailureDivert.paused
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.recovering.value
+        breaker = await ProviderModelCircuitBreakerRepository(s).get(
+            provider="openai",
+            model="gpt-5",
+        )
+        assert breaker is not None
+        assert breaker.failure_count == 1
+        assert breaker.last_reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+
+
+@pytest.mark.unit
+async def test_enter_recovering_non_capacity_failure_skips_circuit_breaker(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A non-capacity retryable failure (idle timeout) still pauses in place, but it
+    # must NOT touch the capacity circuit breaker — only capacity exhaustion counts.
+    ws_id = await _seed_running(factory, task_policy={"agent_model": "gpt-5"})
+    executor = _make_executor(fake, factory, tmp_path)
+
+    diverted = await executor.enter_recovering_for_provider_failure(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        message="idle timeout exceeded after 600s",
+        reason_code="AGENT_IDLE_TIMEOUT",
+        details=_IDLE_DETAILS,
+        execution_owner_id="worker-A",
+    )
+
+    assert diverted is ProviderFailureDivert.paused
+    async with factory() as s:
+        breaker = await ProviderModelCircuitBreakerRepository(s).get(
+            provider="openai",
+            model="gpt-5",
+        )
+        assert breaker is None
 
 
 @pytest.mark.unit
