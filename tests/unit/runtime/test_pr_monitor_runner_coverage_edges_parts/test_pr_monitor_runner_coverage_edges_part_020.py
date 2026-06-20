@@ -1396,7 +1396,7 @@ async def test_ci_fix_catches_head_object_missing_error(
 
     async def _head_object_missing(**_kwargs: object) -> None:
         raise _MonitorHeadObjectMissingError(
-            "HEAD_OBJECT_MISSING_UNRECOVERABLE",
+            "HEAD_OBJECT_MISSING_CI_REPAIR_CUSTOM",
             "HEAD object missing for workspace test and recovery failed",
         )
 
@@ -1418,7 +1418,7 @@ async def test_ci_fix_catches_head_object_missing_error(
     assert result.failed
     assert result.pushed is False
     assert result.returncode == 1
-    assert result.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert result.reason_code == "HEAD_OBJECT_MISSING_CI_REPAIR_CUSTOM"
     assert "HEAD object missing" in result.stderr
 
 
