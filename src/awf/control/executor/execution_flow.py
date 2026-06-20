@@ -255,6 +255,7 @@ async def execute(
     async def _repair_mirror_hooks_path_or_mark_failed(
         *,
         failure_stage: str,
+        failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
         before_mark_failed: Any = None,
     ) -> bool:
         return await repair_mirror_hooks_path_or_mark_failed(
@@ -264,6 +265,7 @@ async def execute(
             repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
             recovery_active=recovery_active,
             failure_stage=failure_stage,
+            failure_from_status=failure_from_status,
             before_mark_failed=before_mark_failed,
         )
 
@@ -1315,6 +1317,12 @@ async def execute(
             failure_reason=FailureReason.infrastructure_failure,
             message=f"pre-push policy check failed: {exc!r}"[:2000],
         )
+        return
+
+    if not await _repair_mirror_hooks_path_or_mark_failed(
+        failure_stage="before PR push",
+        failure_from_status=WorkspaceStatus.validating,
+    ):
         return
 
     # PR creation is forge-neutral: ``push_and_open`` does a plain ``git push``

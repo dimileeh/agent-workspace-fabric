@@ -23,6 +23,7 @@ async def repair_mirror_hooks_path_or_mark_failed(
     repair_mirror_hooks_path_fn: Callable[[Path], Awaitable[bool]],
     recovery_active: bool,
     failure_stage: str,
+    failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
     before_mark_failed: Callable[[], None] | None = None,
 ) -> bool:
     if mirror_path is None:
@@ -59,7 +60,7 @@ async def repair_mirror_hooks_path_or_mark_failed(
             )
         await executor._mark_failed(
             workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
+            from_status=failure_from_status,
             failure_reason=FailureReason.infrastructure_failure,
             message=failure_message,
             reason_code=mirror_repair_failure_reason_code,
