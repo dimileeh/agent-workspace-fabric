@@ -154,8 +154,8 @@ async def _unset_matching_include_path(
         args=("--get-all", "include.path"),
     )
     if returncode == 1:
-        return False
-    if returncode != 0:
+        stdout = ""
+    elif returncode != 0:
         raise GitOperationError(
             operation=f"{operation_prefix}.hooks_path_include_probe",
             returncode=returncode,
@@ -164,8 +164,28 @@ async def _unset_matching_include_path(
             reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
         )
 
+    include_paths = [("include.path", include_path) for include_path in stdout.splitlines()]
+    returncode, stdout, stderr = await _run_git_config(
+        git_args=git_args,
+        config_scope_args=config_scope_args,
+        args=("--get-regexp", r"^includeIf\..*\.path$"),
+    )
+    if returncode not in (0, 1):
+        raise GitOperationError(
+            operation=f"{operation_prefix}.hooks_path_include_probe",
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+    if returncode == 0:
+        for line in stdout.splitlines():
+            key, separator, include_path = line.partition(" ")
+            if separator:
+                include_paths.append((key, include_path))
+
     removed = False
-    for include_path in stdout.splitlines():
+    for include_key, include_path in include_paths:
         if _resolve_git_include_path(include_path, config_path) != included_origin.resolve():
             continue
         unset_returncode, unset_stdout, unset_stderr = await _run_git_config(
@@ -173,7 +193,7 @@ async def _unset_matching_include_path(
             config_scope_args=config_scope_args,
             args=(
                 "--unset-all",
-                "include.path",
+                include_key,
                 f"^{re.escape(include_path)}$",
             ),
         )
@@ -898,6 +918,41 @@ def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
     return git_dir
 
 
+def _linked_worktree_path_from_git_dir(linked_git_dir: Path) -> Path:
+    """Return the worktree path from Git's linked-worktree back-reference."""
+    metadata_gitdir = linked_git_dir / "gitdir"
+    try:
+        raw_gitdir = metadata_gitdir.read_text(encoding="utf-8").strip()
+        if not raw_gitdir:
+            raise GitOperationError(
+                operation="worktree.hooks_path_probe",
+                returncode=1,
+                stdout="",
+                stderr=f"empty linked-worktree gitdir back-reference at {metadata_gitdir}",
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+        git_file = Path(raw_gitdir)
+        if not git_file.is_absolute():
+            git_file = linked_git_dir / git_file
+        return git_file.resolve().parent
+    except OSError as exc:
+        raise GitOperationError(
+            operation="worktree.hooks_path_probe",
+            returncode=1,
+            stdout="",
+            stderr=f"cannot read linked-worktree gitdir back-reference at {metadata_gitdir}",
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        ) from exc
+    except RuntimeError as exc:
+        raise GitOperationError(
+            operation="worktree.hooks_path_probe",
+            returncode=1,
+            stdout="",
+            stderr=f"cannot resolve linked-worktree gitdir back-reference at {metadata_gitdir}",
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        ) from exc
+
+
 def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> None:
     seen: set[tuple[Path, bool, bool]] = set()
     for target in targets:
@@ -929,10 +984,11 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
 
     worktrees_dir = mirror_path / "worktrees"
     for config_path in sorted(worktrees_dir.glob("*/config.worktree")):
+        worktree_path = _linked_worktree_path_from_git_dir(config_path.parent)
         repaired = (
             await _repair_hooks_path_config(
-                git_args=(),
-                config_scope_args=("--file", str(config_path)),
+                git_args=("-C", str(worktree_path)),
+                config_scope_args=("--worktree",),
                 config_path=config_path,
                 operation_prefix="worktree",
             )
