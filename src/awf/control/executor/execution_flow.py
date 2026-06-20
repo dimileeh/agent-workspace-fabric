@@ -282,7 +282,10 @@ async def execute(
     ) -> bool:
         if await verify_head_object_exists(worktree_path):
             return True
-        recovered = await self._recover_missing_git_head_or_mark_failed(
+        recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
+        if recover_missing_head is None:
+            return False
+        recovered = await recover_missing_head(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             base_commit=ws.base_commit,
@@ -300,7 +303,10 @@ async def execute(
     ) -> bool:
         if await verify_head_object_exists(worktree_path):
             return True
-        if not await self._recover_missing_git_head_or_mark_failed(
+        recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
+        if recover_missing_head is None:
+            return False
+        if not await recover_missing_head(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             base_commit=ws.base_commit,
