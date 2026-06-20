@@ -952,6 +952,7 @@ class TestMiscMonitorHelpers:
         mirror_path = tmp_path / "mirror.git"
         fake = FakeCommandRunner()
         fake.queue_result(returncode=1, stderr="missing")
+        fake.queue_result(returncode=0)
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
         captured_recovery_heads: list[str] = []
@@ -1013,9 +1014,94 @@ class TestMiscMonitorHelpers:
             "-e",
             f"{stale_operation_start_head}^{{commit}}",
         ]
+        assert fake.calls[1].args[-3:] == ["cat-file", "-e", f"{candidate_head}^{{commit}}"]
         assert fake.calls[0].env is not None
         assert "GIT_OBJECT_DIRECTORY" not in fake.calls[0].env
         assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[0].env
+        assert fake.calls[1].env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in fake.calls[1].env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[1].env
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_mirror_rejects_unverified_candidate_head(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A mirror-missing candidate SHA must not be used for filesystem recovery."""
+        workspace_id = "ws_missing_head_mirror_unverified"
+        stale_operation_start_head = "1" * 40
+        mirror_path = tmp_path / "mirror.git"
+        fake = FakeCommandRunner()
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+        checked_anchors: list[str] = []
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _repair_mirror_hooks_path(_mirror_path: Path) -> None:
+            return None
+
+        async def _open_merge_candidate_head_sha(*_args: object) -> str:
+            return stale_operation_start_head
+
+        async def _mirror_commit_object_exists(
+            _self: object,
+            _mirror_path: Path,
+            commit_sha: str,
+        ) -> bool:
+            checked_anchors.append(commit_sha)
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            raise AssertionError("unverified mirror candidate must not be recovered")
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "mirror_path_for_worktree",
+            lambda _worktree_path: mirror_path,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_open_merge_candidate_head_sha",
+            _open_merge_candidate_head_sha,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_mirror_commit_object_exists",
+            _mirror_commit_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+
+        with pytest.raises(_MonitorHeadObjectMissingError):
+            await runner._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message="awf: monitor dirty worktree",
+                operation_start_head=stale_operation_start_head,
+                task_tag=None,
+            )
+
+        assert checked_anchors == [stale_operation_start_head]
+        assert fake.calls == []
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_no_mirror_rejects_unverified_candidate_head(

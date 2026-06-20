@@ -801,7 +801,27 @@ async def _commit_dirty_worktree(
         )
         recovery_head = operation_start_head
         candidate_head: str | None = None
+        attempted_mirror_recovery_heads: set[str] = set()
         attempted_worktree_recovery_heads: set[str] = set()
+
+        async def verified_mirror_recovery_head(
+            recovery_head_sha: str,
+            *,
+            source: str,
+        ) -> str | None:
+            attempted_mirror_recovery_heads.add(recovery_head_sha)
+            recovery_head_exists = await _mirror_commit_object_exists(
+                self, cast(Path, mirror_path), recovery_head_sha
+            )
+            if recovery_head_exists:
+                return recovery_head_sha
+            _log.warning(
+                "monitor.head_object_missing_recovery_anchor_missing",
+                workspace_id=workspace_id,
+                operation_start_head=recovery_head_sha[:10],
+                recovery_source=source,
+            )
+            return None
 
         async def verified_worktree_recovery_head(
             recovery_head_sha: str,
@@ -823,16 +843,10 @@ async def _commit_dirty_worktree(
             return None
 
         if recovery_head and mirror_path is not None:
-            recovery_head_exists = await _mirror_commit_object_exists(
-                self, mirror_path, recovery_head
+            recovery_head = await verified_mirror_recovery_head(
+                recovery_head,
+                source="operation_start_head",
             )
-            if not recovery_head_exists:
-                _log.warning(
-                    "monitor.head_object_missing_recovery_anchor_missing",
-                    workspace_id=workspace_id,
-                    operation_start_head=recovery_head[:10],
-                )
-                recovery_head = None
         elif recovery_head:
             candidate_head = await _open_merge_candidate_head_sha(self, workspace_id)
             if candidate_head and candidate_head != recovery_head:
@@ -861,6 +875,14 @@ async def _commit_dirty_worktree(
                     recovery_head = None
                 else:
                     recovery_head = await verified_worktree_recovery_head(
+                        recovery_head,
+                        source="candidate",
+                    )
+            elif recovery_head and mirror_path is not None:
+                if recovery_head in attempted_mirror_recovery_heads:
+                    recovery_head = None
+                else:
+                    recovery_head = await verified_mirror_recovery_head(
                         recovery_head,
                         source="candidate",
                     )
