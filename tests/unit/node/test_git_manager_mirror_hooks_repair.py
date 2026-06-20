@@ -175,8 +175,8 @@ class TestRepairMirrorHooksPath:
         async def _run_git_worktree_prune(path: Path) -> None:
             nonlocal prune_calls
             prune_calls += 1
-            # Prune cannot clear metadata that stays unreadable (e.g. a
-            # permission-denied gitdir back-reference of a live worktree).
+            # Prune cannot clear metadata whose gitdir back-reference stays
+            # missing (the empty linked-worktree dir survives the prune).
 
         monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
         monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
@@ -286,6 +286,53 @@ class TestRepairMirrorHooksPath:
             await git_module.repair_mirror_hooks_path(mirror)
 
         assert raised.value is probe_error
+
+    @pytest.mark.unit
+    async def test_unreadable_live_worktree_gitdir_fails_closed_without_prune(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        linked_git_dir = mirror / "worktrees" / "workspace"
+        linked_git_dir.mkdir(parents=True)
+        gitdir_ref = linked_git_dir / "gitdir"
+        gitdir_ref.write_text(str(tmp_path / "live-worktree" / ".git"), encoding="utf-8")
+        prune_calls = 0
+
+        async def _repair_hooks_path_config(**_kwargs: object) -> bool:
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            nonlocal prune_calls
+            prune_calls += 1
+
+        real_read_text = Path.read_text
+
+        def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+            if self == gitdir_ref:
+                raise PermissionError("unable to read gitdir file (Permission denied)")
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+        monkeypatch.setattr(Path, "read_text", _read_text)
+
+        # A permission-denied gitdir back-reference belongs to a live worktree we
+        # merely cannot inspect; it is NOT stale metadata. Pruning it would delete
+        # the live worktree's admin files, so repair must fail closed and never
+        # reach ``git worktree prune``.
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module.repair_mirror_hooks_path(mirror)
+
+        assert prune_calls == 0
+        assert raised.value.operation == "worktree.hooks_path_probe"
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert "cannot access linked-worktree gitdir back-reference" in raised.value.stderr
 
     @pytest.mark.unit
     async def test_removes_include_exposing_poisoned_hooks_path(self, tmp_path: Path) -> None:

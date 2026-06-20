@@ -1000,12 +1000,27 @@ def _linked_worktree_path_from_git_dir(linked_git_dir: Path) -> Path:
         if not git_file.is_absolute():
             git_file = linked_git_dir / git_file
         return git_file.resolve().parent
-    except OSError as exc:
+    except FileNotFoundError as exc:
+        # The back-reference file is gone (ENOENT): the linked worktree was
+        # removed out from under us, i.e. genuinely stale metadata that
+        # ``git worktree prune`` can safely clear.
         raise GitOperationError(
             operation="worktree.hooks_path_probe",
             returncode=1,
             stdout="",
             stderr=f"cannot read linked-worktree gitdir back-reference at {metadata_gitdir}",
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        ) from exc
+    except OSError as exc:
+        # The back-reference exists but is unreadable (e.g. permission denied):
+        # this is a live worktree we merely cannot inspect, not stale metadata.
+        # Surface a non-stale error so repair fails closed instead of pruning —
+        # ``git worktree prune`` would delete the live worktree's admin files.
+        raise GitOperationError(
+            operation="worktree.hooks_path_probe",
+            returncode=1,
+            stdout="",
+            stderr=f"cannot access linked-worktree gitdir back-reference at {metadata_gitdir}",
             reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
         ) from exc
     except RuntimeError as exc:
@@ -1125,11 +1140,12 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
             mirror_path
         )
         if retry_stale_worktree_metadata:
-            # Prune clears dead metadata races, but unreadable linked-worktree
-            # metadata (e.g. a permission-denied gitdir back-reference of a live
-            # worktree) survives. Its ``config.worktree`` was skipped on both
-            # passes, so a poisoned ``core.hooksPath`` may still be present. Fail
-            # closed rather than letting the monitor proceed on an unverified mirror.
+            # Prune clears dead metadata races, but stale metadata that survives
+            # the prune (e.g. an unreadable ``worktrees`` directory, or a missing
+            # gitdir back-reference prune cannot reap) leaves a worktree whose
+            # ``config.worktree`` was skipped on both passes, so a poisoned
+            # ``core.hooksPath`` may still be present. Fail closed rather than
+            # letting the monitor proceed on an unverified mirror.
             raise GitOperationError(
                 operation="mirror.worktree_metadata_stale",
                 returncode=1,
