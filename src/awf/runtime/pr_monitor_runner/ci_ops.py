@@ -294,7 +294,13 @@ async def _run_ci_fix(
                     error_type=repair_exc.__class__.__name__,
                     original_error_type=exc.__class__.__name__,
                 )
-                raise _MonitorMirrorHooksPathRepairFailedError() from repair_exc
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr="could not repair poisoned mirror hooks path",
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                )
         post_agent_err = exc
 
     # The rollback anchor for the provider-recovery ``except`` clause below is

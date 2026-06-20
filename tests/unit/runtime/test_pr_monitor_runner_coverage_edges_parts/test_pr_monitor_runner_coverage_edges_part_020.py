@@ -11,10 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.node.git_manager import GitOperationError
-from awf.runtime.pr_monitor_runner.types import (
-    _MonitorHeadObjectMissingError,
-    _MonitorMirrorHooksPathRepairFailedError,
-)
+from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_REASON
+from awf.runtime.pr_monitor_runner.types import _MonitorHeadObjectMissingError
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -277,21 +275,20 @@ async def test_ci_fix_cleanup_error_repairs_hooks_path(
     from awf.runtime.pr_monitor import CheckFailure
 
     if post_repair_fails:
-        with pytest.raises(_MonitorMirrorHooksPathRepairFailedError) as exc_info:
-            await runner._run_ci_fix(
-                repo=RepoRef(owner="dimileeh", name="aira-web"),
-                pr_number=42,
-                failures=(
-                    CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="test failure"),
-                ),
-                compose_project="proj",
-                compose_file=tmp_path / "compose.yml",
-                workspace_id=workspace_id,
-                remote_branch="awf/ws_test",
-            )
+        result = await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="test failure"),),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch="awf/ws_test",
+        )
 
-        assert str(exc_info.value) == "could not repair poisoned mirror hooks path"
-        assert isinstance(exc_info.value.__cause__, OSError)
+        assert result.failed is True
+        assert result.pushed is False
+        assert result.reason_code == _MIRROR_HOOKS_PATH_POISONED_REASON
+        assert result.stderr == "could not repair poisoned mirror hooks path"
     else:
         with pytest.raises(ComposeExecCleanupError) as exc_info:
             await runner._run_ci_fix(
