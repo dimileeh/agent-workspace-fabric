@@ -1015,6 +1015,7 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
     )
     runner._deps.validation = validation  # type: ignore[assignment]
     refresh_calls: list[dict[str, object]] = []
+    cleanup_calls: list[dict[str, object]] = []
 
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
         return False
@@ -1038,6 +1039,25 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
     async def _refresh_supply_chain_policy_before_push(**kwargs: object) -> str | None:
         refresh_calls.append(dict(kwargs))
         return None
+
+    async def _pre_push_validation_cleanup(
+        self: object,
+        *,
+        worktree_path: Path,
+        restore_ref: str,
+    ) -> ValidationWorktreeCleanup:
+        del self
+        cleanup_calls.append(
+            {
+                "worktree_path": worktree_path,
+                "restore_ref": restore_ref,
+            }
+        )
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=restore_ref,
+        )
 
     monkeypatch.setattr(
         pre_push_validation,
@@ -1064,6 +1084,11 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
         "_refresh_supply_chain_policy_before_push",
         _refresh_supply_chain_policy_before_push,
     )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
 
     result = await pre_push_validation._run_pre_push_validation(
         runner,
@@ -1078,6 +1103,12 @@ async def test_pre_push_validation_recovered_head_diff_failure_blocks_validation
     assert result.passed is False
     assert result.reason_code == "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
     assert "recovered HEAD diff unavailable" in result.message
+    assert cleanup_calls == [
+        {
+            "worktree_path": worktree,
+            "restore_ref": recovery_base,
+        }
+    ]
     assert refresh_calls == []
     assert validation.calls == []
 

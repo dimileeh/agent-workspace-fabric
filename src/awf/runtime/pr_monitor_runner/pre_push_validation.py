@@ -808,6 +808,11 @@ async def _run_pre_push_validation(
                     reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
                     error=repr(exc),
                 )
+                await _pre_push_validation_cleanup(
+                    self,
+                    worktree_path=worktree_path,
+                    restore_ref=recovery_head,
+                )
                 return _PrePushValidationResult(
                     passed=False,
                     validation_run_id=None,
@@ -857,6 +862,11 @@ async def _run_pre_push_validation(
                     recovered_head=recovered[:10],
                     reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
                     error=repr(exc),
+                )
+                await _pre_push_validation_cleanup(
+                    self,
+                    worktree_path=worktree_path,
+                    restore_ref=recovery_head,
                 )
                 return _PrePushValidationResult(
                     passed=False,

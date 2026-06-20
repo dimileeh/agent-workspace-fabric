@@ -13,6 +13,7 @@ from awf.control.quality_gates import QualityGateViolation
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor_runner import pre_push_validation
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -69,6 +70,7 @@ async def test_pre_push_validation_recovered_head_committed_diff_error_blocks_va
         worktrees_root=tmp_path / "worktrees",
     )
     runner._deps.validation = validation  # type: ignore[assignment]
+    cleanup_calls: list[dict[str, object]] = []
 
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
         return False
@@ -98,6 +100,25 @@ async def test_pre_push_validation_recovered_head_committed_diff_error_blocks_va
     ) -> list[QualityGateViolation]:
         del args, kwargs
         raise ProtectedScopeDiffError("committed diff unavailable")
+
+    async def _pre_push_validation_cleanup(
+        self: object,
+        *,
+        worktree_path: Path,
+        restore_ref: str,
+    ) -> ValidationWorktreeCleanup:
+        del self
+        cleanup_calls.append(
+            {
+                "worktree_path": worktree_path,
+                "restore_ref": restore_ref,
+            }
+        )
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=restore_ref,
+        )
 
     monkeypatch.setattr(
         pre_push_validation,
@@ -129,6 +150,11 @@ async def test_pre_push_validation_recovered_head_committed_diff_error_blocks_va
         "_protected_scope_violations_for_recovered_commit",
         _protected_scope_violations_for_recovered_commit,
     )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
 
     result = await pre_push_validation._run_pre_push_validation(
         runner,
@@ -144,4 +170,10 @@ async def test_pre_push_validation_recovered_head_committed_diff_error_blocks_va
     assert result.workspace_head_sha == recovered_head
     assert result.reason_code == "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
     assert "recovered HEAD diff unavailable" in result.message
+    assert cleanup_calls == [
+        {
+            "worktree_path": worktree,
+            "restore_ref": recovery_base,
+        }
+    ]
     assert validation.calls == []
