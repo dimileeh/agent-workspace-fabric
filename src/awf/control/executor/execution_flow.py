@@ -1,7 +1,4 @@
-"""WorkspaceExecutor execution flow.
-
-Mechanically extracted from the original orchestrator; behavior is unchanged.
-"""
+"""WorkspaceExecutor execution flow."""
 
 from __future__ import annotations
 
@@ -16,9 +13,7 @@ from awf.adapters.base import (
     AgentRunError,
     get_adapter,
 )
-from awf.common.command_evidence import (
-    append_command_evidence,
-)
+from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
