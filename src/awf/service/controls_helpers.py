@@ -788,4 +788,10 @@ def _is_active(status_value: WorkspaceStatus) -> bool:
         # while the row stays ``blocked`` pointing at removed resources, and
         # ``blocked`` cannot transition directly to ``destroying``.
         WorkspaceStatus.blocked,
+        # ``recovering`` is the auto-healing provider-retry pause (#612) — the
+        # same kind of non-terminal hold (warm stack + worktree + execution
+        # claim) that also cannot transition directly to ``destroying``. It must
+        # classify as active for the identical reason, so stop/destroy route it
+        # through ``cancelled`` and the force guard applies.
+        WorkspaceStatus.recovering,
     }

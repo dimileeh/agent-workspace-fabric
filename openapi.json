@@ -11160,6 +11160,10 @@
             "title": "Ready",
             "type": "integer"
           },
+          "recovering": {
+            "title": "Recovering",
+            "type": "integer"
+          },
           "requested": {
             "title": "Requested",
             "type": "integer"
@@ -11184,6 +11188,7 @@
           "pushing",
           "monitoring_pr",
           "blocked",
+          "recovering",
           "destroying",
           "completed",
           "failed",
@@ -11314,6 +11319,7 @@
           "pushing",
           "monitoring_pr",
           "blocked",
+          "recovering",
           "completed",
           "failed",
           "cancelled",

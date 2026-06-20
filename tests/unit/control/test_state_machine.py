@@ -40,6 +40,10 @@ class TestValidTransitions:
             (WorkspaceStatus.running, WorkspaceStatus.validating),
             (WorkspaceStatus.running, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.running, WorkspaceStatus.blocked),
+            # A transient provider failure mid-run diverts into the auto-healing
+            # ``recovering`` pause instead of terminally failing (#612 slice 2
+            # wires the divert; the edge is declared here in slice 1).
+            (WorkspaceStatus.running, WorkspaceStatus.recovering),
             (WorkspaceStatus.running, WorkspaceStatus.failed),
             (WorkspaceStatus.running, WorkspaceStatus.cancelled),
             # Worker-restart salvage can rewind an abandoned active phase so
@@ -63,6 +67,14 @@ class TestValidTransitions:
             (WorkspaceStatus.blocked, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.blocked, WorkspaceStatus.failed),
             (WorkspaceStatus.blocked, WorkspaceStatus.cancelled),
+            # A recovering workspace auto-resumes after the provider cooldown
+            # (-> running), re-fails when the retry budget is exhausted or the
+            # failure is non-retryable (-> failed), or an operator cancels it
+            # (-> cancelled). Like blocked, it never jumps straight to
+            # completed/destroying.
+            (WorkspaceStatus.recovering, WorkspaceStatus.running),
+            (WorkspaceStatus.recovering, WorkspaceStatus.failed),
+            (WorkspaceStatus.recovering, WorkspaceStatus.cancelled),
             # A protected-scope violation during the PR monitor pauses the PR
             # owner for an operator decision instead of failing (post-PR block).
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.blocked),
@@ -110,6 +122,20 @@ class TestInvalidTransitions:
             (WorkspaceStatus.blocked, WorkspaceStatus.completed),
             (WorkspaceStatus.blocked, WorkspaceStatus.destroying),
             (WorkspaceStatus.blocked, WorkspaceStatus.blocked),
+            # recovering is non-terminal and auto-healing: it may only resume
+            # (-> running) or terminate (-> failed/cancelled). It cannot jump to
+            # completed/destroying, self-loop, or resume into any phase other
+            # than running. The validating/pushing -> recovering entry edges are
+            # deferred to slice 2 (the only divert fork runs in ``running``), so
+            # they must stay rejected here.
+            (WorkspaceStatus.recovering, WorkspaceStatus.completed),
+            (WorkspaceStatus.recovering, WorkspaceStatus.destroying),
+            (WorkspaceStatus.recovering, WorkspaceStatus.recovering),
+            (WorkspaceStatus.recovering, WorkspaceStatus.monitoring_pr),
+            (WorkspaceStatus.recovering, WorkspaceStatus.validating),
+            (WorkspaceStatus.recovering, WorkspaceStatus.pushing),
+            (WorkspaceStatus.validating, WorkspaceStatus.recovering),
+            (WorkspaceStatus.pushing, WorkspaceStatus.recovering),
             # Cannot self-transition.
             (WorkspaceStatus.running, WorkspaceStatus.running),
             # monitoring_pr exits to completed/failed/cancelled (and now blocked
@@ -159,6 +185,7 @@ class TestTerminalDetection:
             WorkspaceStatus.validating,
             WorkspaceStatus.pushing,
             WorkspaceStatus.blocked,
+            WorkspaceStatus.recovering,
             WorkspaceStatus.completed,  # terminal *for the attempt*, but workspace can still destroy
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
@@ -194,6 +221,7 @@ class TestTerminalDetection:
             WorkspaceStatus.pushing,
             WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.blocked,
+            WorkspaceStatus.recovering,
         ],
     )
     def test_not_callback_terminal(self, state: WorkspaceStatus) -> None:
