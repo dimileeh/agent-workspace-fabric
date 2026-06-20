@@ -1269,6 +1269,11 @@ async def execute(
                     target_head_sha=validate_only_target_head_sha,
                 )
         if not recovery_requires_pr_update:
+            if not await _repair_mirror_hooks_path_or_mark_failed(
+                failure_stage="before recovery skip-push handoff",
+                failure_from_status=WorkspaceStatus.validating,
+            ):
+                return
             if not await self._recheck_status(
                 workspace_id,
                 expected=WorkspaceStatus.validating,

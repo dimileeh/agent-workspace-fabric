@@ -10,9 +10,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.db.enums import WorkspaceStatus
+from awf.control.executor import execution_flow as execution_flow_module
+from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.node.git_manager import GitOperationError
 from awf.runtime.validation import ValidationResult
 from tests.postgres import postgres_test_engine
 from tests.unit.control.test_executor_monitor_recovery_parts.test_executor_monitor_recovery_part_001 import (
@@ -160,4 +162,56 @@ async def test_recovery_skips_push_when_pr_already_exists(
             and event.old_state == WorkspaceStatus.validating.value
             and event.new_state == WorkspaceStatus.completed.value
             for event in events
+        )
+
+
+@pytest.mark.unit
+async def test_recovery_skip_push_repairs_mirror_hooks_before_monitor_handoff(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate-only recovery must fail closed if post-validation hook repair fails."""
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, pr_url="https://github.com/x/y/pull/1"
+    )
+    mirror_path = tmp_path / "mirror.git"
+    repair_calls: list[Path] = []
+
+    async def _repair_mirror_hooks_path(path: Path) -> bool:
+        repair_calls.append(path)
+        if len(repair_calls) == 3:
+            raise GitOperationError(
+                operation="mirror.hooks_path_repair",
+                returncode=128,
+                stdout="",
+                stderr="could not lock config file\n",
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+        return True
+
+    monkeypatch.setattr(
+        execution_flow_module, "mirror_path_for_worktree", lambda _path: mirror_path
+    )
+    monkeypatch.setattr(
+        execution_flow_module, "repair_mirror_hooks_path", _repair_mirror_hooks_path
+    )
+
+    _queue_validation_head(fake, head="d" * 40)
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert repair_calls == [mirror_path, mirror_path, mirror_path]
+    assert _all_push_and_pr_create_calls(fake) == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert (
+            ws.failure_message
+            == "could not repair poisoned mirror hooks path before recovery skip-push handoff"
         )
