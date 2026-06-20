@@ -398,6 +398,7 @@ async def test_commit_dirty_worktree_rejects_malformed_recovered_diff(
 ) -> None:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="M\0src/awf/runtime/pr_monitor_runner/remote_repair.py")
+    cmd.queue_result(returncode=0)
     worktrees_root = tmp_path / "worktrees"
     worktree = worktrees_root / _WORKSPACE_ID
     worktree.mkdir(parents=True)
@@ -433,6 +434,15 @@ async def test_commit_dirty_worktree_rejects_malformed_recovered_diff(
             operation_start_head=_START_HEAD,
             task_tag=None,
         )
+    assert len(cmd.calls) == 2
+    assert cmd.calls[0].args[-5:] == [
+        "diff",
+        "--name-status",
+        "-z",
+        f"{_START_HEAD}..{_RECOVERED_HEAD}",
+        "--",
+    ]
+    assert cmd.calls[1].args[-3:] == ["reset", "--hard", _START_HEAD]
 
 
 @pytest.mark.unit
