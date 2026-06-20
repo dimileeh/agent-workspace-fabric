@@ -277,6 +277,24 @@ async def execute(
     async def _repair_hooks_after_agent_cleanup_failure() -> bool:
         return await _repair_mirror_hooks_path_after_cleanup_failure()
 
+    async def _recover_missing_head_after_setup_cleanup_failure(
+        exc: ComposeExecCleanupError,
+    ) -> bool:
+        if await verify_head_object_exists(worktree_path):
+            return True
+        recovered = await self._recover_missing_git_head_or_mark_failed(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_commit=ws.base_commit,
+            branch_name=expected_branch,
+            from_status=WorkspaceStatus.running,
+            stage="profile_setup_cleanup_failure",
+            error=exc,
+            task_tag=ws.task_tag,
+            mark_failed_on_failure=False,
+        )
+        return bool(recovered)
+
     async def _recover_missing_head_after_agent_cleanup_failure(
         exc: ComposeExecCleanupError,
     ) -> bool:
@@ -403,11 +421,13 @@ async def execute(
                 phase_names=("setup", "pre_agent"),
                 worktree_path=worktree_path,
             )
-        except ComposeExecCleanupError:
+        except ComposeExecCleanupError as exc:
             if not await _repair_mirror_hooks_path_after_cleanup_failure(
                 failure_stage="after profile setup cleanup failure"
             ):
                 return
+            if not await _recover_missing_head_after_setup_cleanup_failure(exc):
+                raise
             raise
         try:
             await self._record_setup_dependency_network_events(
