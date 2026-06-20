@@ -989,6 +989,13 @@ async def _commit_dirty_worktree(
                     stderr=diff.stderr[:400],
                     reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
                 )
+                await _cleanup_recovered_missing_head_delta(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    recovery_head=recovery_head,
+                    reason="recovered_diff_failed",
+                )
                 raise _MonitorHeadObjectMissingError(
                     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
                     f"HEAD object recovered for workspace {workspace_id} but recovered diff failed",

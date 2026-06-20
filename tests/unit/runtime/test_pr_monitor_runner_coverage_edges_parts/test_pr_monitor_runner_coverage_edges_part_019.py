@@ -1051,6 +1051,7 @@ async def test_commit_dirty_worktree_missing_head_recovery_fails_closed_when_rec
 
     assert exc.value.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
     assert policy_calls == []
+    assert any(call.args[-3:] == ["reset", "--hard", "base_sha_12345"] for call in cmd.calls)
 
 
 @pytest.mark.unit
