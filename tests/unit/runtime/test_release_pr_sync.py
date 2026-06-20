@@ -14,6 +14,7 @@ import pytest
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.runtime.release_pr_sync import (
+    _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES,
     NO_CHANGES_REASON_CODE,
     ReleasePrSyncError,
     ReleasePrSyncNoOp,
@@ -627,6 +628,53 @@ class TestFindOrCreateReleasePr:
             ["gh", "pr", "list"],
             ["gh", "pr", "view"],
         ]
+
+    @pytest.mark.unit
+    async def test_transient_create_failure_retry_exhausted_reraises(self) -> None:
+        # Four consecutive transient create failures whose reconcile lookups find
+        # nothing must exhaust the bounded retry loop
+        # (``attempt > _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES``) and re-raise the
+        # original gh error rather than looping forever. Mirrors the feature-PR
+        # exhaustion guard in ``test_pr_creator.py``.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        for _ in range(_RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES + 1):
+            fake.queue_result(returncode=1, stderr="HTTP 500 from GitHub")  # gh pr create
+            fake.queue_result(returncode=0, stdout="[]")  # reconcile gh pr list -> none
+        gh = GitHubClient(fake)
+        slept: list[float] = []
+
+        async def _record_sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        with pytest.raises(GitHubClientError) as exc:
+            await find_or_create_release_pr(
+                runner=fake,
+                gh=gh,
+                repo=_REPO,
+                source_branch="development",
+                target_branch="main",
+                title="t",
+                body="b",
+                sleep=_record_sleep,
+            )
+
+        assert exc.value.operation == "gh pr create"
+        # One initial list + four (create, reconcile-list) attempts; no `gh pr view`.
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+        ]
+        # Backoff before the 2nd/3rd/4th attempts only — the exhausting attempt
+        # re-raises before sleeping.
+        assert slept == [5.0, 10.0, 20.0]
 
     @pytest.mark.unit
     async def test_deterministic_create_failure_reraises_without_recheck(self) -> None:
