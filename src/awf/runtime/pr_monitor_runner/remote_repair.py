@@ -801,6 +801,27 @@ async def _commit_dirty_worktree(
         )
         recovery_head = operation_start_head
         candidate_head: str | None = None
+        attempted_worktree_recovery_heads: set[str] = set()
+
+        async def verified_worktree_recovery_head(
+            recovery_head_sha: str,
+            *,
+            source: str,
+        ) -> str | None:
+            attempted_worktree_recovery_heads.add(recovery_head_sha)
+            recovery_head_exists = await _worktree_commit_object_exists(
+                self, worktree_path, recovery_head_sha
+            )
+            if recovery_head_exists:
+                return recovery_head_sha
+            _log.warning(
+                "monitor.head_object_missing_recovery_anchor_missing",
+                workspace_id=workspace_id,
+                operation_start_head=recovery_head_sha[:10],
+                recovery_source=source,
+            )
+            return None
+
         if recovery_head and mirror_path is not None:
             recovery_head_exists = await _mirror_commit_object_exists(
                 self, mirror_path, recovery_head
@@ -822,10 +843,27 @@ async def _commit_dirty_worktree(
                     candidate_head=candidate_head[:10],
                 )
                 recovery_head = candidate_head
+            recovery_head = await verified_worktree_recovery_head(
+                recovery_head,
+                source=(
+                    "candidate"
+                    if candidate_head is not None and recovery_head == candidate_head
+                    else "operation_start_head"
+                ),
+            )
         if not recovery_head:
-            recovery_head = candidate_head or await _open_merge_candidate_head_sha(
+            candidate_head = candidate_head or await _open_merge_candidate_head_sha(
                 self, workspace_id
             )
+            recovery_head = candidate_head
+            if recovery_head and mirror_path is None:
+                if recovery_head in attempted_worktree_recovery_heads:
+                    recovery_head = None
+                else:
+                    recovery_head = await verified_worktree_recovery_head(
+                        recovery_head,
+                        source="candidate",
+                    )
         if recovery_head is None:
             raise _MonitorHeadObjectMissingError(
                 _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,

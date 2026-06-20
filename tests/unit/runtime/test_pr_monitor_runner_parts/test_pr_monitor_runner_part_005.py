@@ -59,6 +59,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _with_ci_failures,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
@@ -1017,6 +1018,67 @@ class TestMiscMonitorHelpers:
         assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[0].env
 
     @pytest.mark.unit
+    async def test_commit_dirty_worktree_no_mirror_rejects_unverified_candidate_head(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No-mirror missing-HEAD recovery must prove the selected candidate exists."""
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+        workspace_id = "ws_missing_head_no_mirror_unverified"
+        stale_operation_start_head = "1" * 40
+        candidate_head = "2" * 40
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="candidate missing")
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _open_merge_candidate_head_sha(*_args: object) -> str:
+            return candidate_head
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            raise AssertionError("unverified no-mirror candidate must not be recovered")
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(remote_repair, "mirror_path_for_worktree", lambda _worktree_path: None)
+        monkeypatch.setattr(
+            remote_repair,
+            "_open_merge_candidate_head_sha",
+            _open_merge_candidate_head_sha,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+
+        with pytest.raises(_MonitorHeadObjectMissingError):
+            await runner._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message="awf: monitor dirty worktree",
+                operation_start_head=stale_operation_start_head,
+                task_tag=None,
+            )
+
+        assert len(fake.calls) == 1
+        assert fake.calls[0].args[-3:] == ["cat-file", "-e", f"{candidate_head}^{{commit}}"]
+        assert fake.calls[0].env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in fake.calls[0].env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[0].env
+
+    @pytest.mark.unit
     async def test_commit_dirty_worktree_missing_head_recovery_runtime_only_returns_false(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -1095,8 +1157,8 @@ class TestMiscMonitorHelpers:
         worktree and cannot see protected-file changes in the recovered commit.
         This must block even when no compose context exists for a repair pass.
         """
-        workspace_id = await seed_monitoring_workspace(factory)
         operation_start_head = "1" * 40
+        workspace_id = await seed_monitoring_workspace(factory, head_sha=operation_start_head)
         recovered_head = "2" * 40
         protected_path = ".github/workflows/ci.yml"
         fake = FakeCommandRunner()

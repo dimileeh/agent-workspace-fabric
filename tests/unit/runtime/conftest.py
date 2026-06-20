@@ -54,6 +54,7 @@ def _mock_pr_monitor_git_mirror_guards(
     exercises_real_mirror_commit_guard = (
         "repair_operation_start_head" in nodeid
         or "test_commit_dirty_worktree_missing_head_falls_back_from_stale_start_head" in nodeid
+        or "test_commit_dirty_worktree_no_mirror_rejects_unverified_candidate_head" in nodeid
         or "test_pr_monitor_runner_coverage_edges_part_019.py::"
         "test_commit_dirty_worktree_missing_head_recovery_"
         in nodeid
