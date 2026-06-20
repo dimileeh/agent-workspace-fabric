@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -605,6 +606,30 @@ class TestRepairMirrorHooksPath:
             check=True,
             capture_output=True,
         )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--get-all", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+
+    @pytest.mark.unit
+    async def test_skips_stale_linked_worktree_entry(self, tmp_path: Path) -> None:
+        mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "core.hooksPath", "/dev/null"],
+            check=True,
+            capture_output=True,
+        )
+        linked_git_dir = git_module.linked_worktree_git_dir(worktree)
+        assert linked_git_dir is not None
+        assert linked_git_dir.exists()
+        shutil.rmtree(worktree)
 
         result = await git_module.repair_mirror_hooks_path(mirror)
 

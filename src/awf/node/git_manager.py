@@ -990,6 +990,8 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
     )
     for linked_worktree_dir in linked_worktree_dirs:
         worktree_path = _linked_worktree_path_from_git_dir(linked_worktree_dir)
+        if not worktree_path.exists():
+            continue
         repaired = (
             await _repair_hooks_path_config(
                 git_args=("-C", str(worktree_path)),
