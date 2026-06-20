@@ -85,6 +85,71 @@ class TestRepairMirrorHooksPath:
         assert check.returncode != 0
 
     @pytest.mark.unit
+    async def test_repair_waits_for_shared_mirror_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        started = False
+
+        async def _repair_hooks_path_config(**_kwargs: object) -> bool:
+            nonlocal started
+            started = True
+            return False
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        lock = git_module.GitManager._lock_for_mirror(mirror)  # noqa: SLF001
+        await lock.acquire()
+        task = asyncio.create_task(git_module.repair_mirror_hooks_path(mirror))
+        try:
+            await asyncio.sleep(0)
+            assert started is False
+            assert task.done() is False
+        finally:
+            lock.release()
+
+        assert await task is False
+        assert started is True
+
+    @pytest.mark.unit
+    async def test_prunes_and_retries_when_linked_worktree_metadata_disappears(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        linked_git_dir = mirror / "worktrees" / "workspace"
+        linked_git_dir.mkdir(parents=True)
+        repair_calls = 0
+        prune_calls = 0
+
+        async def _repair_hooks_path_config(**_kwargs: object) -> bool:
+            nonlocal repair_calls
+            repair_calls += 1
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            nonlocal prune_calls
+            prune_calls += 1
+            assert path == mirror
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+
+        assert await git_module.repair_mirror_hooks_path(mirror) is True
+        assert prune_calls == 1
+        assert repair_calls == 2
+
+    @pytest.mark.unit
     async def test_removes_include_exposing_poisoned_hooks_path(self, tmp_path: Path) -> None:
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()

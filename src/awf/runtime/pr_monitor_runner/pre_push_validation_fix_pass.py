@@ -46,6 +46,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
@@ -412,12 +413,17 @@ async def _repair_pre_push_validation_fix_mirror_hooks(
     try:
         await repair_mirror_hooks_path(mirror_path)
     except (GitOperationError, OSError) as exc:
+        repair_details = mirror_hooks_repair_failure_details(
+            exc,
+            repair_stage="pre_push_validation_fix_pass",
+            mirror_path=mirror_path,
+            extra={"pass_number": pass_number},
+        )
         _log.warning(
             "monitor.mirror_hooks_path_repair_failed",
             workspace_id=workspace_id,
-            pass_number=pass_number,
             reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-            error_type=exc.__class__.__name__,
+            **repair_details,
         )
         return _MIRROR_HOOKS_PATH_POISONED_REASON
     return None

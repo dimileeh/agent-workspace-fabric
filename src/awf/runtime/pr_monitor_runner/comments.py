@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
@@ -289,11 +290,16 @@ async def _invoke_cli_for_verdict_result(
         try:
             await repair_mirror_hooks_path(mirror_path)
         except (GitOperationError, OSError) as exc:
+            repair_details = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="before_comment_agent",
+                mirror_path=mirror_path,
+            )
             _log.warning(
                 "monitor.mirror_hooks_path_repair_failed",
                 workspace_id=workspace_id,
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                error_type=exc.__class__.__name__,
+                **repair_details,
             )
             raise _MonitorMirrorHooksPathRepairFailedError() from exc
     agent_run_err = None
@@ -325,11 +331,16 @@ async def _invoke_cli_for_verdict_result(
             try:
                 await repair_mirror_hooks_path(mirror_path)
             except (GitOperationError, OSError) as exc:
+                repair_details = mirror_hooks_repair_failure_details(
+                    exc,
+                    repair_stage="after_comment_agent_exception",
+                    mirror_path=mirror_path,
+                )
                 _log.warning(
                     "monitor.mirror_hooks_path_repair_failed",
                     workspace_id=workspace_id,
                     reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                    error_type=exc.__class__.__name__,
+                    **repair_details,
                 )
                 raise _MonitorMirrorHooksPathRepairFailedError() from exc
         await runner._commit_dirty_worktree(

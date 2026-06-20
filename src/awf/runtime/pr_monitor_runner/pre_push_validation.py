@@ -44,6 +44,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
     _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
@@ -642,11 +643,17 @@ async def _post_pre_push_validation_mirror_hooks_repair_result(
     try:
         await repair_mirror_hooks_path(mirror_path)
     except (GitOperationError, OSError) as exc:
+        repair_details = mirror_hooks_repair_failure_details(
+            exc,
+            repair_stage="post_pre_push_validation",
+            mirror_path=mirror_path,
+            extra={"post_validation_mirror_repair_failed": True},
+        )
         _log.warning(
             "monitor.post_pre_push_validation_mirror_hooks_path_repair_failed",
             workspace_id=workspace_id,
             reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-            error_type=exc.__class__.__name__,
+            **repair_details,
         )
         return _PrePushValidationResult(
             passed=False,
@@ -654,7 +661,7 @@ async def _post_pre_push_validation_mirror_hooks_repair_result(
             workspace_head_sha=workspace_head_sha,
             reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
             message="could not repair poisoned mirror hooks path after pre-push validation",
-            extra_details={"post_validation_mirror_repair_failed": True},
+            extra_details=repair_details,
         )
     return None
 
@@ -692,11 +699,16 @@ async def _run_pre_push_validation(
         try:
             await repair_mirror_hooks_path(mirror_path)
         except (GitOperationError, OSError) as exc:
+            repair_details = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="before_pre_push_validation",
+                mirror_path=mirror_path,
+            )
             _log.warning(
                 "monitor.mirror_hooks_path_repair_failed",
                 workspace_id=workspace_id,
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                error_type=exc.__class__.__name__,
+                **repair_details,
             )
             return _PrePushValidationResult(
                 passed=False,
@@ -704,6 +716,7 @@ async def _run_pre_push_validation(
                 workspace_head_sha=workspace_head_sha,
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                 message="could not repair poisoned mirror hooks path before pre-push validation",
+                extra_details=repair_details,
             )
 
     head_object_exists = await verify_head_object_exists(worktree_path)

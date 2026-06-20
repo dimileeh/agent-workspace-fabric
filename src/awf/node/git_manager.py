@@ -116,6 +116,29 @@ async def _run_git_config(
     )
 
 
+async def _run_git_worktree_prune(mirror_path: Path) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "--git-dir",
+        str(mirror_path),
+        "worktree",
+        "prune",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=git_env_without_object_lookup_overrides(),
+    )
+    stdout_bytes, stderr_bytes = await proc.communicate()
+    assert proc.returncode is not None
+    if proc.returncode != 0:
+        raise GitOperationError(
+            operation="mirror.worktree_prune",
+            returncode=proc.returncode,
+            stdout=stdout_bytes.decode("utf-8", errors="replace"),
+            stderr=stderr_bytes.decode("utf-8", errors="replace"),
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+
+
 async def _probe_hooks_path_config(
     *,
     git_args: tuple[str, ...],
@@ -995,6 +1018,12 @@ def _linked_worktree_path_from_git_dir(linked_git_dir: Path) -> Path:
         ) from exc
 
 
+def _is_stale_linked_worktree_metadata_error(exc: GitOperationError) -> bool:
+    return exc.operation == "worktree.hooks_path_probe" and exc.stderr.startswith(
+        "cannot read linked-worktree gitdir back-reference at "
+    )
+
+
 def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> None:
     seen: set[tuple[Path, bool, bool]] = set()
     for target in targets:
@@ -1011,12 +1040,7 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
             os.chown(target.path, uid, gid)
 
 
-async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
-    """Remove poisoned ``core.hooksPath`` values from mirror and worktree config.
-
-    Returns ``True`` if repair was needed and succeeded, ``False`` if no repair
-    was needed. Raises ``GitOperationError`` if the probe or unset fails.
-    """
+async def _repair_mirror_hooks_path_once(mirror_path: Path) -> tuple[bool, bool]:
     repaired = await _repair_hooks_path_config(
         git_args=("--git-dir", str(mirror_path)),
         config_scope_args=("--local",),
@@ -1024,16 +1048,27 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         operation_prefix="mirror",
     )
 
+    stale_worktree_metadata = False
     worktrees_dir = mirror_path / "worktrees"
-    linked_worktree_dirs = (
-        sorted(path for path in worktrees_dir.iterdir() if path.is_dir())
-        if worktrees_dir.exists()
-        else []
-    )
+    if worktrees_dir.exists():
+        try:
+            linked_worktree_dirs = sorted(path for path in worktrees_dir.iterdir() if path.is_dir())
+        except OSError:
+            linked_worktree_dirs = []
+            stale_worktree_metadata = True
+    else:
+        linked_worktree_dirs = []
     worktree_config_enabled: bool | None = None
     for linked_worktree_dir in linked_worktree_dirs:
-        worktree_path = _linked_worktree_path_from_git_dir(linked_worktree_dir)
+        try:
+            worktree_path = _linked_worktree_path_from_git_dir(linked_worktree_dir)
+        except GitOperationError as exc:
+            if not _is_stale_linked_worktree_metadata_error(exc):
+                raise
+            stale_worktree_metadata = True
+            continue
         if not worktree_path.exists():
+            stale_worktree_metadata = True
             continue
         repaired = (
             await _repair_hooks_path_config(
@@ -1070,7 +1105,26 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
             )
             or repaired
         )
-    return repaired
+    return repaired, stale_worktree_metadata
+
+
+async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
+    """Remove poisoned ``core.hooksPath`` values from mirror and worktree config.
+
+    Returns ``True`` if repair was needed and succeeded, ``False`` if no repair
+    was needed. Raises ``GitOperationError`` if the probe or unset fails.
+    """
+    lock = GitManager._lock_for_mirror(mirror_path)
+    async with lock:
+        repaired, stale_worktree_metadata = await _repair_mirror_hooks_path_once(mirror_path)
+        if not stale_worktree_metadata:
+            return repaired
+
+        await _run_git_worktree_prune(mirror_path)
+        retry_repaired, _retry_stale_worktree_metadata = await _repair_mirror_hooks_path_once(
+            mirror_path
+        )
+        return repaired or retry_repaired or True
 
 
 async def verify_head_object_exists(worktree_path: Path) -> bool:
