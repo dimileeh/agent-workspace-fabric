@@ -13,13 +13,17 @@ from awf.control.quality_gates import QualityGateViolation
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner import pre_push_validation
-from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_REPAIR_FAILED_REASON
+from awf.runtime.pr_monitor_runner.constants import (
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+)
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_types import ValidationCommandResult, ValidationResult
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
+from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_CLEANUP_FAILED
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -84,6 +88,42 @@ async def _existing_mirror_commit(
     """Treat scripted recovery anchors as present in the fake mirror."""
     del self, mirror_path, commit_sha
     return True
+
+
+async def _clean_pre_push_validation_worktree_check(
+    self: object,
+    *,
+    worktree_path: Path,
+) -> ValidationWorktreeCheck:
+    del self, worktree_path
+    return ValidationWorktreeCheck(clean=True)
+
+
+async def _clean_pre_push_validation_cleanup(
+    self: object,
+    *,
+    worktree_path: Path,
+    restore_ref: str,
+) -> ValidationWorktreeCleanup:
+    del self, worktree_path
+    return ValidationWorktreeCleanup(
+        cleaned=False,
+        check=ValidationWorktreeCheck(clean=True),
+        restore_ref=restore_ref,
+    )
+
+
+def _patch_clean_pre_push_validation_worktree(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_worktree_check",
+        _clean_pre_push_validation_worktree_check,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _clean_pre_push_validation_cleanup,
+    )
 
 
 @pytest.mark.unit
@@ -338,6 +378,175 @@ async def test_pre_push_validation_does_not_mislabel_unexpected_mirror_repair_er
             compose_file=tmp_path / "compose.yml",
             remote_branch=f"awf/{workspace_id}",
         )
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_repairs_mirror_hooks_after_validation_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation failures must repair mirror hooks before returning."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    local_head = "3" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    validation = _FakeValidation(_failed_validation_result(tmp_path))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    repair_calls: list[Path] = []
+
+    async def _repair_mirror_hooks_path(mirror_path: Path) -> bool:
+        repair_calls.append(mirror_path)
+        return False
+
+    monkeypatch.setattr(pre_push_validation, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+    _patch_clean_pre_push_validation_worktree(monkeypatch)
+
+    result = await pre_push_validation._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.passed is False
+    assert result.reason_code == pre_push_validation.PRE_PUSH_VALIDATION_FAILED_REASON
+    assert repair_calls == [tmp_path / "mirrors" / "test.git"] * 2
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fails_closed_when_post_validation_mirror_repair_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poisoned mirror after validation must block the validated push result."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    local_head = "4" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    validation = _FakeValidation(_failed_validation_result(tmp_path))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    repair_calls = 0
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        nonlocal repair_calls
+        repair_calls += 1
+        if repair_calls == 2:
+            raise GitOperationError(
+                operation="mirror.hooks_path_repair",
+                returncode=1,
+                stdout="",
+                stderr="failed",
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+        return False
+
+    monkeypatch.setattr(pre_push_validation, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+    _patch_clean_pre_push_validation_worktree(monkeypatch)
+
+    result = await pre_push_validation._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.passed is False
+    assert result.reason_code == _MIRROR_HOOKS_PATH_POISONED_REASON
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_repairs_mirror_hooks_after_cleanup_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation cleanup failures must still repair mirror hooks before returning."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = _write_worktree_with_mirror(tmp_path, workspace_id)
+    cmd = FakeCommandRunner()
+    local_head = "5" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    repair_calls: list[Path] = []
+
+    async def _repair_mirror_hooks_path(mirror_path: Path) -> bool:
+        repair_calls.append(mirror_path)
+        return False
+
+    async def _pre_push_validation_cleanup(
+        self: object,
+        *,
+        worktree_path: Path,
+        restore_ref: str,
+    ) -> ValidationWorktreeCleanup:
+        del self, worktree_path
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=ValidationWorktreeCheck(clean=False, paths=("generated.txt",)),
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message="cleanup failed",
+            cleanup_command="git restore",
+            cleanup_stderr="restore failed",
+        )
+
+    monkeypatch.setattr(pre_push_validation, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_worktree_check",
+        _clean_pre_push_validation_worktree_check,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+
+    result = await pre_push_validation._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert repair_calls == [tmp_path / "mirrors" / "test.git"] * 2
 
 
 @pytest.mark.unit

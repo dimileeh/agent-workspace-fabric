@@ -630,6 +630,35 @@ def _pre_push_cleanup_result(
     )
 
 
+async def _post_pre_push_validation_mirror_hooks_repair_result(
+    *,
+    workspace_id: str,
+    validation_run_id: str | None,
+    workspace_head_sha: str | None,
+    mirror_path: Path | None,
+) -> _PrePushValidationResult | None:
+    if mirror_path is None:
+        return None
+    try:
+        await repair_mirror_hooks_path(mirror_path)
+    except (GitOperationError, OSError) as exc:
+        _log.warning(
+            "monitor.post_pre_push_validation_mirror_hooks_path_repair_failed",
+            workspace_id=workspace_id,
+            reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            error_type=exc.__class__.__name__,
+        )
+        return _PrePushValidationResult(
+            passed=False,
+            validation_run_id=validation_run_id,
+            workspace_head_sha=workspace_head_sha,
+            reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            message="could not repair poisoned mirror hooks path after pre-push validation",
+            extra_details={"post_validation_mirror_repair_failed": True},
+        )
+    return None
+
+
 async def _run_pre_push_validation(
     self: Any,
     *,
@@ -964,6 +993,14 @@ async def _run_pre_push_validation(
                 status="failed",
                 reason_code=cleanup_result.reason_code,
             )
+            mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                workspace_head_sha=workspace_head_sha,
+                mirror_path=mirror_path,
+            )
+            if mirror_repair_result is not None:
+                return mirror_repair_result
             return _pre_push_cleanup_result(
                 validation_run_id=validation_run_id,
                 workspace_head_sha=workspace_head_sha,
@@ -976,6 +1013,14 @@ async def _run_pre_push_validation(
             status="failed",
             reason_code=exc.reason_code,
         )
+        mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            workspace_head_sha=workspace_head_sha,
+            mirror_path=mirror_path,
+        )
+        if mirror_repair_result is not None:
+            return mirror_repair_result
         return _PrePushValidationResult(
             passed=False,
             validation_run_id=validation_run_id,
@@ -1007,6 +1052,14 @@ async def _run_pre_push_validation(
                 status="failed",
                 reason_code=cleanup_result.reason_code,
             )
+            mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                workspace_head_sha=workspace_head_sha,
+                mirror_path=mirror_path,
+            )
+            if mirror_repair_result is not None:
+                return mirror_repair_result
             return _pre_push_cleanup_result(
                 validation_run_id=validation_run_id,
                 workspace_head_sha=workspace_head_sha,
@@ -1019,6 +1072,14 @@ async def _run_pre_push_validation(
             status="failed",
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
         )
+        mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            workspace_head_sha=workspace_head_sha,
+            mirror_path=mirror_path,
+        )
+        if mirror_repair_result is not None:
+            return mirror_repair_result
         return _PrePushValidationResult(
             passed=False,
             validation_run_id=validation_run_id,
@@ -1039,6 +1100,14 @@ async def _run_pre_push_validation(
             status="failed",
             reason_code=cleanup_result.reason_code,
         )
+        mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            workspace_head_sha=workspace_head_sha,
+            mirror_path=mirror_path,
+        )
+        if mirror_repair_result is not None:
+            return mirror_repair_result
         return _pre_push_cleanup_result(
             validation_run_id=validation_run_id,
             workspace_head_sha=workspace_head_sha,
@@ -1093,6 +1162,14 @@ async def _run_pre_push_validation(
         coverage=_validation_run_coverage_metadata(result),
         command_retries=[c.retry_count for c in result.commands],
     )
+    mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+        workspace_id=workspace_id,
+        validation_run_id=validation_run_id,
+        workspace_head_sha=workspace_head_sha,
+        mirror_path=mirror_path,
+    )
+    if mirror_repair_result is not None:
+        return mirror_repair_result
     return _PrePushValidationResult(
         passed=result.all_passed,
         validation_run_id=validation_run_id,
