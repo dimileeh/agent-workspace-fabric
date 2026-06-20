@@ -117,3 +117,45 @@ class TestVerifyHeadObjectExists:
         result = await git_module.verify_head_object_exists(layout.worktree_path)
 
         assert result is False
+
+    @pytest.mark.unit
+    async def test_fails_closed_for_repository_alternates(
+        self,
+        origin_repo: Path,
+        work_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        manager = GitManager(work_dir)
+        layout = await manager.add_worktree(
+            workspace_id="ws_repo_alternates",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_repo_alternates",
+        )
+
+        alternate_repo = tmp_path / "alternate"
+        alternate_repo.mkdir()
+        _git(["init", "-q", "-b", "development"], alternate_repo)
+        _git(["config", "user.name", "AWF Test"], alternate_repo)
+        _git(["config", "user.email", "awf@test.local"], alternate_repo)
+        (alternate_repo / "README.md").write_text("alternate\n")
+        _git(["add", "."], alternate_repo)
+        _git(["commit", "-q", "-m", "alternate"], alternate_repo)
+        alternate_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=alternate_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        ref_path = layout.mirror_path / "refs" / "heads" / layout.branch_name
+        ref_path.parent.mkdir(parents=True, exist_ok=True)
+        ref_path.write_text(alternate_sha + "\n")
+        alternates_path = layout.mirror_path / "objects" / "info" / "alternates"
+        alternates_path.parent.mkdir(parents=True, exist_ok=True)
+        alternates_path.write_text(str(alternate_repo / ".git" / "objects") + "\n")
+
+        result = await git_module.verify_head_object_exists(layout.worktree_path)
+
+        assert result is False
