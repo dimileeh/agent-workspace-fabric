@@ -19,6 +19,7 @@ from awf.runtime.release_pr_sync import (
     ReleasePrSyncError,
     ReleasePrSyncNoOp,
     ReleasePrSyncResult,
+    _lookup_release_pr_after_create_failure,
     count_commits_ahead,
     find_or_create_release_pr,
     prepare_release_pr_sync,
@@ -759,6 +760,27 @@ class TestFindOrCreateReleasePr:
             )
 
         assert all(c.args[:3] != ["gh", "pr", "view"] for c in fake.calls)
+
+    @pytest.mark.unit
+    async def test_lookup_failure_detail_preserves_reason_code(self) -> None:
+        # When the reconcile ``gh pr list`` fails it raises
+        # ``PullRequestMetadataError``; the failed-lookup detail must carry the
+        # exception's ``reason_code`` so retry/audit metadata keeps the
+        # policy-relevant failure semantics (reason codes flow end-to-end).
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="HTTP 502 from GitHub")  # gh pr list -> errors
+
+        number, detail = await _lookup_release_pr_after_create_failure(
+            runner=fake,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+        )
+
+        assert number is None
+        assert detail["status"] == "failed"
+        assert detail["reason_code"] == "OPEN_PR_LOOKUP_FAILED"
+        assert detail["returncode"] == 1
 
 
 class TestPrepareReleasePrSync:

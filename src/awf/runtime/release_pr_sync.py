@@ -269,6 +269,10 @@ async def _lookup_release_pr_after_create_failure(
             "status": "failed",
             "operation": "gh pr list",
             "returncode": detail.get("returncode"),
+            # ``reason_code`` lives on the exception itself, not inside ``detail``;
+            # carry it into the reconcile-lookup record so the retry/audit metadata
+            # keeps the policy-relevant failure semantics (reason codes flow end-to-end).
+            "reason_code": exc.reason_code,
             "error_message": exc.message.strip(),
         }
     return number, {"status": "found" if number is not None else "not_found", "number": number}
