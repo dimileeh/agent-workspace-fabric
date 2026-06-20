@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import types
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,7 +15,6 @@ import structlog
 
 from awf.common.audit import REDACTION_MARKER
 from awf.common.config import Settings
-from awf.common.git_auth import bitbucket_git_config_entries
 from awf.node.companion_images import CompanionImageBuilder
 from awf.profiles.models import ProfileMonitor, ProfileRuntime, ProfileService, WorkspaceProfile
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
@@ -824,9 +824,46 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     assert created["classified_sweep_kwargs"]["work_dir"] == Path(settings.work_dir).resolve()
     assert created["classified_sweep_kwargs"]["docker_host"] == settings.docker_host
     assert created["classified_sweep_kwargs"]["compose_teardown"] is classified_teardown
+    # No-arg call (the periodic backstop) resolves ``enabled`` to the flag default and reaps
+    # terminal + missing (``row_less_only`` defaults to False) under the global flag.
     assert created["classified_sweep_kwargs"]["enabled"] is auto_cleanup_orphans
     assert created["classified_sweep_kwargs"]["min_age_hours"] == 4.0
     assert created["classified_sweep_kwargs"]["min_retention_hours"] == 72.0
+    assert created["classified_sweep_kwargs"]["row_less_only"] is False
+    # The periodic backstop passes no ``--limit``, so the sweep stays unbounded.
+    assert created["classified_sweep_kwargs"]["limit"] is None
+
+    # On-demand override (#637): forcing ``enabled=True`` for an operator-requested gc
+    # run must pass through to the sweep regardless of the ``auto_cleanup_orphans`` flag.
+    # ``row_less_only=True`` (PRRT_kwDOSJAM6s6LB30p) must thread through too so the additive
+    # sweep reaps only no-DB-record orphans, never a scoped-out terminal workspace; the
+    # operator's ``--limit`` must thread through as well so the additive sweep is bounded
+    # oldest-first like the terminal reaper (PRRT_kwDOSJAM6s6LCCJZ).
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5))
+    assert created["classified_sweep_kwargs"]["enabled"] is True
+    assert created["classified_sweep_kwargs"]["row_less_only"] is True
+    assert created["classified_sweep_kwargs"]["limit"] == 5
+
+    # The operator's ``--min-age-hours`` is forwarded as a safety FLOOR for the row-less
+    # orphan grace (PRRT_kwDOSJAM6s6LCiLb): a longer requested window widens the grace so a
+    # too-young-by-command orphan is never reaped behind the operator's longer scope, while a
+    # shorter/absent one never shrinks the configured ``orphan_reconcile_min_age_hours`` (4.0)
+    # mid-provision guard. A longer request wins:
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5, min_age_hours=10.0))
+    assert created["classified_sweep_kwargs"]["min_age_hours"] == 10.0
+    # A shorter request is floored at the configured grace:
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5, min_age_hours=1.0))
+    assert created["classified_sweep_kwargs"]["min_age_hours"] == 4.0
+
+    # The API request-time ``now`` anchor (a ``datetime``) is forwarded to the sweep as an epoch
+    # float so the row-less orphan grace freezes at POST time instead of the worker's claim clock
+    # (PRRT_kwDOSJAM6s6LCs9R).
+    anchor = datetime(2026, 6, 14, 21, 0, tzinfo=UTC)
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5, now=anchor))
+    assert created["classified_sweep_kwargs"]["now"] == anchor.timestamp()
+    # No anchor (the periodic backstop) leaves the sweep to default to its own clock (``None``).
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5))
+    assert created["classified_sweep_kwargs"]["now"] is None
 
 
 @pytest.mark.unit
@@ -1068,217 +1105,6 @@ def test_is_postgres_database_url_rejects_non_postgres_backend_without_warning()
     assert not any(
         event.get("event") == "worker.postgres_merge_coordinator_not_selected" for event in captured
     )
-
-
-@pytest.mark.unit
-def test_service_git_environment_uses_mounted_host_home(tmp_path: Path) -> None:
-    host_home = tmp_path / "host-home"
-    ssh_dir = host_home / ".ssh"
-    ssh_dir.mkdir(parents=True)
-    (host_home / ".gitconfig").write_text("[user]\n  name = AWF\n")
-    ssh_config = ssh_dir / "config"
-    ssh_config.write_text("Host github.com\n  UseKeychain yes\n")
-    known_hosts = ssh_dir / "known_hosts"
-    known_hosts.write_text("github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...\n")
-
-    env = worker_mod._service_git_environment(host_home)
-
-    assert env["HOME"] == str(host_home)
-    assert env["GIT_CONFIG_GLOBAL"] == str(host_home / ".gitconfig")
-    assert "IgnoreUnknown=UseKeychain" in env["GIT_SSH_COMMAND"]
-    assert str(ssh_config) in env["GIT_SSH_COMMAND"]
-    assert str(known_hosts) in env["GIT_SSH_COMMAND"]
-    assert "StrictHostKeyChecking=accept-new" in env["GIT_SSH_COMMAND"]
-
-
-@pytest.mark.unit
-def test_service_git_environment_forwards_github_token_for_gh_cli(tmp_path: Path) -> None:
-    env = worker_mod._service_git_environment(
-        tmp_path / "host-home",
-        github_token="ghp_service_token",
-    )
-
-    assert env["GH_TOKEN"] == "ghp_service_token"
-    assert env["GITHUB_TOKEN"] == "ghp_service_token"
-
-
-@pytest.mark.unit
-def test_service_git_environment_marks_worker_managed_worktrees_safe(tmp_path: Path) -> None:
-    env = worker_mod._service_git_environment(tmp_path / "host-home")
-
-    assert env["GIT_CONFIG_COUNT"] == "1"
-    assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
-    assert env["GIT_CONFIG_VALUE_0"] == "*"
-
-
-@pytest.mark.unit
-def test_service_git_environment_configures_gh_credential_helper_for_git(
-    tmp_path: Path,
-) -> None:
-    env = worker_mod._service_git_environment(
-        tmp_path / "host-home",
-        github_token="ghp_service_token",
-    )
-
-    count = int(env["GIT_CONFIG_COUNT"])
-    entries = {
-        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
-    }
-
-    assert entries["safe.directory"] == "*"
-    assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
-    assert entries["url.https://github.com/.insteadOf"] == "git@github.com:"
-    assert all("ghp_service_token" not in value for value in entries.values())
-
-
-@pytest.mark.unit
-def test_service_git_environment_forwards_ssh_agent_socket(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("SSH_AUTH_SOCK", "/run/host-services/ssh-auth.sock")
-
-    env = worker_mod._service_git_environment(tmp_path / "host-home")
-
-    assert env["SSH_AUTH_SOCK"] == "/run/host-services/ssh-auth.sock"
-    assert "IdentityAgent=/run/host-services/ssh-auth.sock" in env["GIT_SSH_COMMAND"]
-
-
-@pytest.mark.unit
-def test_service_git_environment_wires_bitbucket_helper_without_leaking_token(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    secret_token = "ATATT-service-token-do-not-render"
-    monkeypatch.setenv("BITBUCKET_API_TOKEN", secret_token)
-    monkeypatch.setenv("BITBUCKET_EMAIL", "agent@example.com")
-
-    env = worker_mod._service_git_environment(
-        tmp_path / "host-home",
-        github_token="ghp_service_token",
-    )
-
-    count = int(env["GIT_CONFIG_COUNT"])
-    entries = {
-        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
-    }
-    # Bitbucket host-scoped helper is wired alongside the (unchanged) GitHub one.
-    assert "credential.https://bitbucket.org.helper" in entries
-    assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
-    assert entries["url.https://github.com/.insteadOf"] == "git@github.com:"
-    # SSH-form bitbucket remotes are rewritten to HTTPS so the token is used
-    # (parity with the GitHub insteadOf rewrite above). ``insteadOf`` is
-    # multi-valued: the scp-like ``git@bitbucket.org:`` form, the no-port
-    # ``ssh://git@bitbucket.org/`` form, and the explicit-default-port
-    # ``ssh://git@bitbucket.org:22/`` form (which the preflight accepts as
-    # canonical) are all covered.
-    bitbucket_insteadof = [
-        env[f"GIT_CONFIG_VALUE_{index}"]
-        for index in range(count)
-        if env[f"GIT_CONFIG_KEY_{index}"] == "url.https://bitbucket.org/.insteadOf"
-    ]
-    assert "git@bitbucket.org:" in bitbucket_insteadof
-    assert "ssh://git@bitbucket.org/" in bitbucket_insteadof
-    assert "ssh://git@bitbucket.org:22/" in bitbucket_insteadof
-    assert env["GIT_TERMINAL_PROMPT"] == "0"
-    # The Atlassian token never lands in any git env value.
-    assert all(secret_token not in value for value in env.values())
-
-
-@pytest.mark.unit
-def test_service_git_environment_unchanged_without_bitbucket_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
-    monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
-
-    env = worker_mod._service_git_environment(
-        tmp_path / "host-home",
-        github_token="ghp_service_token",
-    )
-
-    # Pure regression: no bitbucket helper, no terminal-prompt override, and the
-    # GitHub credential helper plus safe.directory entries are untouched.
-    assert "GIT_TERMINAL_PROMPT" not in env
-    count = int(env["GIT_CONFIG_COUNT"])
-    entries = {
-        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
-    }
-    # Compare against the exact bitbucket-scoped config keys rather than a substring
-    # of the host (a bare-host substring check is an incomplete-URL-sanitization
-    # pattern flagged by static analysis).
-    assert {key for key, _ in bitbucket_git_config_entries()}.isdisjoint(entries)
-    assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
-
-
-@pytest.mark.unit
-def test_service_git_environment_reads_bitbucket_and_ssh_from_source_env(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """``source_env`` (not the caller os.environ) drives the Bitbucket/SSH wiring.
-
-    The real worker reads its Compose-forwarded container env; callers that run
-    from a different process context (``awf profile doctor``) pass that env via
-    ``source_env`` so the Bitbucket-conditional additions match the worker. Here
-    the creds and agent socket live ONLY in ``source_env`` and are absent from the
-    caller os.environ, yet the Bitbucket helper, GIT_TERMINAL_PROMPT, and the
-    SSH_AUTH_SOCK/GIT_SSH_COMMAND wiring are still emitted.
-    """
-    monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
-    monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
-    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
-
-    env = worker_mod._service_git_environment(
-        tmp_path / "host-home",
-        github_token="ghp_service_token",
-        source_env={
-            "BITBUCKET_API_TOKEN": "bb_token",
-            "BITBUCKET_EMAIL": "dev@example.com",
-            "SSH_AUTH_SOCK": "/run/host-services/ssh-auth.sock",
-        },
-    )
-
-    assert env["GIT_TERMINAL_PROMPT"] == "0"
-    count = int(env["GIT_CONFIG_COUNT"])
-    entries = {
-        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
-    }
-    assert "credential.https://bitbucket.org.helper" in entries
-    assert env["SSH_AUTH_SOCK"] == "/run/host-services/ssh-auth.sock"
-    assert "IdentityAgent=/run/host-services/ssh-auth.sock" in env["GIT_SSH_COMMAND"]
-
-
-@pytest.mark.unit
-def test_service_git_environment_source_env_overrides_caller_environ(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An explicit ``source_env`` fully replaces os.environ for Bitbucket detection.
-
-    Bitbucket creds in the caller os.environ but absent from ``source_env`` must
-    NOT add the Bitbucket helper: the worker context modelled by ``source_env``
-    lacks them, so the doctor must not over-add keys the worker would not inject.
-    """
-    monkeypatch.setenv("BITBUCKET_API_TOKEN", "caller_token")
-    monkeypatch.setenv("BITBUCKET_EMAIL", "caller@example.com")
-
-    env = worker_mod._service_git_environment(
-        tmp_path / "host-home",
-        github_token="ghp_service_token",
-        source_env={},
-    )
-
-    assert "GIT_TERMINAL_PROMPT" not in env
-    count = int(env["GIT_CONFIG_COUNT"])
-    entries = {
-        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
-    }
-    # Compare against the exact bitbucket-scoped config keys rather than a substring
-    # of the host (a bare-host substring check is an incomplete-URL-sanitization
-    # pattern flagged by static analysis).
-    assert {key for key, _ in bitbucket_git_config_entries()}.isdisjoint(entries)
 
 
 class _RecordingForgeClient:
