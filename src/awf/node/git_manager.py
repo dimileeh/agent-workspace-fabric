@@ -209,6 +209,25 @@ async def _unset_matching_include_path(
     return removed
 
 
+async def _worktree_config_extension_enabled(config_path: Path) -> bool:
+    returncode, stdout, stderr = await _run_git_config(
+        git_args=(),
+        config_scope_args=("--file", str(config_path), "--bool"),
+        args=("--get", "extensions.worktreeConfig"),
+    )
+    if returncode == 1:
+        return False
+    if returncode != 0:
+        raise GitOperationError(
+            operation="mirror.worktree_config_probe",
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+    return stdout.strip().lower() == "true"
+
+
 async def _repair_hooks_path_config(
     *,
     git_args: tuple[str, ...],
@@ -988,6 +1007,7 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         if worktrees_dir.exists()
         else []
     )
+    worktree_config_enabled: bool | None = None
     for linked_worktree_dir in linked_worktree_dirs:
         worktree_path = _linked_worktree_path_from_git_dir(linked_worktree_dir)
         if not worktree_path.exists():
@@ -1007,6 +1027,12 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         )
         config_path = linked_worktree_dir / "config.worktree"
         if not config_path.exists():
+            continue
+        if worktree_config_enabled is None:
+            worktree_config_enabled = await _worktree_config_extension_enabled(
+                mirror_path / "config"
+            )
+        if not worktree_config_enabled:
             continue
         repaired = (
             await _repair_hooks_path_config(

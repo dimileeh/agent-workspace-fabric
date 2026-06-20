@@ -239,12 +239,35 @@ class TestRepairMirrorHooksPath:
         assert check.stdout == ""
 
     @pytest.mark.unit
+    async def test_ignores_config_worktree_when_worktree_config_extension_is_disabled(
+        self, tmp_path: Path
+    ) -> None:
+        mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        linked_git_dir = git_module.linked_worktree_git_dir(worktree)
+        assert linked_git_dir is not None
+        config_worktree = linked_git_dir / "config.worktree"
+        config_worktree.write_text("[core]\n\thooksPath = /dev/null\n", encoding="utf-8")
+
+        extension_check = subprocess.run(
+            ["git", "-C", str(worktree), "config", "--local", "--get", "extensions.worktreeConfig"],
+            capture_output=True,
+            text=True,
+        )
+        assert extension_check.returncode != 0
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is False
+        assert config_worktree.read_text(encoding="utf-8") == "[core]\n\thooksPath = /dev/null\n"
+
+    @pytest.mark.unit
     async def test_linked_worktree_config_probes_include_safe_directory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         mirror = tmp_path / "mirror.git"
         linked_git_dir = mirror / "worktrees" / "workspace"
         linked_git_dir.mkdir(parents=True)
+        (mirror / "config").write_text("[extensions]\n\tworktreeConfig = true\n", encoding="utf-8")
         worktree = tmp_path / "workspace"
         worktree.mkdir()
         (linked_git_dir / "gitdir").write_text(str(worktree / ".git"), encoding="utf-8")
