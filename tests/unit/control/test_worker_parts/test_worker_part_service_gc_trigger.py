@@ -148,6 +148,7 @@ async def test_consume_folds_classified_orphan_reaper_with_enabled_forced(
         row_less_only: bool,
         limit: int | None,
         min_age_hours: float | None = None,
+        now: datetime | None = None,
     ) -> OrphanReapResult:
         orphan_calls.append(enabled)
         row_less_only_calls.append(row_less_only)
@@ -244,6 +245,7 @@ async def test_consume_marks_failed_when_orphan_reaper_raises(
         row_less_only: bool,
         limit: int | None,
         min_age_hours: float | None = None,
+        now: datetime | None = None,
     ) -> object:
         raise RuntimeError("orphan sweep blew up")
 
@@ -296,6 +298,7 @@ async def test_consume_downgrades_combined_status_when_orphan_reap_partial(
         row_less_only: bool,
         limit: int | None,
         min_age_hours: float | None = None,
+        now: datetime | None = None,
     ) -> OrphanReapResult:
         return OrphanReapResult(
             enabled=enabled,
@@ -496,6 +499,7 @@ async def test_consume_threads_min_age_into_orphan_reaper(
         row_less_only: bool,
         limit: int | None,
         min_age_hours: float | None = None,
+        now: datetime | None = None,
     ) -> OrphanReapResult:
         captured["min_age_hours"] = min_age_hours
         captured["limit"] = limit
@@ -510,6 +514,95 @@ async def test_consume_threads_min_age_into_orphan_reaper(
     await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
 
     assert captured == {"min_age_hours": 240.0, "limit": 3}
+
+
+async def test_consume_threads_cutoff_anchor_into_orphan_reaper(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The API-anchored ``now`` flows into the orphan sweep too (PRRT_kwDOSJAM6s6LCs9R).
+
+    The terminal reaper already receives the parsed request-time ``now`` so its cutoff stays
+    frozen at POST time (PRRT_kwDOSJAM6s6JbriQ). The additive row-less orphan sweep measures a
+    no-DB-record resource's grace against ``now`` as well, so forwarding ``min_age_hours`` while
+    dropping ``now`` lets ``reap_classified_orphans`` fall back to the worker's claim-time
+    ``time.time()``: a worktree/volume that was still inside the operator's ``--min-age-hours``
+    safety window when ``gc --execute`` was posted could age into eligibility before the worker
+    reaches this call and be reaped — exactly the request-time drift the terminal pass avoids. The
+    parsed anchor must reach the orphan sweep so both passes share one cutoff.
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    anchor = datetime(2026, 6, 14, 21, 0, tzinfo=UTC)
+    await _seed_pending(
+        session_factory,
+        params={"execute": True, "min_age_hours": 1.5, "now": anchor.isoformat()},
+    )
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        captured["now"] = now
+        captured["min_age_hours"] = min_age_hours
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    # The same parsed ``datetime`` anchor threaded into the terminal reaper reaches the sweep.
+    assert captured == {"now": anchor, "min_age_hours": 1.5}
+
+
+async def test_consume_omits_orphan_cutoff_anchor_when_absent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A run with no stored ``now`` forwards ``None`` so the sweep keeps its claim-clock default.
+
+    The remaining-budget/min-age plumbing must not synthesise an anchor: when the operator's
+    request carried no ``now`` the orphan sweep receives ``None`` and falls back to its own clock,
+    matching the terminal reaper which likewise omits ``now`` (PRRT_kwDOSJAM6s6LCs9R).
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    await _seed_pending(session_factory, params={"execute": True})
+    captured: dict[str, object] = {"now": "unset"}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        captured["now"] = now
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {"now": None}
 
 
 async def test_consume_caps_orphan_limit_to_remaining_budget(
@@ -540,6 +633,7 @@ async def test_consume_caps_orphan_limit_to_remaining_budget(
         row_less_only: bool,
         limit: int | None,
         min_age_hours: float | None = None,
+        now: datetime | None = None,
     ) -> OrphanReapResult:
         captured["limit"] = limit
         return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
@@ -579,6 +673,7 @@ async def test_consume_forwards_remaining_limit_to_orphan_sweep(
         row_less_only: bool,
         limit: int | None,
         min_age_hours: float | None = None,
+        now: datetime | None = None,
     ) -> OrphanReapResult:
         captured["limit"] = limit
         return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
@@ -618,6 +713,7 @@ async def test_consume_leaves_orphan_sweep_unbounded_without_limit(
         row_less_only: bool,
         limit: int | None,
         min_age_hours: float | None = None,
+        now: datetime | None = None,
     ) -> OrphanReapResult:
         captured["limit"] = limit
         return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)

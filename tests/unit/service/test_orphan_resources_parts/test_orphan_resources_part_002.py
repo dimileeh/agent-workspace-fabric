@@ -975,6 +975,50 @@ def test_sweep_classified_orphans_scans_classifies_and_reaps(
 
 
 @pytest.mark.unit
+def test_sweep_classified_orphans_forwards_now_anchor_to_reap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep forwards its ``now`` anchor into the reap (PRRT_kwDOSJAM6s6LCs9R).
+
+    The on-demand ``service gc`` path freezes the row-less orphan grace at the API's request time by
+    threading ``now`` down the call chain. The sweep must hand that anchor to
+    :func:`reap_classified_orphans` (whose ``_missing_record_is_aged`` measures age against it)
+    rather than dropping it and letting the reaper fall back to the worker's claim-time
+    ``time.time()``.
+    """
+    import awf.service.orphan_resources as orphan_resources
+
+    monkeypatch.setattr(orphan_resources, "session_scope", lambda _factory: _SessionScope())
+
+    async def _workspace_view(_session: object, **_kwargs: object) -> WorkspaceIdView:
+        return _ok_view()
+
+    monkeypatch.setattr(orphan_resources, "workspace_id_view_from_session", _workspace_view)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_reap(_summary: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(orphan_resources, "reap_classified_orphans", _fake_reap)
+
+    asyncio.run(
+        orphan_resources.sweep_classified_orphans(
+            object(),  # type: ignore[arg-type]
+            work_dir=tmp_path,
+            docker_host="unix:///test-docker.sock",
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            run_subprocess=_run_for(),
+            now=1_700_000_000.0,
+        )
+    )
+
+    assert captured["now"] == 1_700_000_000.0
+
+
+@pytest.mark.unit
 def test_sweep_classified_orphans_disabled_skips_scans_and_workspace_view(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

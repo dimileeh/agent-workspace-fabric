@@ -317,6 +317,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         row_less_only: bool = False,
         limit: int | None = None,
         min_age_hours: float | None = None,
+        now: datetime | None = None,
     ) -> OrphanReapResult:
         """Sweep classified orphan resources using the worker runtime dependencies.
 
@@ -349,6 +350,15 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         longer request widens the window while a shorter/absent one never shrinks the
         mid-provision guard that protects a just-created worktree visible before its row
         commits. The periodic backstop passes ``None`` and keeps the configured grace.
+
+        ``now`` is the API's request-time cutoff anchor (the same ``datetime`` forwarded to the
+        terminal reaper). The on-demand ``service gc`` path threads it so the row-less orphan
+        grace is measured against the frozen request time rather than the worker's (minutes-later)
+        claim clock; without it ``reap_classified_orphans`` falls back to ``time.time()`` and a
+        worktree/volume still inside the operator's ``--min-age-hours`` window at POST time could
+        age into eligibility before the worker reaps (PRRT_kwDOSJAM6s6LCs9R). It is converted to an
+        epoch float for the mtime-based age check; ``None`` (the periodic backstop) keeps the
+        claim-clock default.
         """
         resolved_enabled = settings.auto_cleanup_orphans if enabled is None else enabled
         resolved_min_age_hours = settings.orphan_reconcile_min_age_hours
@@ -364,6 +374,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             min_retention_hours=settings.completed_workspace_retention_hours,
             row_less_only=row_less_only,
             limit=limit,
+            now=None if now is None else now.timestamp(),
         )
 
     async def _reap_superseded_claude_bases() -> dict[str, object]:

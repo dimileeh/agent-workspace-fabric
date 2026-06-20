@@ -212,7 +212,11 @@ async def _run_claimed_service_gc_trigger(
     sweep applies, so without it the sweep would silently fall back to the worker's
     ``orphan_reconcile_min_age_hours`` default and could reap an orphan that is too young for the
     operator's explicit window yet old enough by that (possibly lower) default, deleting inside
-    the longer safety window the operator scoped (PRRT_kwDOSJAM6s6LCiLb). Its
+    the longer safety window the operator scoped (PRRT_kwDOSJAM6s6LCiLb). The parsed request-time
+    ``now`` anchor is forwarded too, so the row-less grace is measured against the same frozen cutoff
+    the terminal reaper uses instead of the worker's (minutes-later) claim clock — without it a
+    worktree/volume still inside the operator's ``--min-age-hours`` window at POST time could age into
+    eligibility before the worker reaches this call and be reaped (PRRT_kwDOSJAM6s6LCs9R). Its
     ``OrphanReapResult`` is folded
     into the combined report under ``classified_orphan_reap`` (flowing into the API's
     ``worker_reclaim.report``), and a non-raising ``partial`` sweep (a compose-teardown /
@@ -239,8 +243,9 @@ async def _run_claimed_service_gc_trigger(
         # invocation could age into eligibility and be reaped though no plan/dry-run
         # listed it (PRRT_kwDOSJAM6s6JbriQ).
         now = params.get("now")
-        if now is not None:
-            reaper_kwargs["now"] = datetime.fromisoformat(now)
+        anchor_now = datetime.fromisoformat(now) if now is not None else None
+        if anchor_now is not None:
+            reaper_kwargs["now"] = anchor_now
         statuses = params.get("statuses")
         if statuses:
             reaper_kwargs["statuses"] = statuses
@@ -272,9 +277,15 @@ async def _run_claimed_service_gc_trigger(
         # and could reap a too-young-by-command orphan that is merely old enough by that (possibly
         # lower) default — deleting inside the longer safety window the operator explicitly scoped
         # (PRRT_kwDOSJAM6s6LCiLb). The closure floors it at the configured grace so a shorter/absent
-        # request never shrinks the mid-provision guard; ``None`` keeps that default. Guarded on the
-        # dependency being wired so the DB-only gc path stays unchanged when no orphan
-        # reaper is present.
+        # request never shrinks the mid-provision guard; ``None`` keeps that default. The same parsed
+        # request-time ``now`` anchor threaded into the terminal reaper is forwarded too: a row-less
+        # orphan's grace is measured against ``now`` (the closure converts the anchor to an epoch),
+        # so without it the sweep falls back to the worker's claim-time ``time.time()`` and a
+        # worktree/volume that was still inside the operator's ``--min-age-hours`` window at POST time
+        # could age into eligibility before the worker reaches this call — exactly the request-time
+        # cutoff drift the terminal pass already avoids (PRRT_kwDOSJAM6s6LCs9R); ``None`` keeps the
+        # claim-clock default. Guarded on the dependency being wired so the DB-only gc path stays
+        # unchanged when no orphan reaper is present.
         if self._classified_orphan_reaper is not None:
             orphan_limit = limit
             if orphan_limit is not None:
@@ -284,6 +295,7 @@ async def _run_claimed_service_gc_trigger(
                 row_less_only=True,
                 limit=orphan_limit,
                 min_age_hours=min_age_hours,
+                now=anchor_now,
             )
             report = {**report, "classified_orphan_reap": orphan_result.to_dict()}
             # A non-raising ``partial`` orphan reap (a compose teardown / worktree delete

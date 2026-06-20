@@ -959,6 +959,7 @@ async def sweep_classified_orphans(
     run_subprocess: SubprocessRun | None = None,
     row_less_only: bool = False,
     limit: int | None = None,
+    now: float | None = None,
 ) -> OrphanReapResult:
     """Scan, classify, and reap readiness-classified orphan resources.
 
@@ -968,7 +969,10 @@ async def sweep_classified_orphans(
     :func:`reap_classified_orphans` so a caller (the on-demand ``service gc``
     path) can restrict the reap to no-DB-record (``missing``) orphans
     (PRRT_kwDOSJAM6s6LB30p, #637) and bound it to the operator's ``--limit`` batch,
-    oldest-first (PRRT_kwDOSJAM6s6LCCJZ).
+    oldest-first (PRRT_kwDOSJAM6s6LCCJZ). ``now`` (an epoch float) forwards to
+    :func:`reap_classified_orphans` as the age-check anchor so the on-demand path can
+    freeze the row-less grace at the API's request time rather than the worker's claim
+    clock; ``None`` lets the reaper default to ``time.time()`` (PRRT_kwDOSJAM6s6LCs9R).
     """
     if not enabled:
         return OrphanReapResult(
@@ -1016,6 +1020,7 @@ async def sweep_classified_orphans(
         min_age_hours=min_age_hours,
         row_less_only=row_less_only,
         limit=limit,
+        now=now,
     )
 
 

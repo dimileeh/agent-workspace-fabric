@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import types
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -853,6 +854,16 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     # A shorter request is floored at the configured grace:
     asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5, min_age_hours=1.0))
     assert created["classified_sweep_kwargs"]["min_age_hours"] == 4.0
+
+    # The API request-time ``now`` anchor (a ``datetime``) is forwarded to the sweep as an epoch
+    # float so the row-less orphan grace freezes at POST time instead of the worker's claim clock
+    # (PRRT_kwDOSJAM6s6LCs9R).
+    anchor = datetime(2026, 6, 14, 21, 0, tzinfo=UTC)
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5, now=anchor))
+    assert created["classified_sweep_kwargs"]["now"] == anchor.timestamp()
+    # No anchor (the periodic backstop) leaves the sweep to default to its own clock (``None``).
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5))
+    assert created["classified_sweep_kwargs"]["now"] is None
 
 
 @pytest.mark.unit
