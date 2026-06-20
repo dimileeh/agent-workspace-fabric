@@ -40,7 +40,6 @@ from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_RECOVERED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
-    _MONITOR_POLICY_BLOCKED_REASON,
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
 )
@@ -724,7 +723,7 @@ async def _run_pre_push_validation(
                 "monitor.pre_push_validation_recovered_head_policy_blocked",
                 workspace_id=workspace_id,
                 recovered_head=recovery_head[:10],
-                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+                reason_code=exc.reason_code,
             )
             cleanup = await _pre_push_validation_cleanup(
                 self,
@@ -744,7 +743,7 @@ async def _run_pre_push_validation(
                 passed=False,
                 validation_run_id=None,
                 workspace_head_sha=recovery_head,
-                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+                reason_code=exc.reason_code,
                 message=(
                     "PR monitor pre-push validation blocked: "
                     f"recovered HEAD failed supply-chain policy: {exc}"

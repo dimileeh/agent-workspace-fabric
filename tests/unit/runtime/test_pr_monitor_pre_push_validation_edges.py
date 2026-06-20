@@ -620,7 +620,10 @@ async def test_pre_push_validation_missing_head_recovery_policy_block_cleans_res
                 "command_evidence": command_evidence,
             }
         )
-        raise _MonitorPolicyBlockedError("SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION (package-lock.json)")
+        raise _MonitorPolicyBlockedError(
+            "PROTECTED_SCOPE_REPAIR_FAILED (.github/workflows/ci.yml)",
+            reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+        )
 
     async def _pre_push_validation_cleanup(
         self: object,
@@ -673,8 +676,8 @@ async def test_pre_push_validation_missing_head_recovery_policy_block_cleans_res
     )
 
     assert result.passed is False
-    assert result.reason_code == "MONITOR_POLICY_BLOCKED"
-    assert "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION" in result.message
+    assert result.reason_code == _PROTECTED_SCOPE_REPAIR_FAILED_REASON
+    assert "PROTECTED_SCOPE_REPAIR_FAILED" in result.message
     assert result.workspace_head_sha == recovery_base
     assert recovery_calls == [
         {
