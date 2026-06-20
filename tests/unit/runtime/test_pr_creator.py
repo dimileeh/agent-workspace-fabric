@@ -233,6 +233,55 @@ class TestPushAndOpen:
         assert len(list_calls) == 1
 
     @pytest.mark.unit
+    async def test_github_malformed_graphql_resubmit_pr_create_retries_then_succeeds(
+        self,
+    ) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # push succeeds
+        runner.queue_result(
+            returncode=1,
+            stderr=(
+                "pull request create failed: HTTP 400: We received a malformed request "
+                "from your client. Sorry about that. Please try resubmitting your "
+                "request and contact us if the problem persists. "
+                "(https://api.github.com/graphql)"
+            ),
+        )
+        runner.queue_result(returncode=0, stdout="[]")  # reconcile lookup: none
+        runner.queue_result(
+            returncode=0,
+            stdout="https://github.com/dimileeh/aira-agent/pull/42\n",
+        )
+
+        creator = PullRequestCreator(
+            runner,
+            pr_create_transient_max_retries=1,
+            pr_create_transient_initial_backoff_seconds=0,
+        )
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_x",
+            base_branch="development",
+            title="t",
+            body="b",
+            forge_client=GitHubClient(runner),
+            repo_url=_GH_REPO_URL,
+        )
+
+        assert result.url == "https://github.com/dimileeh/aira-agent/pull/42"
+        assert result.open_metadata is not None
+        assert result.open_metadata["strategy"] == "created_after_retry"
+        failures = result.open_metadata["failures"]
+        assert isinstance(failures, list)
+        assert failures[0]["transient"] is True
+        assert failures[0]["will_retry"] is True
+        create_calls = [call for call in runner.calls if call.args[:3] == ["gh", "pr", "create"]]
+        list_calls = [call for call in runner.calls if call.args[:3] == ["gh", "pr", "list"]]
+        assert len(create_calls) == 2
+        assert len(list_calls) == 1
+
+    @pytest.mark.unit
     async def test_github_transient_pr_create_failure_then_empty_url_preserves_retry_details(
         self,
     ) -> None:

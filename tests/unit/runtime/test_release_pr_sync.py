@@ -433,14 +433,112 @@ class TestFindOrCreateReleasePr:
         ]
 
     @pytest.mark.unit
-    async def test_non_duplicate_create_failure_reraises_without_recheck(self) -> None:
-        # A create failure that is not a duplicate-PR rejection (auth, network,
-        # branch protection, HTTP 5xx) is not a lost race. It must surface the
-        # original gh error immediately, without a second `gh pr list` whose own
-        # failure could mask the real cause.
+    async def test_transient_create_failure_retries_then_succeeds(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
         fake.queue_result(returncode=1, stderr="HTTP 500 from GitHub")  # gh pr create -> fails
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list recheck -> none
+        fake.queue_result(returncode=0, stdout="https://github.com/o/r/pull/321\n")
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=321))  # gh pr view
+        gh = GitHubClient(fake)
+        slept: list[float] = []
+
+        async def _record_sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        metadata, created = await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body="b",
+            sleep=_record_sleep,
+        )
+
+        assert created is True
+        assert metadata.number == 321
+        assert slept == [5.0]
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "view"],
+        ]
+
+    @pytest.mark.unit
+    async def test_malformed_graphql_resubmit_create_failure_retries_then_succeeds(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(
+            returncode=1,
+            stderr=(
+                "pull request create failed: HTTP 400: We received a malformed request "
+                "from your client. Sorry about that. Please try resubmitting your "
+                "request and contact us if the problem persists. "
+                "(https://api.github.com/graphql)"
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list recheck -> none
+        fake.queue_result(returncode=0, stdout="https://github.com/o/r/pull/321\n")
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=321))  # gh pr view
+        gh = GitHubClient(fake)
+
+        async def _no_sleep(_seconds: float) -> None:
+            return None
+
+        metadata, created = await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body="b",
+            sleep=_no_sleep,
+        )
+
+        assert created is True
+        assert metadata.number == 321
+        assert len([c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"]]) == 2
+
+    @pytest.mark.unit
+    async def test_transient_create_failure_reconciles_existing_pr(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(returncode=1, stderr="HTTP 503 from GitHub")  # gh pr create -> fails
+        fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=77))
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=77))  # gh pr view
+        gh = GitHubClient(fake)
+
+        metadata, created = await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body="b",
+        )
+
+        assert created is False
+        assert metadata.number == 77
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+            ["gh", "pr", "view"],
+        ]
+
+    @pytest.mark.unit
+    async def test_deterministic_create_failure_reraises_without_recheck(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(returncode=1, stderr="Bad credentials")  # gh pr create -> fails
         gh = GitHubClient(fake)
 
         with pytest.raises(GitHubClientError) as exc:
@@ -455,7 +553,7 @@ class TestFindOrCreateReleasePr:
             )
 
         assert exc.value.operation == "gh pr create"
-        # Only the initial list + the failed create ran: no re-check, no view.
+        # Only the initial list + the failed create ran: no retry, re-check, or view.
         assert [c.args[:3] for c in fake.calls] == [
             ["gh", "pr", "list"],
             ["gh", "pr", "create"],

@@ -27,6 +27,7 @@ from awf.common.bitbucket_client import (
     BitbucketClientError,
 )
 from awf.common.github_client import GitHubClientError
+from awf.common.github_transient import is_transient_github_error_text
 from awf.control.quality_gates import QualityGateViolation
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import (
@@ -89,7 +90,6 @@ from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
 )
 from awf.runtime.pr_monitor_runner.constants import (
-    _AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS,
     _AUTHORIZATION_BEARER_RE,
     _AWF_VERDICT,
     _BASE_FETCH_RETRY_COUNT_KEY_PREFIX,
@@ -650,14 +650,7 @@ def _redact_and_truncate_forge_error(value: str, *, limit: int = 400) -> str:
 def _is_transient_github_client_error(exc: GitHubClientError) -> bool:
     """Classify GitHub/gh failures that should keep the monitor polling."""
 
-    text = f"{exc.operation}\n{exc.stderr}".lower()
-    if any(marker in text for marker in _NON_TRANSIENT_GITHUB_ERROR_MARKERS):
-        return False
-    if any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS):
-        return True
-    # Ambiguous auth blips are transient only on the GitHub API client path (#515);
-    # ``_is_transient_base_fetch_error`` deliberately does not consult them.
-    return any(marker in text for marker in _AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS)
+    return is_transient_github_error_text(operation=exc.operation, stderr=exc.stderr)
 
 
 def _is_transient_bitbucket_client_error(exc: BitbucketClientError) -> bool:

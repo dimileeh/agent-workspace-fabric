@@ -165,6 +165,50 @@ async def test_github_transient_401_retries_with_backoff_then_exhausts(
 
 
 @pytest.mark.unit
+async def test_github_malformed_graphql_resubmit_retries(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    exc = GitHubClientError(
+        operation="gh api graphql",
+        returncode=1,
+        stderr=(
+            "HTTP 400: We received a malformed request from your client. "
+            "Sorry about that. Please try resubmitting your request and contact us "
+            "if the problem persists. (https://api.github.com/graphql)"
+        ),
+    )
+    state = MonitorState()
+
+    retried = await runner._wait_after_transient_github_error(
+        exc,
+        workspace_id=workspace_id,
+        pr_number=42,
+        context="fetch_pr_status",
+        state=state,
+        monitor_log=None,
+    )
+
+    assert retried is True
+    assert sleep_fn.calls == [5]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        retrying = _events(ws, "monitor.github_transient_error_retrying")
+        assert len(retrying) == 1
+        assert retrying[0].payload["context"] == "fetch_pr_status"
+
+
+@pytest.mark.unit
 async def test_bitbucket_transient_403_retries_with_backoff_then_exhausts(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
