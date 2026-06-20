@@ -19,3 +19,20 @@
   focused. Revisit if the pause/approval queue becomes noisy in practice.
 - **Depends on / blocked by:** Independent of the pause feature, but most useful *after* it ships
   (you'll know the real pause frequency).
+
+## Provider-recovery thundering-herd circuit-breaker (cap concurrent in-place retries)
+
+- **What:** Bound the number of concurrent `recovering` workspaces that hold a warm stack, with a
+  circuit-breaker for a provider-wide outage (free slots past a threshold / fall back to terminal when
+  the fleet is saturated).
+- **Why:** The in-place provider retry (#612, `plans/PROVIDER_INPLACE_RETRY_PLAN.md`) keeps the warm
+  stack during the cooldown. For a single transient blip that's fine, but a provider-wide outage would
+  idle-timeout many running workspaces at once → all enter `recovering` and hold their slots
+  simultaneously → capacity starvation, then a synchronized re-fire into the still-down provider.
+- **Pros:** Bounds worst-case capacity starvation; avoids a synchronized retry storm against a down provider.
+- **Cons:** Adds a cap + fallback policy (a second failure path next to warm-hold); premature before we
+  see the herd in practice.
+- **Context:** Surfaced in the `/plan-eng-review` §4 performance pass on #612; deliberately deferred so
+  the single-blip core ships right-sized. The warm-hold is consistent with how `blocked` already holds
+  slots for operator pauses.
+- **Depends on / blocked by:** #612 (in-place retry) shipping first — you'll know the real herd frequency.
