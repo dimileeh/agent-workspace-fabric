@@ -269,6 +269,10 @@ async def _count_stuck_detailed(
             ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
             Workspace.status != WorkspaceStatus.destroying.value,
             Workspace.status != WorkspaceStatus.monitoring_pr.value,
+            # ``recovering`` is an intentional auto-retry pause (#612): it holds
+            # its warm stack across the provider cooldown and resumes itself, so
+            # a workspace older than 2×SLA while paused here is not "stuck".
+            Workspace.status != WorkspaceStatus.recovering.value,
             Workspace.created_at < cutoff,
         )
     )

@@ -575,6 +575,32 @@ async def test_destroy_rejects_active_workspace_without_force_before_cleanup(
 
 
 @pytest.mark.unit
+async def test_destroy_rejects_recovering_workspace_without_force_before_cleanup(
+    session: AsyncSession,
+) -> None:
+    # A ``recovering`` workspace is a non-terminal auto-retry pause that holds a
+    # warm stack + worktree + execution claim and cannot transition directly to
+    # ``destroying`` (#612). Like ``blocked`` it must classify as active, so a
+    # force-less destroy is refused before any cleanup runs — otherwise the row
+    # would be torn down while still pointing at live resources.
+    workspace = await _workspace(session, status=WorkspaceStatus.recovering)
+    cleaner = RecordingCleaner()
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    with pytest.raises(ActiveWorkspaceDestroyError) as exc_info:
+        await service.destroy_workspace(
+            workspace.id,
+            force=False,
+            remove_volumes=True,
+            remove_worktree=True,
+        )
+
+    assert exc_info.value.error_code == "WORKSPACE_ACTIVE"
+    assert cleaner.calls == []
+    assert await _operations(session, workspace.id) == []
+
+
+@pytest.mark.unit
 async def test_destroy_already_cancelled_workspace_runs_cleanup_and_records_destroy_contract(
     session: AsyncSession,
 ) -> None:

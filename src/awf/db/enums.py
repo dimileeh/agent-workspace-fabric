@@ -53,6 +53,21 @@ class WorkspaceStatus(StrEnum):
     self-approve. See ``src/awf/control/quality_gates.py`` and the worker resume
     path. This is NOT terminal and must not fold into the "Running" KPI."""
 
+    recovering = "recovering"
+    """Non-terminal, AUTO-healing pause for an in-flight provider retry (#612).
+
+    Entered (pre-PR) when an agent run hits a *transient* provider failure (e.g.
+    an idle-timeout) that is retryable and still has retry budget: instead of
+    terminally failing and discarding the spent work, the workspace pauses here
+    with its worktree, warm stack, and execution claim preserved across the
+    provider cooldown, then resumes itself in place — no operator action. It is
+    the same KIND of pause as ``blocked`` (non-terminal, holds an execution slot,
+    keeps a warm stack) and shares its status accounting, but it is NOT
+    operator-facing: there is no ``guide``/grant, required-PR, or block-state
+    projection — it auto-resumes once ``now >= provider_cooldown_not_before``.
+    This is NOT terminal and must not fold into the "Running" KPI. Nothing enters
+    this status yet — #612 slice 2 wires the failure-fork divert."""
+
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
