@@ -211,6 +211,7 @@ async def _run_ci_fix(
         worktree_path=worktree_path,
         operation_type="ci_repair",
         fallback_head_sha=status.head_sha if status is not None else None,
+        allow_candidate_fallback=False,
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)

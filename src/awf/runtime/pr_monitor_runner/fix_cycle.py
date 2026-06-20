@@ -126,6 +126,7 @@ async def _run_fix_cycle(
         worktree_path=worktree_path,
         operation_type="comment_repair",
         fallback_head_sha=pr_head_sha,
+        allow_candidate_fallback=False,
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)

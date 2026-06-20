@@ -176,6 +176,7 @@ async def _repair_operation_start_head_result(
     worktree_path: Path,
     operation_type: str,
     fallback_head_sha: str | None = None,
+    allow_candidate_fallback: bool = True,
 ) -> tuple[str, _GitPushResult | None]:
     def failure_result(
         *,
@@ -260,6 +261,8 @@ async def _repair_operation_start_head_result(
     async def start_head_fallback() -> tuple[str | None, str]:
         if fallback_head_sha:
             return fallback_head_sha, "status"
+        if not allow_candidate_fallback:
+            return None, "candidate"
         return await self._open_merge_candidate_head_sha(workspace_id), "candidate"
 
     if not worktree_path.exists():
