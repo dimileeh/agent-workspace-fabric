@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select
@@ -120,6 +121,60 @@ async def list_resumable_blocked_ids(
         Workspace.status == WorkspaceStatus.blocked.value,
         not_monitor_origin,
         or_(actionable_hint, active_grant_exists),
+    )
+    if node_id is not None:
+        stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+    if exclude_ids:
+        stmt = stmt.where(Workspace.id.notin_(exclude_ids))
+    stmt = stmt.order_by(Workspace.updated_at.asc(), Workspace.id.asc()).limit(limit)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def list_resumable_recovering_ids(
+    session: AsyncSession,
+    dialect_name: str | None,
+    *,
+    limit: int,
+    now: datetime,
+    exclude_ids: set[str] | None = None,
+    node_id: str | None = None,
+) -> builtins.list[str]:
+    """Return ``recovering`` workspace IDs whose provider cooldown has elapsed (#612).
+
+    A ``recovering`` workspace auto-heals: the worker resumes the agent in place
+    once ``now >= task_policy.provider_recovery_state.not_before`` (the provider
+    cooldown deadline written when the run diverted into ``recovering``). Rows
+    still inside the cooldown carry a future ``not_before`` and are excluded here,
+    so the worker does not resume early.
+
+    The ``not_before`` deadline is stored as a tz-aware UTC ISO-8601 string (see
+    ``provider_cooldown_not_before`` / ``enter_recovering_for_provider_failure``);
+    the comparison value is normalized to UTC ISO the same way, so the lexicographic
+    string comparison is monotonic with chronological order. A row missing the
+    deadline (legacy/partial) is excluded — it has no cooldown to gate on, so it is
+    left to the stale-active recovery path rather than resumed blind.
+
+    Node-scoped exactly like ``list_resumable_blocked_ids``: a recovering
+    workspace's warm compose stack/worktree is preserved on the node that ran it,
+    so only that node — or any node, for NULL/legacy rows — may resume it.
+    Oldest ``updated_at`` first for FIFO fairness across cooled-down workspaces.
+    """
+    if limit <= 0:
+        return []
+    now_iso = now.astimezone(UTC).isoformat()
+    if dialect_name == "postgresql":
+        not_before: ColumnElement[Any] = Workspace.task_policy.op("->")(
+            "provider_recovery_state"
+        ).op("->>")("not_before")
+    else:
+        not_before = func.json_extract(
+            Workspace.task_policy, "$.provider_recovery_state.not_before"
+        )
+    cooldown_elapsed = and_(not_before.isnot(None), not_before <= now_iso)
+    stmt = select(Workspace.id).where(
+        Workspace.status == WorkspaceStatus.recovering.value,
+        cooldown_elapsed,
     )
     if node_id is not None:
         stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))

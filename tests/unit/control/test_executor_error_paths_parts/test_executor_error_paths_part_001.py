@@ -54,6 +54,7 @@ from awf.runtime.validation import (
     ValidationResult,
     ValidationRunner,
 )
+from awf.service.provider_recovery import provider_cooldown_not_before
 from tests.postgres import create_postgres_test_engine, postgres_test_engine
 from tests.unit.control.executor_paths import _test_worktree_path, _test_worktrees_root
 
@@ -904,13 +905,19 @@ class TestUnexpectedErrorDuringAgentRun:
         assert operations[0].payload["provider_recovery"]["action"] == "fallback"
 
     @pytest.mark.unit
-    async def test_provider_no_work_failure_schedules_same_provider_retry_first(
+    async def test_provider_no_work_failure_diverts_to_recovering_in_place(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # #612: a retryable provider failure on the no-commits agent-run fork with
+        # retry budget remaining diverts the SAME workspace into the auto-healing
+        # ``recovering`` pause (in-place retry) instead of fail-and-relaunching a
+        # fresh workspace. The warm stack + execution claim are preserved and the
+        # cooldown deadline is persisted for the worker resume gate; no second
+        # workspace is created (the single CLEAN attempt id is the point of #612).
         from awf.adapters import base as adapter_base
         from awf.db.enums import AgentRuntime
 
@@ -961,38 +968,34 @@ class TestUnexpectedErrorDuringAgentRun:
             tmp_path,
             validation=_RecordingValidation(),
         )
-        await executor.execute(ws_id)
+        await executor.execute(ws_id, execution_owner_id="worker-A")
         after = datetime.now(UTC)
 
         async with factory() as session:
-            retry_workspace = (
-                await session.execute(select(Workspace).where(Workspace.id != ws_id))
-            ).scalar_one()
-            event = (
-                await session.execute(
-                    select(WorkspaceEvent).where(
-                        WorkspaceEvent.workspace_id == ws_id,
-                        WorkspaceEvent.event_type == "workspace.provider_recovery_requested",
-                    )
-                )
-            ).scalar_one()
+            ws = await WorkspaceRepository(session).get(ws_id)
+            # No fresh-relaunch workspace was created — in-place retry keeps the
+            # single workspace/attempt id.
+            other = (
+                (await session.execute(select(Workspace).where(Workspace.id != ws_id)))
+                .scalars()
+                .all()
+            )
+            attempts = list((await session.execute(select(TaskAttempt))).scalars())
 
-        state = retry_workspace.task_policy["provider_recovery_state"]
-        not_before = _parse_utc_datetime(state["not_before"])
-        assert retry_workspace.status == WorkspaceStatus.requested.value
-        assert retry_workspace.agent == "gemini"
-        assert retry_workspace.task_policy["agent_model"] == "gemini-2.5-pro"
-        assert state["action"] == "retry"
-        assert state["target_provider"] == "google"
-        assert state["target_model"] == "gemini-2.5-pro"
-        assert state["retry_attempt_number"] == 1
-        assert state["fallback_attempt_number"] == 0
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.recovering.value
+        assert other == []
+        assert [attempt.workspace_id for attempt in attempts] == [ws_id]
+        # The held execution claim stays in place as the warm-stack lease.
+        assert ws.execution_claimed_by == "worker-A"
+        # The cooldown deadline is persisted for the worker resume gate.
+        not_before = provider_cooldown_not_before(ws.task_policy)
+        assert not_before is not None
         assert before + expected_retry_delay <= not_before <= after + expected_retry_delay
-        recovery_payload = event.payload["provider_recovery"]
-        assert recovery_payload["action"] == "retry"
-        assert recovery_payload["decision_reason_code"] == "PROVIDER_RETRY_DELAYED"
-        assert recovery_payload["retry_after_seconds"] == retry_after_seconds
-        assert "not_before" in recovery_payload
+        state = ws.task_policy["provider_recovery_state"]
+        assert state["action"] == "retry"
+        assert state["retry_attempt_number"] == 1
+        assert state["recovery_scope"] == "agent_run_in_place"
 
     @pytest.mark.unit
     async def test_provider_recovery_explicit_codex_capacity_falls_back_to_configured_default(

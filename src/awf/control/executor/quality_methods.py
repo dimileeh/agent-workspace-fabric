@@ -1306,6 +1306,18 @@ async def _mark_post_agent_commit_failed(
             base_message = f"{base_message}: {summary_text}"
         if agent_exit_note is not None:
             base_message = f"{base_message}; {agent_exit_note}"
+        # Same divert as the no-commits agent-failure fork: a retryable provider
+        # failure with budget remaining pauses into ``recovering`` for in-place
+        # retry BEFORE the terminal teardown, instead of fail-and-relaunch (#612).
+        if await self.enter_recovering_for_provider_failure(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            message=base_message[:2000],
+            reason_code=agent_run_reason_code,
+            details=details,
+            execution_owner_id=execution_owner_id,
+        ):
+            return
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,

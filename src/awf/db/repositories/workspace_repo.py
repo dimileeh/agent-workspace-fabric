@@ -79,6 +79,7 @@ from awf.db.repositories.workspace_repo_host_ports import (
 )
 from awf.db.repositories.workspace_repo_resumable import (
     list_resumable_blocked_ids,
+    list_resumable_recovering_ids,
 )
 
 
@@ -695,6 +696,31 @@ class WorkspaceRepository:
             self._session,
             self._dialect_name,
             limit=limit,
+            exclude_ids=exclude_ids,
+            node_id=node_id,
+        )
+
+    async def list_resumable_recovering_ids(
+        self,
+        *,
+        limit: int,
+        now: datetime,
+        exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
+    ) -> builtins.list[str]:
+        """Return ``recovering`` workspace IDs whose provider cooldown elapsed (#612).
+
+        A ``recovering`` workspace is resumable once ``now`` has reached the
+        provider cooldown deadline persisted at
+        ``task_policy.provider_recovery_state.not_before``; rows still inside the
+        cooldown are excluded so the worker does not resume early. Node-scoped and
+        FIFO by ``updated_at`` exactly like ``list_resumable_blocked_ids``.
+        """
+        return await list_resumable_recovering_ids(
+            self._session,
+            self._dialect_name,
+            limit=limit,
+            now=now,
             exclude_ids=exclude_ids,
             node_id=node_id,
         )

@@ -75,6 +75,7 @@ from awf.control.executor.recovery_payloads import (
 from awf.control.executor.state_ops import _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import (
+    PauseResumeReason,
     _MonitorRebaseRecoveryError,
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
@@ -112,7 +113,7 @@ async def execute(
     *,
     execution_owner_id: str | None = None,
     execution_lease_expires_at: datetime | None = None,
-    resume_from_blocked: bool = False,
+    resume_reason: PauseResumeReason | None = None,
 ) -> None:
     """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
 
@@ -120,17 +121,27 @@ async def execute(
     workspace that is not currently in ``ready`` — useful when a poll
     loop races with a manual invocation.
 
-    ``resume_from_blocked`` re-enters a workspace the worker already moved
+    ``resume_reason == "blocked"`` re-enters a workspace the worker already moved
     ``blocked -> running`` after an operator resolved a protected quality-gate
     violation; ``_begin_execution`` decides whether to re-run the agent (a
     revert/redo directive) or skip it (an approve-and-keep grant). Active
     operator grants are honored by every gate and consumed once the gate passes;
     if a protected violation still stands the gate re-blocks (bumping
     ``block_epoch``, invalidating the now-stale grants).
+
+    ``resume_reason == "recovering"`` re-enters a workspace the worker moved
+    ``recovering -> running`` after the provider cooldown elapsed (#612): a fresh
+    agent re-run on the worker-reset worktree with no operator-grant/baseline
+    replay. Only the ``blocked`` resume consumes grants and reuses the persisted
+    baseline, so those are gated on ``resume_from_blocked`` below.
     """
+    # ``blocked`` is the only resume that reuses the persisted baseline
+    # (``skip_measure``) and consumes operator grants after the push CAS; the
+    # ``recovering`` resume re-measures and has no grants to consume.
+    resume_from_blocked = resume_reason == "blocked"
     begin = await self._begin_execution(
         workspace_id,
-        resume_from_blocked=resume_from_blocked,
+        resume_reason=resume_reason,
         execution_owner_id=execution_owner_id,
         execution_lease_expires_at=execution_lease_expires_at,
     )
@@ -1065,6 +1076,28 @@ async def execute(
                 # Plan/Validation controls. This branch returns before the
                 # post-validation deposit block. Best-effort and idempotent.
                 _deposit_planning_artifacts()
+                # A retryable provider failure with retry budget remaining diverts
+                # into the auto-healing ``recovering`` pause INSTEAD of going
+                # terminal: the warm stack + worktree + execution claim survive the
+                # provider cooldown and the agent is re-run in place (#612). The
+                # decision (classify + budget) is the SAME one the fail-and-relaunch
+                # path runs downstream, hoisted here so the divert lands before the
+                # terminal teardown (T7). Gated on
+                # ``agent_run_failure_reason == agent_failure`` — the same gate as
+                # the provider-recovery call below — so the recovered missing-HEAD
+                # path (which also sets ``agent_run_reason_code``) never diverts.
+                if (
+                    agent_run_failure_reason == FailureReason.agent_failure
+                    and await self.enter_recovering_for_provider_failure(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        message=message,
+                        reason_code=agent_run_reason_code,
+                        details=agent_run_details,
+                        execution_owner_id=execution_owner_id,
+                    )
+                ):
+                    return
                 # Provider recovery reads the failed state event, so
                 # persist the structured reason/details first. The
                 # recovery service creates an authorized delayed retry

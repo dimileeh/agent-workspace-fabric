@@ -43,7 +43,7 @@ from awf.control.executor.recovery_payloads import (
     _planning_validation_handoff_metadata,
 )
 from awf.control.executor.status_helpers import _is_callback_terminal_status
-from awf.control.executor.types import _PlanningValidationHandoff
+from awf.control.executor.types import PauseResumeReason, _PlanningValidationHandoff
 from awf.control.operator_grants import (
     active_operator_grant_specs_in_session,
     consume_active_operator_grants_in_session,
@@ -54,6 +54,7 @@ from awf.control.quality_gates import (
     QualityGateViolation,
 )
 from awf.db.enums import (
+    AgentRuntime,
     FailureReason,
     OperationStatus,
     WorkspaceStatus,
@@ -63,6 +64,11 @@ from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
 from awf.runtime.validation import ValidationCommandResult, ValidationCoverageResult
+from awf.service.provider_recovery import (
+    _policy_model,
+    in_place_recovery_task_policy,
+    should_recover_in_place,
+)
 
 
 def _resolved_profile_snapshot_from_db_value(value: object) -> dict[str, Any] | None:
@@ -534,6 +540,129 @@ async def enter_blocked_for_protected_violation(
         return True
 
 
+async def enter_recovering_for_provider_failure(
+    self: Any,
+    *,
+    workspace_id: str,
+    from_status: WorkspaceStatus,
+    message: str,
+    reason_code: str | None,
+    details: Mapping[str, Any] | None,
+    execution_owner_id: str | None = None,
+) -> bool:
+    """Divert a retryable provider failure into the auto-healing ``recovering`` pause.
+
+    Replaces ``_mark_failed(... agent_failure ...)`` at the agent-run failure forks
+    when the failure is a retryable provider failure with retry budget remaining
+    (#612): the classify + budget decision (``should_recover_in_place``, the SAME
+    logic the fail-and-relaunch path runs downstream — T7) is hoisted here so the
+    divert lands in ``recovering`` BEFORE the terminal transition / warm-stack
+    teardown fires. Returns ``True`` when the workspace was paused into
+    ``recovering`` (the caller then returns WITHOUT calling ``_mark_failed`` /
+    ``_prepare_provider_recovery``); ``False`` for a non-provider / terminal /
+    budget-exhausted / fallback failure, so the caller falls through to today's
+    terminal path unchanged.
+
+    Epoch-guarded clean exit (mirrors the #421 / blocked CAS): the
+    ``running -> recovering`` transition is gated on the row still being in
+    ``from_status`` and — when known — still claimed by ``execution_owner_id``.
+    0 rows means a stale/raced executor lost the claim, so we return ``False``
+    WITHOUT clobbering the row (a late error path cannot drive it to ``failed``
+    behind a newer claimant). The provider cooldown deadline is persisted in
+    ``task_policy.provider_recovery_state.not_before`` (read back by
+    ``provider_cooldown_not_before`` to gate the resume) and the held execution
+    claim is left in place as the warm-stack lease.
+    """
+    decision_now = datetime.now(UTC)
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        if ws is None:  # pragma: no cover - destroyed mid-flight
+            return False
+        decision = should_recover_in_place(
+            reason_code=reason_code,
+            message=message,
+            details=details,
+            task_policy=ws.task_policy,
+            agent=ws.agent,
+            current_model=_policy_model(ws.task_policy),
+            now=decision_now,
+            effective_default_model=_executor_default_model_for_agent(self, ws.agent),
+        )
+        if decision is None:
+            return False
+
+        extra_conditions: tuple[Any, ...] = ()
+        if execution_owner_id is not None:
+            extra_conditions = (Workspace.execution_claimed_by == execution_owner_id,)
+        recovery_payload = {
+            "provider_recovery": {
+                **decision.metadata,
+                "action": "retry",
+                "recovery_scope": "agent_run_in_place",
+                "decision_reason_code": decision.reason_code,
+                "retry_attempt_number": decision.retry_attempt_number,
+                "not_before": decision.not_before.isoformat(),
+            }
+        }
+        transitioned = await repo.transition_if_current(
+            workspace_id,
+            from_status=from_status,
+            to=WorkspaceStatus.recovering,
+            reason_code=decision.reason_code,
+            payload=recovery_payload,
+            extra_conditions=extra_conditions,
+        )
+        if transitioned is None:
+            current = await repo.get(workspace_id)
+            if current is not None:
+                await self._record_stale_action_skip(
+                    repo,
+                    current,
+                    action="enter_recovering_for_provider_failure",
+                    expected=from_status,
+                    reason_code="EXECUTOR_ENTER_RECOVERING_SKIPPED",
+                )
+                if _is_callback_terminal_status(current.status):
+                    await self._finish_ignored_stale_callback_operations_in_session(
+                        session,
+                        workspace_id=workspace_id,
+                        callback_source="executor",
+                        callback_action="enter_recovering_for_provider_failure",
+                        expected_status=from_status,
+                        actual_status=current.status,
+                    )
+                await session.commit()
+            return False
+
+        transitioned.task_policy = in_place_recovery_task_policy(
+            transitioned.task_policy,
+            decision=decision,
+        )
+        # A provider failure mid-recovery (a validate/rebase recovery fix pass) must
+        # not leave the recovery Operation active — mirror the blocked enter so a
+        # later resume re-invokes the agent cleanly rather than taking the
+        # validate-only recovery branch and skipping it.
+        await self._finish_active_recovery_operations_in_session(
+            session,
+            workspace_id=workspace_id,
+            status=OperationStatus.failed,
+            reason_code=decision.reason_code,
+            error_message=("Retryable provider failure paused the workspace for in-place retry."),
+        )
+        await session.commit()
+        return True
+
+
+def _executor_default_model_for_agent(self: Any, agent: str) -> str | None:
+    """Resolve the configured default model for ``agent`` (matches ``_prepare_provider_recovery``)."""
+    try:
+        defaults = self._defaults_for(AgentRuntime(agent))
+    except ValueError:
+        return None
+    return defaults.model if defaults is not None else None
+
+
 async def _persist_block_baseline_coverage(
     self: Any,
     workspace_id: str,
@@ -618,7 +747,7 @@ async def _begin_execution(
     self: Any,
     workspace_id: str,
     *,
-    resume_from_blocked: bool,
+    resume_reason: PauseResumeReason | None = None,
     execution_owner_id: str | None,
     execution_lease_expires_at: datetime | None,
 ) -> tuple[Workspace, bool, bool, ValidationCoverageResult | None] | None:
@@ -632,7 +761,7 @@ async def _begin_execution(
     coverage ratchet compares against the original base rather than the mutated
     worktree); it is ``None`` on a fresh claim.
 
-    ``resume_from_blocked`` re-enters a workspace the worker has already
+    ``resume_reason == "blocked"`` re-enters a workspace the worker has already
     transitioned ``blocked -> running`` (re-acquiring the epoch-fenced execution
     claim) after an operator resolved a protected quality-gate violation. The
     claim was taken by the worker's resume CAS, so ``_claim_ready`` is skipped;
@@ -641,6 +770,16 @@ async def _begin_execution(
     A revert/redo directive re-invokes the agent with the directive appended; an
     approve-and-keep grant skips the agent entirely (``resume_skip_agent``) and
     re-runs setup + full validation.
+
+    ``resume_reason == "recovering"`` re-enters a workspace the worker moved
+    ``recovering -> running`` once the provider cooldown elapsed (#612). Unlike
+    the blocked resume this is a fresh agent re-run on a worktree the worker has
+    already stashed + reset to HEAD, so it deliberately BYPASSES every blocked-only
+    resume semantic: no persisted ``block_baseline_coverage`` reuse (baseline is
+    re-measured), no ``pending_operator_hint`` directive injection, no operator
+    grants / ``resume_disable_fix_passes``, and never ``resume_skip_agent`` — the
+    agent always runs. The status recheck is still epoch-fenced on
+    ``execution_owner_id`` so a stale worker cannot drive a duplicate resume.
 
     ``resume_disable_fix_passes`` is the separate signal that the *secondary*
     agent passes (validation fix passes + pre-commit repair) must stay off. It is
@@ -651,7 +790,23 @@ async def _begin_execution(
     violation silently suppressed by the same single-use grant
     (PRRT_kwDOSJAM6s6J7EUX / PRRT_kwDOSJAM6s6J5SDf).
     """
-    if resume_from_blocked:
+    if resume_reason == "recovering":
+        # Auto-healing provider-failure resume: a fresh agent re-run on the
+        # worker-reset worktree. Bypass all blocked-only resume semantics — no
+        # baseline reuse, no operator hint/grant replay, always re-run the agent.
+        ws = await self._load_workspace(workspace_id)
+        if ws is None:
+            return None
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.running,
+            action="resume_recovering_execution",
+            owner_id=execution_owner_id,
+        ):
+            return None
+        return ws, False, False, None
+
+    if resume_reason == "blocked":
         ws = await self._load_workspace(workspace_id)
         if ws is None:
             return None
