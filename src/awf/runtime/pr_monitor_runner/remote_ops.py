@@ -916,8 +916,10 @@ async def _run_sync_base(
             )
         except Exception as exc:
             # Runtime plumbing can fail outside ``AgentRunError`` after the agent
-            # has already mutated the shared sync-base mirror. Repair once, then
-            # preserve the original failure for the monitor loop.
+            # has already mutated the shared sync-base mirror. Repair once; if
+            # repair fails, fail closed with the mirror-hooks reason because the
+            # shared mirror may remain poisoned. Otherwise preserve the original
+            # failure for the monitor loop.
             if mirror_path is not None:
                 try:
                     await repair_mirror_hooks_path(mirror_path)
@@ -929,6 +931,7 @@ async def _run_sync_base(
                         error_type=repair_exc.__class__.__name__,
                         original_error_type=exc.__class__.__name__,
                     )
+                    raise _MonitorMirrorHooksPathRepairFailedError() from repair_exc
             raise
 
         try:
