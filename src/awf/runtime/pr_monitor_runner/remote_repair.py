@@ -221,7 +221,7 @@ async def _repair_operation_start_head_result(
         fallback_exists = (
             await _mirror_commit_object_exists(self, mirror_path, fallback_head)
             if mirror_path is not None
-            else await _worktree_commit_object_exists(self, worktree_path, fallback_head)
+            else await verify_head_object_exists(worktree_path)
         )
         if not fallback_exists:
             _log.warning(
@@ -795,6 +795,7 @@ async def _commit_dirty_worktree(
             reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
         )
         recovery_head = operation_start_head
+        candidate_head: str | None = None
         if recovery_head and mirror_path is not None:
             recovery_head_exists = await _mirror_commit_object_exists(
                 self, mirror_path, recovery_head
@@ -806,8 +807,20 @@ async def _commit_dirty_worktree(
                     operation_start_head=recovery_head[:10],
                 )
                 recovery_head = None
+        elif recovery_head:
+            candidate_head = await _open_merge_candidate_head_sha(self, workspace_id)
+            if candidate_head and candidate_head != recovery_head:
+                _log.warning(
+                    "monitor.head_object_missing_recovery_anchor_unverified",
+                    workspace_id=workspace_id,
+                    operation_start_head=recovery_head[:10],
+                    candidate_head=candidate_head[:10],
+                )
+                recovery_head = candidate_head
         if not recovery_head:
-            recovery_head = await _open_merge_candidate_head_sha(self, workspace_id)
+            recovery_head = candidate_head or await _open_merge_candidate_head_sha(
+                self, workspace_id
+            )
         if recovery_head is None:
             raise _MonitorHeadObjectMissingError(
                 _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,

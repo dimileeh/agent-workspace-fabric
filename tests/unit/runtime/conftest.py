@@ -50,7 +50,15 @@ def _mock_pr_monitor_git_mirror_guards(
             raising=False,
         )
 
-    if "repair_operation_start_head" not in request.node.nodeid:
+    nodeid = request.node.nodeid
+    exercises_real_mirror_commit_guard = (
+        "repair_operation_start_head" in nodeid
+        or "test_commit_dirty_worktree_missing_head_falls_back_from_stale_start_head" in nodeid
+        or "test_pr_monitor_runner_coverage_edges_part_019.py::"
+        "test_commit_dirty_worktree_missing_head_recovery_"
+        in nodeid
+    )
+    if not exercises_real_mirror_commit_guard:
         monkeypatch.setattr(
             "awf.runtime.pr_monitor_runner.remote_repair._mirror_commit_object_exists",
             _commit_object_exists,
