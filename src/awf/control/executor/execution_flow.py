@@ -269,11 +269,14 @@ async def execute(
             before_mark_failed=before_mark_failed,
         )
 
-    async def _repair_mirror_hooks_path_after_agent_cleanup_failure() -> None:
+    async def _repair_mirror_hooks_path_after_cleanup_failure(
+        *, failure_stage: str = "after agent cleanup failure"
+    ) -> None:
         await repair_mirror_hooks_path_after_agent_cleanup_failure(
             workspace_id=workspace_id,
             mirror_path=mirror_path,
             repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+            failure_stage=failure_stage,
         )
 
     try:
@@ -366,14 +369,20 @@ async def execute(
             return
         if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
             return
-        setup_result = await self._validation.run_profile_phases(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-            phase_names=("setup", "pre_agent"),
-            worktree_path=worktree_path,
-        )
+        try:
+            setup_result = await self._validation.run_profile_phases(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+                phase_names=("setup", "pre_agent"),
+                worktree_path=worktree_path,
+            )
+        except ComposeExecCleanupError:
+            await _repair_mirror_hooks_path_after_cleanup_failure(
+                failure_stage="after profile setup cleanup failure"
+            )
+            raise
         try:
             await self._record_setup_dependency_network_events(
                 workspace_id=workspace_id,
@@ -502,7 +511,7 @@ async def execute(
                     skip_measure=resume_from_blocked,
                 )
             except ComposeExecCleanupError:
-                await _repair_mirror_hooks_path_after_agent_cleanup_failure()
+                await _repair_mirror_hooks_path_after_cleanup_failure()
                 raise
             if not await self._recheck_status(
                 workspace_id,
@@ -532,7 +541,7 @@ async def execute(
                     return
                 post_agent_mirror_repair_done = True
             except ComposeExecCleanupError:
-                await _repair_mirror_hooks_path_after_agent_cleanup_failure()
+                await _repair_mirror_hooks_path_after_cleanup_failure()
                 raise
             except AgentRunError:
                 raise

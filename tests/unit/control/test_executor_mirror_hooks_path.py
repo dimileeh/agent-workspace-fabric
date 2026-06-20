@@ -422,6 +422,122 @@ async def test_execute_repairs_mirror_hooks_path_after_setup_failure(
 
 
 @pytest.mark.unit
+async def test_execute_repairs_mirror_hooks_path_after_setup_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile_snapshot = WorkspaceProfile(name="mirror-hooks-setup-cleanup").model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    workspace = Workspace(
+        id="ws_mirror_hooks_setup_cleanup",
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Mirror hooks",
+        task_prompt="Repair mirror hooks after setup cleanup failure.",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=profile_snapshot,
+    )
+    mirror_path = tmp_path / "mirror.git"
+    mark_failed_calls: list[dict[str, Any]] = []
+    repair_calls: list[Path] = []
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: Any) -> object:
+            raise ComposeExecCleanupError(
+                invocation_id="awf_profile_setup_cleanup",
+                source="setup",
+                label="profile setup",
+                message="tagged process still running",
+            )
+
+    class _Executor:
+        _config = SimpleNamespace(
+            agent_idle_timeout_seconds=30,
+            agent_wall_timeout_seconds=60,
+            compose_projects_root=tmp_path / "compose",
+            planning_max_iterations_default=6,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        _log_store = None
+        _runner = object()
+        _usage_sampler = None
+        _validation = _Validation()
+
+        async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
+            return workspace, False, False, None
+
+        async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _block_open_pr_reexecution_without_recovery(
+            self, *_args: object, **_kwargs: object
+        ) -> object:
+            return SimpleNamespace(blocked=False, recovery=None)
+
+        async def _dispatch_non_feature_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _prepare_conformance_salvage_for_execution(
+            self, *_args: object, **_kwargs: object
+        ) -> None:
+            return None
+
+        def _defaults_for(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def _mark_failed(self, **kwargs: Any) -> None:
+            mark_failed_calls.append(kwargs)
+
+        async def _finish_active_recovery_operations(self, **_kwargs: Any) -> None:
+            raise AssertionError("no recovery operation should be finished")
+
+        async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+            raise AssertionError("setup dependency events require a setup result")
+
+    async def _repair_agent_runtime_ownership(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def _repair_mirror_hooks_path(path: Path) -> bool:
+        repair_calls.append(path)
+        return True
+
+    monkeypatch.setattr(
+        execution_flow,
+        "get_adapter",
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+    )
+    monkeypatch.setattr(
+        execution_flow,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(execution_flow, "mirror_path_for_worktree", lambda _path: mirror_path)
+    monkeypatch.setattr(execution_flow, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    await execution_flow.execute(_Executor(), workspace.id)
+
+    assert repair_calls == [mirror_path, mirror_path]
+    assert mark_failed_calls == [
+        {
+            "workspace_id": workspace.id,
+            "from_status": WorkspaceStatus.running,
+            "failure_reason": FailureReason.infrastructure_failure,
+            "message": (
+                "EXEC_PROCESS_CLEANUP_FAILED: setup profile setup invocation "
+                "awf_profile_setup_cleanup: tagged process still running"
+            ),
+            "reason_code": EXEC_PROCESS_CLEANUP_FAILED,
+        }
+    ]
+
+
+@pytest.mark.unit
 async def test_execute_repairs_mirror_hooks_path_after_successful_setup_before_recovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

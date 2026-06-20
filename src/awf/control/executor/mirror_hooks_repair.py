@@ -74,6 +74,7 @@ async def repair_mirror_hooks_path_after_agent_cleanup_failure(
     workspace_id: str,
     mirror_path: Path | None,
     repair_mirror_hooks_path_fn: Callable[[Path], Awaitable[bool]],
+    failure_stage: str = "after agent cleanup failure",
 ) -> None:
     if mirror_path is None:
         return
@@ -85,7 +86,7 @@ async def repair_mirror_hooks_path_after_agent_cleanup_failure(
             workspace_id=workspace_id,
             reason_code=exc.reason_code,
             stderr=exc.stderr[:400],
-            failure_stage="after agent cleanup failure",
+            failure_stage=failure_stage,
         )
     except OSError as exc:
         _log.warning(
@@ -93,5 +94,5 @@ async def repair_mirror_hooks_path_after_agent_cleanup_failure(
             workspace_id=workspace_id,
             reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
             error=repr(exc)[:400],
-            failure_stage="after agent cleanup failure",
+            failure_stage=failure_stage,
         )
