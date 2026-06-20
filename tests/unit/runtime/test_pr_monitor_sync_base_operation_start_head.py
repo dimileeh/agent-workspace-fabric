@@ -19,7 +19,6 @@ from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
-    _MonitorMirrorHooksPathRepairFailedError,
 )
 
 
@@ -1008,19 +1007,24 @@ async def test_run_sync_base_fails_closed_when_post_agent_mirror_hooks_repair_fa
         _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
     )
 
-    with pytest.raises(_MonitorMirrorHooksPathRepairFailedError) as exc_info:
-        await remote_ops._run_sync_base(
-            runner,
-            workspace_id="ws-sync",
-            repo=SimpleNamespace(slug=lambda: "owner/repo"),
-            pr_number=614,
-            base_branch="main",
-            remote_branch="awf/ws-sync",
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-        )
+    result = await remote_ops._run_sync_base(
+        runner,
+        workspace_id="ws-sync",
+        repo=SimpleNamespace(slug=lambda: "owner/repo"),
+        pr_number=614,
+        base_branch="main",
+        remote_branch="awf/ws-sync",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
 
-    assert exc_info.value.__cause__ is repair_error
+    assert result == _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr="could not repair poisoned mirror hooks path after sync-base agent failure",
+        reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+    )
     assert events == [
         "git:merge --abort",
         "fetch-base",
