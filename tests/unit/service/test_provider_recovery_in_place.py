@@ -172,3 +172,29 @@ def test_in_place_recovery_task_policy_appends_existing_fingerprints() -> None:
     fingerprints = policy["provider_recovery_state"]["failure_fingerprints"]
     assert "prior-fp" in fingerprints
     assert len(fingerprints) == 2
+
+
+@pytest.mark.unit
+def test_in_place_recovery_task_policy_preserves_spent_fallback_budget() -> None:
+    # The workspace is already a provider fallback attempt
+    # (``fallback_attempt_number == 1``). An in-place same-agent retry must carry
+    # that spent budget forward so a later provider failure does not parse the
+    # count as 0 and re-select an already-exhausted fallback.
+    task_policy = {
+        "agent_model": "gpt-5",
+        "provider_recovery_state": {"fallback_attempt_number": 1},
+    }
+    decision = should_recover_in_place(
+        reason_code="AGENT_IDLE_TIMEOUT",
+        message="idle timeout exceeded after 600s",
+        details={"provider": "openai", "model": "gpt-5"},
+        task_policy=task_policy,
+        agent="codex",
+        current_model="gpt-5",
+        now=_NOW,
+    )
+    assert decision is not None
+
+    policy = in_place_recovery_task_policy(task_policy, decision=decision)
+
+    assert policy["provider_recovery_state"]["fallback_attempt_number"] == 1

@@ -407,6 +407,13 @@ def in_place_recovery_task_policy(
         "source_provider": _metadata_str(decision.metadata, "provider"),
         "source_model": _metadata_str(decision.metadata, "model"),
         "failure_fingerprints": fingerprints,
+        # An in-place retry keeps the SAME workspace, so any already-spent fallback
+        # budget must carry forward: a same-agent retry never changes the fallback
+        # counter (``decide_provider_recovery`` preserves ``state.fallback_attempt_number``
+        # for ``action == "retry"``). Dropping it here would let a later provider
+        # failure parse the count as 0 and re-select ``fallbacks[0]`` — repeating an
+        # already-exhausted fallback attempt.
+        "fallback_attempt_number": state.fallback_attempt_number,
         "retry_attempt_number": decision.retry_attempt_number,
         "not_before": decision.not_before.isoformat(),
         "recommended_action": _metadata_str(decision.metadata, "recommended_action"),
