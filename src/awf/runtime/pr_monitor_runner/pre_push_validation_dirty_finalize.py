@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 from awf.common.logging import get_logger
 from awf.runtime.pr_monitor_runner.constants import (
-    _MONITOR_POLICY_BLOCKED_REASON,
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
@@ -402,11 +401,11 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # code end-to-end instead of letting it collapse into the generic
         # pre-existing-dirty failure. Returning a non-clean check carrying the
         # reason code flows through ``_pre_push_dirty_result`` into
-        # ``_GitPushResult.reason_code``. That reason is intentionally
-        # NON-terminal (``_GitPushResult.terminal_monitor_failure`` does not
-        # include ``MONITOR_POLICY_BLOCKED``), so the monitor loop increments
-        # and retries. Returning without rolling back strands the residue, and
-        # the next repair cycle's repair-start guard
+        # ``_GitPushResult.reason_code``. The default ``MONITOR_POLICY_BLOCKED``
+        # reason is intentionally NON-terminal
+        # (``_GitPushResult.terminal_monitor_failure`` does not include it), so
+        # the monitor loop increments and retries. Returning without rolling
+        # back strands the residue, and the next repair cycle's repair-start guard
         # (``_pre_existing_dirty_repair_worktree_result``) trips as
         # ``PRE_EXISTING_DIRTY_WORKTREE``, losing the policy reason and wedging
         # recovery instead of re-polling cleanly. Roll back to
@@ -429,11 +428,12 @@ async def _try_finalize_pre_push_dirty_repair_state(
             workspace_id=workspace_id,
             error=repr(exc),
             paths=list(check.paths),
+            reason_code=exc.reason_code,
         )
         return ValidationWorktreeCheck(
             clean=False,
             paths=check.paths,
-            reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+            reason_code=exc.reason_code,
             message=str(exc) or "monitor policy blocked the pre-push dirty finalize",
         )
     except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
