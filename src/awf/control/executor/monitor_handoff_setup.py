@@ -18,7 +18,9 @@ from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     _setup_dependency_network_failure_details,
 )
+from awf.control.executor.mirror_hooks_repair import repair_mirror_hooks_path_or_mark_failed
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.node.git_manager import mirror_path_for_worktree, repair_mirror_hooks_path
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -223,6 +225,18 @@ async def _run_monitor_handoff_profile_setup(
     worktree_path: Path,
 ) -> bool:
     """Run profile setup before handing an adopted/release PR to the monitor."""
+    mirror_path = mirror_path_for_worktree(worktree_path)
+
+    async def _repair_mirror_hooks_path_or_mark_failed(*, failure_stage: str) -> bool:
+        return await repair_mirror_hooks_path_or_mark_failed(
+            executor=self,
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+            recovery_active=False,
+            failure_stage=failure_stage,
+        )
+
     try:
         validation = getattr(self, "_validation", None)
         if validation is None:
@@ -250,6 +264,10 @@ async def _run_monitor_handoff_profile_setup(
                 reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
             )
             return False
+        if not await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="before monitor handoff setup"
+        ):
+            return False
         setup_result = await validation.run_profile_phases(
             workspace_id=workspace_id,
             compose_project=compose_project,
@@ -261,6 +279,10 @@ async def _run_monitor_handoff_profile_setup(
     except _MonitorHandoffSetupFailureError:
         raise
     except ComposeExecCleanupError as exc:
+        if not await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="after monitor handoff setup cleanup failure"
+        ):
+            return False
         await _mark_failed_or_raise_setup_failure(
             self,
             workspace_id=workspace_id,
@@ -294,6 +316,10 @@ async def _run_monitor_handoff_profile_setup(
         )
 
     if setup_result.all_passed:
+        if not await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="after successful monitor handoff setup"
+        ):
+            return False
         # Mirror the ``execute`` path: probe the container for declared
         # toolchains and record any ``RUNTIME_TOOLCHAIN_UNAVAILABLE`` warnings
         # after a green setup. The probe is strictly additive and non-blocking,
@@ -337,6 +363,10 @@ async def _run_monitor_handoff_profile_setup(
         )
 
     first_fail = setup_result.first_failure
+    if not await _repair_mirror_hooks_path_or_mark_failed(
+        failure_stage="after monitor handoff setup failure"
+    ):
+        return False
     setup_dependency_details = _setup_dependency_network_failure_details(first_fail)
     setup_failure_reason_code = (
         SETUP_DEPENDENCY_NETWORK_FAILURE
