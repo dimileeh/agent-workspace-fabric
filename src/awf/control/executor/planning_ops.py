@@ -178,7 +178,7 @@ def _plan_artifact_candidate_digests(
     try:
         resolved_worktree = worktree_path.resolve(strict=True)
         resolved_plan_dir = plan_dir.resolve(strict=True)
-    except OSError:
+    except OSError:  # pragma: no cover - plan dir removed between is_dir() and resolve()
         return {}
     if resolved_plan_dir != resolved_worktree / plan_path.parent:
         return {}
@@ -189,10 +189,10 @@ def _plan_artifact_candidate_digests(
             continue
         try:
             relative_candidate = candidate.relative_to(worktree_path)
-        except ValueError:
+        except ValueError:  # pragma: no cover - glob children always sit under the worktree
             continue
         if relative_candidate.parent != plan_path.parent:
-            continue
+            continue  # pragma: no cover - non-recursive glob yields only direct children
         digest = _digest_file_if_present(candidate)
         if digest is not None:
             candidates[relative_candidate] = digest
