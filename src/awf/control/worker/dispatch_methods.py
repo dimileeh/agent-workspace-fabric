@@ -18,6 +18,7 @@ from awf.control.worker.constants import (
     _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL,
     _RECOVERING_RESUME_EXECUTION_CANCELLED_REASON_CODE,
     _RECOVERING_RESUME_EXECUTION_FAILED_REASON_CODE,
+    _RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
     EXECUTION_CLAIM_FENCED,
 )
 from awf.control.worker.logging import _log
@@ -169,19 +170,27 @@ def _dispatch_recovering_resumes(self: Any, workspace_ids: list[str], *, limit: 
     return _dispatch_paused_resumes(self, workspace_ids, limit=limit, reason="recovering")
 
 
-async def _reset_recovering_worktree(self: Any, workspace_id: str) -> None:
+async def _reset_recovering_worktree(self: Any, workspace_id: str) -> bool:
     """Stash uncommitted dirt then reset the worktree to HEAD before a recovering resume.
 
     A provider stall (e.g. an idle-timeout kill mid-edit) can leave the worktree
     inconsistent. A ``recovering`` resume re-runs the agent from the last clean
     commit, so stash any dirt first (``--include-untracked`` — partial work stays
     recoverable as a stash entry) then ``git reset --hard HEAD`` (D3). Best-effort:
-    if the worktree path is unavailable or ``git status`` fails we skip the reset
-    rather than risk discarding unstashed work; a stash failure also aborts the
-    reset for the same reason. Reuses the worker's preserved-active git runner."""
+    if the worktree path is unavailable we skip the reset and let the executor drive
+    the resume; if ``git status`` fails we skip the reset rather than risk discarding
+    unstashed work; a stash failure also aborts the reset for the same reason.
+
+    Returns ``True`` when the worktree is in a safe-to-resume state (no preserved
+    worktree path to act on, already clean, or successfully stashed + reset), and
+    ``False`` when a ``git status``/``stash``/``reset`` failure means the worktree
+    may still hold partial edits — the caller must abort the in-place retry and
+    preserve the paused state for a later safe resume rather than re-running the
+    agent on a contaminated worktree. Reuses the worker's preserved-active git
+    runner."""
     worktree_path = self._preserved_active_worktree_path(workspace_id)
     if worktree_path is None:
-        return
+        return True
     status_ok, status_out, status_err = await self._run_preserved_active_git(
         worktree_path, "status", "--porcelain=v1", "--untracked-files=all"
     )
@@ -191,7 +200,7 @@ async def _reset_recovering_worktree(self: Any, workspace_id: str) -> None:
             workspace_id=workspace_id,
             error=status_err[:240],
         )
-        return
+        return False
     if status_out.strip():
         stash_ok, _stash_out, stash_err = await self._run_preserved_active_git(
             worktree_path,
@@ -207,7 +216,7 @@ async def _reset_recovering_worktree(self: Any, workspace_id: str) -> None:
                 workspace_id=workspace_id,
                 error=stash_err[:240],
             )
-            return
+            return False
     reset_ok, _reset_out, reset_err = await self._run_preserved_active_git(
         worktree_path, "reset", "--hard", "HEAD"
     )
@@ -217,6 +226,8 @@ async def _reset_recovering_worktree(self: Any, workspace_id: str) -> None:
             workspace_id=workspace_id,
             error=reset_err[:240],
         )
+        return False
+    return True
 
 
 async def _safely_resume_paused_claimed(
@@ -257,8 +268,20 @@ async def _safely_resume_paused_claimed(
             return
         if reason == "recovering":
             # A stalled-mid-edit worktree is inconsistent; resume from the last
-            # clean commit (stash dirt → reset --hard HEAD) before re-invoking.
-            await self._reset_recovering_worktree(workspace_id)
+            # clean commit (stash dirt → reset --hard HEAD) before re-invoking. If
+            # that reset cannot be completed safely (``git status``/``stash``/
+            # ``reset`` failed) the worktree may still hold partial provider edits,
+            # so abort the in-place retry and restore the paused state for a later
+            # safe resume rather than re-running the agent on a contaminated tree.
+            # ``executor_drove_resume`` stays ``False`` so the ``finally`` releases
+            # the claim, letting a capable worker re-claim the cooled-down row.
+            if not await self._reset_recovering_worktree(workspace_id):
+                await self._restore_paused_resume_claim(
+                    workspace_id,
+                    reason=reason,
+                    reason_code=_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
+                )
+                return
             await self._executor.resume_recovering_execution(
                 workspace_id,
                 execution_owner_id=self._worker_id,

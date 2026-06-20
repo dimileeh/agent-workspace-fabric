@@ -284,6 +284,13 @@ _RECOVERING_RESUME_DISPATCH_ABORTED_REASON_CODE = "RECOVERING_RESUME_DISPATCH_AB
 ``recovering -> running`` claim but the post-claim ordered-decision write (or another
 failure) aborted before a resume task was dispatched."""
 
+_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE = "RECOVERING_RESUME_WORKTREE_RESET_ABORTED"
+"""Reason code for reverting ``running -> recovering`` when a recovering-resume won the
+``recovering -> running`` claim but the pre-run worktree reset (``git status``/``stash``/
+``reset --hard``) could not complete, so the worktree may still hold partial provider edits.
+The in-place retry is aborted and the auto-retry pause is restored for a later safe resume
+rather than re-running the agent on a contaminated worktree (#612)."""
+
 _RECOVERING_RESUME_EXECUTION_FAILED_REASON_CODE = "RECOVERING_RESUME_EXECUTION_FAILED"
 """Reason code for reverting ``running -> recovering`` when a recovering-resume won the
 ``recovering -> running`` claim and dispatched, but ``resume_recovering_execution`` raised

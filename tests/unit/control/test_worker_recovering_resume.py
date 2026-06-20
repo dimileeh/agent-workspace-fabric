@@ -322,7 +322,8 @@ async def test_reset_recovering_worktree_skips_when_status_fails(
     tmp_path: Path,
 ) -> None:
     # ``git status`` fails on a non-git directory → the reset is skipped rather
-    # than risk discarding unstashed work.
+    # than risk discarding unstashed work, and the function reports ``False`` so
+    # the caller aborts the in-place retry instead of running on the dirty tree.
     not_a_repo = tmp_path / "not-a-repo"
     not_a_repo.mkdir()
     (not_a_repo / "scratch.py").write_text("DIRTY\n")
@@ -333,10 +334,91 @@ async def test_reset_recovering_worktree_skips_when_status_fails(
         provisioner=_TransitioningProvisioner(worktree_path=not_a_repo),
     )
 
-    await worker._reset_recovering_worktree("ws_no_git")  # noqa: SLF001
+    safe = await worker._reset_recovering_worktree("ws_no_git")  # noqa: SLF001
 
-    # The file is untouched — no destructive reset ran.
+    # The file is untouched — no destructive reset ran — and the reset is unsafe.
+    assert safe is False
     assert (not_a_repo / "scratch.py").read_text() == "DIRTY\n"
+
+
+@pytest.mark.unit
+async def test_reset_recovering_worktree_reports_safe_when_reset_completes(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A successful stash + reset (and the clean no-op case, with no worktree path)
+    # all report ``True`` so the caller proceeds with the in-place retry.
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _git(["init", "-q", "-b", "development"], worktree)
+    _git(["config", "user.name", "T"], worktree)
+    _git(["config", "user.email", "t@t"], worktree)
+    (worktree / "tracked.py").write_text("clean\n")
+    _git(["add", "."], worktree)
+    _git(["commit", "-q", "-m", "base"], worktree)
+    (worktree / "tracked.py").write_text("DIRTY EDIT\n")
+
+    worker = _worker(
+        session_factory,
+        _RecordingRecoveringExecutor(),
+        provisioner=_TransitioningProvisioner(worktree_path=worktree),
+    )
+    assert await worker._reset_recovering_worktree("ws_dirty") is True  # noqa: SLF001
+
+    # No preserved worktree path → nothing to reset → still safe to resume.
+    no_path_worker = _worker(
+        session_factory,
+        _RecordingRecoveringExecutor(),
+        provisioner=_TransitioningProvisioner(worktree_path=None),
+    )
+    assert await no_path_worker._reset_recovering_worktree("ws_none") is True  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_recovering_resume_aborts_when_worktree_reset_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+    tmp_path: Path,
+) -> None:
+    # When the pre-run worktree reset cannot complete (here ``git status`` fails on
+    # a non-git worktree that may still hold partial provider edits), the in-place
+    # recovering retry is aborted: the executor is NOT re-invoked on the dirty tree,
+    # the row is restored to ``recovering`` for a later safe resume, and the claim
+    # is released so a capable worker can re-claim the cooled-down row.
+    not_a_repo = tmp_path / "dirty-worktree"
+    not_a_repo.mkdir()
+    (not_a_repo / "partial.py").write_text("PARTIAL PROVIDER EDIT\n")
+
+    ws_id = await _create_recovering(
+        session_factory,
+        origin_repo,
+        "reset-fails",
+        not_before=datetime.now(UTC) - timedelta(seconds=5),
+    )
+    executor = _RecordingRecoveringExecutor()
+    worker = _worker(
+        session_factory,
+        executor,
+        provisioner=_TransitioningProvisioner(worktree_path=not_a_repo),
+    )
+    assert await worker._claim_recovering_for_resume(ws_id)  # noqa: SLF001
+
+    await asyncio.wait_for(
+        worker._safely_resume_recovering_claimed(ws_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    # The contaminated worktree was never handed to the executor.
+    assert executor.resume_recovering_calls == []
+    # The partial edits are preserved — no destructive reset ran.
+    assert (not_a_repo / "partial.py").read_text() == "PARTIAL PROVIDER EDIT\n"
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        # Paused state restored; the claim released so the row can be re-claimed.
+        assert ws.status == WorkspaceStatus.recovering.value
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
 
 
 @pytest.mark.unit
