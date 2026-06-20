@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -57,6 +58,9 @@ from awf.control.executor.mirror_hooks_repair import (
     MirrorHooksPathRepairAbortedError,
     repair_mirror_hooks_path_after_agent_cleanup_failure,
     repair_mirror_hooks_path_or_mark_failed,
+)
+from awf.control.executor.missing_head_recovery import (
+    recover_missing_head_after_cleanup_failure,
 )
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
@@ -288,78 +292,20 @@ async def execute(
     async def _repair_hooks_after_agent_cleanup_failure() -> bool:
         return await _repair_mirror_hooks_path_after_cleanup_failure()
 
-    async def _recover_missing_head_after_setup_cleanup_failure(
-        exc: ComposeExecCleanupError,
-    ) -> bool:
-        if await verify_head_object_exists(worktree_path):
-            return True
-        recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
-        if recover_missing_head is None:
-            return False
-        recovered = await recover_missing_head(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=ws.base_commit,
-            branch_name=expected_branch,
-            from_status=WorkspaceStatus.running,
-            stage="profile_setup_cleanup_failure",
-            error=exc,
-            task_tag=ws.task_tag,
-            mark_failed_on_failure=False,
-        )
-        return bool(recovered)
-
-    async def _recover_missing_head_after_baseline_cleanup_failure(
-        exc: ComposeExecCleanupError,
-    ) -> bool:
-        if await verify_head_object_exists(worktree_path):
-            return True
-        recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
-        if recover_missing_head is None:
-            return False
-        recovered = await recover_missing_head(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=ws.base_commit,
-            branch_name=expected_branch,
-            from_status=WorkspaceStatus.running,
-            stage="baseline_coverage_cleanup_failure",
-            error=exc,
-            task_tag=ws.task_tag,
-            mark_failed_on_failure=False,
-        )
-        return bool(recovered)
-
-    async def _recover_missing_head_after_agent_cleanup_failure(
-        exc: ComposeExecCleanupError,
-    ) -> bool:
-        if await verify_head_object_exists(worktree_path):
-            return True
-        recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
-        if recover_missing_head is None:
-            return False
-        if not await recover_missing_head(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=ws.base_commit,
-            branch_name=expected_branch,
-            from_status=WorkspaceStatus.running,
-            stage="agent_run_cleanup_failure",
-            error=exc,
-            task_tag=ws.task_tag,
-            mark_failed_on_failure=False,
-        ):
-            return False
-        recovered_commit_verified = await self._verify_recovered_post_agent_commit_or_mark_failed(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=ws.base_commit,
-            owned_paths=list(ws.owned_paths),
-            expected_status=WorkspaceStatus.running,
-            execution_owner_id=execution_owner_id,
-            mark_failed_on_failure=False,
-        )
-        return bool(recovered_commit_verified)
+    # Bind the worktree-scoped recovery args once; each cleanup-failure path
+    # supplies only its ``stage`` (plus the post-agent commit re-verify for the
+    # agent-run path). ``verify_head_object_exists`` is captured here so test
+    # monkeypatches on this module's name still apply.
+    _recover_missing_head_after_cleanup_failure = partial(
+        recover_missing_head_after_cleanup_failure,
+        executor=self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        base_commit=ws.base_commit,
+        branch_name=expected_branch,
+        task_tag=ws.task_tag,
+        verify_head_object_exists_fn=verify_head_object_exists,
+    )
 
     try:
         agent = AgentRuntime(ws.agent)
@@ -465,7 +411,9 @@ async def execute(
                 failure_stage="after profile setup cleanup failure"
             ):
                 return
-            if not await _recover_missing_head_after_setup_cleanup_failure(exc):
+            if not await _recover_missing_head_after_cleanup_failure(
+                exc, stage="profile_setup_cleanup_failure"
+            ):
                 raise
             raise
         try:
@@ -598,7 +546,9 @@ async def execute(
             except ComposeExecCleanupError as exc:
                 if not await _repair_mirror_hooks_path_after_cleanup_failure():
                     return
-                if not await _recover_missing_head_after_baseline_cleanup_failure(exc):
+                if not await _recover_missing_head_after_cleanup_failure(
+                    exc, stage="baseline_coverage_cleanup_failure"
+                ):
                     raise
                 raise
             if not await self._recheck_status(
@@ -631,7 +581,13 @@ async def execute(
             except ComposeExecCleanupError as exc:
                 if not await _repair_hooks_after_agent_cleanup_failure():
                     return
-                if not await _recover_missing_head_after_agent_cleanup_failure(exc):
+                if not await _recover_missing_head_after_cleanup_failure(
+                    exc,
+                    stage="agent_run_cleanup_failure",
+                    owned_paths=list(ws.owned_paths),
+                    execution_owner_id=execution_owner_id,
+                    verify_post_agent_commit=True,
+                ):
                     raise
                 raise
             except AgentRunError:
