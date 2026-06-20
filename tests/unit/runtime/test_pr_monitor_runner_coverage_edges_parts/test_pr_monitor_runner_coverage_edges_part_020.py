@@ -257,6 +257,11 @@ async def test_ci_fix_cleanup_error_repairs_hooks_path(
         events.append("agent")
         return await adapter_run(**kwargs)
 
+    async def _commit_dirty_worktree(**kwargs: object) -> bool:
+        events.append("commit_dirty_worktree")
+        assert kwargs["operation_start_head"] == "abc123"
+        return True
+
     monkeypatch.setattr(
         "awf.runtime.pr_monitor_runner.ci_ops.repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
@@ -266,6 +271,7 @@ async def test_ci_fix_cleanup_error_repairs_hooks_path(
         _repair_mirror_hooks_path,
     )
     monkeypatch.setattr(runner._deps.adapter, "run", _adapter_run)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
 
     from awf.common.github_client import RepoRef
     from awf.runtime.pr_monitor import CheckFailure
@@ -302,7 +308,10 @@ async def test_ci_fix_cleanup_error_repairs_hooks_path(
 
         assert exc_info.value.invocation_id == "awf_ci_fix_cleanup"
 
-    assert events == ["repair", "agent", "repair"]
+    expected_events = ["repair", "agent", "repair"]
+    if not post_repair_fails:
+        expected_events.append("commit_dirty_worktree")
+    assert events == expected_events
     assert len(hooks_path_repaired) == 2
 
 

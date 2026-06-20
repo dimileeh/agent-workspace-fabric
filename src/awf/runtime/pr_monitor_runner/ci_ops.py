@@ -227,6 +227,7 @@ async def _run_ci_fix(
         task_tag=task_tag,
     )
     agent_run_err = None
+    post_agent_err: Exception | None = None
     command_evidence: list[str] = []
     if not await repair_agent_runtime_ownership(
         logger=_log,
@@ -277,11 +278,11 @@ async def _run_ci_fix(
             stderr=exc.result.stderr,
         )
     except Exception as exc:
-        # Broad by design: adapter/runtime plumbing can fail outside
-        # ``AgentRunError``. Repair the mirror once; if repair fails, fail
-        # closed with the mirror-hooks reason because the shared mirror may
-        # remain poisoned. Otherwise re-raise the original non-cancellation
-        # failure so the monitor preserves the real outcome.
+        # Runtime plumbing can fail outside ``AgentRunError`` after the agent
+        # has already mutated the shared mirror or self-committed. Repair
+        # hooks once; if repair succeeds, still run the dirty-worktree sink
+        # below so its HEAD-object guard can verify/recover the mirror ref
+        # before the original failure is propagated.
         if mirror_path is not None:
             try:
                 await repair_mirror_hooks_path(mirror_path)
@@ -294,7 +295,7 @@ async def _run_ci_fix(
                     original_error_type=exc.__class__.__name__,
                 )
                 raise _MonitorMirrorHooksPathRepairFailedError() from repair_exc
-        raise
+        post_agent_err = exc
 
     # The rollback anchor for the provider-recovery ``except`` clause below is
     # captured INSIDE that clause (after ``_commit_dirty_worktree`` raised),
@@ -455,6 +456,9 @@ async def _run_ci_fix(
             stderr=str(exc),
             reason_code=exc.reason_code,
         )
+
+    if post_agent_err is not None:
+        raise post_agent_err
 
     if agent_run_err is not None:
         # ``_commit_dirty_worktree`` returns False for two reasons: the
