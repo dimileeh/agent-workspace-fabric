@@ -1192,6 +1192,7 @@ class TestMiscMonitorHelpers:
         stale_operation_start_head = "1" * 40
         candidate_head = "2" * 40
         fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="stale operation start missing")
         fake.queue_result(returncode=1, stderr="candidate missing")
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
@@ -1233,11 +1234,17 @@ class TestMiscMonitorHelpers:
                 task_tag=None,
             )
 
-        assert len(fake.calls) == 1
-        assert fake.calls[0].args[-3:] == ["cat-file", "-e", f"{candidate_head}^{{commit}}"]
-        assert fake.calls[0].env is not None
-        assert "GIT_OBJECT_DIRECTORY" not in fake.calls[0].env
-        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[0].env
+        assert len(fake.calls) == 2
+        assert fake.calls[0].args[-3:] == [
+            "cat-file",
+            "-e",
+            f"{stale_operation_start_head}^{{commit}}",
+        ]
+        assert fake.calls[1].args[-3:] == ["cat-file", "-e", f"{candidate_head}^{{commit}}"]
+        for call in fake.calls:
+            assert call.env is not None
+            assert "GIT_OBJECT_DIRECTORY" not in call.env
+            assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_missing_head_recovery_runtime_only_returns_false(

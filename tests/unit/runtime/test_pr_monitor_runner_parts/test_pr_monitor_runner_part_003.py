@@ -572,7 +572,10 @@ async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
         stderr="Codex Spark: you've hit your usage limit. Switch to another model.",
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True, exist_ok=True)
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(returncode=0)  # operation start HEAD exists
     runner = make_runner(
         factory=factory,
         cmd=cmd,
