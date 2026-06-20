@@ -275,9 +275,11 @@ async def _repair_operation_start_head_result(
     head_sha = result.stdout.strip()
     if result.ok and head_sha:
         mirror_path = mirror_path_for_worktree(worktree_path)
-        if mirror_path is not None and not await _mirror_commit_object_exists(
-            self, mirror_path, head_sha
-        ):
+        if mirror_path is not None:
+            head_exists = await _mirror_commit_object_exists(self, mirror_path, head_sha)
+        else:
+            head_exists = await _worktree_commit_object_exists(self, worktree_path, head_sha)
+        if not head_exists:
             stdout = result.stdout[:400]
             stderr = result.stderr[:400]
             _log.warning(
@@ -285,7 +287,7 @@ async def _repair_operation_start_head_result(
                 workspace_id=workspace_id,
                 operation_type=operation_type,
                 head_sha=head_sha[:10],
-                mirror_path=str(mirror_path),
+                mirror_path=str(mirror_path) if mirror_path is not None else None,
                 returncode=result.returncode,
                 stdout=stdout,
                 stderr=stderr,
