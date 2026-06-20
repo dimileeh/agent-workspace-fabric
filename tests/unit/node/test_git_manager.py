@@ -825,7 +825,10 @@ def test_linked_worktree_path_from_git_dir_wraps_metadata_read_error(
 
     assert raised.value.operation == "worktree.hooks_path_probe"
     assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
-    assert "cannot read linked-worktree gitdir back-reference" in raised.value.stderr
+    # A non-ENOENT OSError (permission denied) is a live-but-unreadable worktree,
+    # not a removal race, so the probe surfaces the fail-closed "cannot access"
+    # wording rather than the stale "cannot read" sentinel reserved for ENOENT.
+    assert "cannot access linked-worktree gitdir back-reference" in raised.value.stderr
 
 
 @pytest.mark.unit
