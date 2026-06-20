@@ -241,6 +241,72 @@ async def test_consume_marks_failed_when_orphan_reaper_raises(
         assert "orphan sweep blew up" in (failed.error_message or "")
 
 
+async def test_consume_downgrades_combined_status_when_orphan_reap_partial(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A non-raising ``partial`` orphan reap downgrades the combined report (PRRT_kwDOSJAM6s6LB30q).
+
+    ``reap_classified_orphans`` returns ``OrphanReapResult(status="partial")`` — rather than
+    raising — when a compose teardown or worktree deletion fails. Merely nesting that under
+    ``classified_orphan_reap`` while leaving the top-level ``status`` ``succeeded`` would let the
+    worker-delegation fold (which derives ``worker_partial`` from the *top-level* status) report a
+    successful ``service gc --execute`` even though the orphan cleanup failed. The partial state
+    must fold into the combined report's headline status so the failure surfaces.
+    """
+    from awf.service.orphan_resources import (
+        ORPHAN_REAP_PARTIAL,
+        OrphanReapOutcome,
+        OrphanReapResult,
+    )
+
+    request_id = await _seed_pending(session_factory)
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {
+            "status": "succeeded",
+            "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+            "deleted_path_count": 2,
+        }
+
+    async def _classified_orphan_reaper(*, enabled: bool, row_less_only: bool) -> OrphanReapResult:
+        return OrphanReapResult(
+            enabled=enabled,
+            status="partial",
+            reason_code=ORPHAN_REAP_PARTIAL,
+            errors=(
+                OrphanReapOutcome(
+                    kind="worktree",
+                    workspace_id="ws_stuck",
+                    status="failed",
+                    reason_code="PATH_DELETE_PERMISSION_DENIED",
+                    error="permission denied",
+                ),
+            ),
+        )
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    async with session_factory() as session:
+        finished = await ServiceGCRequestRepository(session).get(request_id)
+        assert finished is not None
+        # The reap did not raise, so the row still completes — but the combined report is
+        # downgraded to ``partial`` so the worker-delegation fold surfaces a non-success run
+        # instead of a false success while the failed orphan cleanup is left unreported.
+        assert finished.status == "completed"
+        result = finished.result or {}
+        assert result["status"] == "partial"
+        assert result["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+        assert result["classified_orphan_reap"]["status"] == "partial"
+        # The terminal-reaper detail keys still survive the downgrade.
+        assert result["deleted_path_count"] == 2
+
+
 async def test_consume_threads_operator_params_into_reaper(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

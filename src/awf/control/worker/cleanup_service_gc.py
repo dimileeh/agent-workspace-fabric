@@ -27,6 +27,7 @@ from awf.control.worker.constants import (
 from awf.control.worker.logging import _log
 from awf.db.repositories import ServiceGCRequestRepository
 from awf.db.resilience import run_db_operation_with_retry
+from awf.service.gc import CLEANUP_EXECUTION_PARTIAL
 from awf.service.gc_worker_delegation import SERVICE_GC_WORKER_RECLAIM_FAILED
 
 
@@ -201,10 +202,15 @@ async def _run_claimed_service_gc_trigger(
     via ``--status``/``--exclude-status`` (PRRT_kwDOSJAM6s6LB30p): those terminal workspaces
     have DB rows and are already reaped by the scope-honouring ``_terminal_gc_reaper`` above,
     whereas row-less orphans have no status to scope on. Its ``OrphanReapResult`` is folded
-    into the combined report under ``classified_orphan_reap`` (flowing untouched into the
-    API's ``worker_reclaim.report``). The fold sits inside the same ``try`` so an
-    orphan-sweep raise is recorded on the row like any reaper failure rather than surfacing a
-    false success; it is skipped when no orphan reaper is wired (back-compat).
+    into the combined report under ``classified_orphan_reap`` (flowing into the API's
+    ``worker_reclaim.report``), and a non-raising ``partial`` sweep (a compose-teardown /
+    worktree-delete error surfaced as a status rather than an exception) also downgrades the
+    *top-level* combined ``status`` to ``partial`` — the worker-delegation fold derives
+    ``worker_partial`` from that top-level status, so without the downgrade an orphan-sweep
+    failure would still report a successful ``service gc --execute`` (PRRT_kwDOSJAM6s6LB30q).
+    The fold sits inside the same ``try`` so an orphan-sweep raise is recorded on the row like
+    any reaper failure rather than surfacing a false success; it is skipped when no orphan
+    reaper is wired (back-compat).
     """
     try:
         reaper_kwargs: dict[str, Any] = {}
@@ -243,6 +249,18 @@ async def _run_claimed_service_gc_trigger(
         if self._classified_orphan_reaper is not None:
             orphan_result = await self._classified_orphan_reaper(enabled=True, row_less_only=True)
             report = {**report, "classified_orphan_reap": orphan_result.to_dict()}
+            # A non-raising ``partial`` orphan reap (a compose teardown / worktree delete
+            # error surfaced as ``PATH_DELETE_PERMISSION_DENIED`` rather than an exception)
+            # must downgrade the *top-level* combined status, not only nest under
+            # ``classified_orphan_reap``. The worker-delegation fold derives
+            # ``worker_partial`` from ``report["status"]`` (``WorkerReclaimOutcome.from_report``),
+            # so without this an orphan-sweep failure would still report a successful
+            # ``service gc --execute`` (PRRT_kwDOSJAM6s6LB30q). Mirror ``combine_terminal_gc_
+            # reports``' "partial wins" rule: only ever downgrade, never upgrade an
+            # already-partial terminal report.
+            if orphan_result.status == "partial":
+                report["status"] = "partial"
+                report["reason_code"] = CLEANUP_EXECUTION_PARTIAL
     except asyncio.CancelledError:
         raise
     except Exception as exc:
