@@ -940,6 +940,24 @@ class TestListWorkspaces:
         assert {r["status"] for r in results} == {"ready"}
 
     @pytest.mark.unit
+    async def test_filters_by_recovering_status(
+        self, client: AsyncClient, engine: AsyncEngine
+    ) -> None:
+        # ``recovering`` is the auto-healing provider-retry pause (#612). It is a
+        # plain string status, so the ``status=recovering`` list filter must be
+        # accepted and the status round-trips in the response body.
+        recovering_id = await _create_workspace(client, task_title="recovering")
+        await _create_workspace(client, task_title="still requested")
+        await _set_workspace_status(engine, recovering_id, WorkspaceStatus.recovering)
+
+        response = await client.get("/v1/workspaces", params={"status": "recovering"})
+
+        assert response.status_code == 200
+        results = response.json()
+        assert [r["id"] for r in results] == [recovering_id]
+        assert {r["status"] for r in results} == {"recovering"}
+
+    @pytest.mark.unit
     async def test_filters_by_agent(self, client: AsyncClient) -> None:
         await _create_workspace(client, task_title="codex", agent="codex")
         claude_id = await _create_workspace(

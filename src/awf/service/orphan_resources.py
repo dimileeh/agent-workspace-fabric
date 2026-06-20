@@ -74,6 +74,10 @@ ACTIVE_WORKSPACE_STATUSES = frozenset(
         # in gc_classify). It must classify as active here so the orphan reaper
         # never tears down the warm stack this state exists to keep.
         WorkspaceStatus.blocked.value,
+        # A recovering workspace is paused auto-retrying across the provider
+        # cooldown with its worktree + warm stack preserved (#612); it must
+        # classify as active for the same reason — never reap the warm stack.
+        WorkspaceStatus.recovering.value,
         WorkspaceStatus.destroying.value,
     }
 )
