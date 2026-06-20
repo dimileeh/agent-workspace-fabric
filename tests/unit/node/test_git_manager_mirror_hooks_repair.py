@@ -141,6 +141,9 @@ class TestRepairMirrorHooksPath:
             nonlocal prune_calls
             prune_calls += 1
             assert path == mirror
+            # Real ``git worktree prune`` removes the dead linked-worktree metadata,
+            # so the retry pass no longer reports it as stale.
+            shutil.rmtree(linked_git_dir)
 
         monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
         monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
@@ -148,6 +151,40 @@ class TestRepairMirrorHooksPath:
         assert await git_module.repair_mirror_hooks_path(mirror) is True
         assert prune_calls == 1
         assert repair_calls == 2
+
+    @pytest.mark.unit
+    async def test_fails_closed_when_stale_metadata_survives_retry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        linked_git_dir = mirror / "worktrees" / "workspace"
+        linked_git_dir.mkdir(parents=True)
+        prune_calls = 0
+
+        async def _repair_hooks_path_config(**_kwargs: object) -> bool:
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            nonlocal prune_calls
+            prune_calls += 1
+            # Prune cannot clear metadata that stays unreadable (e.g. a
+            # permission-denied gitdir back-reference of a live worktree).
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+
+        with pytest.raises(git_module.GitOperationError) as raised:
+            await git_module.repair_mirror_hooks_path(mirror)
+
+        assert prune_calls == 1
+        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert raised.value.operation == "mirror.worktree_metadata_stale"
 
     @pytest.mark.unit
     async def test_removes_include_exposing_poisoned_hooks_path(self, tmp_path: Path) -> None:

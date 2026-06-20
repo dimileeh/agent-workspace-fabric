@@ -1121,9 +1121,25 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
             return repaired
 
         await _run_git_worktree_prune(mirror_path)
-        retry_repaired, _retry_stale_worktree_metadata = await _repair_mirror_hooks_path_once(
+        retry_repaired, retry_stale_worktree_metadata = await _repair_mirror_hooks_path_once(
             mirror_path
         )
+        if retry_stale_worktree_metadata:
+            # Prune clears dead metadata races, but unreadable linked-worktree
+            # metadata (e.g. a permission-denied gitdir back-reference of a live
+            # worktree) survives. Its ``config.worktree`` was skipped on both
+            # passes, so a poisoned ``core.hooksPath`` may still be present. Fail
+            # closed rather than letting the monitor proceed on an unverified mirror.
+            raise GitOperationError(
+                operation="mirror.worktree_metadata_stale",
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "linked-worktree metadata still stale after worktree prune at "
+                    f"{mirror_path}; cannot guarantee core.hooksPath repair of worktree config"
+                ),
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
         return repaired or retry_repaired or True
 
 
