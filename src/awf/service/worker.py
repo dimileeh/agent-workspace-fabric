@@ -312,7 +312,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         )
 
     async def _reap_classified_orphans(
-        *, enabled: bool | None = None, row_less_only: bool = False
+        *, enabled: bool | None = None, row_less_only: bool = False, limit: int | None = None
     ) -> OrphanReapResult:
         """Sweep classified orphan resources using the worker runtime dependencies.
 
@@ -327,6 +327,12 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         the operator scoped out with ``--status``/``--exclude-status``
         (PRRT_kwDOSJAM6s6LB30p); the periodic backstop leaves it ``False`` to reap
         terminal + missing under the global ``auto_cleanup_orphans`` flag.
+
+        ``limit`` likewise forwards through: the on-demand path threads the operator's
+        ``--limit`` so its additive sweep is bounded to that many oldest-first
+        workspaces, matching the DB-row terminal reaper instead of reaping every aged
+        row-less orphan in one pass (PRRT_kwDOSJAM6s6LCCJZ). The periodic backstop (and
+        an on-demand run with no ``--limit``) leaves it ``None`` (unbounded).
         """
         resolved_enabled = settings.auto_cleanup_orphans if enabled is None else enabled
         return await sweep_classified_orphans(
@@ -338,6 +344,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             min_age_hours=settings.orphan_reconcile_min_age_hours,
             min_retention_hours=settings.completed_workspace_retention_hours,
             row_less_only=row_less_only,
+            limit=limit,
         )
 
     async def _reap_superseded_claude_bases() -> dict[str, object]:

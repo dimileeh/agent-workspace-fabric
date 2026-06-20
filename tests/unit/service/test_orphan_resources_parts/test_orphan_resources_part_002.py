@@ -726,6 +726,145 @@ def test_reaper_reaps_aged_missing_worktree(tmp_path: Path) -> None:
     assert not worktree.exists()
 
 
+@pytest.mark.unit
+def test_reaper_limit_bounds_to_oldest_workspaces_first(tmp_path: Path) -> None:
+    """``--limit`` bounds the row-less sweep to the N oldest distinct workspaces.
+
+    The DB-row terminal reaper already honours ``--limit`` oldest-first; the additive
+    row-less orphan sweep must too, so ``awf service gc --execute --limit 1`` cannot tear
+    down every aged row-less orphan in one pass (PRRT_kwDOSJAM6s6LCCJZ). "Oldest" is the
+    on-disk anchor mtime — the same signal the age gate reads — since a row-less orphan
+    has no DB ``updated_at`` to sort on.
+    """
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktrees = tmp_path / "git" / "worktrees"
+    old = worktrees / "ws_old"
+    new = worktrees / "ws_new"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    os.utime(old, (1_000_000.0, 1_000_000.0))
+    os.utime(new, (2_000_000.0, 2_000_000.0))
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),  # no rows -> both worktrees classify "missing"
+        auto_cleanup_orphans=True,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,  # isolate the limit bound from the row-less age guard
+            limit=1,
+        )
+    )
+
+    assert result.status == "ok"
+    assert [outcome.workspace_id for outcome in result.reaped] == ["ws_old"]
+    assert not old.exists()
+    assert new.exists()  # the newer workspace is left for a later batch
+
+
+@pytest.mark.unit
+def test_reaper_limit_reaps_selected_workspace_records_together(tmp_path: Path) -> None:
+    """Bounding by DISTINCT workspace never half-reaps a stack (PRRT_kwDOSJAM6s6LCCJZ).
+
+    A workspace surfaces several records (a compose stack + its worktree). Under
+    ``--limit 1`` the single selected (oldest) workspace must be reaped as a unit — both
+    its compose teardown and its worktree — while the un-selected newer workspace is left
+    entirely intact.
+    """
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktrees = tmp_path / "git" / "worktrees"
+    full = worktrees / "ws_full"
+    newer = worktrees / "ws_new"
+    full.mkdir(parents=True)
+    newer.mkdir(parents=True)
+    os.utime(full, (1_000_000.0, 1_000_000.0))
+    os.utime(newer, (2_000_000.0, 2_000_000.0))
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_full-agent-1",
+                    "project": "awf_ws_full",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),  # no rows -> every record is a "missing" orphan
+        auto_cleanup_orphans=True,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,
+            limit=1,
+        )
+    )
+
+    assert result.status == "ok"
+    assert [call[2] for call in teardown.calls] == ["ws_full"]
+    assert {(outcome.kind, outcome.workspace_id) for outcome in result.reaped} == {
+        ("compose", "ws_full"),
+        ("worktree", "ws_full"),
+    }
+    assert not full.exists()
+    assert newer.exists()
+
+
+@pytest.mark.unit
+def test_reaper_limit_above_workspace_count_reaps_all(tmp_path: Path) -> None:
+    """A ``--limit`` larger than the distinct-workspace count clamps to reaping all."""
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktrees = tmp_path / "git" / "worktrees"
+    (worktrees / "ws_a").mkdir(parents=True)
+    (worktrees / "ws_b").mkdir(parents=True)
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,
+            limit=5,
+        )
+    )
+
+    assert result.status == "ok"
+    assert {outcome.workspace_id for outcome in result.reaped} == {"ws_a", "ws_b"}
+    assert not (worktrees / "ws_a").exists()
+    assert not (worktrees / "ws_b").exists()
+
+
 class _SessionScope:
     """Async context manager test double for orphan sweep DB sessions."""
 

@@ -830,14 +830,19 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     assert created["classified_sweep_kwargs"]["min_age_hours"] == 4.0
     assert created["classified_sweep_kwargs"]["min_retention_hours"] == 72.0
     assert created["classified_sweep_kwargs"]["row_less_only"] is False
+    # The periodic backstop passes no ``--limit``, so the sweep stays unbounded.
+    assert created["classified_sweep_kwargs"]["limit"] is None
 
     # On-demand override (#637): forcing ``enabled=True`` for an operator-requested gc
     # run must pass through to the sweep regardless of the ``auto_cleanup_orphans`` flag.
     # ``row_less_only=True`` (PRRT_kwDOSJAM6s6LB30p) must thread through too so the additive
-    # sweep reaps only no-DB-record orphans, never a scoped-out terminal workspace.
-    asyncio.run(classified_reaper(enabled=True, row_less_only=True))
+    # sweep reaps only no-DB-record orphans, never a scoped-out terminal workspace; the
+    # operator's ``--limit`` must thread through as well so the additive sweep is bounded
+    # oldest-first like the terminal reaper (PRRT_kwDOSJAM6s6LCCJZ).
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5))
     assert created["classified_sweep_kwargs"]["enabled"] is True
     assert created["classified_sweep_kwargs"]["row_less_only"] is True
+    assert created["classified_sweep_kwargs"]["limit"] == 5
 
 
 @pytest.mark.unit

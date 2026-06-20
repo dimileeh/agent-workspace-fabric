@@ -201,7 +201,11 @@ async def _run_claimed_service_gc_trigger(
     keeps the additive sweep from tearing down a terminal workspace the operator scoped out
     via ``--status``/``--exclude-status`` (PRRT_kwDOSJAM6s6LB30p): those terminal workspaces
     have DB rows and are already reaped by the scope-honouring ``_terminal_gc_reaper`` above,
-    whereas row-less orphans have no status to scope on. Its ``OrphanReapResult`` is folded
+    whereas row-less orphans have no status to scope on. The operator's ``--limit`` is
+    threaded into the sweep as well so it is bounded to that many oldest-first row-less
+    workspaces — restoring the ``--limit`` blast-radius parity the terminal reaper already
+    honours rather than reaping every aged orphan in one pass (PRRT_kwDOSJAM6s6LCCJZ). Its
+    ``OrphanReapResult`` is folded
     into the combined report under ``classified_orphan_reap`` (flowing into the API's
     ``worker_reclaim.report``), and a non-raising ``partial`` sweep (a compose-teardown /
     worktree-delete error surfaced as a status rather than an exception) also downgrades the
@@ -244,10 +248,17 @@ async def _run_claimed_service_gc_trigger(
         # operator scoped out via ``--status``/``--exclude-status`` — those terminal rows
         # are already handled by the scope-honouring ``_terminal_gc_reaper`` above, and the
         # status filters are not (and need not be) threaded into a row-less-only sweep
-        # (PRRT_kwDOSJAM6s6LB30p). Guarded on the dependency being wired so the DB-only gc
-        # path stays unchanged when no orphan reaper is present.
+        # (PRRT_kwDOSJAM6s6LB30p). The operator's ``--limit`` (the same ``limit`` already
+        # threaded into the terminal reaper above) is forwarded too so the additive sweep
+        # is bounded to that many oldest-first row-less workspaces rather than tearing down
+        # every aged orphan in one pass — restoring ``--limit`` parity across both passes
+        # (PRRT_kwDOSJAM6s6LCCJZ); ``None`` (no ``--limit``) stays unbounded. Guarded on the
+        # dependency being wired so the DB-only gc path stays unchanged when no orphan
+        # reaper is present.
         if self._classified_orphan_reaper is not None:
-            orphan_result = await self._classified_orphan_reaper(enabled=True, row_less_only=True)
+            orphan_result = await self._classified_orphan_reaper(
+                enabled=True, row_less_only=True, limit=limit
+            )
             report = {**report, "classified_orphan_reap": orphan_result.to_dict()}
             # A non-raising ``partial`` orphan reap (a compose teardown / worktree delete
             # error surfaced as ``PATH_DELETE_PERMISSION_DENIED`` rather than an exception)

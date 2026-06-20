@@ -132,17 +132,21 @@ async def test_consume_folds_classified_orphan_reaper_with_enabled_forced(
         OrphanReapResult,
     )
 
-    request_id = await _seed_pending(session_factory)
+    request_id = await _seed_pending(session_factory, params={"execute": True, "limit": 3})
     terminal_report = {"status": "succeeded", "deleted_path_count": 2}
     orphan_calls: list[bool] = []
     row_less_only_calls: list[bool] = []
+    limit_calls: list[int | None] = []
 
     async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
         return terminal_report
 
-    async def _classified_orphan_reaper(*, enabled: bool, row_less_only: bool) -> OrphanReapResult:
+    async def _classified_orphan_reaper(
+        *, enabled: bool, row_less_only: bool, limit: int | None
+    ) -> OrphanReapResult:
         orphan_calls.append(enabled)
         row_less_only_calls.append(row_less_only)
+        limit_calls.append(limit)
         return OrphanReapResult(
             enabled=enabled,
             status="ok",
@@ -170,6 +174,9 @@ async def test_consume_folds_classified_orphan_reaper_with_enabled_forced(
     # the operator scoped out via ``--status``/``--exclude-status`` (PRRT_kwDOSJAM6s6LB30p).
     assert orphan_calls == [True]
     assert row_less_only_calls == [True]
+    # The operator's stored ``--limit`` is threaded into the additive sweep too so it is
+    # bounded oldest-first like the terminal reaper, not unbounded (PRRT_kwDOSJAM6s6LCCJZ).
+    assert limit_calls == [3]
     async with session_factory() as session:
         finished = await ServiceGCRequestRepository(session).get(request_id)
         assert finished is not None
@@ -222,7 +229,9 @@ async def test_consume_marks_failed_when_orphan_reaper_raises(
     async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
         return {"status": "succeeded", "deleted_path_count": 1}
 
-    async def _classified_orphan_reaper(*, enabled: bool, row_less_only: bool) -> object:
+    async def _classified_orphan_reaper(
+        *, enabled: bool, row_less_only: bool, limit: int | None
+    ) -> object:
         raise RuntimeError("orphan sweep blew up")
 
     worker = _make_worker(
@@ -268,7 +277,9 @@ async def test_consume_downgrades_combined_status_when_orphan_reap_partial(
             "deleted_path_count": 2,
         }
 
-    async def _classified_orphan_reaper(*, enabled: bool, row_less_only: bool) -> OrphanReapResult:
+    async def _classified_orphan_reaper(
+        *, enabled: bool, row_less_only: bool, limit: int | None
+    ) -> OrphanReapResult:
         return OrphanReapResult(
             enabled=enabled,
             status="partial",

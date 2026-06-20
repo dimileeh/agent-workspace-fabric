@@ -775,6 +775,36 @@ def build_orphan_compose_teardown(manager: ComposeManager) -> OrphanResourceComp
     return _teardown
 
 
+def _orphan_record_anchor(record: ClassifiedResource, *, resolved_work_dir: Path) -> Path | None:
+    """On-disk artifact a row-less orphan's age is read from.
+
+    Worktree records anchor on their checkout path; docker
+    (container/network/volume) records anchor on the per-workspace compose dir --
+    the same roots :func:`gc_reconcile` protects. Both the grace gate
+    (:func:`_missing_record_is_aged`) and the oldest-first ``--limit`` ordering
+    (:func:`_limit_records_to_oldest_workspaces`) read this single anchor so the two
+    never drift. ``None`` only when a worktree record carries no path (defensive;
+    managed worktree records always do).
+    """
+    if record.kind == "worktree":
+        path_text = record.resource.path
+        return Path(path_text) if path_text else None
+    return resolved_work_dir / "compose" / record.workspace_id
+
+
+def _orphan_record_anchor_mtime(
+    record: ClassifiedResource, *, resolved_work_dir: Path
+) -> float | None:
+    """``mtime`` of a row-less orphan's on-disk anchor, or ``None`` when undatable."""
+    anchor = _orphan_record_anchor(record, resolved_work_dir=resolved_work_dir)
+    if anchor is None:  # pragma: no cover - worktree records always carry a path.
+        return None
+    try:
+        return anchor.stat().st_mtime
+    except OSError:
+        return None
+
+
 def _missing_record_is_aged(
     record: ClassifiedResource,
     *,
@@ -795,24 +825,58 @@ def _missing_record_is_aged(
     """
     if grace_seconds <= 0.0:
         return True
-    if record.kind == "worktree":
-        path_text = record.resource.path
-        if not path_text:  # pragma: no cover - worktree records always carry a path.
-            return False
-        anchor = Path(path_text)
-    else:
-        # Docker resources (container/network/volume) anchor on the per-workspace
-        # compose dir -- the same root gc_reconcile protects. If no compose dir
-        # exists, there is no in-flight provision to protect (row and dir both
-        # gone, only docker lingers), so the lingering stack is a genuine orphan.
-        anchor = resolved_work_dir / "compose" / record.workspace_id
-        if not anchor.exists():
-            return True
+    anchor = _orphan_record_anchor(record, resolved_work_dir=resolved_work_dir)
+    if anchor is None:  # pragma: no cover - worktree records always carry a path.
+        return False
+    # A docker resource whose per-workspace compose dir is gone has no in-flight
+    # provision to protect (row and dir both gone, only docker lingers), so the
+    # lingering stack is a genuine orphan.
+    if record.kind != "worktree" and not anchor.exists():
+        return True
     try:
         mtime = anchor.stat().st_mtime
     except OSError:  # pragma: no cover - reaper runs as root over its own dirs.
         return False
     return (now - mtime) >= grace_seconds
+
+
+def _limit_records_to_oldest_workspaces(
+    records: list[ClassifiedResource],
+    *,
+    limit: int,
+    resolved_work_dir: Path,
+) -> list[ClassifiedResource]:
+    """Keep records for at most ``limit`` distinct workspaces, oldest on-disk first.
+
+    Bounds the additive row-less orphan sweep to the operator's ``--limit`` batch so
+    ``awf service gc --execute --limit N`` cannot let the sweep tear down every aged
+    row-less orphan in one pass while the DB-row terminal reaper honours the same N --
+    the cross-pass consistency PRRT_kwDOSJAM6s6LCCJZ asked for. Bounds DISTINCT
+    workspaces, not records: a workspace surfaces several records (worktree +
+    container/network/volume) and :func:`reap_classified_orphans` tears its compose
+    stack down as a unit, so a record-level cap could half-reap a stack. "Oldest" is
+    the oldest on-disk anchor ``mtime`` across a workspace's records -- a row-less
+    orphan has no DB row (hence no ``updated_at``) to sort on, so this reuses the same
+    anchor the age gate reads; an undatable anchor sorts oldest (reaped first) and ties
+    break on ``workspace_id`` for determinism. The terminal pass orders by DB
+    ``updated_at`` while this pass orders by disk ``mtime``, so ``--limit N`` bounds
+    each pass to N rather than yielding one globally oldest-N set -- the approximation
+    the absence of a shared sort key forces.
+    """
+    workspace_age: dict[str, float] = {}
+    for record in records:
+        mtime = _orphan_record_anchor_mtime(record, resolved_work_dir=resolved_work_dir)
+        age_key = float("-inf") if mtime is None else mtime
+        existing = workspace_age.get(record.workspace_id)
+        if existing is None or age_key < existing:
+            workspace_age[record.workspace_id] = age_key
+    kept = {
+        workspace_id
+        for workspace_id, _ in sorted(workspace_age.items(), key=lambda item: (item[1], item[0]))[
+            :limit
+        ]
+    }
+    return [record for record in records if record.workspace_id in kept]
 
 
 async def reap_classified_orphans(
@@ -824,6 +888,7 @@ async def reap_classified_orphans(
     now: float | None = None,
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
     row_less_only: bool = False,
+    limit: int | None = None,
 ) -> OrphanReapResult:
     """Reap ``terminal`` / aged ``missing`` classified orphans when ``enabled``.
 
@@ -853,6 +918,13 @@ async def reap_classified_orphans(
     have no status to scope on and are exactly what that path cannot see (#637).
     The periodic backstop reaps both classes under the global ``auto_cleanup_orphans``
     flag (no per-operator scope), so it leaves ``row_less_only`` at its default.
+
+    ``limit`` bounds the reap to that many distinct, oldest-first workspaces
+    (:func:`_limit_records_to_oldest_workspaces`) so the on-demand ``service gc`` path's
+    additive sweep honours ``awf service gc --execute --limit N`` like the DB-row
+    terminal reaper does, instead of tearing down every aged row-less orphan in one
+    pass (PRRT_kwDOSJAM6s6LCCJZ). ``None`` (the periodic backstop, and an on-demand run
+    with no ``--limit``) leaves the reap unbounded.
     """
     if not enabled:
         return OrphanReapResult(
@@ -904,6 +976,10 @@ async def reap_classified_orphans(
             )
             continue
         orphan_records.append(record)
+    if limit is not None:
+        orphan_records = _limit_records_to_oldest_workspaces(
+            orphan_records, limit=limit, resolved_work_dir=resolved_work_dir
+        )
     # One teardown per (project, workspace) so multiple docker resources from the
     # same stack do not trigger redundant downs.
     compose_projects: dict[tuple[str, str], None] = {}
@@ -1004,15 +1080,17 @@ async def sweep_classified_orphans(
     min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
     run_subprocess: SubprocessRun | None = None,
     row_less_only: bool = False,
+    limit: int | None = None,
 ) -> OrphanReapResult:
     """Scan, classify, and reap readiness-classified orphan resources.
 
     ``min_retention_hours`` protects retained terminal salvage during
     classification, while ``min_age_hours`` only guards row-less missing
-    resources during reaping. ``row_less_only`` forwards to
+    resources during reaping. ``row_less_only`` and ``limit`` forward to
     :func:`reap_classified_orphans` so a caller (the on-demand ``service gc``
-    path) can restrict the reap to no-DB-record (``missing``) orphans and avoid
-    tearing down scoped-out terminal workspaces (PRRT_kwDOSJAM6s6LB30p, #637).
+    path) can restrict the reap to no-DB-record (``missing``) orphans
+    (PRRT_kwDOSJAM6s6LB30p, #637) and bound it to the operator's ``--limit`` batch,
+    oldest-first (PRRT_kwDOSJAM6s6LCCJZ).
     """
     if not enabled:
         return OrphanReapResult(
@@ -1059,6 +1137,7 @@ async def sweep_classified_orphans(
         enabled=enabled,
         min_age_hours=min_age_hours,
         row_less_only=row_less_only,
+        limit=limit,
     )
 
 
