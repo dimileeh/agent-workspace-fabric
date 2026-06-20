@@ -277,8 +277,10 @@ async def _run_ci_fix(
         )
     except Exception as exc:
         # Broad by design: adapter/runtime plumbing can fail outside
-        # ``AgentRunError``. Repair the mirror once, then re-raise the original
-        # non-cancellation failure so the monitor preserves the real outcome.
+        # ``AgentRunError``. Repair the mirror once; if repair fails, fail
+        # closed with the mirror-hooks reason because the shared mirror may
+        # remain poisoned. Otherwise re-raise the original non-cancellation
+        # failure so the monitor preserves the real outcome.
         if mirror_path is not None:
             try:
                 await repair_mirror_hooks_path(mirror_path)
@@ -290,6 +292,7 @@ async def _run_ci_fix(
                     error_type=repair_exc.__class__.__name__,
                     original_error_type=exc.__class__.__name__,
                 )
+                raise _MonitorMirrorHooksPathRepairFailedError() from repair_exc
         raise
 
     # The rollback anchor for the provider-recovery ``except`` clause below is

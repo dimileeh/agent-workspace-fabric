@@ -13,6 +13,7 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -269,20 +270,40 @@ async def test_ci_fix_cleanup_error_repairs_hooks_path(
     from awf.common.github_client import RepoRef
     from awf.runtime.pr_monitor import CheckFailure
 
-    with pytest.raises(ComposeExecCleanupError) as exc_info:
-        await runner._run_ci_fix(
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            failures=(CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="test failure"),),
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            workspace_id=workspace_id,
-            remote_branch="awf/ws_test",
-        )
+    if post_repair_fails:
+        with pytest.raises(_MonitorMirrorHooksPathRepairFailedError) as exc_info:
+            await runner._run_ci_fix(
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=42,
+                failures=(
+                    CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="test failure"),
+                ),
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+                workspace_id=workspace_id,
+                remote_branch="awf/ws_test",
+            )
+
+        assert str(exc_info.value) == "could not repair poisoned mirror hooks path"
+        assert isinstance(exc_info.value.__cause__, OSError)
+    else:
+        with pytest.raises(ComposeExecCleanupError) as exc_info:
+            await runner._run_ci_fix(
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=42,
+                failures=(
+                    CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="test failure"),
+                ),
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+                workspace_id=workspace_id,
+                remote_branch="awf/ws_test",
+            )
+
+        assert exc_info.value.invocation_id == "awf_ci_fix_cleanup"
 
     assert events == ["repair", "agent", "repair"]
     assert len(hooks_path_repaired) == 2
-    assert exc_info.value.invocation_id == "awf_ci_fix_cleanup"
 
 
 @pytest.mark.unit
