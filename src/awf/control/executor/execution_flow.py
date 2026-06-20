@@ -267,18 +267,22 @@ async def execute(
 
     async def _repair_mirror_hooks_path_after_cleanup_failure(
         *, failure_stage: str = "after agent cleanup failure"
-    ) -> None:
-        await repair_mirror_hooks_path_after_agent_cleanup_failure(
+    ) -> bool:
+        return await repair_mirror_hooks_path_after_agent_cleanup_failure(
+            executor=self,
             workspace_id=workspace_id,
             mirror_path=mirror_path,
             repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+            recovery_active=recovery_active,
             failure_stage=failure_stage,
+            before_mark_failed=_deposit_planning_artifacts,
         )
 
     async def _repair_hooks_and_recover_missing_head_after_agent_cleanup_failure(
         exc: ComposeExecCleanupError,
     ) -> bool:
-        await _repair_mirror_hooks_path_after_cleanup_failure()
+        if not await _repair_mirror_hooks_path_after_cleanup_failure():
+            return False
         if ws.base_commit is None:
             return True
         if await verify_head_object_exists(worktree_path):
@@ -411,9 +415,10 @@ async def execute(
                 worktree_path=worktree_path,
             )
         except ComposeExecCleanupError:
-            await _repair_mirror_hooks_path_after_cleanup_failure(
+            if not await _repair_mirror_hooks_path_after_cleanup_failure(
                 failure_stage="after profile setup cleanup failure"
-            )
+            ):
+                return
             raise
         try:
             await self._record_setup_dependency_network_events(
@@ -543,7 +548,8 @@ async def execute(
                     skip_measure=resume_from_blocked,
                 )
             except ComposeExecCleanupError:
-                await _repair_mirror_hooks_path_after_cleanup_failure()
+                if not await _repair_mirror_hooks_path_after_cleanup_failure():
+                    return
                 raise
             if not await self._recheck_status(
                 workspace_id,

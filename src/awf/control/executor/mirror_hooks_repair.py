@@ -71,28 +71,22 @@ async def repair_mirror_hooks_path_or_mark_failed(
 
 async def repair_mirror_hooks_path_after_agent_cleanup_failure(
     *,
+    executor: Any,
     workspace_id: str,
     mirror_path: Path | None,
     repair_mirror_hooks_path_fn: Callable[[Path], Awaitable[bool]],
+    recovery_active: bool,
     failure_stage: str = "after agent cleanup failure",
-) -> None:
-    if mirror_path is None:
-        return
-    try:
-        await repair_mirror_hooks_path_fn(mirror_path)
-    except GitOperationError as exc:
-        _log.warning(
-            "executor.mirror_hooks_path_repair_failed",
-            workspace_id=workspace_id,
-            reason_code=exc.reason_code,
-            stderr=exc.stderr[:400],
-            failure_stage=failure_stage,
-        )
-    except OSError as exc:
-        _log.warning(
-            "executor.mirror_hooks_path_repair_failed",
-            workspace_id=workspace_id,
-            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
-            error=repr(exc)[:400],
-            failure_stage=failure_stage,
-        )
+    failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
+    before_mark_failed: Callable[[], None] | None = None,
+) -> bool:
+    return await repair_mirror_hooks_path_or_mark_failed(
+        executor=executor,
+        workspace_id=workspace_id,
+        mirror_path=mirror_path,
+        repair_mirror_hooks_path_fn=repair_mirror_hooks_path_fn,
+        recovery_active=recovery_active,
+        failure_stage=failure_stage,
+        failure_from_status=failure_from_status,
+        before_mark_failed=before_mark_failed,
+    )

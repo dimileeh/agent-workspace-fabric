@@ -89,33 +89,52 @@ async def test_repair_mirror_hooks_path_or_mark_failed_marks_failed_on_oserror(
 
 
 @pytest.mark.unit
-async def test_repair_mirror_hooks_path_after_agent_cleanup_failure_logs_oserror(
+async def test_repair_mirror_hooks_path_after_agent_cleanup_failure_marks_failed_on_oserror(
     tmp_path: Path,
 ) -> None:
     workspace_id = "ws_mirror_hooks_cleanup_oserror"
     mirror_path = tmp_path / "mirror.git"
     repair_calls: list[Path] = []
+    mark_failed_calls: list[dict[str, Any]] = []
+
+    class _Executor:
+        async def _mark_failed(self, **kwargs: Any) -> None:
+            mark_failed_calls.append(kwargs)
+
+        async def _finish_active_recovery_operations(self, **_kwargs: Any) -> None:
+            raise AssertionError("no recovery operation should be finished")
 
     async def _repair_mirror_hooks_path(path: Path) -> bool:
         repair_calls.append(path)
         raise OSError("read-only filesystem")
 
     with structlog.testing.capture_logs() as captured:
-        await mirror_hooks_repair.repair_mirror_hooks_path_after_agent_cleanup_failure(
+        repaired = await mirror_hooks_repair.repair_mirror_hooks_path_after_agent_cleanup_failure(
+            executor=_Executor(),
             workspace_id=workspace_id,
             mirror_path=mirror_path,
             repair_mirror_hooks_path_fn=_repair_mirror_hooks_path,
+            recovery_active=False,
         )
 
+    assert repaired is False
     assert repair_calls == [mirror_path]
     assert {
         "event": "executor.mirror_hooks_path_repair_failed",
         "workspace_id": workspace_id,
         "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
         "error": "OSError('read-only filesystem')",
-        "failure_stage": "after agent cleanup failure",
         "log_level": "warning",
     } in captured
+    assert mark_failed_calls == [
+        {
+            "workspace_id": workspace_id,
+            "from_status": WorkspaceStatus.running,
+            "failure_reason": FailureReason.infrastructure_failure,
+            "message": "could not repair poisoned mirror hooks path after agent cleanup failure",
+            "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        }
+    ]
 
 
 @pytest.mark.unit
@@ -1283,11 +1302,8 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_cleanup_failure(
             "workspace_id": workspace.id,
             "from_status": WorkspaceStatus.running,
             "failure_reason": FailureReason.infrastructure_failure,
-            "message": (
-                "EXEC_PROCESS_CLEANUP_FAILED: agent agent invocation "
-                "awf_agent_cleanup: tagged process still running"
-            ),
-            "reason_code": EXEC_PROCESS_CLEANUP_FAILED,
+            "message": "could not repair poisoned mirror hooks path after agent cleanup failure",
+            "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
         }
     ]
 
