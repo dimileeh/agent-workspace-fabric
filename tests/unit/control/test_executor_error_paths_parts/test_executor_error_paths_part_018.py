@@ -440,6 +440,85 @@ class TestExecutorMonitorHandoffSetupSplit:
         assert "tagged process still running" in failure["message"]
 
     @pytest.mark.unit
+    async def test_handoff_setup_cleanup_failure_recovers_missing_head_before_mark_failed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        mark_failed_calls: list[dict[str, Any]] = []
+        recovery_calls: list[dict[str, Any]] = []
+        verify_calls: list[Path] = []
+
+        class _Workspace:
+            base_commit = "base123"
+            branch_name = "awf/ws-cleanup"
+            task_tag = "PROJ-7"
+
+        class _Validation:
+            async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+                raise ComposeExecCleanupError(
+                    invocation_id="awf_monitor_handoff_setup_cleanup",
+                    source="validation",
+                    label="setup",
+                    message="tagged process still running",
+                )
+
+        async def _verify_head_object_exists(worktree_path: Path) -> bool:
+            verify_calls.append(worktree_path)
+            return False
+
+        class _Executor:
+            _validation = _Validation()
+
+            async def _load_workspace(self, workspace_id: str) -> _Workspace:
+                assert workspace_id == "ws-cleanup"
+                return _Workspace()
+
+            async def _recover_missing_git_head_or_mark_failed(self, **kwargs: Any) -> bool:
+                recovery_calls.append(kwargs)
+                return True
+
+            async def _record_setup_dependency_network_events(
+                self,
+                **_kwargs: object,
+            ) -> None:
+                raise AssertionError("cleanup failures should not record setup events")
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+
+        result = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-cleanup",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert result is False
+        assert verify_calls == [tmp_path]
+        assert len(recovery_calls) == 1
+        recovery = recovery_calls[0]
+        assert recovery["workspace_id"] == "ws-cleanup"
+        assert recovery["worktree_path"] == tmp_path
+        assert recovery["base_commit"] == "base123"
+        assert recovery["branch_name"] == "awf/ws-cleanup"
+        assert recovery["from_status"] == WorkspaceStatus.running
+        assert recovery["stage"] == "monitor_handoff_profile_setup_cleanup_failure"
+        assert isinstance(recovery["error"], ComposeExecCleanupError)
+        assert recovery["task_tag"] == "PROJ-7"
+        assert recovery["mark_failed_on_failure"] is False
+        assert mark_failed_calls
+        assert mark_failed_calls[-1]["reason_code"] == "EXEC_PROCESS_CLEANUP_FAILED"
+
+    @pytest.mark.unit
     async def test_handoff_setup_event_recording_failure_is_best_effort(
         self,
         tmp_path: Path,

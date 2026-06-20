@@ -20,7 +20,11 @@ from awf.control.executor.logging_ops import (
 )
 from awf.control.executor.mirror_hooks_repair import repair_mirror_hooks_path_or_mark_failed
 from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.node.git_manager import mirror_path_for_worktree, repair_mirror_hooks_path
+from awf.node.git_manager import (
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+    verify_head_object_exists,
+)
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -223,9 +227,49 @@ async def _run_monitor_handoff_profile_setup(
     compose_project: str,
     compose_file: Path,
     worktree_path: Path,
+    base_commit: str | None = None,
+    branch_name: str | None = None,
+    task_tag: str | None = None,
 ) -> bool:
     """Run profile setup before handing an adopted/release PR to the monitor."""
     mirror_path = mirror_path_for_worktree(worktree_path)
+
+    async def _load_recovery_workspace_metadata() -> tuple[str | None, str | None, str | None]:
+        if base_commit is not None or branch_name is not None or task_tag is not None:
+            return base_commit, branch_name, task_tag
+        load_workspace = getattr(self, "_load_workspace", None)
+        if not callable(load_workspace):
+            return None, None, None
+        workspace = await load_workspace(workspace_id)
+        if workspace is None:
+            return None, None, None
+        return workspace.base_commit, workspace.branch_name, workspace.task_tag
+
+    async def _recover_missing_head_after_setup_cleanup_failure(
+        exc: ComposeExecCleanupError,
+    ) -> bool:
+        if await verify_head_object_exists(worktree_path):
+            return True
+        recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
+        if recover_missing_head is None:
+            return False
+        (
+            recovery_base_commit,
+            recovery_branch_name,
+            recovery_task_tag,
+        ) = await _load_recovery_workspace_metadata()
+        recovered = await recover_missing_head(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_commit=recovery_base_commit,
+            branch_name=recovery_branch_name or f"awf/{workspace_id}",
+            from_status=WorkspaceStatus.running,
+            stage="monitor_handoff_profile_setup_cleanup_failure",
+            error=exc,
+            task_tag=recovery_task_tag,
+            mark_failed_on_failure=False,
+        )
+        return bool(recovered)
 
     async def _repair_mirror_hooks_path_or_mark_failed(*, failure_stage: str) -> bool:
         return await repair_mirror_hooks_path_or_mark_failed(
@@ -283,6 +327,7 @@ async def _run_monitor_handoff_profile_setup(
             failure_stage="after monitor handoff setup cleanup failure"
         ):
             return False
+        await _recover_missing_head_after_setup_cleanup_failure(exc)
         await _mark_failed_or_raise_setup_failure(
             self,
             workspace_id=workspace_id,
