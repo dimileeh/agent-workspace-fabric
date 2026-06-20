@@ -15,7 +15,7 @@
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-sans": "^5.2.8",
-    "@tailwindcss/postcss": "^4.2.4",
+    "@tailwindcss/postcss": "^4.3.1",
     "lucide-react": "^1.21.0",
     "next": "^16.2.6",
     "react": "^19.2.5",
