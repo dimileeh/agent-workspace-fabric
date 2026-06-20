@@ -298,6 +298,27 @@ async def execute(
         )
         return bool(recovered)
 
+    async def _recover_missing_head_after_baseline_cleanup_failure(
+        exc: ComposeExecCleanupError,
+    ) -> bool:
+        if await verify_head_object_exists(worktree_path):
+            return True
+        recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
+        if recover_missing_head is None:
+            return False
+        recovered = await recover_missing_head(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_commit=ws.base_commit,
+            branch_name=expected_branch,
+            from_status=WorkspaceStatus.running,
+            stage="baseline_coverage_cleanup_failure",
+            error=exc,
+            task_tag=ws.task_tag,
+            mark_failed_on_failure=False,
+        )
+        return bool(recovered)
+
     async def _recover_missing_head_after_agent_cleanup_failure(
         exc: ComposeExecCleanupError,
     ) -> bool:
@@ -563,9 +584,11 @@ async def execute(
                     reuse=baseline_coverage,
                     skip_measure=resume_from_blocked,
                 )
-            except ComposeExecCleanupError:
+            except ComposeExecCleanupError as exc:
                 if not await _repair_mirror_hooks_path_after_cleanup_failure():
                     return
+                if not await _recover_missing_head_after_baseline_cleanup_failure(exc):
+                    raise
                 raise
             if not await self._recheck_status(
                 workspace_id,
