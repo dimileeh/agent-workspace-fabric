@@ -311,16 +311,70 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             execute=settings.auto_cleanup_orphans,
         )
 
-    async def _reap_classified_orphans() -> OrphanReapResult:
-        """Sweep classified orphan resources using the worker runtime dependencies."""
+    async def _reap_classified_orphans(
+        *,
+        enabled: bool | None = None,
+        row_less_only: bool = False,
+        limit: int | None = None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        """Sweep classified orphan resources using the worker runtime dependencies.
+
+        ``enabled`` defaults to the ``auto_cleanup_orphans`` flag so the periodic
+        backstop stays default-off. The on-demand ``service gc`` path passes
+        ``enabled=True`` to force a reap for the explicit operator request regardless
+        of the flag (#637); all other scope (retention, min-age) is unchanged.
+
+        ``row_less_only`` forwards to :func:`sweep_classified_orphans`. The on-demand
+        ``service gc`` path passes ``True`` so its additive sweep reaps only
+        no-DB-record (``missing``) orphans and never tears down a terminal workspace
+        the operator scoped out with ``--status``/``--exclude-status``
+        (PRRT_kwDOSJAM6s6LB30p); the periodic backstop leaves it ``False`` to reap
+        terminal + missing under the global ``auto_cleanup_orphans`` flag.
+
+        ``limit`` likewise forwards through: the on-demand path threads the operator's
+        ``--limit`` so its additive sweep is bounded to that many oldest-first
+        workspaces, matching the DB-row terminal reaper instead of reaping every aged
+        row-less orphan in one pass (PRRT_kwDOSJAM6s6LCCJZ). The periodic backstop (and
+        an on-demand run with no ``--limit``) leaves it ``None`` (unbounded).
+
+        ``min_age_hours`` is the operator's ``--min-age-hours`` safety window. For a
+        ``row_less_only`` sweep it is the *only* age guard applied to no-DB-record
+        orphans, so the on-demand path forwards it for parity with the terminal reaper:
+        without it the sweep falls back to ``orphan_reconcile_min_age_hours`` and could
+        reap an orphan too young for the operator's explicit window yet old enough by that
+        (possibly lower) default, deleting inside the longer safety window the operator
+        scoped (PRRT_kwDOSJAM6s6LCiLb). It is applied as a *floor*: the effective grace is
+        ``max`` of the request and the configured ``orphan_reconcile_min_age_hours`` so a
+        longer request widens the window while a shorter/absent one never shrinks the
+        mid-provision guard that protects a just-created worktree visible before its row
+        commits. The periodic backstop passes ``None`` and keeps the configured grace.
+
+        ``now`` is the API's request-time cutoff anchor (the same ``datetime`` forwarded to the
+        terminal reaper). The on-demand ``service gc`` path threads it so the row-less orphan
+        grace is measured against the frozen request time rather than the worker's (minutes-later)
+        claim clock; without it ``reap_classified_orphans`` falls back to ``time.time()`` and a
+        worktree/volume still inside the operator's ``--min-age-hours`` window at POST time could
+        age into eligibility before the worker reaps (PRRT_kwDOSJAM6s6LCs9R). It is converted to an
+        epoch float for the mtime-based age check; ``None`` (the periodic backstop) keeps the
+        claim-clock default.
+        """
+        resolved_enabled = settings.auto_cleanup_orphans if enabled is None else enabled
+        resolved_min_age_hours = settings.orphan_reconcile_min_age_hours
+        if min_age_hours is not None:
+            resolved_min_age_hours = max(resolved_min_age_hours, min_age_hours)
         return await sweep_classified_orphans(
             session_factory,
             work_dir=work_dir,
             docker_host=settings.docker_host,
             compose_teardown=classified_orphan_teardown,
-            enabled=settings.auto_cleanup_orphans,
-            min_age_hours=settings.orphan_reconcile_min_age_hours,
+            enabled=resolved_enabled,
+            min_age_hours=resolved_min_age_hours,
             min_retention_hours=settings.completed_workspace_retention_hours,
+            row_less_only=row_less_only,
+            limit=limit,
+            now=None if now is None else now.timestamp(),
         )
 
     async def _reap_superseded_claude_bases() -> dict[str, object]:
