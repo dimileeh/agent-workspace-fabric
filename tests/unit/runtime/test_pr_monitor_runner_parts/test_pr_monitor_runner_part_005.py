@@ -1023,6 +1023,81 @@ class TestMiscMonitorHelpers:
         assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[1].env
 
     @pytest.mark.unit
+    async def test_commit_dirty_worktree_no_mirror_prefers_verified_operation_start_before_candidate(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No-mirror missing-HEAD recovery does not skip a valid start anchor."""
+        workspace_id = "ws_missing_head_no_mirror_prefers_start"
+        operation_start_head = "1" * 40
+        candidate_head = "2" * 40
+        fake = FakeCommandRunner()
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+        checked_anchors: list[str] = []
+        opened_candidates: list[str] = []
+        captured_recovery_heads: list[str] = []
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _open_merge_candidate_head_sha(_self: object, opened_workspace_id: str) -> str:
+            opened_candidates.append(opened_workspace_id)
+            return candidate_head
+
+        async def _worktree_commit_object_exists(
+            _self: object,
+            _worktree_path: Path,
+            commit_sha: str,
+        ) -> bool:
+            checked_anchors.append(commit_sha)
+            return commit_sha == operation_start_head
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **kwargs: object,
+        ) -> str:
+            recovery_head = str(kwargs["operation_start_head"])
+            captured_recovery_heads.append(recovery_head)
+            return recovery_head
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(remote_repair, "mirror_path_for_worktree", lambda _worktree_path: None)
+        monkeypatch.setattr(
+            remote_repair,
+            "_open_merge_candidate_head_sha",
+            _open_merge_candidate_head_sha,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_worktree_commit_object_exists",
+            _worktree_commit_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+            operation_start_head=operation_start_head,
+            task_tag=None,
+        )
+
+        assert committed is False
+        assert checked_anchors == [operation_start_head]
+        assert opened_candidates == []
+        assert captured_recovery_heads == [operation_start_head]
+
+    @pytest.mark.unit
     async def test_commit_dirty_worktree_mirror_rejects_unverified_candidate_head(
         self,
         factory: async_sessionmaker[AsyncSession],

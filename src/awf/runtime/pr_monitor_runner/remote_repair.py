@@ -857,22 +857,9 @@ async def _commit_dirty_worktree(
                 source="operation_start_head",
             )
         elif recovery_head:
-            candidate_head = await _open_merge_candidate_head_sha(self, workspace_id)
-            if candidate_head and candidate_head != recovery_head:
-                _log.warning(
-                    "monitor.head_object_missing_recovery_anchor_unverified",
-                    workspace_id=workspace_id,
-                    operation_start_head=recovery_head[:10],
-                    candidate_head=candidate_head[:10],
-                )
-                recovery_head = candidate_head
             recovery_head = await verified_worktree_recovery_head(
                 recovery_head,
-                source=(
-                    "candidate"
-                    if candidate_head is not None and recovery_head == candidate_head
-                    else "operation_start_head"
-                ),
+                source="operation_start_head",
             )
         if not recovery_head:
             candidate_head = candidate_head or await _open_merge_candidate_head_sha(
