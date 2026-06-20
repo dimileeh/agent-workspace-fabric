@@ -137,16 +137,22 @@ async def test_consume_folds_classified_orphan_reaper_with_enabled_forced(
     orphan_calls: list[bool] = []
     row_less_only_calls: list[bool] = []
     limit_calls: list[int | None] = []
+    min_age_calls: list[float | None] = []
 
     async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
         return terminal_report
 
     async def _classified_orphan_reaper(
-        *, enabled: bool, row_less_only: bool, limit: int | None
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
     ) -> OrphanReapResult:
         orphan_calls.append(enabled)
         row_less_only_calls.append(row_less_only)
         limit_calls.append(limit)
+        min_age_calls.append(min_age_hours)
         return OrphanReapResult(
             enabled=enabled,
             status="ok",
@@ -177,6 +183,9 @@ async def test_consume_folds_classified_orphan_reaper_with_enabled_forced(
     # The operator's stored ``--limit`` is threaded into the additive sweep too so it is
     # bounded oldest-first like the terminal reaper, not unbounded (PRRT_kwDOSJAM6s6LCCJZ).
     assert limit_calls == [3]
+    # No ``min_age_hours`` was stored on this row, so ``None`` is forwarded and the sweep
+    # keeps the worker's configured orphan grace (PRRT_kwDOSJAM6s6LCiLb).
+    assert min_age_calls == [None]
     async with session_factory() as session:
         finished = await ServiceGCRequestRepository(session).get(request_id)
         assert finished is not None
@@ -230,7 +239,11 @@ async def test_consume_marks_failed_when_orphan_reaper_raises(
         return {"status": "succeeded", "deleted_path_count": 1}
 
     async def _classified_orphan_reaper(
-        *, enabled: bool, row_less_only: bool, limit: int | None
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
     ) -> object:
         raise RuntimeError("orphan sweep blew up")
 
@@ -278,7 +291,11 @@ async def test_consume_downgrades_combined_status_when_orphan_reap_partial(
         }
 
     async def _classified_orphan_reaper(
-        *, enabled: bool, row_less_only: bool, limit: int | None
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
     ) -> OrphanReapResult:
         return OrphanReapResult(
             enabled=enabled,
@@ -447,6 +464,52 @@ async def test_consume_threads_cutoff_anchor_into_reaper(
     await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
 
     assert captured == {"min_age_hours": 1.5, "now": anchor}
+
+
+async def test_consume_threads_min_age_into_orphan_reaper(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The operator's stored ``min_age_hours`` flows into the orphan sweep too (PRRT_kwDOSJAM6s6LCiLb).
+
+    The additive row-less orphan sweep applies ``min_age_hours`` as the *only* age guard for
+    no-DB-record resources (``row_less_only=True``). Forwarding only ``--limit`` while letting
+    ``min_age_hours`` fall back to the worker's ``orphan_reconcile_min_age_hours`` default would
+    let a row-less worktree/volume that is too young for the operator's explicit safety window —
+    yet old enough for the (possibly lower) worker default — be reaped behind the operator's
+    longer ``gc --execute --min-age-hours X`` scope. The stored min-age must reach the sweep so
+    the orphan grace honours the same safety window the terminal reaper already does.
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    await _seed_pending(
+        session_factory,
+        params={"execute": True, "min_age_hours": 240.0, "limit": 3},
+    )
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+    ) -> OrphanReapResult:
+        captured["min_age_hours"] = min_age_hours
+        captured["limit"] = limit
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {"min_age_hours": 240.0, "limit": 3}
 
 
 async def test_consume_is_noop_without_reaper(

@@ -844,6 +844,17 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     assert created["classified_sweep_kwargs"]["row_less_only"] is True
     assert created["classified_sweep_kwargs"]["limit"] == 5
 
+    # The operator's ``--min-age-hours`` is forwarded as a safety FLOOR for the row-less
+    # orphan grace (PRRT_kwDOSJAM6s6LCiLb): a longer requested window widens the grace so a
+    # too-young-by-command orphan is never reaped behind the operator's longer scope, while a
+    # shorter/absent one never shrinks the configured ``orphan_reconcile_min_age_hours`` (4.0)
+    # mid-provision guard. A longer request wins:
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5, min_age_hours=10.0))
+    assert created["classified_sweep_kwargs"]["min_age_hours"] == 10.0
+    # A shorter request is floored at the configured grace:
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True, limit=5, min_age_hours=1.0))
+    assert created["classified_sweep_kwargs"]["min_age_hours"] == 4.0
+
 
 @pytest.mark.unit
 def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_hostname(

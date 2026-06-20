@@ -204,7 +204,12 @@ async def _run_claimed_service_gc_trigger(
     whereas row-less orphans have no status to scope on. The operator's ``--limit`` is
     threaded into the sweep as well so it is bounded to that many oldest-first row-less
     workspaces — restoring the ``--limit`` blast-radius parity the terminal reaper already
-    honours rather than reaping every aged orphan in one pass (PRRT_kwDOSJAM6s6LCCJZ). Its
+    honours rather than reaping every aged orphan in one pass (PRRT_kwDOSJAM6s6LCCJZ). The
+    operator's ``--min-age-hours`` is forwarded too — it is the only age guard a row-less-only
+    sweep applies, so without it the sweep would silently fall back to the worker's
+    ``orphan_reconcile_min_age_hours`` default and could reap an orphan that is too young for the
+    operator's explicit window yet old enough by that (possibly lower) default, deleting inside
+    the longer safety window the operator scoped (PRRT_kwDOSJAM6s6LCiLb). Its
     ``OrphanReapResult`` is folded
     into the combined report under ``classified_orphan_reap`` (flowing into the API's
     ``worker_reclaim.report``), and a non-raising ``partial`` sweep (a compose-teardown /
@@ -252,12 +257,19 @@ async def _run_claimed_service_gc_trigger(
         # threaded into the terminal reaper above) is forwarded too so the additive sweep
         # is bounded to that many oldest-first row-less workspaces rather than tearing down
         # every aged orphan in one pass — restoring ``--limit`` parity across both passes
-        # (PRRT_kwDOSJAM6s6LCCJZ); ``None`` (no ``--limit``) stays unbounded. Guarded on the
+        # (PRRT_kwDOSJAM6s6LCCJZ); ``None`` (no ``--limit``) stays unbounded. The operator's
+        # ``--min-age-hours`` (the same ``min_age_hours`` threaded into the terminal reaper) is
+        # forwarded as well: it is the *only* age guard a row-less-only sweep applies, so without
+        # it the sweep would fall back to the worker's ``orphan_reconcile_min_age_hours`` default
+        # and could reap a too-young-by-command orphan that is merely old enough by that (possibly
+        # lower) default — deleting inside the longer safety window the operator explicitly scoped
+        # (PRRT_kwDOSJAM6s6LCiLb). The closure floors it at the configured grace so a shorter/absent
+        # request never shrinks the mid-provision guard; ``None`` keeps that default. Guarded on the
         # dependency being wired so the DB-only gc path stays unchanged when no orphan
         # reaper is present.
         if self._classified_orphan_reaper is not None:
             orphan_result = await self._classified_orphan_reaper(
-                enabled=True, row_less_only=True, limit=limit
+                enabled=True, row_less_only=True, limit=limit, min_age_hours=min_age_hours
             )
             report = {**report, "classified_orphan_reap": orphan_result.to_dict()}
             # A non-raising ``partial`` orphan reap (a compose teardown / worktree delete

@@ -312,7 +312,11 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         )
 
     async def _reap_classified_orphans(
-        *, enabled: bool | None = None, row_less_only: bool = False, limit: int | None = None
+        *,
+        enabled: bool | None = None,
+        row_less_only: bool = False,
+        limit: int | None = None,
+        min_age_hours: float | None = None,
     ) -> OrphanReapResult:
         """Sweep classified orphan resources using the worker runtime dependencies.
 
@@ -333,15 +337,30 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         workspaces, matching the DB-row terminal reaper instead of reaping every aged
         row-less orphan in one pass (PRRT_kwDOSJAM6s6LCCJZ). The periodic backstop (and
         an on-demand run with no ``--limit``) leaves it ``None`` (unbounded).
+
+        ``min_age_hours`` is the operator's ``--min-age-hours`` safety window. For a
+        ``row_less_only`` sweep it is the *only* age guard applied to no-DB-record
+        orphans, so the on-demand path forwards it for parity with the terminal reaper:
+        without it the sweep falls back to ``orphan_reconcile_min_age_hours`` and could
+        reap an orphan too young for the operator's explicit window yet old enough by that
+        (possibly lower) default, deleting inside the longer safety window the operator
+        scoped (PRRT_kwDOSJAM6s6LCiLb). It is applied as a *floor*: the effective grace is
+        ``max`` of the request and the configured ``orphan_reconcile_min_age_hours`` so a
+        longer request widens the window while a shorter/absent one never shrinks the
+        mid-provision guard that protects a just-created worktree visible before its row
+        commits. The periodic backstop passes ``None`` and keeps the configured grace.
         """
         resolved_enabled = settings.auto_cleanup_orphans if enabled is None else enabled
+        resolved_min_age_hours = settings.orphan_reconcile_min_age_hours
+        if min_age_hours is not None:
+            resolved_min_age_hours = max(resolved_min_age_hours, min_age_hours)
         return await sweep_classified_orphans(
             session_factory,
             work_dir=work_dir,
             docker_host=settings.docker_host,
             compose_teardown=classified_orphan_teardown,
             enabled=resolved_enabled,
-            min_age_hours=settings.orphan_reconcile_min_age_hours,
+            min_age_hours=resolved_min_age_hours,
             min_retention_hours=settings.completed_workspace_retention_hours,
             row_less_only=row_less_only,
             limit=limit,
