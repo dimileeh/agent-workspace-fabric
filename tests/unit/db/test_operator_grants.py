@@ -439,6 +439,37 @@ async def test_list_resumable_recovering_ids_scopes_to_owning_node(session: Asyn
 
 
 @pytest.mark.unit
+async def test_list_resumable_recovering_ids_accepts_z_suffixed_not_before(
+    session: AsyncSession,
+) -> None:
+    """A ``Z``-suffixed UTC deadline still orders chronologically (TIMESTAMPTZ cast).
+
+    Raw ISO-string comparison would mis-rank ``...:00Z`` against the
+    ``...:00.<us>+00:00`` form of ``now`` (``'Z' > '.'`` / ``'Z' > '+'`` in ASCII)
+    and strand the elapsed row in ``recovering`` forever; the PostgreSQL cast to
+    ``TIMESTAMPTZ`` keeps the gate correct regardless of offset spelling.
+    """
+    repo = WorkspaceRepository(session)
+    now = datetime(2026, 6, 20, 12, 0, 0, 500000, tzinfo=UTC)
+
+    elapsed_z = await _workspace(session)
+    elapsed_z.status = WorkspaceStatus.recovering.value
+    # Half a second in the past, but written with a ``Z`` suffix (not isoformat()):
+    # lexically "2026-06-20T12:00:00Z" > "2026-06-20T12:00:00.500000+00:00".
+    elapsed_z.task_policy = {
+        "provider_recovery_state": {
+            "action": "retry",
+            "retry_attempt_number": 1,
+            "not_before": "2026-06-20T12:00:00Z",
+        }
+    }
+    await session.flush()
+
+    selected = await repo.list_resumable_recovering_ids(limit=10, now=now)
+    assert selected == [elapsed_z.id]
+
+
+@pytest.mark.unit
 async def test_list_resumable_recovering_ids_sqlite_extracts_not_before() -> None:
     """The SQLite cooldown branch extracts ``not_before`` via ``json_extract``.
 
