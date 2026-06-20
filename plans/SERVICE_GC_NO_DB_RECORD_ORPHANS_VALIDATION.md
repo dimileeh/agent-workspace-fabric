@@ -1,6 +1,6 @@
 # `awf service gc` no-DB-record orphan reclamation — Validation
 
-Plan reference: `docs/awf-plans/ws_a3c9e52c834e48b2b8c83e25.md`
+Plan reference: `SERVICE_GC_NO_DB_RECORD_ORPHANS_PLAN.md`
 Issue: dimileeh/agent-workspace-fabric#637
 Implementation commit: `dcfab6054 fix(gc): reclaim no-DB-record orphans from on-demand awf service gc (#637)`
 
