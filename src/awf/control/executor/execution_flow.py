@@ -92,6 +92,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
+    verify_head_object_exists,
 )
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
@@ -275,6 +276,32 @@ async def execute(
 
     async def _repair_hooks_after_agent_cleanup_failure() -> bool:
         return await _repair_mirror_hooks_path_after_cleanup_failure()
+
+    async def _recover_missing_head_after_agent_cleanup_failure(
+        exc: ComposeExecCleanupError,
+    ) -> bool:
+        if await verify_head_object_exists(worktree_path):
+            return True
+        if not await self._recover_missing_git_head_or_mark_failed(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_commit=ws.base_commit,
+            branch_name=expected_branch,
+            from_status=WorkspaceStatus.running,
+            stage="agent_run_cleanup_failure",
+            error=exc,
+            task_tag=ws.task_tag,
+        ):
+            return False
+        recovered_commit_verified = await self._verify_recovered_post_agent_commit_or_mark_failed(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_commit=ws.base_commit,
+            owned_paths=list(ws.owned_paths),
+            expected_status=WorkspaceStatus.running,
+            execution_owner_id=execution_owner_id,
+        )
+        return bool(recovered_commit_verified)
 
     try:
         agent = AgentRuntime(ws.agent)
@@ -539,8 +566,10 @@ async def execute(
                 ):
                     return
                 post_agent_mirror_repair_done = True
-            except ComposeExecCleanupError:
+            except ComposeExecCleanupError as exc:
                 if not await _repair_hooks_after_agent_cleanup_failure():
+                    return
+                if not await _recover_missing_head_after_agent_cleanup_failure(exc):
                     return
                 raise
             except AgentRunError:
