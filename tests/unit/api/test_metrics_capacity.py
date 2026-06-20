@@ -1002,3 +1002,34 @@ async def test_resource_saturation_endpoint_explains_disk_admission_denial(
     assert body["admission"]["status"] == "blocked"
     assert body["admission"]["reason"] == "INSUFFICIENT_DISK"
     assert "free disk" in body["admission"]["detail"].lower()
+
+
+@pytest.mark.unit
+def test_saturation_counts_response_carries_recovering() -> None:
+    # The auto-healing provider-retry pause (#612) gets its own per-status
+    # saturation count, mirroring ``blocked``. The response model maps it by
+    # name from the ``WorkspaceSaturationCounts`` dataclass (``from_attributes``).
+    from awf.service.metrics_types import WorkspaceSaturationCounts
+
+    counts = WorkspaceSaturationCounts(
+        by_status={WorkspaceStatus.recovering.value: 2},
+        active_total=2,
+        requested=0,
+        provisioning=0,
+        ready=0,
+        running=0,
+        validating=0,
+        pushing=0,
+        monitoring_pr=0,
+        blocked=0,
+        recovering=2,
+        destroying=0,
+        completed=0,
+        failed=0,
+        cancelled=0,
+        destroyed=0,
+    )
+    response = metrics_route.WorkspaceSaturationCountsResponse.model_validate(counts)
+    assert response.recovering == 2
+    assert response.active_total == 2
+    assert response.model_dump()["recovering"] == 2

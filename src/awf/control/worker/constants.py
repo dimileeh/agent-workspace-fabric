@@ -39,11 +39,15 @@ _REQUESTED_ADMISSION_SLOT_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.monitoring_pr,
     # A blocked workspace keeps its warm stack, so it holds the host-port lock.
     WorkspaceStatus.blocked,
+    # A recovering workspace keeps its warm stack while it auto-retries across
+    # the provider cooldown, so it holds the host-port lock too (#612).
+    WorkspaceStatus.recovering,
 )
 """Workspace statuses where the workspace holds an admission slot (e.g. a host-port lock).
 
-Deliberately excludes ``blocked`` from ``_ACTIVE_EXECUTION_STATUSES`` and
-``_RUNTIME_HEALTH_SCAN_STATUSES`` (above): a paused ``blocked`` workspace must be
+Deliberately excludes ``blocked`` and ``recovering`` from
+``_ACTIVE_EXECUTION_STATUSES`` and ``_RUNTIME_HEALTH_SCAN_STATUSES`` (above): a
+paused ``blocked`` (operator) or ``recovering`` (auto-retry) workspace must be
 preserve-not-reap, so it stays out of the stale-execution reaping / health-scan
 sets while still holding its admission slot here."""
 

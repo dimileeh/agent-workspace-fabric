@@ -579,6 +579,30 @@ class TestWorkspaceList:
         ]
 
     @pytest.mark.unit
+    def test_recovering_status_flag_passed(self) -> None:
+        # ``recovering`` is the auto-healing provider-retry pause (#612); the
+        # ``--status`` option is typed ``list[WorkspaceStatus]`` so the new enum
+        # value parses and forwards as ``status=recovering`` without error.
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "list",
+                    "--status",
+                    "recovering",
+                ],
+            )
+
+        assert result.exit_code == 0
+        kwargs = mock.call_args.kwargs
+        assert kwargs["params"] == [
+            ("limit", 50),
+            ("status", "recovering"),
+        ]
+
+    @pytest.mark.unit
     def test_pretty_prints_separators_between_items(self) -> None:
         response = _mock_response(
             status_code=200,

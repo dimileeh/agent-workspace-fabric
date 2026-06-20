@@ -92,6 +92,10 @@ EXECUTION_IN_USE_STATUSES = frozenset(
         # A blocked workspace keeps its warm stack + execution claim while it
         # awaits an operator decision, so it still holds an execution slot.
         WorkspaceStatus.blocked.value,
+        # A recovering workspace keeps its warm stack + execution claim during
+        # the provider cooldown while it auto-retries in place, so it still holds
+        # an execution slot (#612).
+        WorkspaceStatus.recovering.value,
     }
 )
 EXECUTION_QUEUE_STATUSES = frozenset({WorkspaceStatus.ready.value})
