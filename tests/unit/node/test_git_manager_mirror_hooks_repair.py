@@ -127,6 +127,92 @@ class TestRepairMirrorHooksPath:
         assert include_check.returncode != 0
 
     @pytest.mark.unit
+    async def test_removes_mirror_gitdir_include_exposed_from_worktree_context(
+        self, tmp_path: Path
+    ) -> None:
+        mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        included_config = tmp_path / "mirror-gitdir-included-hooks.conf"
+        included_config.write_text("[core]\n\thooksPath = /dev/null\n", encoding="utf-8")
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "includeIf.gitdir:**/worktrees/**.path",
+                str(included_config),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        mirror_probe = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "--local",
+                "--includes",
+                "--get-all",
+                "core.hooksPath",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert mirror_probe.returncode != 0
+        context_probe = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "config",
+                "--local",
+                "--includes",
+                "--get-all",
+                "core.hooksPath",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert context_probe.returncode == 0
+        assert context_probe.stdout == "/dev/null\n"
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "config",
+                "--local",
+                "--includes",
+                "--get-all",
+                "core.hooksPath",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+        include_check = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "--local",
+                "--get-regexp",
+                r"^includeIf\..*\.path$",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert include_check.returncode != 0
+
+    @pytest.mark.unit
     async def test_clears_poisoned_worktree_local_hooks_path(self, tmp_path: Path) -> None:
         mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
         subprocess.run(

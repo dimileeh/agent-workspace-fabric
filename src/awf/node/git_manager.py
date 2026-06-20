@@ -983,8 +983,25 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
     )
 
     worktrees_dir = mirror_path / "worktrees"
-    for config_path in sorted(worktrees_dir.glob("*/config.worktree")):
-        worktree_path = _linked_worktree_path_from_git_dir(config_path.parent)
+    linked_worktree_dirs = (
+        sorted(path for path in worktrees_dir.iterdir() if path.is_dir())
+        if worktrees_dir.exists()
+        else []
+    )
+    for linked_worktree_dir in linked_worktree_dirs:
+        worktree_path = _linked_worktree_path_from_git_dir(linked_worktree_dir)
+        repaired = (
+            await _repair_hooks_path_config(
+                git_args=("-C", str(worktree_path)),
+                config_scope_args=("--local",),
+                config_path=mirror_path / "config",
+                operation_prefix="mirror",
+            )
+            or repaired
+        )
+        config_path = linked_worktree_dir / "config.worktree"
+        if not config_path.exists():
+            continue
         repaired = (
             await _repair_hooks_path_config(
                 git_args=("-C", str(worktree_path)),
