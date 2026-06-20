@@ -154,11 +154,15 @@ async def test_commit_dirty_worktree_preserves_mirror_hooks_repair_failure_detai
             {
                 "workspace_id": workspace_id,
                 "reason_code": "MIRROR_HOOKS_PATH_POISONED",
+                "mirror_hooks_repair_failed": True,
+                "repair_stage": "commit_dirty_worktree",
                 "error_type": "GitOperationError",
+                "mirror_path": str(tmp_path / "mirrors" / "test.git"),
                 "repair_reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
                 "git_operation": "mirror.hooks_path_repair",
                 "git_returncode": 1,
                 "stderr": "fatal: config unset failed",
+                "stdout": "",
             },
         )
     ]

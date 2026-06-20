@@ -46,6 +46,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
@@ -248,11 +249,16 @@ async def _run_ci_fix(
         try:
             await repair_mirror_hooks_path(mirror_path)
         except (GitOperationError, OSError) as exc:
+            repair_details = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="before_ci_fix_agent",
+                mirror_path=mirror_path,
+            )
             _log.warning(
                 "monitor.ci_fix_mirror_hooks_path_repair_failed",
                 workspace_id=workspace_id,
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                error_type=exc.__class__.__name__,
+                **repair_details,
             )
             return _GitPushResult(
                 pushed=False,
@@ -260,6 +266,7 @@ async def _run_ci_fix(
                 returncode=1,
                 stderr="could not repair poisoned mirror hooks path before CI fix agent launch",
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                details=repair_details,
             )
     try:
         result = await self._deps.adapter.run(
@@ -287,12 +294,17 @@ async def _run_ci_fix(
             try:
                 await repair_mirror_hooks_path(mirror_path)
             except (GitOperationError, OSError) as repair_exc:
+                repair_details = mirror_hooks_repair_failure_details(
+                    repair_exc,
+                    repair_stage="after_ci_fix_agent_exception",
+                    mirror_path=mirror_path,
+                    extra={"original_error_type": exc.__class__.__name__},
+                )
                 _log.warning(
                     "monitor.ci_fix_post_agent_mirror_hooks_path_repair_failed",
                     workspace_id=workspace_id,
                     reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                    error_type=repair_exc.__class__.__name__,
-                    original_error_type=exc.__class__.__name__,
+                    **repair_details,
                 )
                 return _GitPushResult(
                     pushed=False,
@@ -300,6 +312,7 @@ async def _run_ci_fix(
                     returncode=1,
                     stderr="could not repair poisoned mirror hooks path",
                     reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    details=repair_details,
                 )
         post_agent_err = exc
 

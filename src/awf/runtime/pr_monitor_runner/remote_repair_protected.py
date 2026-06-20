@@ -82,6 +82,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _untracked_paths_from_porcelain_z,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
     _ProtectedScopePushBlock,
@@ -844,10 +845,16 @@ async def _repair_protected_scope_changes_before_commit(
         try:
             await repair_mirror_hooks_path(mirror_path)
         except (GitOperationError, OSError) as exc:
+            repair_details = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="protected_scope_repair",
+                mirror_path=mirror_path,
+            )
             _log.warning(
                 "monitor.protected_scope_repair_mirror_hooks_path_repair_failed",
                 workspace_id=workspace_id,
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                **repair_details,
             )
             raise _MonitorMirrorHooksPathRepairFailedError() from exc
 
