@@ -257,9 +257,13 @@ async def _repair_operation_start_head_result(
         )
         return fallback_head, None
 
+    async def start_head_fallback() -> tuple[str | None, str]:
+        if fallback_head_sha:
+            return fallback_head_sha, "status"
+        return await self._open_merge_candidate_head_sha(workspace_id), "candidate"
+
     if not worktree_path.exists():
-        source = "status" if fallback_head_sha else "candidate"
-        fallback_head = fallback_head_sha or await self._open_merge_candidate_head_sha(workspace_id)
+        fallback_head, source = await start_head_fallback()
         if fallback_head:
             return await validated_fallback_result(
                 fallback_head,
@@ -292,10 +296,11 @@ async def _repair_operation_start_head_result(
                 stdout=stdout,
                 stderr=stderr,
             )
-            if fallback_head_sha:
+            fallback_head, source = await start_head_fallback()
+            if fallback_head:
                 return await validated_fallback_result(
-                    fallback_head_sha,
-                    source="status",
+                    fallback_head,
+                    source=source,
                     returncode=result.returncode,
                     stdout=stdout,
                     stderr=stderr,
@@ -309,10 +314,11 @@ async def _repair_operation_start_head_result(
 
     stdout = result.stdout[:400]
     stderr = result.stderr[:400]
-    if fallback_head_sha:
+    fallback_head, source = await start_head_fallback()
+    if fallback_head:
         return await validated_fallback_result(
-            fallback_head_sha,
-            source="status",
+            fallback_head,
+            source=source,
             returncode=result.returncode,
             stdout=stdout,
             stderr=stderr,
