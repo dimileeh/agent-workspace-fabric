@@ -221,7 +221,7 @@ async def _repair_operation_start_head_result(
         fallback_exists = (
             await _mirror_commit_object_exists(self, mirror_path, fallback_head)
             if mirror_path is not None
-            else await verify_head_object_exists(worktree_path)
+            else await _worktree_commit_object_exists(self, worktree_path, fallback_head)
         )
         if not fallback_exists:
             _log.warning(
