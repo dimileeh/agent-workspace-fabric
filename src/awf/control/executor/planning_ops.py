@@ -12,7 +12,7 @@ import re as re
 import shlex as shlex
 import time as time
 import traceback as traceback
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -27,6 +27,9 @@ from awf.common.command_evidence import (
 )
 from awf.common.git_identity import (
     git_safe_directory_config_args,
+)
+from awf.common.owned_paths import (
+    INTERNAL_PLAN_ARTIFACT_DIR,
 )
 from awf.control.executor.constants import _FILE_DIGEST_CHUNK_SIZE, PLAN_CONFORMANCE_UNSATISFIED
 from awf.control.executor.helpers import (
@@ -117,6 +120,8 @@ _PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES = frozenset(
     }
 )
 _PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_SCAN_LIMIT = 100
+_PLAN_ARTIFACT_NEAR_MISS_GLOB = "ws_*.md"
+_PLAN_ARTIFACT_NEAR_MISS_MAX_DISTANCE = 2
 
 
 # Compatibility re-exports for tests that still reference these names via the
@@ -143,6 +148,189 @@ def __getattr__(name: str) -> object:
 
         return getattr(_planning_conformance, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _plan_artifact_candidate_digests(
+    worktree_path: Path,
+    plan_path: Path,
+) -> dict[Path, str]:
+    """Digest direct ignored-plan candidates without changing git dirty semantics."""
+    if plan_path.parent.as_posix() != INTERNAL_PLAN_ARTIFACT_DIR:
+        return {}
+
+    plan_dir = worktree_path / plan_path.parent
+    if not plan_dir.is_dir():
+        return {}
+
+    candidates: dict[Path, str] = {}
+    for candidate in sorted(plan_dir.glob(_PLAN_ARTIFACT_NEAR_MISS_GLOB)):
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        try:
+            relative_candidate = candidate.relative_to(worktree_path)
+        except ValueError:
+            continue
+        if relative_candidate.parent != plan_path.parent:
+            continue
+        digest = _digest_file_if_present(candidate)
+        if digest is not None:
+            candidates[relative_candidate] = digest
+    return candidates
+
+
+def _changed_plan_artifact_candidates(
+    before: Mapping[Path, str],
+    after: Mapping[Path, str],
+    *,
+    required_plan_path: Path,
+) -> tuple[Path, ...]:
+    changed = [
+        path
+        for path, digest in after.items()
+        if path != required_plan_path and before.get(path) != digest
+    ]
+    return tuple(sorted(changed))
+
+
+def _filename_hamming_distance(left: str, right: str) -> int | None:
+    if len(left) != len(right):
+        return None
+    return sum(
+        1 for left_char, right_char in zip(left, right, strict=True) if left_char != right_char
+    )
+
+
+def _near_miss_plan_artifact_evidence(
+    *,
+    candidate: Path,
+    required_plan_path: Path,
+    reason: str,
+) -> dict[str, object]:
+    distance = _filename_hamming_distance(candidate.name, required_plan_path.name)
+    evidence: dict[str, object] = {
+        "path": candidate.as_posix(),
+        "required_path": required_plan_path.as_posix(),
+        "reason": reason,
+    }
+    if distance is not None:
+        evidence["filename_hamming_distance"] = distance
+    return evidence
+
+
+def _is_safe_plan_artifact_near_miss(candidate: Path, required_plan_path: Path) -> bool:
+    distance = _filename_hamming_distance(candidate.name, required_plan_path.name)
+    return distance is not None and 0 < distance <= _PLAN_ARTIFACT_NEAR_MISS_MAX_DISTANCE
+
+
+def _recover_plan_artifact_near_miss(
+    *,
+    worktree_path: Path,
+    workspace_id: str,
+    required_plan_path: Path,
+    required_plan_digest_before: str | None,
+    changed_paths_during_planning: Sequence[Path],
+    candidates_before: Mapping[Path, str],
+    candidates_after: Mapping[Path, str],
+) -> tuple[bool, list[dict[str, object]]]:
+    """Recover a single typo-like ignored plan artifact when the rest is clean."""
+    required_default_path = Path(INTERNAL_PLAN_ARTIFACT_DIR) / f"{workspace_id}.md"
+    if required_plan_path != required_default_path:
+        return False, []
+
+    changed_candidates = _changed_plan_artifact_candidates(
+        candidates_before,
+        candidates_after,
+        required_plan_path=required_plan_path,
+    )
+    if not changed_candidates:
+        return False, []
+
+    changed_path_strings = [path.as_posix() for path in changed_paths_during_planning]
+    if changed_path_strings:
+        evidence = [
+            _near_miss_plan_artifact_evidence(
+                candidate=candidate,
+                required_plan_path=required_plan_path,
+                reason="planning_changed_other_paths",
+            )
+            for candidate in changed_candidates
+        ]
+        for item in evidence:
+            item["offending_paths"] = changed_path_strings[:20]
+        return False, evidence
+
+    if required_plan_digest_before is not None:
+        return (
+            False,
+            [
+                _near_miss_plan_artifact_evidence(
+                    candidate=candidate,
+                    required_plan_path=required_plan_path,
+                    reason="required_plan_already_existed",
+                )
+                for candidate in changed_candidates
+            ],
+        )
+
+    if len(changed_candidates) != 1:
+        return (
+            False,
+            [
+                _near_miss_plan_artifact_evidence(
+                    candidate=candidate,
+                    required_plan_path=required_plan_path,
+                    reason="ambiguous_near_miss_candidates",
+                )
+                for candidate in changed_candidates
+            ],
+        )
+
+    candidate = changed_candidates[0]
+    if not _is_safe_plan_artifact_near_miss(candidate, required_plan_path):
+        return (
+            False,
+            [
+                _near_miss_plan_artifact_evidence(
+                    candidate=candidate,
+                    required_plan_path=required_plan_path,
+                    reason="filename_not_close_enough",
+                )
+            ],
+        )
+
+    source = worktree_path / candidate
+    target = worktree_path / required_plan_path
+    if target.exists():
+        return (
+            False,
+            [
+                _near_miss_plan_artifact_evidence(
+                    candidate=candidate,
+                    required_plan_path=required_plan_path,
+                    reason="required_plan_path_exists",
+                )
+            ],
+        )
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(target)
+    except OSError as exc:
+        move_evidence = _near_miss_plan_artifact_evidence(
+            candidate=candidate,
+            required_plan_path=required_plan_path,
+            reason="recovery_move_failed",
+        )
+        move_evidence["error"] = str(exc)
+        return False, [move_evidence]
+
+    _log.info(
+        "executor.planning_near_miss_plan_artifact_recovered",
+        workspace_id=workspace_id,
+        required_path=required_plan_path.as_posix(),
+        recovered_from=candidate.as_posix(),
+    )
+    return True, []
 
 
 async def _auto_retry_planning_scope_failure(
@@ -522,6 +710,7 @@ async def _run_agent_task_with_optional_planning(
 
     before_plan = await self._changed_paths(worktree_path)
     plan_file_digest_before = _digest_file_if_present(worktree_path / plan_path)
+    plan_candidates_before = _plan_artifact_candidate_digests(worktree_path, plan_path)
     baseline_sha: str | None = None
     rev_r = await self._runner.run(
         [
@@ -560,16 +749,31 @@ async def _run_agent_task_with_optional_planning(
         else set()
     )
     after_plan = dirty_paths | committed_paths
+    plan_candidates_after = _plan_artifact_candidate_digests(worktree_path, plan_path)
+    near_miss_plan_artifacts: list[dict[str, object]] = []
     if plan_path not in after_plan:
         plan_file_digest_after = _digest_file_if_present(worktree_path / plan_path)
         if plan_file_digest_after is not None and plan_file_digest_after != plan_file_digest_before:
             after_plan = {*after_plan, plan_path}
+        else:
+            recovered_near_miss, near_miss_plan_artifacts = _recover_plan_artifact_near_miss(
+                worktree_path=worktree_path,
+                workspace_id=workspace.id,
+                required_plan_path=plan_path,
+                required_plan_digest_before=plan_file_digest_before,
+                changed_paths_during_planning=sorted(after_plan - before_plan),
+                candidates_before=plan_candidates_before,
+                candidates_after=plan_candidates_after,
+            )
+            if recovered_near_miss:
+                after_plan = {*after_plan, plan_path}
     if plan_path not in after_plan:
         return _build_planning_scope_failure(
             scope_phase="planning",
             required_paths=(plan_path,),
             offending_paths=sorted(after_plan - before_plan),
             summary=(f"planning phase did not create or modify required plan file `{plan_path}`"),
+            near_miss_plan_artifacts=near_miss_plan_artifacts,
         )
     if planning.enforce_plan_only_changes:
         extra = sorted(after_plan - before_plan - {plan_path})

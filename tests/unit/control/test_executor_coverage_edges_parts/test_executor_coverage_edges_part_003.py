@@ -164,6 +164,39 @@ def _executor_with_runner(
     return executor
 
 
+def _required_awf_plan_profile(name: str) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": name,
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+
+def _queue_planning_scope_failure_commands(
+    runner: FakeCommandRunner,
+    *,
+    dirty_stdout: str = "",
+) -> None:
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+    runner.queue_result(returncode=0, stdout=dirty_stdout)  # dirty_paths
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+
+
+def _queue_planning_success_with_conformance_commands(runner: FakeCommandRunner) -> None:
+    _queue_planning_scope_failure_commands(runner)
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-compare
+
+
 def _autofix_classification(
     *,
     repair_files: tuple[str, ...] = ("src/app.py",),
@@ -405,6 +438,277 @@ async def test_planning_required_accepts_ignored_plan_file_written_by_agent(
 
     assert message is None
     assert len(adapter.prompts) == 3
+
+
+@pytest.mark.unit
+async def test_planning_required_recovers_single_ignored_near_miss_plan_file(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    required_path = worktree / "docs" / "awf-plans" / "ws_plan_near_miss.md"
+    near_miss_path = worktree / "docs" / "awf-plans" / "ws_plan_near_moss.md"
+
+    class _NearMissPlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                near_miss_path.parent.mkdir(parents=True, exist_ok=True)
+                near_miss_path.write_text(
+                    "# Plan\n\nRecover the typoed plan artifact.\n",
+                    encoding="utf-8",
+                )
+            return result
+
+    runner = FakeCommandRunner()
+    _queue_planning_success_with_conformance_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _NearMissPlanAdapter(
+        "plan written",
+        "implementation",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(
+            id="ws_plan_near_miss",
+            task_prompt="do it",
+            task_tag=None,
+        ),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-near-miss"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 3
+    assert required_path.read_text(encoding="utf-8") == (
+        "# Plan\n\nRecover the typoed plan artifact.\n"
+    )
+    assert not near_miss_path.exists()
+
+
+@pytest.mark.unit
+async def test_planning_required_near_miss_fails_when_multiple_candidates(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    candidate_paths = (
+        worktree / "docs" / "awf-plans" / "ws_aaab.md",
+        worktree / "docs" / "awf-plans" / "ws_aaac.md",
+    )
+
+    class _AmbiguousPlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                for path in candidate_paths:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("# Plan\n\nAmbiguous.\n", encoding="utf-8")
+            return result
+
+    runner = FakeCommandRunner()
+    _queue_planning_scope_failure_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _AmbiguousPlanAdapter("plan written elsewhere")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_aaaa", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-ambiguous-near-miss"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.details is not None
+    near_miss = message.details["near_miss_plan_artifacts"]
+    assert [item["path"] for item in near_miss] == [
+        "docs/awf-plans/ws_aaab.md",
+        "docs/awf-plans/ws_aaac.md",
+    ]
+    assert {item["reason"] for item in near_miss} == {"ambiguous_near_miss_candidates"}
+
+
+@pytest.mark.unit
+async def test_planning_required_near_miss_fails_when_source_changes(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    near_miss_path = worktree / "docs" / "awf-plans" / "ws_near_sourcf.md"
+
+    class _SourceChangingPlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                near_miss_path.parent.mkdir(parents=True, exist_ok=True)
+                near_miss_path.write_text("# Plan\n\nUnsafe.\n", encoding="utf-8")
+            return result
+
+    runner = FakeCommandRunner()
+    _queue_planning_scope_failure_commands(runner, dirty_stdout=" M src/app.py\n")
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _SourceChangingPlanAdapter("plan written elsewhere")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_near_source", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-near-miss-source"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.details is not None
+    near_miss = message.details["near_miss_plan_artifacts"]
+    assert near_miss == [
+        {
+            "path": "docs/awf-plans/ws_near_sourcf.md",
+            "required_path": "docs/awf-plans/ws_near_source.md",
+            "reason": "planning_changed_other_paths",
+            "filename_hamming_distance": 1,
+            "offending_paths": ["src/app.py"],
+        }
+    ]
+
+
+@pytest.mark.unit
+async def test_planning_required_near_miss_ignores_non_candidate_files(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_dir = worktree / "docs" / "awf-plans"
+
+    class _NonCandidatePlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                (plan_dir / "nested").mkdir(parents=True, exist_ok=True)
+                (plan_dir / "README.md").write_text("# Notes\n", encoding="utf-8")
+                (plan_dir / "ws_hidden.json").write_text("{}", encoding="utf-8")
+                (plan_dir / "nested" / "ws_hiddem.md").write_text(
+                    "# Nested\n",
+                    encoding="utf-8",
+                )
+            return result
+
+    runner = FakeCommandRunner()
+    _queue_planning_scope_failure_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _NonCandidatePlanAdapter("plan written elsewhere")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_hidden", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-non-candidate"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.details is not None
+    assert message.details["near_miss_plan_artifacts"] == []
+
+
+@pytest.mark.unit
+async def test_planning_required_near_miss_does_not_recover_distant_filename(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    near_miss_path = worktree / "docs" / "awf-plans" / "ws_faraway.md"
+
+    class _DistantPlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                near_miss_path.parent.mkdir(parents=True, exist_ok=True)
+                near_miss_path.write_text("# Plan\n\nToo far.\n", encoding="utf-8")
+            return result
+
+    runner = FakeCommandRunner()
+    _queue_planning_scope_failure_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _DistantPlanAdapter("plan written elsewhere")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_close", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-distant-near-miss"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.details is not None
+    assert message.details["near_miss_plan_artifacts"] == [
+        {
+            "path": "docs/awf-plans/ws_faraway.md",
+            "required_path": "docs/awf-plans/ws_close.md",
+            "reason": "filename_not_close_enough",
+        }
+    ]
+
+
+@pytest.mark.unit
+async def test_planning_required_near_miss_does_not_overwrite_existing_plan(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    required_path = worktree / "docs" / "awf-plans" / "ws_exist.md"
+    near_miss_path = worktree / "docs" / "awf-plans" / "ws_exisu.md"
+    required_path.parent.mkdir(parents=True, exist_ok=True)
+    required_path.write_text("# Original\n", encoding="utf-8")
+
+    class _ExistingPlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                near_miss_path.write_text("# New plan\n", encoding="utf-8")
+            return result
+
+    runner = FakeCommandRunner()
+    _queue_planning_scope_failure_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _ExistingPlanAdapter("plan written elsewhere")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_exist", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-existing-required"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert required_path.read_text(encoding="utf-8") == "# Original\n"
+    assert near_miss_path.exists()
+    assert message.details is not None
+    assert message.details["near_miss_plan_artifacts"] == [
+        {
+            "path": "docs/awf-plans/ws_exisu.md",
+            "required_path": "docs/awf-plans/ws_exist.md",
+            "reason": "required_plan_already_existed",
+            "filename_hamming_distance": 1,
+        }
+    ]
 
 
 @pytest.mark.unit
