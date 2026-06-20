@@ -47,6 +47,7 @@ from awf.node.git_manager import (
     git_env_without_object_lookup_overrides,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
+    verify_head_object_exists,
 )
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.ownership import (
@@ -60,6 +61,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_GIT_PUSH_EVENT,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _MIRROR_HOOKS_PATH_POISONED_REASON,
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
     _PROTECTED_SCOPE_PAUSED_REASON,
@@ -89,6 +91,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _ProtectedScopeRollbackDeltaEvidence,
 )
@@ -865,10 +868,20 @@ async def _repair_protected_scope_changes_before_commit(
 
     await _repair_recovery_mirror_hooks_path()
 
+    if not await verify_head_object_exists(worktree_path):
+        _log.warning(
+            "monitor.head_object_missing",
+            workspace_id=workspace_id,
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+        raise _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            f"HEAD object missing for workspace {workspace_id} after protected-scope repair",
+        )
+
     if agent_run_err is not None:
         await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
 
-    worktree_path = self._worktrees_root / workspace_id
     repaired_status = await self._deps.runner.run(
         git_worktree_command(worktree_path, "status", "--porcelain"),
         env=git_env_without_object_lookup_overrides(),

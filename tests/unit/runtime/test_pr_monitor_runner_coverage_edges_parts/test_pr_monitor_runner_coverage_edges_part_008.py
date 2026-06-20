@@ -27,6 +27,7 @@ from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
+    _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _ProtectedScopeRollbackDeltaEvidence,
 )
@@ -642,6 +643,132 @@ async def test_protected_scope_repair_cleans_mirror_before_provider_retry(
         )
 
     assert events == ["mirror-repair", "mirror-repair", "provider-recovery"]
+
+
+@pytest.mark.unit
+async def test_protected_scope_repair_verifies_head_before_provider_retry(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.adapter.queue(returncode=1, stderr="provider outage")
+    violation = _protected_workflow_violation()
+    events: list[str] = []
+
+    async def _violations_for_status(**_kwargs: object) -> tuple[QualityGateViolation, ...]:
+        return (violation,)
+
+    async def _prompt(**_kwargs: object) -> str:
+        return "repair protected scope"
+
+    async def _suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        events.append("verify-head")
+        return False
+
+    async def _handle_provider_error(*_args: object, **_kwargs: object) -> None:
+        events.append("provider-recovery")
+
+    monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
+    monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
+    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _suppresses_cli)
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_agent_runtime_ownership",
+        _repair_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+    monkeypatch.setattr(runner, "_handle_provider_agent_run_error", _handle_provider_error)
+
+    with pytest.raises(_MonitorHeadObjectMissingError) as exc_info:
+        await runner._repair_protected_scope_changes_before_commit(
+            workspace_id="ws_delta",
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="awf_ws_delta",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
+
+    assert exc_info.value.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert events == ["verify-head"]
+    assert runner._deps.runner.calls == []
+
+
+@pytest.mark.unit
+async def test_protected_scope_repair_verifies_head_before_status_recheck(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.adapter.queue(returncode=0)
+    violation = _protected_workflow_violation()
+    events: list[str] = []
+
+    async def _violations_for_status(**_kwargs: object) -> tuple[QualityGateViolation, ...]:
+        return (violation,)
+
+    async def _prompt(**_kwargs: object) -> str:
+        return "repair protected scope"
+
+    async def _suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        events.append("verify-head")
+        return False
+
+    monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
+    monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
+    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _suppresses_cli)
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_agent_runtime_ownership",
+        _repair_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+
+    with pytest.raises(_MonitorHeadObjectMissingError) as exc_info:
+        await runner._repair_protected_scope_changes_before_commit(
+            workspace_id="ws_delta",
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="awf_ws_delta",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
+
+    assert exc_info.value.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert events == ["verify-head"]
+    assert runner._deps.runner.calls == []
 
 
 @pytest.mark.unit
