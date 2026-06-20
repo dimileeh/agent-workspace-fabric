@@ -104,3 +104,40 @@ async def test_setup_cleanup_failure_recovers_missing_head_before_outer_failure(
         assert ws.status == WorkspaceStatus.failed.value
         assert ws.failure_reason == FailureReason.infrastructure_failure.value
         assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+
+
+@pytest.mark.unit
+async def test_setup_cleanup_failure_skips_recovery_when_head_is_present(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed_ready_workspace(factory)
+
+    async def _run_phases(*, phase_names: tuple[str, ...], **_kwargs: object) -> object:
+        if phase_names == ("setup", "pre_agent"):
+            raise ComposeExecCleanupError(
+                invocation_id="setup-cleanup",
+                source="agent",
+                label="setup",
+                message="cleanup timed out",
+            )
+        raise AssertionError("validation should not run after setup cleanup failure")
+
+    verify_head = AsyncMock(return_value=True)
+    recover = AsyncMock(return_value=True)
+    monkeypatch.setattr(executor._validation, "run_profile_phases", _run_phases)
+    monkeypatch.setattr(execution_flow_module, "verify_head_object_exists", verify_head)
+    monkeypatch.setattr(executor, "_recover_missing_git_head_or_mark_failed", recover)
+
+    await executor.execute(ws_id)
+
+    verify_head.assert_awaited_once()
+    recover.assert_not_awaited()
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
