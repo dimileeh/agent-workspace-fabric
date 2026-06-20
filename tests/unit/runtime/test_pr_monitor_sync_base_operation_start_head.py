@@ -833,8 +833,12 @@ async def test_run_sync_base_repairs_mirror_hooks_after_conflict_agent_cleanup_f
         events.append("repair-hooks")
         return True
 
-    async def _unexpected_commit_dirty_worktree(**_kwargs: object) -> bool:
-        pytest.fail("cleanup failure must re-raise before commit")
+    captured_operation_start_heads: list[object] = []
+
+    async def _commit_dirty_worktree(**kwargs: object) -> bool:
+        events.append("commit")
+        captured_operation_start_heads.append(kwargs.get("operation_start_head"))
+        return False
 
     async def _unexpected_protected_scope(**_kwargs: object) -> None:
         pytest.fail("cleanup failure must re-raise before protected-scope checks")
@@ -862,7 +866,7 @@ async def test_run_sync_base_repairs_mirror_hooks_after_conflict_agent_cleanup_f
         _resolve_task_tag=_resolve_task_tag,
         _fetch_base=_fetch_base,
         _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
-        _commit_dirty_worktree=_unexpected_commit_dirty_worktree,
+        _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_unexpected_protected_scope,
         _validated_git_push_result=_unexpected_validated_push,
         _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
@@ -891,7 +895,9 @@ async def test_run_sync_base_repairs_mirror_hooks_after_conflict_agent_cleanup_f
         "repair-hooks",
         "adapter.run",
         "repair-hooks",
+        "commit",
     ]
+    assert captured_operation_start_heads == ["operation-start-sha"]
 
 
 @pytest.mark.unit

@@ -864,6 +864,7 @@ async def _run_sync_base(
             task_tag=task_tag,
         )
         agent_run_err = None
+        post_agent_err: Exception | None = None
         command_evidence: list[str] = []
         if await runner._provider_recovery_suppresses_cli(workspace_id):
             raise ProviderRecoveryRetryError()
@@ -916,10 +917,10 @@ async def _run_sync_base(
             )
         except Exception as exc:
             # Runtime plumbing can fail outside ``AgentRunError`` after the agent
-            # has already mutated the shared sync-base mirror. Repair once; if
-            # repair fails, fail closed with the mirror-hooks reason because the
-            # shared mirror may remain poisoned. Otherwise preserve the original
-            # failure for the monitor loop.
+            # has already mutated the shared sync-base mirror or self-committed.
+            # Repair hooks once; if repair succeeds, still run the dirty-worktree
+            # sink below so its HEAD-object guard can verify/recover the mirror
+            # ref before the original failure is propagated.
             if mirror_path is not None:
                 try:
                     await repair_mirror_hooks_path(mirror_path)
@@ -932,7 +933,7 @@ async def _run_sync_base(
                         original_error_type=exc.__class__.__name__,
                     )
                     raise _MonitorMirrorHooksPathRepairFailedError() from repair_exc
-            raise
+            post_agent_err = exc
 
         try:
             await runner._commit_dirty_worktree(
@@ -976,6 +977,9 @@ async def _run_sync_base(
                 stderr=str(exc),
                 reason_code=exc.reason_code,
             )
+
+        if post_agent_err is not None:
+            raise post_agent_err
 
         if agent_run_err is not None:
             await runner._handle_provider_agent_run_error(workspace_id, agent_run_err)
