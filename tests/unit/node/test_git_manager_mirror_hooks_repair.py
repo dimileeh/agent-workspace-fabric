@@ -148,7 +148,9 @@ class TestRepairMirrorHooksPath:
         monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
         monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
 
-        assert await git_module.repair_mirror_hooks_path(mirror) is True
+        # Both scan passes report nothing to repair, so the corrected contract
+        # returns ``False`` even though stale metadata was pruned between them.
+        assert await git_module.repair_mirror_hooks_path(mirror) is False
         assert prune_calls == 1
         assert repair_calls == 2
 

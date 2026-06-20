@@ -1140,7 +1140,7 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
                 ),
                 reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
             )
-        return repaired or retry_repaired or True
+        return repaired or retry_repaired
 
 
 async def verify_head_object_exists(worktree_path: Path) -> bool:
