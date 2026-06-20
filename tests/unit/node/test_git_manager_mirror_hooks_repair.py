@@ -84,6 +84,49 @@ class TestRepairMirrorHooksPath:
         assert check.returncode != 0
 
     @pytest.mark.unit
+    async def test_removes_include_exposing_poisoned_hooks_path(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        included_config = tmp_path / "included-hooks.conf"
+        included_config.write_text("[core]\n\thooksPath = /dev/null\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "include.path", str(included_config)],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "config",
+                "--local",
+                "--includes",
+                "--get-all",
+                "core.hooksPath",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+        include_check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--local", "--get-all", "include.path"],
+            capture_output=True,
+            text=True,
+        )
+        assert include_check.returncode != 0
+
+    @pytest.mark.unit
     async def test_clears_poisoned_worktree_local_hooks_path(self, tmp_path: Path) -> None:
         mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
         subprocess.run(
@@ -107,6 +150,58 @@ class TestRepairMirrorHooksPath:
         )
         assert check.returncode != 0
         assert check.stdout == ""
+
+    @pytest.mark.unit
+    async def test_removes_worktree_include_exposing_poisoned_hooks_path(
+        self, tmp_path: Path
+    ) -> None:
+        mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        subprocess.run(
+            ["git", "-C", str(worktree), "config", "extensions.worktreeConfig", "true"],
+            check=True,
+            capture_output=True,
+        )
+        included_config = tmp_path / "worktree-included-hooks.conf"
+        included_config.write_text("[core]\n\thooksPath = /dev/null\n", encoding="utf-8")
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "config",
+                "--worktree",
+                "include.path",
+                str(included_config),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "config",
+                "--worktree",
+                "--includes",
+                "--get-all",
+                "core.hooksPath",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+        assert check.stdout == ""
+        include_check = subprocess.run(
+            ["git", "-C", str(worktree), "config", "--worktree", "--get-all", "include.path"],
+            capture_output=True,
+            text=True,
+        )
+        assert include_check.returncode != 0
 
     @pytest.mark.unit
     async def test_clears_duplicate_poisoned_hooks_paths(self, tmp_path: Path) -> None:
