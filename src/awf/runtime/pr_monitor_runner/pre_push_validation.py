@@ -876,10 +876,24 @@ async def _run_pre_push_validation(
                     paths=[violation.path for violation in violations],
                     reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
                 )
+                cleanup = await _pre_push_validation_cleanup(
+                    self,
+                    worktree_path=worktree_path,
+                    restore_ref=recovery_head,
+                )
+                if not cleanup.ok:
+                    _log.warning(
+                        "monitor.pre_push_validation_recovered_head_protected_scope_cleanup_failed",
+                        workspace_id=workspace_id,
+                        recovered_head=recovered[:10],
+                        cleanup_reason_code=cleanup.reason_code,
+                        cleanup_message=cleanup.message[:400],
+                        cleanup_stderr=cleanup.cleanup_stderr[:400],
+                    )
                 return _PrePushValidationResult(
                     passed=False,
                     validation_run_id=None,
-                    workspace_head_sha=recovered,
+                    workspace_head_sha=recovery_head,
                     reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
                     message=(
                         "PR monitor pre-push validation blocked: "

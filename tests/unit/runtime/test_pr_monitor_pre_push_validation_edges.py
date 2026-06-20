@@ -1109,6 +1109,7 @@ async def test_pre_push_validation_recovered_head_blocks_committed_protected_sco
     runner._deps.validation = validation  # type: ignore[assignment]
     committed_diff_calls: list[dict[str, object]] = []
     ownership_calls: list[dict[str, object]] = []
+    cleanup_calls: list[dict[str, object]] = []
 
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
         return False
@@ -1148,6 +1149,25 @@ async def test_pre_push_validation_recovered_head_blocks_committed_protected_sco
     async def _repair_protected_scope_changes_before_commit(**_kwargs: object) -> CommandResult:
         raise AssertionError("recovered committed diffs must not use dirty-status repair")
 
+    async def _pre_push_validation_cleanup(
+        self: object,
+        *,
+        worktree_path: Path,
+        restore_ref: str,
+    ) -> ValidationWorktreeCleanup:
+        del self
+        cleanup_calls.append(
+            {
+                "worktree_path": worktree_path,
+                "restore_ref": restore_ref,
+            }
+        )
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=restore_ref,
+        )
+
     monkeypatch.setattr(
         pre_push_validation,
         "repair_mirror_hooks_path",
@@ -1183,6 +1203,11 @@ async def test_pre_push_validation_recovered_head_blocks_committed_protected_sco
         "_protected_scope_violations_for_recovered_commit",
         _protected_scope_violations_for_recovered_commit,
     )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
 
     result = await pre_push_validation._run_pre_push_validation(
         runner,
@@ -1195,7 +1220,7 @@ async def test_pre_push_validation_recovered_head_blocks_committed_protected_sco
     )
 
     assert result.passed is False
-    assert result.workspace_head_sha == recovered_head
+    assert result.workspace_head_sha == recovery_base
     assert result.reason_code == "PROTECTED_SCOPE_REPAIR_FAILED"
     assert "recovered HEAD protected-scope repair failed" in result.message
     assert ownership_calls == [
@@ -1214,6 +1239,12 @@ async def test_pre_push_validation_recovered_head_blocks_committed_protected_sco
             "worktree_path": worktree,
             "base_ref": recovery_base,
             "changed_paths": (".github/workflows/ci.yml",),
+        }
+    ]
+    assert cleanup_calls == [
+        {
+            "worktree_path": worktree,
+            "restore_ref": recovery_base,
         }
     ]
     assert validation.calls == []
