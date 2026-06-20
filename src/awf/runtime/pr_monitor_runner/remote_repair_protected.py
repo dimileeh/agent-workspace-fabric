@@ -850,6 +850,19 @@ async def _repair_protected_scope_changes_before_commit(
             )
             raise _MonitorMirrorHooksPathRepairFailedError() from exc
 
+    async def _verify_repair_head_object_exists() -> None:
+        if await verify_head_object_exists(worktree_path):
+            return
+        _log.warning(
+            "monitor.head_object_missing",
+            workspace_id=workspace_id,
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+        raise _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            f"HEAD object missing for workspace {workspace_id} after protected-scope repair",
+        )
+
     await _repair_recovery_mirror_hooks_path()
     agent_run_err = None
     try:
@@ -864,20 +877,11 @@ async def _repair_protected_scope_changes_before_commit(
         agent_run_err = exc
     except Exception:
         await _repair_recovery_mirror_hooks_path()
+        await _verify_repair_head_object_exists()
         raise
 
     await _repair_recovery_mirror_hooks_path()
-
-    if not await verify_head_object_exists(worktree_path):
-        _log.warning(
-            "monitor.head_object_missing",
-            workspace_id=workspace_id,
-            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
-        )
-        raise _MonitorHeadObjectMissingError(
-            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
-            f"HEAD object missing for workspace {workspace_id} after protected-scope repair",
-        )
+    await _verify_repair_head_object_exists()
 
     if agent_run_err is not None:
         await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)

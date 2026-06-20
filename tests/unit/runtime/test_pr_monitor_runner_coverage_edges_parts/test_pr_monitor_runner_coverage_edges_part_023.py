@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.control.quality_gates_common import QualityGateViolation
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
+from awf.runtime.pr_monitor_runner import (
+    remote_repair_protected as pr_remote_repair_protected,
+)
 from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
@@ -53,6 +57,39 @@ class _CommitRunner(_RecoveryRunner):
         return CommandResult(returncode=0, stdout="", stderr="")
 
 
+class _ProtectedRepairRunner:
+    def __init__(self, cmd: FakeCommandRunner, *, worktrees_root: Path) -> None:
+        self._deps = SimpleNamespace(
+            runner=cmd,
+            adapter=_UnexpectedFailureAdapter(),
+        )
+        self._worktrees_root = worktrees_root
+        self.violations_calls = 0
+
+    async def _protected_scope_violations_for_status(
+        self,
+        **_kwargs: object,
+    ) -> list[QualityGateViolation]:
+        self.violations_calls += 1
+        return [
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/workflows/",
+            )
+        ]
+
+    async def _protected_scope_repair_prompt(self, **_kwargs: object) -> str:
+        return "repair protected scope"
+
+    async def _provider_recovery_suppresses_cli(self, _workspace_id: str) -> bool:
+        return False
+
+
+class _UnexpectedFailureAdapter:
+    async def run(self, **_kwargs: object) -> None:
+        raise RuntimeError("compose cleanup failed")
+
+
 async def _recover(
     runner: _RecoveryRunner,
     worktree: Path,
@@ -82,6 +119,56 @@ async def test_missing_head_filesystem_recovery_returns_none_without_mirror(
 
     assert await _recover(runner, worktree) is None
     assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_protected_scope_repair_checks_head_after_unexpected_adapter_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    worktrees_root = tmp_path / "worktrees"
+    worktree = worktrees_root / _WORKSPACE_ID
+    worktree.mkdir(parents=True)
+    runner = _ProtectedRepairRunner(cmd, worktrees_root=worktrees_root)
+    mirror = tmp_path / "mirror.git"
+    calls: list[str] = []
+
+    async def _repair_hooks(_mirror: Path) -> None:
+        calls.append("repair_hooks")
+
+    async def _head_missing(_worktree_path: Path) -> bool:
+        calls.append("verify_head")
+        return False
+
+    async def _repair_ownership(**_kwargs: object) -> bool:
+        calls.append("repair_ownership")
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "mirror_path_for_worktree",
+        lambda _path: mirror,
+    )
+    monkeypatch.setattr(pr_remote_repair_protected, "repair_mirror_hooks_path", _repair_hooks)
+    monkeypatch.setattr(pr_remote_repair_protected, "verify_head_object_exists", _head_missing)
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_agent_runtime_ownership",
+        _repair_ownership,
+    )
+
+    with pytest.raises(_MonitorHeadObjectMissingError, match="after protected-scope repair"):
+        await pr_remote_repair_protected._repair_protected_scope_changes_before_commit(
+            runner,
+            workspace_id=_WORKSPACE_ID,
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    assert calls == ["repair_ownership", "repair_hooks", "repair_hooks", "verify_head"]
+    assert runner.violations_calls == 1
 
 
 @pytest.mark.unit
