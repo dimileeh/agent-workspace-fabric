@@ -190,8 +190,10 @@ async def _reparent_fix_pass_commit(
             stderr=(result.stderr or "")[:400],
         )
 
+    git_env = git_env_without_object_lookup_overrides()
     current_tree_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "rev-parse", f"{current_head}^{{tree}}")
+        git_worktree_command(worktree_path, "rev-parse", f"{current_head}^{{tree}}"),
+        env=git_env,
     )
     current_tree = current_tree_result.stdout.strip() if current_tree_result.ok else ""
     if not current_tree:
@@ -199,7 +201,8 @@ async def _reparent_fix_pass_commit(
         return None, False, _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
 
     start_tree_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "rev-parse", f"{fix_start_head}^{{tree}}")
+        git_worktree_command(worktree_path, "rev-parse", f"{fix_start_head}^{{tree}}"),
+        env=git_env,
     )
     start_tree = start_tree_result.stdout.strip() if start_tree_result.ok else ""
     if not start_tree:
@@ -221,7 +224,8 @@ async def _reparent_fix_pass_commit(
         return None, True, None
 
     message_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "log", "-1", "--format=%B", current_head)
+        git_worktree_command(worktree_path, "log", "-1", "--format=%B", current_head),
+        env=git_env,
     )
     message = message_result.stdout.strip() if message_result.ok else ""
     if not message:
@@ -247,7 +251,8 @@ async def _reparent_fix_pass_commit(
             fix_start_head,
             "-m",
             message,
-        )
+        ),
+        env=git_env,
     )
     new_sha = commit_result.stdout.strip() if commit_result.ok else ""
     if not new_sha:
@@ -255,7 +260,8 @@ async def _reparent_fix_pass_commit(
         return None, False, _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
 
     reset_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", new_sha)
+        git_worktree_command(worktree_path, "reset", "--hard", new_sha),
+        env=git_env,
     )
     if not reset_result.ok:
         _warn("reset --hard reparented commit", reset_result)
