@@ -326,6 +326,14 @@ async def execute(
             expected_status=WorkspaceStatus.running,
             execution_owner_id=execution_owner_id,
         )
+        if not recovered_commit_verified:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.blocked,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=cleanup_failure_message(exc),
+                reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+            )
         return bool(recovered_commit_verified)
 
     try:
