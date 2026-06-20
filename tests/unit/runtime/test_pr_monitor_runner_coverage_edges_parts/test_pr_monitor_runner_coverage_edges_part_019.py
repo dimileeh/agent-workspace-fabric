@@ -201,6 +201,7 @@ async def test_recover_missing_head_object_fails_closed_during_merge(
     )
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -226,7 +227,10 @@ async def test_recover_missing_head_object_fails_closed_during_merge(
     )
 
     assert recovered is None
-    assert not any("update-ref" in call.args for call in cmd.calls)
+    assert any(
+        call.args[-3:] == ["update-ref", f"refs/heads/awf/{workspace_id}", "a" * 40]
+        for call in cmd.calls
+    )
     assert not any(call.args[-3:] == ["reset", "--mixed", "HEAD"] for call in cmd.calls)
     assert not any("commit" in call.args for call in cmd.calls)
 

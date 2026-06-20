@@ -516,16 +516,16 @@ async def _recover_missing_head_object_from_filesystem(
         )
         return None
 
+    reset_ref = await mirror_git(["update-ref", branch_ref, operation_start_head])
+    if not reset_ref.ok:
+        return None
+
     if _worktree_has_merge_head(worktree_path):
         _log.warning(
             "monitor.head_object_missing_recovery_merge_in_progress",
             workspace_id=workspace_id,
             branch_ref=branch_ref,
         )
-        return None
-
-    reset_ref = await mirror_git(["update-ref", branch_ref, operation_start_head])
-    if not reset_ref.ok:
         return None
 
     reset_index = await worktree_git(["reset", "--mixed", "HEAD"])
