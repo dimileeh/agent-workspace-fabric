@@ -1024,6 +1024,14 @@ async def test_run_sync_base_fails_closed_when_post_agent_mirror_hooks_repair_fa
         returncode=1,
         stderr="could not repair poisoned mirror hooks path after sync-base agent failure",
         reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+        details={
+            "mirror_hooks_repair_failed": True,
+            "repair_stage": "after_sync_base_agent_exception",
+            "error_type": "OSError",
+            "mirror_path": str(tmp_path / "mirror.git"),
+            "error": "could not repair hooks",
+            "original_error_type": "ComposeExecCleanupError",
+        },
     )
     assert events == [
         "git:merge --abort",
