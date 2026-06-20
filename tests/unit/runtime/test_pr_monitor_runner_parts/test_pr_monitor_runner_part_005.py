@@ -59,6 +59,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _with_ci_failures,
 )
 from awf.runtime.pr_monitor_runner.types import (
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
 )
@@ -1310,6 +1311,79 @@ class TestMiscMonitorHelpers:
         assert fake.calls[0].env is not None
         assert "GIT_OBJECT_DIRECTORY" not in fake.calls[0].env
         assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[0].env
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_recovered_head_ownership_failure_restores_head(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovered ownership repair failures must restore the recovery head."""
+        workspace_id = "ws_missing_head_ownership_failure"
+        operation_start_head = "1" * 40
+        recovered_head = "2" * 40
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="M\0src/awf/example.py\0")
+        fake.queue_result(returncode=0)
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            return recovered_head
+
+        async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+            return False
+
+        async def _protected_scope_violations_for_recovered_dirty_commit(
+            *_args: object,
+            **_kwargs: object,
+        ) -> list[object]:
+            raise AssertionError("protected-scope check should not run")
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_protected_scope_violations_for_recovered_dirty_commit",
+            _protected_scope_violations_for_recovered_dirty_commit,
+        )
+
+        with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError):
+            await runner._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message="awf: monitor dirty worktree",
+                operation_start_head=operation_start_head,
+            )
+
+        assert len(fake.calls) == 2
+        assert fake.calls[0].args[-5:] == [
+            "diff",
+            "--name-status",
+            "-z",
+            f"{operation_start_head}..{recovered_head}",
+            "--",
+        ]
+        assert fake.calls[1].args[-3:] == ["reset", "--hard", operation_start_head]
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_missing_head_recovery_blocks_protected_commit(

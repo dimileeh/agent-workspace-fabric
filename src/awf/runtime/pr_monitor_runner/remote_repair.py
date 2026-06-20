@@ -1009,6 +1009,14 @@ async def _commit_dirty_worktree(
                 event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
                 reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
             ):
+                await _cleanup_recovered_missing_head_delta(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    recovery_head=recovery_head,
+                    reason="ownership_repair_failed",
+                    untracked_cleanup_paths=recovered_untracked_cleanup_paths,
+                )
                 raise _MonitorAgentRuntimeOwnershipRepairFailedError(
                     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
                 )
