@@ -1111,10 +1111,11 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=128, stderr="path missing")  # git show protected workflow
         cmd.queue_result(returncode=0)  # ls-tree confirms protected workflow is absent
         adapter.queue(stdout="removed workflow edit; fixed test instead")
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # repaired HEAD exists
         cmd.queue_result(
             returncode=0,
             stdout=" M tests/integration/test_workspace_agent_git_in_workspace.py\n",
-        )  # dirty check after scope correction
+        )  # protected repair status after scope correction
         cmd.queue_result(
             returncode=0,
             stdout=" M tests/integration/test_workspace_agent_git_in_workspace.py\n",
@@ -1171,4 +1172,4 @@ class TestMonitorDirtyWorktreeSalvage:
             if len(call.args) >= 5
             and call.args[-3:] == ["commit", "-m", "fix: address PR review thread T_workflow"]
         ]
-        assert len(commit_calls) == 1
+        assert len(commit_calls) == 1, _call_tail_report(cmd)
