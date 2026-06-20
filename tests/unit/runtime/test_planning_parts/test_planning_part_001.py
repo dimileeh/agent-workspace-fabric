@@ -12,6 +12,7 @@ from awf.db.enums import AgentRuntime
 from awf.runtime import planning as planning_mod
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    AGENT_WORKTREE_ROOT,
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
     MAX_CONFORMANCE_TEXT_CHARS,
     PLAN_CONFORMANCE_REPORTED,
@@ -23,6 +24,7 @@ from awf.runtime.planning import (
     PlanConformanceStatus,
     _evidence_strings,
     _gaps_from_payload,
+    agent_artifact_path,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
@@ -204,6 +206,46 @@ def test_changed_paths_from_porcelain_preserves_quoted_literal_arrow_paths() -> 
     paths = changed_paths_from_porcelain(' M "docs/awf -> plans/ws.conformance.json"\n')
 
     assert paths == {Path("docs/awf -> plans/ws.conformance.json")}
+
+
+@pytest.mark.unit
+def test_agent_artifact_path_anchors_relative_path_at_worktree_root() -> None:
+    """Worktree-relative artifact paths resolve to the in-container worktree root (#620)."""
+    assert AGENT_WORKTREE_ROOT == "/workspace"
+    assert (
+        agent_artifact_path(Path("docs/awf-plans/ws_123.md")).as_posix()
+        == "/workspace/docs/awf-plans/ws_123.md"
+    )
+    assert (
+        agent_artifact_path(Path("docs/awf-plans/ws_123.conformance.json")).as_posix()
+        == "/workspace/docs/awf-plans/ws_123.conformance.json"
+    )
+
+
+@pytest.mark.unit
+def test_prompts_anchor_plan_artifacts_at_worktree_root() -> None:
+    """Plan/conformance prompts carry the worktree-root-anchored artifact paths (#620)."""
+    plan = agent_artifact_path(Path("docs/awf-plans/ws_123.md"))
+    report = agent_artifact_path(Path("docs/awf-plans/ws_123.conformance.json"))
+
+    planning_prompt = build_planning_prompt(task_prompt="Add metrics", plan_path=plan)
+    execution_prompt = build_execution_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        iteration=0,
+        gaps=(),
+    )
+    conformance_prompt = build_conformance_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        report_path=report,
+        iteration=0,
+    )
+
+    assert "/workspace/docs/awf-plans/ws_123.md" in planning_prompt
+    assert "/workspace/docs/awf-plans/ws_123.md" in execution_prompt
+    assert "/workspace/docs/awf-plans/ws_123.md" in conformance_prompt
+    assert "/workspace/docs/awf-plans/ws_123.conformance.json" in conformance_prompt
 
 
 @pytest.mark.unit

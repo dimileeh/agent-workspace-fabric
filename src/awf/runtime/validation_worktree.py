@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
+from awf.common.owned_paths import is_under_internal_plan_artifact_dir
 from awf.runtime.git_porcelain import (
     changed_paths_from_porcelain as _changed_paths_from_porcelain,
 )
@@ -667,11 +668,17 @@ async def check_validation_worktree_clean(
     )
 
     # Ignored roots only suppress untracked or ignored artifacts; tracked files
-    # below those roots must stay visible so cleanup can restore them.
+    # below those roots must stay visible so cleanup can restore them. The
+    # internal plan-artifact dir (``docs/awf-plans`` at ANY depth) is AWF-owned
+    # ephemeral state, never a user file, so it is suppressed UNCONDITIONALLY —
+    # independent of ``ignore_all_ignored`` and of the target repo's .gitignore.
+    # This stops a stray plan artifact written from a subdir CWD (e.g.
+    # ``apps/console/docs/awf-plans/ws_x.md``) from failing a run (#620).
     ignored_untracked_paths = {
         path
         for path in untracked_paths_from_status
         if _is_under_ignored_path(path, ignored_paths_to_ignore)
+        or is_under_internal_plan_artifact_dir(path)
     }
     visible_changed_paths = tuple(
         path for path in changed_paths if path not in ignored_untracked_paths
@@ -738,6 +745,14 @@ async def check_validation_worktree_clean(
             message=reason,
             command_stderr=(exc.stderr or "")[:1000],
         )
+    # A stray *empty* internal plan directory at any depth (e.g. left behind by
+    # an agent that cd'd into a subdir) is AWF-owned ephemeral state, so drop it
+    # from the dirty snapshot just like the untracked entries above (#620).
+    empty_untracked_dirs = tuple(
+        dir_path
+        for dir_path in empty_untracked_dirs
+        if not is_under_internal_plan_artifact_dir(dir_path)
+    )
     paths = tuple(
         dict.fromkeys(
             (

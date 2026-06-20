@@ -13,6 +13,7 @@ from awf.common.ids import (
 )
 
 INTERNAL_PLAN_ARTIFACT_DIR: Final = "docs/awf-plans"
+_INTERNAL_PLAN_ARTIFACT_DIR_SEGMENTS: Final = tuple(INTERNAL_PLAN_ARTIFACT_DIR.split("/"))
 _PLANNING_PATH_FIELDS: Final = ("plan_path", "conformance_report_path")
 _WORKSPACE_ID_PLACEHOLDER: Final = "{workspace_id}"
 _WORKSPACE_ID_GLOB: Final = f"{WORKSPACE_ID_PREFIX}*"
@@ -24,6 +25,26 @@ INTERNAL_PLAN_ARTIFACT_NAME_RE: Final = re.compile(
     r"^ws_(?:[A-Za-z0-9][A-Za-z0-9_]*|\*)"
     r"(?:\.md|(?:\.conformance)?\.json)$"
 )
+
+
+def is_under_internal_plan_artifact_dir(path: str) -> bool:
+    """Return whether ``path`` is the internal plan-artifact dir or a descendant.
+
+    Matches the reserved ``docs/awf-plans`` directory itself and anything beneath
+    it at ANY depth — including a stray copy an agent wrote from a subdirectory
+    (e.g. ``apps/console/docs/awf-plans/ws_x.md``) when its CWD was not the
+    worktree root (#620). The match is on the consecutive
+    ``("docs", "awf-plans")`` segment pair, so the sibling
+    ``docs/awf-plans-archive`` and unrelated ``awf-plans``/``xdocs`` paths are
+    NOT matched. These artifacts are AWF-internal ephemeral state, never user
+    files, so callers may treat them as always-ignorable.
+    """
+    segments = normalize_owned_path(path).split("/")
+    window = len(_INTERNAL_PLAN_ARTIFACT_DIR_SEGMENTS)
+    for start in range(len(segments) - window + 1):
+        if tuple(segments[start : start + window]) == _INTERNAL_PLAN_ARTIFACT_DIR_SEGMENTS:
+            return True
+    return False
 
 
 def normalize_owned_path(path: str) -> str:

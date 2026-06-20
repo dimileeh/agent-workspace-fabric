@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 from awf.common.redaction import redact_secrets
@@ -112,6 +112,28 @@ def render_workspace_path(template: str, *, workspace_id: str) -> Path:
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"path template must stay inside the workspace: {template!r}")
     return path
+
+
+AGENT_WORKTREE_ROOT: Final[str] = "/workspace"
+"""In-container worktree root the agent process starts in.
+
+Matches ``build_tracked_compose_exec``'s default ``workdir`` (the coding CLI is
+launched at ``/workspace``). Agents routinely ``cd`` into a task subdirectory
+mid-run, so a worktree-relative artifact path handed to the agent verbatim would
+resolve under that subdir instead of the repo root."""
+
+
+def agent_artifact_path(relative_path: Path) -> Path:
+    """Anchor a worktree-relative artifact path at the in-container worktree root.
+
+    ``render_workspace_path`` guarantees ``relative_path`` is relative, so the
+    absolute base always wins cleanly. Handing the agent the anchored
+    ``/workspace/...`` path keeps the plan/conformance artifact at the worktree
+    root regardless of the agent's CWD, so it can never land nested under a task
+    subdir (e.g. ``apps/console/docs/awf-plans/``) and trip the dirty-tree guard
+    (#620). The control plane is Linux-only, so ``Path`` is ``PosixPath`` and
+    ``.as_posix()`` yields the correct ``/workspace/...`` string."""
+    return Path(AGENT_WORKTREE_ROOT) / relative_path
 
 
 def render_coordination_warning_section(

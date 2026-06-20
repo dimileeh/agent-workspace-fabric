@@ -473,6 +473,128 @@ async def test_check_validation_worktree_clean_can_ignore_all_ignored_paths(
 
 
 @pytest.mark.unit
+async def test_check_validation_worktree_clean_suppresses_nested_internal_plan_artifact(
+    tmp_path: Path,
+) -> None:
+    """A nested plan artifact must not trip the guard even without a gitignore rule (#620).
+
+    Reproduces the recurring incident: an agent working from ``apps/console``
+    wrote the plan to ``apps/console/docs/awf-plans/ws_x.md``, which the
+    root-anchored ``.gitignore`` did not cover, so git reported it as a plain
+    untracked file (``??``). The pre-validation guard runs with
+    ``ignore_all_ignored=False``; internal plan artifacts must still be
+    suppressed unconditionally so the workspace is not failed with
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``.
+    """
+    worktree = _init_fake_worktree(tmp_path)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status reporting a nested, non-ignored plan artifact."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "?? apps/console/docs/awf-plans/ws_x.md\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is True
+    assert check.reason_code is None
+    assert check.paths == ()
+    assert check.untracked_paths == ()
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_suppresses_root_internal_plan_artifact(
+    tmp_path: Path,
+) -> None:
+    """A root plan artifact stays ignored as ignored (``!!``) under ignore_all_ignored."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status reporting the gitignored root plan artifact."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "!! docs/awf-plans/ws_x.md\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+    )
+
+    assert check.clean is True
+    assert check.reason_code is None
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_keeps_plan_artifact_sibling_dir_dirty(
+    tmp_path: Path,
+) -> None:
+    """The sibling ``docs/awf-plans-archive`` is a real dir and must stay dirty."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status reporting a sibling-archive untracked file."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "?? docs/awf-plans-archive/x.md\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert check.paths == ("docs/awf-plans-archive/x.md",)
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_keeps_tracked_plan_readme_edit_visible(
+    tmp_path: Path,
+) -> None:
+    """A tracked ``docs/awf-plans/README.md`` edit is real work and stays visible."""
+    worktree = _init_fake_worktree(tmp_path)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status reporting a modified tracked README under the plan dir."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, " M docs/awf-plans/README.md\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert check.paths == ("docs/awf-plans/README.md",)
+    assert check.untracked_paths == ()
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_suppresses_empty_nested_plan_dir(
+    tmp_path: Path,
+) -> None:
+    """An empty nested plan directory is filtered from the dirty snapshot (#620).
+
+    The parent ``apps/console/docs`` holds a sibling file, so the snapshot's only
+    empty-directory candidate is the internal plan dir itself; the dirty guard
+    must drop it.
+    """
+    worktree = _init_fake_worktree(tmp_path)
+    nested_docs = worktree / "apps" / "console" / "docs"
+    (nested_docs / "awf-plans").mkdir(parents=True)
+    (nested_docs / "index.md").write_text("kept\n", encoding="utf-8")
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status that cannot report the empty plan directory."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is True
+    assert check.reason_code is None
+    assert check.paths == ()
+
+
+@pytest.mark.unit
 async def test_check_validation_worktree_clean_removes_empty_untracked_dirs_when_asked(
     tmp_path: Path,
 ) -> None:
@@ -1139,6 +1261,70 @@ async def test_check_validation_worktree_clean_reports_tracked_path_under_ignore
     assert check.untracked_paths == ()
     assert check.tracked_paths == (".venv/tracked.py",)
     assert check.ignored_paths == (".venv/",)
+
+
+@pytest.mark.unit
+def test_repo_gitignore_ignores_plan_artifacts_at_any_depth(tmp_path: Path) -> None:
+    """The repo ``.gitignore`` ignores plan artifacts at any depth, keeping the README (#620).
+
+    Regression for the recurring dirty-tree failure: the root-anchored
+    ``/docs/awf-plans/*`` rule missed a nested ``apps/console/docs/awf-plans/``
+    copy. The de-anchored ``**/docs/awf-plans/*`` rule must ignore root AND
+    nested artifacts while still tracking the canonical
+    ``docs/awf-plans/README.md`` and leaving the sibling
+    ``docs/awf-plans-archive`` untouched. Asserts against the real repo-root
+    ``.gitignore`` so the rule itself is covered.
+    """
+    repo_gitignore = Path(__file__).resolve().parents[3] / ".gitignore"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", str(repo)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run_real_git(repo, "config", "user.email", "agent@example.com")
+    _run_real_git(repo, "config", "user.name", "AWF Agent")
+    (repo / ".gitignore").write_text(
+        repo_gitignore.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    for relative in (
+        "docs/awf-plans/ws_root.md",
+        "docs/awf-plans/README.md",
+        "apps/console/docs/awf-plans/ws_nested.md",
+        "deep/a/b/docs/awf-plans/x.json",
+        "docs/awf-plans-archive/keep.md",
+    ):
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+
+    def is_ignored(relative: str) -> bool:
+        """Return whether the real repo `.gitignore` ignores ``relative``."""
+        result = subprocess.run(
+            ["git", "-C", str(repo), "check-ignore", "-q", relative],
+            capture_output=True,
+        )
+        return result.returncode == 0
+
+    # (a) nested artifact ignored at any depth, (b) root artifact ignored.
+    assert is_ignored("apps/console/docs/awf-plans/ws_nested.md")
+    assert is_ignored("deep/a/b/docs/awf-plans/x.json")
+    assert is_ignored("docs/awf-plans/ws_root.md")
+    # (c) README stays tracked; the sibling archive dir is not over-matched.
+    assert not is_ignored("docs/awf-plans/README.md")
+    assert not is_ignored("docs/awf-plans-archive/keep.md")
+
+    _run_real_git(repo, "add", "-A")
+    staged = _run_real_git(repo, "diff", "--cached", "--name-only").stdout.split()
+    assert "docs/awf-plans/README.md" in staged
+    assert "docs/awf-plans-archive/keep.md" in staged
+    assert "docs/awf-plans/ws_root.md" not in staged
+    assert "apps/console/docs/awf-plans/ws_nested.md" not in staged
+    assert "deep/a/b/docs/awf-plans/x.json" not in staged
 
 
 def _init_fake_worktree(tmp_path: Path) -> Path:
