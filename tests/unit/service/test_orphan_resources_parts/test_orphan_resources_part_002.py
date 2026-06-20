@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -579,6 +580,80 @@ def test_reaper_row_less_only_skips_terminal_db_record_resources(tmp_path: Path)
     # Only the row-less worktree is reclaimed.
     assert [outcome.kind for outcome in result.reaped] == ["worktree"]
     assert not (tmp_path / "git" / "worktrees" / "ws_dead").exists()
+
+
+@pytest.mark.unit
+def test_superseded_workspace_db_row_is_protected_from_row_less_sweep(tmp_path: Path) -> None:
+    """A ``superseded`` workspace still has a DB row, so the orphan view must classify
+    its resources as ``terminal`` (DB-row-driven reaper territory, under the
+    failed/superseded preservation cap) — never ``missing``.
+
+    ``superseded`` is a string-only terminal status that terminal GC and the CLI treat
+    as eligible (``gc_classify.TERMINAL_WORKSPACE_GC_STATUSES``, ``--exclude-status
+    superseded``). If the orphan view omitted it, the row would be filtered out of the
+    id view, its container/network/volume/worktree would classify as ``missing``, and
+    the on-demand ``row_less_only=True`` sweep would tear it down despite the operator
+    scoping it out — exactly the hazard the row-less restriction exists to avoid
+    (PRRT_kwDOSJAM6s6LC5a-).
+    """
+    from awf.service.orphan_resources import (
+        KNOWN_WORKSPACE_STATUSES,
+        reap_classified_orphans,
+    )
+    from awf.service.orphan_resources import (
+        _workspace_view_from_rows as workspace_view_from_rows,
+    )
+
+    # The id-view query selects superseded rows and partitions them as terminal.
+    assert "superseded" in KNOWN_WORKSPACE_STATUSES
+    view = workspace_view_from_rows(
+        [("ws_sup", "superseded", datetime(2020, 1, 1, tzinfo=UTC))],
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+        min_retention_hours=24.0,
+    )
+    assert "ws_sup" in view.terminal_ids
+    assert "ws_sup" not in view.active_ids
+
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_sup-agent-1",
+                    "project": "awf_ws_sup",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=empty_worktree_scan(),
+        workspace_view=view,
+        auto_cleanup_orphans=True,
+    )
+    container_record = next(record for record in summary.records if record.kind == "container")
+    assert container_record.classification == "terminal"  # not "missing"
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,  # isolate the row-less filter from the age guard
+            row_less_only=True,
+        )
+    )
+
+    assert result.status == "ok"
+    # The superseded DB-record stack is left for the scope-honouring DB-row-driven reaper.
+    assert teardown.calls == []
+    assert result.reaped == ()
 
 
 @pytest.mark.unit

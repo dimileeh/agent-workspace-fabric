@@ -119,6 +119,17 @@ TERMINAL_WORKSPACE_STATUSES = frozenset(
     {
         WorkspaceStatus.completed.value,
         WorkspaceStatus.failed.value,
+        # ``superseded`` is not in the WorkspaceStatus enum (it is a string-only
+        # terminal status), but terminal GC and the CLI treat it as an eligible
+        # terminal status — it appears in gc_classify.TERMINAL_WORKSPACE_GC_STATUSES,
+        # carries the failed/superseded preservation cap, and accepts
+        # ``--status``/``--exclude-status superseded``. It MUST be terminal here too:
+        # if omitted, a superseded workspace row is filtered out of the id view
+        # (KNOWN_WORKSPACE_STATUSES), its containers/networks/volumes/worktree classify
+        # as ``missing``, and the on-demand ``row_less_only=True`` sweep would tear it
+        # down despite ``--exclude-status superseded`` and before the DB-row-driven
+        # terminal reaper's preservation cap applies (PRRT_kwDOSJAM6s6LC5a-).
+        "superseded",
         WorkspaceStatus.cancelled.value,
         WorkspaceStatus.destroyed.value,
     }
