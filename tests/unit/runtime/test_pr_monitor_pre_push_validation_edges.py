@@ -19,6 +19,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_types import ValidationCommandResult, ValidationResult
@@ -290,6 +291,92 @@ async def test_pre_push_validation_fix_pass_policy_block_preserves_exception_rea
     assert validation_calls == 1
     assert result.reason_code == _PROTECTED_SCOPE_REPAIR_FAILED_REASON
     assert "protected-scope repair failed" in result.message
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_head_object_missing_preserves_exception_reason_code(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing-HEAD failures from the fix pass must keep their specific reason."""
+    workspace_id = "workspace_fix_head_reason"
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True, exist_ok=True)
+    validation_calls = 0
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr1",
+        workspace_head_sha="a" * 40,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="attempt 1 failed",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+        result=_validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
+    )
+
+    async def _run_pre_push_validation(
+        _self: object,
+        **_kwargs: object,
+    ) -> pre_push_validation._PrePushValidationResult:
+        nonlocal validation_calls
+        validation_calls += 1
+        if validation_calls > 1:
+            raise AssertionError("missing HEAD should stop before retry validation")
+        return validation_result
+
+    async def _pre_push_validation_commands(
+        _self: object,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+    ) -> tuple[str, ...]:
+        del workspace_id, worktree_path
+        return ("pytest -q",)
+
+    async def _run_fix_pass(_runner: object, **_kwargs: object) -> tuple[bool, str | None]:
+        raise _MonitorHeadObjectMissingError(
+            "HEAD_OBJECT_MISSING_FIX_PASS_CUSTOM",
+            "HEAD object missing for workspace_fix_head_reason",
+        )
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation",
+        _run_pre_push_validation,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_commands",
+        _pre_push_validation_commands,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation_fix_pass",
+        _run_fix_pass,
+    )
+
+    result = await pre_push_validation._run_pre_push_validation_with_fix_passes(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+        remote_url=None,
+        state=None,
+    )
+
+    assert validation_calls == 1
+    assert result.reason_code == "HEAD_OBJECT_MISSING_FIX_PASS_CUSTOM"
+    assert "HEAD object missing" in result.message
 
 
 @pytest.mark.unit

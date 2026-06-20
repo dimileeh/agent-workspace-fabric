@@ -450,7 +450,7 @@ async def _run_pre_push_validation_with_fix_passes(
             )
             return replace(
                 validation_result,
-                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                reason_code=exc.reason_code,
                 message=(
                     f"PR monitor pre-push validation fix pass blocked: HEAD object missing: {exc}"
                 ),
