@@ -385,6 +385,8 @@ async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_after_cleanup_
 ) -> None:
     calls: list[str] = []
     workspace_id = "ws_hooks_cleanup_failed"
+    state = MonitorState()
+    operation_start_head = "a" * 40
     (tmp_path / workspace_id).mkdir()
 
     async def _suppress(_workspace_id: str) -> bool:
@@ -408,7 +410,15 @@ async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_after_cleanup_
         )
 
     async def _commit_dirty_worktree(**_kwargs: object) -> bool:
-        pytest.fail("dirty-worktree sink must not run after cleanup failure")
+        calls.append("_commit_dirty_worktree")
+        assert _kwargs["workspace_id"] == workspace_id
+        assert _kwargs["message"] == "fix: x"
+        assert _kwargs["compose_project"] == "proj"
+        assert _kwargs["compose_file"] == Path("compose.yml")
+        assert _kwargs["state"] is state
+        assert _kwargs["task_tag"] == "TASK-7"
+        assert _kwargs["operation_start_head"] == operation_start_head
+        return False
 
     monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
     monkeypatch.setattr(
@@ -433,9 +443,17 @@ async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_after_cleanup_
             commit_message="fix: x",
             compose_project="proj",
             compose_file=Path("compose.yml"),
+            state=state,
+            task_tag="TASK-7",
+            operation_start_head=operation_start_head,
         )
 
-    assert calls == ["repair_mirror_hooks_path", "adapter.run", "repair_mirror_hooks_path"]
+    assert calls == [
+        "repair_mirror_hooks_path",
+        "adapter.run",
+        "repair_mirror_hooks_path",
+        "_commit_dirty_worktree",
+    ]
 
 
 @pytest.mark.unit

@@ -332,6 +332,16 @@ async def _invoke_cli_for_verdict_result(
                     error_type=exc.__class__.__name__,
                 )
                 raise _MonitorMirrorHooksPathRepairFailedError() from exc
+        await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message=commit_message,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+            command_evidence=command_evidence,
+            task_tag=task_tag,
+            operation_start_head=operation_start_head,
+        )
         raise
 
     committed_dirty_changes = await runner._commit_dirty_worktree(
