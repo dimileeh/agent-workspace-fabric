@@ -391,6 +391,7 @@ async def test_protected_scope_repair_records_remaining_violations_after_agent_f
     adapter.queue(returncode=1, stdout="tool crashed before cleanup")
     cmd.queue_result(returncode=0)  # cat-file HEAD:.github/workflows/ci.yml
     cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
+    cmd.queue_result(returncode=0, stdout="a" * 40)  # rev-parse HEAD before repair
     cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
     cmd.queue_result(returncode=0)  # cat-file HEAD:.github/workflows/ci.yml
     cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
@@ -676,12 +677,16 @@ async def test_protected_scope_repair_verifies_head_before_provider_retry(
         events.append("verify-head")
         return False
 
+    async def _rev_parse_head(_worktree_path: Path) -> None:
+        return None
+
     async def _handle_provider_error(*_args: object, **_kwargs: object) -> None:
         events.append("provider-recovery")
 
     monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
     monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
     monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _suppresses_cli)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
     monkeypatch.setattr(
         pr_remote_repair_protected,
         "repair_agent_runtime_ownership",
@@ -706,6 +711,72 @@ async def test_protected_scope_repair_verifies_head_before_provider_retry(
     assert exc_info.value.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
     assert events == ["verify-head"]
     assert runner._deps.runner.calls == []
+
+
+@pytest.mark.unit
+async def test_protected_scope_repair_restores_pre_repair_head_before_missing_head_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.adapter.queue(returncode=0)
+    violation = _protected_workflow_violation()
+    pre_repair_head = "a" * 40
+
+    async def _violations_for_status(**_kwargs: object) -> tuple[QualityGateViolation, ...]:
+        return (violation,)
+
+    async def _prompt(**_kwargs: object) -> str:
+        return "repair protected scope"
+
+    async def _suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return pre_repair_head
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
+    monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
+    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _suppresses_cli)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_agent_runtime_ownership",
+        _repair_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+
+    with pytest.raises(_MonitorHeadObjectMissingError) as exc_info:
+        await runner._repair_protected_scope_changes_before_commit(
+            workspace_id="ws_delta",
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="awf_ws_delta",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
+
+    assert exc_info.value.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert runner._deps.runner.calls[-1].args[-3:] == ["reset", "--hard", pre_repair_head]
+    assert runner._deps.runner.calls[-1].env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in runner._deps.runner.calls[-1].env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in runner._deps.runner.calls[-1].env
 
 
 @pytest.mark.unit
@@ -741,9 +812,13 @@ async def test_protected_scope_repair_verifies_head_before_status_recheck(
         events.append("verify-head")
         return False
 
+    async def _rev_parse_head(_worktree_path: Path) -> None:
+        return None
+
     monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
     monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
     monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _suppresses_cli)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
     monkeypatch.setattr(
         pr_remote_repair_protected,
         "repair_agent_runtime_ownership",

@@ -836,6 +836,7 @@ async def _repair_protected_scope_changes_before_commit(
             "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
         )
     mirror_path = mirror_path_for_worktree(worktree_path)
+    pre_repair_head = await self._rev_parse_head(worktree_path)
 
     async def _repair_recovery_mirror_hooks_path() -> None:
         if mirror_path is None:
@@ -850,9 +851,39 @@ async def _repair_protected_scope_changes_before_commit(
             )
             raise _MonitorMirrorHooksPathRepairFailedError() from exc
 
+    async def _restore_pre_repair_head_before_missing_object_failure() -> None:
+        if pre_repair_head is None:
+            _log.warning(
+                "monitor.head_object_missing_restore_skipped",
+                workspace_id=workspace_id,
+                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            )
+            return
+        reset_result = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "reset", "--hard", pre_repair_head),
+            env=git_env_without_object_lookup_overrides(),
+        )
+        if reset_result.ok:
+            _log.warning(
+                "monitor.head_object_missing_pre_repair_head_restored",
+                workspace_id=workspace_id,
+                pre_repair_head=pre_repair_head[:10],
+                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            )
+            return
+        _log.warning(
+            "monitor.head_object_missing_pre_repair_head_restore_failed",
+            workspace_id=workspace_id,
+            pre_repair_head=pre_repair_head[:10],
+            returncode=reset_result.returncode,
+            stderr=reset_result.stderr[:400],
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+
     async def _verify_repair_head_object_exists() -> None:
         if await verify_head_object_exists(worktree_path):
             return
+        await _restore_pre_repair_head_before_missing_object_failure()
         _log.warning(
             "monitor.head_object_missing",
             workspace_id=workspace_id,

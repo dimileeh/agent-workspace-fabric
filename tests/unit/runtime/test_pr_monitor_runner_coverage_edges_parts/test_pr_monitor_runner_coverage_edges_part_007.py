@@ -1456,6 +1456,7 @@ async def test_protected_scope_repair_returns_none_when_recheck_fails(
     adapter.queue(stdout="removed workflow edit")
     cmd.queue_result(returncode=0)  # cat-file HEAD:.github/workflows/ci.yml
     cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
+    cmd.queue_result(returncode=0, stdout="a" * 40)  # rev-parse HEAD before repair
     cmd.queue_result(returncode=128, stderr="fatal: not a git repository")
     runner = make_runner(
         factory=factory,
