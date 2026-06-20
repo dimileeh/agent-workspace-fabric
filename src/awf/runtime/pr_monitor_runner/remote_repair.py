@@ -350,6 +350,9 @@ async def _open_merge_candidate_head_sha(self: Any, workspace_id: str) -> str | 
 
 
 async def _mirror_commit_object_exists(self: Any, mirror_path: Path, commit_sha: str) -> bool:
+    if _mirror_declares_object_alternates(mirror_path):
+        return False
+
     result = cast(
         CommandResult,
         await self._deps.runner.run(
@@ -358,6 +361,17 @@ async def _mirror_commit_object_exists(self: Any, mirror_path: Path, commit_sha:
         ),
     )
     return result.ok
+
+
+def _mirror_declares_object_alternates(mirror_path: Path) -> bool:
+    alternates_path = mirror_path / "objects" / "info" / "alternates"
+    try:
+        alternates_path.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # pragma: no cover - fail closed when the alternates probe is unreadable.
+    return True
 
 
 async def _worktree_commit_object_exists(self: Any, worktree_path: Path, commit_sha: str) -> bool:

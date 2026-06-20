@@ -185,6 +185,24 @@ def _monitor_runner(
 
 
 @pytest.mark.unit
+async def test_repair_operation_start_head_mirror_commit_object_exists_rejects_repository_alternates(
+    tmp_path: Path,
+) -> None:
+    mirror_path = tmp_path / "repo.git"
+    alternates_path = mirror_path / "objects" / "info" / "alternates"
+    alternates_path.parent.mkdir(parents=True)
+    alternates_path.write_text("/tmp/private-objects\n")
+    fake = FakeCommandRunner()
+    fake.queue_result(returncode=0)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=fake))
+
+    exists = await remote_repair._mirror_commit_object_exists(runner, mirror_path, "a" * 40)
+
+    assert exists is False
+    assert fake.calls == []
+
+
+@pytest.mark.unit
 async def test_repair_operation_start_head_rejects_dangling_no_mirror_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
