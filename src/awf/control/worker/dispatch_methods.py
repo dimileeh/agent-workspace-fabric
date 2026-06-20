@@ -235,6 +235,16 @@ async def _safely_resume_paused_claimed(
         self._refresh_execution_claim_loop(workspace_id),
         name=f"awf-{reason}-resume-claim-{workspace_id}",
     )
+    # Whether the executor drove the resume to a clean return (vs. the worker
+    # reverting an undriveable row back to its paused status). Gates the
+    # ``finally`` claim release below: a worker-revert path (no executor /
+    # executor error / cancellation) hands the row back and MUST release so a
+    # capable worker can re-claim, but a clean executor return that re-paused the
+    # row into ``recovering``/``blocked`` (another retryable provider failure /
+    # protected-gate violation) is a genuine pause whose warm-stack lease must be
+    # retained — exactly what ``_safely_execute_claimed`` does for the initial
+    # execution (#612 T8).
+    executor_drove_resume = False
     try:
         # The claim CAS already transitioned the row ``<paused> -> running``
         # before dispatch, so a missing executor must not just release the claim
@@ -260,6 +270,7 @@ async def _safely_resume_paused_claimed(
                 execution_owner_id=self._worker_id,
                 execution_lease_expires_at=self._execution_claim_expires_at(),
             )
+        executor_drove_resume = True
     except asyncio.CancelledError:
         # The resume CAS already committed ``<paused> -> running`` before dispatch.
         # ``CancelledError`` is a ``BaseException``, so a cancel that lands while
@@ -297,7 +308,13 @@ async def _safely_resume_paused_claimed(
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
-        await self._release_execution_claim(workspace_id)
+        # ``skip_if_blocked`` only when the executor drove the resume to a clean
+        # return: a re-pause into ``recovering``/``blocked`` keeps its warm-stack
+        # lease (the claim) the same way ``_safely_execute_claimed`` does, so the
+        # next in-place cooldown resume continues on the held claim (#612 T8).
+        # The worker-revert paths leave it ``False`` so they still release the
+        # claim on the row they handed back.
+        await self._release_execution_claim(workspace_id, skip_if_blocked=executor_drove_resume)
         await self._release_terminal_runtime_promptly(workspace_id)
 
 

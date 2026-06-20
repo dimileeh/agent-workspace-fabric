@@ -369,6 +369,111 @@ async def test_release_execution_claim_skips_recovering_workspace(
         assert ws.execution_claimed_by == worker._worker_id  # noqa: SLF001
 
 
+class _RepausingRecoveringExecutor:
+    """Executor whose recovering resume re-pauses the row back into ``recovering``.
+
+    Mimics ``enter_recovering_for_provider_failure``: a second retryable provider
+    failure during the in-place resume transitions ``running -> recovering`` and
+    returns normally (no exception), keeping the execution claim untouched — the
+    same clean-return divert the real execution flow takes.
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+        self.resume_recovering_calls: list[str] = []
+
+    async def execute(self, workspace_id: str, **_kwargs: object) -> None:  # pragma: no cover
+        del workspace_id
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:  # pragma: no cover
+        del workspace_id
+
+    async def resume_recovering_execution(self, workspace_id: str, **_kwargs: object) -> None:
+        self.resume_recovering_calls.append(workspace_id)
+        async with self._session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.recovering, reason_code="REPAUSE")
+            await s.commit()
+
+
+@pytest.mark.unit
+async def test_recovering_resume_repause_retains_execution_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # #612 T8 regression: when an in-place recovering resume hits another retryable
+    # provider failure and the executor re-pauses the row back into ``recovering``
+    # (a clean return, not an error), the dispatch ``finally`` must retain the
+    # warm-stack execution claim — mirroring ``_safely_execute_claimed`` for the
+    # initial execution — so the next cooldown resume continues on the held claim.
+    # Before the fix the ``finally`` released the claim unconditionally, dropping
+    # the lease on the second and later cooldowns.
+    ws_id = await _create_recovering(
+        session_factory,
+        origin_repo,
+        "repause",
+        not_before=datetime.now(UTC) - timedelta(seconds=5),
+    )
+    executor = _RepausingRecoveringExecutor(session_factory)
+    worker = _worker(session_factory, executor)
+
+    # The pre-dispatch resume CAS acquires the claim and moves recovering -> running.
+    assert await worker._claim_recovering_for_resume(ws_id)  # noqa: SLF001
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.execution_claimed_by == worker._worker_id  # noqa: SLF001
+
+    await asyncio.wait_for(
+        worker._safely_resume_recovering_claimed(ws_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    assert executor.resume_recovering_calls == [ws_id]
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        # The executor re-paused the row; the claim is retained as the warm lease.
+        assert ws.status == WorkspaceStatus.recovering.value
+        assert ws.execution_claimed_by == worker._worker_id  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_recovering_resume_missing_executor_releases_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # Counterpart guard: when the worker has no executor to drive the resume it
+    # reverts the row to ``recovering`` and the ``finally`` MUST still release the
+    # claim so a capable worker can re-claim it — the ``skip_if_blocked`` gate only
+    # applies to a clean executor-driven re-pause, not a worker revert.
+    ws_id = await _create_recovering(
+        session_factory,
+        origin_repo,
+        "no-executor",
+        not_before=datetime.now(UTC) - timedelta(seconds=5),
+    )
+    worker = _worker(session_factory, _RecordingRecoveringExecutor())
+    assert await worker._claim_recovering_for_resume(ws_id)  # noqa: SLF001
+    worker._executor = None  # noqa: SLF001
+
+    await asyncio.wait_for(
+        worker._safely_resume_recovering_claimed(ws_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        # Paused state restored, but the claim was released (not stranded).
+        assert ws.status == WorkspaceStatus.recovering.value
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+
+
 @pytest.mark.unit
 async def test_recovering_is_not_a_terminal_runtime_release_candidate(
     session_factory: async_sessionmaker[AsyncSession],
