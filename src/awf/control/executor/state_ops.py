@@ -5,6 +5,7 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import enum
 import json
 from collections.abc import Mapping, Sequence
 from datetime import (
@@ -540,6 +541,26 @@ async def enter_blocked_for_protected_violation(
         return True
 
 
+class ProviderFailureDivert(enum.Enum):
+    """Outcome of the agent-run provider-failure divert.
+
+    ``paused`` — the row entered ``recovering`` for in-place retry; the caller
+    returns WITHOUT the terminal teardown. ``fenced`` — the owner-gated CAS
+    matched 0 rows because the row is still in ``from_status`` but a *newer*
+    claimant holds the execution claim (this stale executor lost its claim);
+    the caller must ALSO return without the terminal teardown, because
+    ``_mark_failed`` is not owner-gated and would otherwise drive the newer
+    claimant's ``running`` row to ``failed`` (mirrors the provisioner D7
+    terminal-CAS fence, #421). ``terminal`` — a non-provider / budget-exhausted
+    / fallback failure, or the row genuinely moved on; the caller falls through
+    to today's terminal ``_mark_failed`` + ``_prepare_provider_recovery`` path.
+    """
+
+    paused = "paused"
+    fenced = "fenced"
+    terminal = "terminal"
+
+
 async def enter_recovering_for_provider_failure(
     self: Any,
     *,
@@ -549,7 +570,7 @@ async def enter_recovering_for_provider_failure(
     reason_code: str | None,
     details: Mapping[str, Any] | None,
     execution_owner_id: str | None = None,
-) -> bool:
+) -> ProviderFailureDivert:
     """Divert a retryable provider failure into the auto-healing ``recovering`` pause.
 
     Replaces ``_mark_failed(... agent_failure ...)`` at the agent-run failure forks
@@ -557,18 +578,22 @@ async def enter_recovering_for_provider_failure(
     (#612): the classify + budget decision (``should_recover_in_place``, the SAME
     logic the fail-and-relaunch path runs downstream — T7) is hoisted here so the
     divert lands in ``recovering`` BEFORE the terminal transition / warm-stack
-    teardown fires. Returns ``True`` when the workspace was paused into
-    ``recovering`` (the caller then returns WITHOUT calling ``_mark_failed`` /
-    ``_prepare_provider_recovery``); ``False`` for a non-provider / terminal /
-    budget-exhausted / fallback failure, so the caller falls through to today's
-    terminal path unchanged.
+    teardown fires. Returns ``ProviderFailureDivert.paused`` when the workspace was
+    paused into ``recovering`` (the caller then returns WITHOUT calling
+    ``_mark_failed`` / ``_prepare_provider_recovery``); ``ProviderFailureDivert.terminal``
+    for a non-provider / terminal / budget-exhausted / fallback failure (or a row
+    that moved on), so the caller falls through to today's terminal path unchanged.
 
     Epoch-guarded clean exit (mirrors the #421 / blocked CAS): the
     ``running -> recovering`` transition is gated on the row still being in
     ``from_status`` and — when known — still claimed by ``execution_owner_id``.
-    0 rows means a stale/raced executor lost the claim, so we return ``False``
-    WITHOUT clobbering the row (a late error path cannot drive it to ``failed``
-    behind a newer claimant). The provider cooldown deadline is persisted in
+    0 rows because the row is still in ``from_status`` but claimed by a *newer*
+    claimant means this executor is stale/fenced, so we return
+    ``ProviderFailureDivert.fenced`` WITHOUT clobbering the row — and the caller
+    must NOT fall through, because the terminal ``_mark_failed`` is not owner-gated
+    and would otherwise drive the newer claimant's ``running`` row to ``failed``
+    behind its back (the D7 fence the provisioner already applies to its terminal
+    CAS). The provider cooldown deadline is persisted in
     ``task_policy.provider_recovery_state.not_before`` (read back by
     ``provider_cooldown_not_before`` to gate the resume) and the held execution
     claim is left in place as the warm-stack lease.
@@ -578,7 +603,7 @@ async def enter_recovering_for_provider_failure(
         repo = WorkspaceRepository(session)
         ws = await repo.get(workspace_id)
         if ws is None:  # pragma: no cover - destroyed mid-flight
-            return False
+            return ProviderFailureDivert.terminal
         decision = should_recover_in_place(
             reason_code=reason_code,
             message=message,
@@ -590,7 +615,7 @@ async def enter_recovering_for_provider_failure(
             effective_default_model=_executor_default_model_for_agent(self, ws.agent),
         )
         if decision is None:
-            return False
+            return ProviderFailureDivert.terminal
 
         extra_conditions: tuple[Any, ...] = ()
         if execution_owner_id is not None:
@@ -633,7 +658,21 @@ async def enter_recovering_for_provider_failure(
                         actual_status=current.status,
                     )
                 await session.commit()
-            return False
+            # The CAS lost because a newer claimant holds the row while it is STILL
+            # in ``from_status`` (owner mismatch): this executor is fenced. Signal
+            # the caller to skip the non-owner-gated terminal ``_mark_failed`` so a
+            # stale executor cannot fail a newer claimant's running row. A row that
+            # genuinely moved on (status != ``from_status``) is reported terminal —
+            # the terminal fallthrough is a safe no-op there (its own ``from_status``
+            # CAS rejects it), preserving today's behavior.
+            if (
+                execution_owner_id is not None
+                and current is not None
+                and current.status == from_status.value
+                and current.execution_claimed_by != execution_owner_id
+            ):
+                return ProviderFailureDivert.fenced
+            return ProviderFailureDivert.terminal
 
         transitioned.task_policy = in_place_recovery_task_policy(
             transitioned.task_policy,
@@ -651,7 +690,7 @@ async def enter_recovering_for_provider_failure(
             error_message=("Retryable provider failure paused the workspace for in-place retry."),
         )
         await session.commit()
-        return True
+        return ProviderFailureDivert.paused
 
 
 def _executor_default_model_for_agent(self: Any, agent: str) -> str | None:

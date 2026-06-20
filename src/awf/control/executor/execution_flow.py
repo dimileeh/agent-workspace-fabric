@@ -72,7 +72,7 @@ from awf.control.executor.recovery_payloads import (
     _recovery_needs_existing_pr_push,
     _validate_only_recovery_target_head_sha,
 )
-from awf.control.executor.state_ops import _sync_resolved_profile
+from awf.control.executor.state_ops import ProviderFailureDivert, _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import (
     PauseResumeReason,
@@ -1086,9 +1086,8 @@ async def execute(
                 # ``agent_run_failure_reason == agent_failure`` — the same gate as
                 # the provider-recovery call below — so the recovered missing-HEAD
                 # path (which also sets ``agent_run_reason_code``) never diverts.
-                if (
-                    agent_run_failure_reason == FailureReason.agent_failure
-                    and await self.enter_recovering_for_provider_failure(
+                if agent_run_failure_reason == FailureReason.agent_failure:
+                    divert = await self.enter_recovering_for_provider_failure(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
                         message=message,
@@ -1096,8 +1095,12 @@ async def execute(
                         details=agent_run_details,
                         execution_owner_id=execution_owner_id,
                     )
-                ):
-                    return
+                    # ``paused`` (entered ``recovering`` for in-place retry) or
+                    # ``fenced`` (a newer claimant holds the running row — a stale
+                    # executor must not drive it to ``failed`` via the non-owner-gated
+                    # ``_mark_failed`` below) both skip the terminal teardown.
+                    if divert is not ProviderFailureDivert.terminal:
+                        return
                 # Provider recovery reads the failed state event, so
                 # persist the structured reason/details first. The
                 # recovery service creates an authorized delayed retry

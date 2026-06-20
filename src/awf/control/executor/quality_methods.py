@@ -48,6 +48,7 @@ from awf.control.executor.quality_gates import (
     _PostAgentCommitClassification,
     _PostAgentCommitStepError,
 )
+from awf.control.executor.state_ops import ProviderFailureDivert
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import _CoverageEvidenceResult
 from awf.control.protected_file_diffs import (
@@ -1309,14 +1310,20 @@ async def _mark_post_agent_commit_failed(
         # Same divert as the no-commits agent-failure fork: a retryable provider
         # failure with budget remaining pauses into ``recovering`` for in-place
         # retry BEFORE the terminal teardown, instead of fail-and-relaunch (#612).
-        if await self.enter_recovering_for_provider_failure(
+        divert = await self.enter_recovering_for_provider_failure(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
             message=base_message[:2000],
             reason_code=agent_run_reason_code,
             details=details,
             execution_owner_id=execution_owner_id,
-        ):
+        )
+        # ``paused`` (entered ``recovering`` for in-place retry) or ``fenced`` (a
+        # newer claimant holds the running row) both skip the terminal teardown:
+        # the fenced skip stops a stale executor from driving a newer claimant's
+        # running row to ``failed`` through the non-owner-gated ``_mark_failed``
+        # below (the D7 terminal-CAS fence the provisioner already applies, #421).
+        if divert is not ProviderFailureDivert.terminal:
             return
         await self._mark_failed(
             workspace_id=workspace_id,

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import quality_methods as executor_quality_methods
 from awf.control.executor.quality_gates import _PostAgentCommitStepError
+from awf.control.executor.state_ops import ProviderFailureDivert
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord
 from awf.db.repositories import WorkspaceRepository
@@ -95,7 +96,7 @@ async def test_enter_recovering_diverts_retryable_failure_with_budget(
         execution_owner_id="worker-A",
     )
 
-    assert diverted is True
+    assert diverted is ProviderFailureDivert.paused
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
@@ -133,7 +134,7 @@ async def test_enter_recovering_budget_exhausted_stays_failed_path(
         execution_owner_id="worker-A",
     )
 
-    assert diverted is False
+    assert diverted is ProviderFailureDivert.terminal
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
@@ -158,7 +159,7 @@ async def test_enter_recovering_non_retryable_stays_failed_path(
         execution_owner_id="worker-A",
     )
 
-    assert diverted is False
+    assert diverted is ProviderFailureDivert.terminal
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
@@ -172,7 +173,10 @@ async def test_enter_recovering_owner_mismatch_does_not_clobber(
     tmp_path: Path,
 ) -> None:
     # A stale executor whose claim was transferred to a newer claimant must not
-    # win the CAS — the epoch fence (execution_claimed_by) matches 0 rows.
+    # win the CAS — the epoch fence (execution_claimed_by) matches 0 rows. The
+    # row is STILL ``running`` under the new claimant, so the divert reports
+    # ``fenced`` (not ``terminal``): the caller must skip the non-owner-gated
+    # ``_mark_failed`` fallthrough that would otherwise fail the new claimant's row.
     ws_id = await _seed_running(factory, execution_claimed_by="worker-new")
     executor = _make_executor(fake, factory, tmp_path)
 
@@ -185,7 +189,7 @@ async def test_enter_recovering_owner_mismatch_does_not_clobber(
         execution_owner_id="worker-stale",
     )
 
-    assert diverted is False
+    assert diverted is ProviderFailureDivert.fenced
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
@@ -220,7 +224,10 @@ async def test_enter_recovering_callback_terminal_race_does_not_clobber(
         execution_owner_id="worker-A",
     )
 
-    assert diverted is False
+    # The row moved off ``running`` (cancelled), so the divert is ``terminal``: the
+    # terminal ``_mark_failed`` fallthrough is a safe no-op (its own ``running``
+    # CAS rejects the cancelled row), and this is NOT the fenced owner-mismatch case.
+    assert diverted is ProviderFailureDivert.terminal
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
@@ -248,7 +255,7 @@ async def test_enter_recovering_invalid_agent_resolves_no_default_model(
         execution_owner_id="worker-A",
     )
 
-    assert diverted is True
+    assert diverted is ProviderFailureDivert.paused
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
@@ -337,7 +344,7 @@ async def test_post_agent_commit_fork_diverts_to_recovering() -> None:
     # When the in-place divert fires, the post-agent-commit fork must NOT mark
     # the workspace failed or queue the fresh-relaunch provider recovery.
     executor = SimpleNamespace(
-        enter_recovering_for_provider_failure=AsyncMock(return_value=True),
+        enter_recovering_for_provider_failure=AsyncMock(return_value=ProviderFailureDivert.paused),
         _mark_failed=AsyncMock(),
         _prepare_provider_recovery=AsyncMock(),
     )
@@ -364,11 +371,46 @@ async def test_post_agent_commit_fork_diverts_to_recovering() -> None:
 
 
 @pytest.mark.unit
+async def test_post_agent_commit_fork_fenced_does_not_clobber() -> None:
+    # A stale executor fenced by a newer claimant (the divert returns ``fenced``)
+    # must NOT fall through to the non-owner-gated terminal path — neither
+    # _mark_failed (which would fail the newer claimant's running row) nor the
+    # fresh-relaunch provider recovery may run.
+    executor = SimpleNamespace(
+        enter_recovering_for_provider_failure=AsyncMock(return_value=ProviderFailureDivert.fenced),
+        _mark_failed=AsyncMock(),
+        _prepare_provider_recovery=AsyncMock(),
+    )
+    error = _PostAgentCommitStepError(
+        stage="git commit",
+        result=CommandResult(returncode=1, stdout="", stderr="boom"),
+        classification=None,
+    )
+
+    await executor_quality_methods._mark_post_agent_commit_failed(  # noqa: SLF001
+        executor,
+        workspace_id="ws_fenced",
+        error=error,
+        agent_run_reason_code="AGENT_IDLE_TIMEOUT",
+        agent_run_details={"provider": "openai", "model": "gpt-5"},
+        agent_exit_note=None,
+        upstream_failure_reason=FailureReason.agent_failure,
+        execution_owner_id="worker-stale",
+    )
+
+    executor.enter_recovering_for_provider_failure.assert_awaited_once()
+    executor._mark_failed.assert_not_awaited()
+    executor._prepare_provider_recovery.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_post_agent_commit_fork_falls_through_when_not_diverted() -> None:
     # Regression: when the divert declines (budget exhausted / non-retryable),
     # the fork keeps today's terminal _mark_failed + _prepare_provider_recovery.
     executor = SimpleNamespace(
-        enter_recovering_for_provider_failure=AsyncMock(return_value=False),
+        enter_recovering_for_provider_failure=AsyncMock(
+            return_value=ProviderFailureDivert.terminal
+        ),
         _mark_failed=AsyncMock(),
         _prepare_provider_recovery=AsyncMock(),
     )
