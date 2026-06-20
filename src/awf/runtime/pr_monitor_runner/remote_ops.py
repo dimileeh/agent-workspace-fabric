@@ -38,6 +38,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
     _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
     _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
@@ -571,11 +572,17 @@ async def _git_push_result(
         try:
             await repair_mirror_hooks_path(mirror_path)
         except (GitOperationError, OSError) as exc:
+            repair_details = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="before_git_push",
+                mirror_path=mirror_path,
+                extra={"phase": "git_push"},
+            )
             _log.warning(
                 "monitor.push_mirror_hooks_path_repair_failed",
                 workspace_id=worktree_path.name,
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                error_type=exc.__class__.__name__,
+                **repair_details,
             )
             return _GitPushResult(
                 pushed=False,
@@ -583,7 +590,7 @@ async def _git_push_result(
                 returncode=1,
                 stderr="could not repair poisoned mirror hooks path before git push",
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                details={"phase": "git_push"},
+                details=repair_details,
             )
     git_env = git_env_without_object_lookup_overrides()
     r = await runner._deps.runner.run(
@@ -818,11 +825,16 @@ async def _run_sync_base(
         try:
             await repair_mirror_hooks_path(mirror_path)
         except (GitOperationError, OSError) as exc:
+            repair_details = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="before_sync_base_merge",
+                mirror_path=mirror_path,
+            )
             _log.warning(
                 "monitor.sync_base_mirror_hooks_path_repair_failed",
                 workspace_id=workspace_id,
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                error_type=exc.__class__.__name__,
+                **repair_details,
             )
             return _GitPushResult(
                 pushed=False,
@@ -830,6 +842,7 @@ async def _run_sync_base(
                 returncode=1,
                 stderr="could not repair poisoned mirror hooks path before sync-base merge",
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                details=repair_details,
             )
     merge_args: tuple[str, ...] = ("merge", "--no-edit", f"origin/{base_branch}")
     if task_tag:
@@ -886,11 +899,16 @@ async def _run_sync_base(
             try:
                 await repair_mirror_hooks_path(mirror_path)
             except (GitOperationError, OSError) as exc:
+                repair_details = mirror_hooks_repair_failure_details(
+                    exc,
+                    repair_stage="before_sync_base_agent",
+                    mirror_path=mirror_path,
+                )
                 _log.warning(
                     "monitor.sync_base_mirror_hooks_path_repair_failed",
                     workspace_id=workspace_id,
                     reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                    error_type=exc.__class__.__name__,
+                    **repair_details,
                 )
                 return _GitPushResult(
                     pushed=False,
@@ -898,6 +916,7 @@ async def _run_sync_base(
                     returncode=1,
                     stderr="could not repair poisoned mirror hooks path before sync-base agent launch",
                     reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    details=repair_details,
                 )
         try:
             result = await runner._deps.adapter.run(
@@ -925,12 +944,17 @@ async def _run_sync_base(
                 try:
                     await repair_mirror_hooks_path(mirror_path)
                 except (GitOperationError, OSError) as repair_exc:
+                    repair_details = mirror_hooks_repair_failure_details(
+                        repair_exc,
+                        repair_stage="after_sync_base_agent_exception",
+                        mirror_path=mirror_path,
+                        extra={"original_error_type": exc.__class__.__name__},
+                    )
                     _log.warning(
                         "monitor.sync_base_post_agent_mirror_hooks_path_repair_failed",
                         workspace_id=workspace_id,
                         reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                        error_type=repair_exc.__class__.__name__,
-                        original_error_type=exc.__class__.__name__,
+                        **repair_details,
                     )
                     return _GitPushResult(
                         pushed=False,
@@ -938,6 +962,7 @@ async def _run_sync_base(
                         returncode=1,
                         stderr="could not repair poisoned mirror hooks path after sync-base agent failure",
                         reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                        details=repair_details,
                     )
             post_agent_err = exc
 

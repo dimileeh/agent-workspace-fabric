@@ -424,6 +424,12 @@ async def test_pre_push_validation_fails_closed_on_git_mirror_hooks_repair_failu
 
     assert result.passed is False
     assert result.reason_code == "MIRROR_HOOKS_PATH_POISONED"
+    assert result.extra_details is not None
+    assert result.extra_details["repair_stage"] == "before_pre_push_validation"
+    assert result.extra_details["git_operation"] == "mirror.hooks_path_repair"
+    assert result.extra_details["git_returncode"] == 1
+    assert result.extra_details["stderr"] == "failed"
+    assert result.extra_details["mirror_hooks_repair_failed"] is True
 
 
 @pytest.mark.unit
@@ -542,7 +548,7 @@ async def test_pre_push_validation_fails_closed_when_post_validation_mirror_repa
             raise GitOperationError(
                 operation="mirror.hooks_path_repair",
                 returncode=1,
-                stdout="",
+                stdout="repair stdout",
                 stderr="failed",
                 reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
             )
@@ -562,6 +568,13 @@ async def test_pre_push_validation_fails_closed_when_post_validation_mirror_repa
 
     assert result.passed is False
     assert result.reason_code == _MIRROR_HOOKS_PATH_POISONED_REASON
+    assert result.extra_details is not None
+    assert result.extra_details["post_validation_mirror_repair_failed"] is True
+    assert result.extra_details["repair_stage"] == "post_pre_push_validation"
+    assert result.extra_details["git_operation"] == "mirror.hooks_path_repair"
+    assert result.extra_details["git_returncode"] == 1
+    assert result.extra_details["stderr"] == "failed"
+    assert result.extra_details["stdout"] == "repair stdout"
 
 
 @pytest.mark.unit
