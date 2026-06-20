@@ -1377,6 +1377,11 @@ async def execute(
         action="pre_push_policy_check",
     ):
         return
+    if not await _repair_mirror_hooks_path_or_mark_failed(
+        failure_stage="before post-validation policy checks",
+        failure_from_status=WorkspaceStatus.validating,
+    ):
+        return
     try:
         if await self._fail_if_plan_only_committed_output(
             workspace_id=workspace_id,

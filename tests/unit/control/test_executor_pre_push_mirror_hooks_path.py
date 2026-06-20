@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -86,7 +88,7 @@ async def test_execute_repairs_mirror_hooks_path_after_validation_before_pr_push
 
     async def _repair_mirror_hooks_path(path: Path) -> bool:
         repair_calls.append(path)
-        if len(repair_calls) == 6:
+        if len(repair_calls) == 7:
             raise GitOperationError(
                 operation="mirror.hooks_path_repair",
                 returncode=128,
@@ -130,7 +132,7 @@ async def test_execute_repairs_mirror_hooks_path_after_validation_before_pr_push
 
     await executor.execute(ws_id)
 
-    assert repair_calls == [mirror_path] * 6
+    assert repair_calls == [mirror_path] * 7
     assert push_attempts == []
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
@@ -215,3 +217,158 @@ async def test_execute_repairs_mirror_hooks_path_on_validation_stop(
             == "could not repair poisoned mirror hooks path after validation stop"
         )
         assert ws.events[-1].reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+
+
+@pytest.mark.unit
+async def test_execute_repairs_mirror_hooks_path_before_plan_only_policy_exit(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Plan-only policy exits must not bypass post-validation mirror repair."""
+    ws_id = await _seed_ready_workspace(factory)
+    mirror_path = tmp_path / "mirror.git"
+    validation_complete = False
+    order: list[str] = []
+
+    async def _repair_mirror_hooks_path(path: Path) -> bool:
+        if validation_complete:
+            order.append("repair")
+        assert path == mirror_path
+        return True
+
+    async def _run_validation_and_fix_cycle(
+        self: WorkspaceExecutor, **_kwargs: object
+    ) -> ExecutionValidationResult:
+        nonlocal validation_complete
+        assert await self._transition_if_current(
+            ws_id,
+            from_status=WorkspaceStatus.running,
+            to=WorkspaceStatus.validating,
+            reason="AGENT_RUN_OK",
+            action="start_validation",
+        )
+        validation_complete = True
+        return ExecutionValidationResult(
+            stop=False,
+            successful_validation_run_id="validation-run",
+            successful_validation_workspace_head_sha="deadbeef01",
+        )
+
+    async def _fail_plan_only(**_kwargs: Any) -> bool:
+        order.append("plan_gate")
+        return True
+
+    protected_gate = AsyncMock(return_value=False)
+
+    monkeypatch.setattr(
+        execution_flow_module, "mirror_path_for_worktree", lambda _path: mirror_path
+    )
+    monkeypatch.setattr(
+        execution_flow_module, "repair_mirror_hooks_path", _repair_mirror_hooks_path
+    )
+    monkeypatch.setattr(
+        execution_flow_module._execution_validation,
+        "run_validation_and_fix_cycle",
+        _run_validation_and_fix_cycle,
+    )
+    monkeypatch.setattr(executor, "_fail_if_plan_only_committed_output", _fail_plan_only)
+    monkeypatch.setattr(
+        executor,
+        "_fail_if_protected_quality_gate_committed_output",
+        protected_gate,
+    )
+
+    fake.queue_result(returncode=0)  # adapter
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base is-ancestor ok
+
+    await executor.execute(ws_id)
+
+    assert order == ["repair", "plan_gate"]
+    protected_gate.assert_not_awaited()
+    assert all("push" not in call.args for call in fake.calls)
+
+
+@pytest.mark.unit
+async def test_execute_repairs_mirror_hooks_path_before_protected_policy_exit(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Protected committed-output exits must not bypass mirror repair."""
+    ws_id = await _seed_ready_workspace(factory)
+    mirror_path = tmp_path / "mirror.git"
+    validation_complete = False
+    order: list[str] = []
+
+    async def _repair_mirror_hooks_path(path: Path) -> bool:
+        if validation_complete:
+            order.append("repair")
+        assert path == mirror_path
+        return True
+
+    async def _run_validation_and_fix_cycle(
+        self: WorkspaceExecutor, **_kwargs: object
+    ) -> ExecutionValidationResult:
+        nonlocal validation_complete
+        assert await self._transition_if_current(
+            ws_id,
+            from_status=WorkspaceStatus.running,
+            to=WorkspaceStatus.validating,
+            reason="AGENT_RUN_OK",
+            action="start_validation",
+        )
+        validation_complete = True
+        return ExecutionValidationResult(
+            stop=False,
+            successful_validation_run_id="validation-run",
+            successful_validation_workspace_head_sha="deadbeef01",
+        )
+
+    async def _pass_plan_only(**_kwargs: Any) -> bool:
+        order.append("plan_gate")
+        return False
+
+    async def _fail_protected(**_kwargs: Any) -> bool:
+        order.append("protected_gate")
+        return True
+
+    monkeypatch.setattr(
+        execution_flow_module, "mirror_path_for_worktree", lambda _path: mirror_path
+    )
+    monkeypatch.setattr(
+        execution_flow_module, "repair_mirror_hooks_path", _repair_mirror_hooks_path
+    )
+    monkeypatch.setattr(
+        execution_flow_module._execution_validation,
+        "run_validation_and_fix_cycle",
+        _run_validation_and_fix_cycle,
+    )
+    monkeypatch.setattr(executor, "_fail_if_plan_only_committed_output", _pass_plan_only)
+    monkeypatch.setattr(
+        executor,
+        "_fail_if_protected_quality_gate_committed_output",
+        _fail_protected,
+    )
+
+    fake.queue_result(returncode=0)  # adapter
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base is-ancestor ok
+
+    await executor.execute(ws_id)
+
+    assert order == ["repair", "plan_gate", "protected_gate"]
+    assert all("push" not in call.args for call in fake.calls)
