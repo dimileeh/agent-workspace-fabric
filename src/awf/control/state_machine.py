@@ -44,6 +44,11 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
             # A protected quality-gate violation pauses the run for an operator
             # decision instead of terminally failing (pre-PR block).
             WorkspaceStatus.blocked,
+            # A transient provider failure mid-run diverts into the auto-healing
+            # ``recovering`` pause instead of terminally failing, so the warm
+            # stack + worktree + execution claim survive the provider cooldown
+            # (#612). This is the only entry edge into ``recovering`` in slice 1.
+            WorkspaceStatus.recovering,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }
@@ -82,6 +87,21 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
             WorkspaceStatus.validating,
             WorkspaceStatus.pushing,
             WorkspaceStatus.monitoring_pr,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+        }
+    ),
+    # A recovering workspace auto-heals: after the provider cooldown the worker
+    # resumes it in place (``running``); if the retry budget is exhausted or the
+    # failure is non-retryable it re-fails (``failed``); or an operator cancels
+    # it (``cancelled``). Like ``blocked`` it is non-terminal, keeps its warm
+    # stack + execution claim while paused, and never jumps straight to
+    # ``completed``/``destroying``. Unlike ``blocked`` it does NOT resume into
+    # ``validating``/``pushing``/``monitoring_pr`` — the auto-retry re-invokes the
+    # agent from the ``running`` phase (#612).
+    WorkspaceStatus.recovering: frozenset(
+        {
+            WorkspaceStatus.running,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }
