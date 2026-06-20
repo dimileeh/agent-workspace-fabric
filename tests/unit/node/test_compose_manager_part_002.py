@@ -503,6 +503,147 @@ class TestRenderTeardown:
         assert manager.removed == []
 
     @pytest.mark.unit
+    async def test_teardown_project_removes_label_less_volume_by_name(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A row-less volume whose compose-project label is gone is removed by name.
+
+        Regression for PRRT_kwDOSJAM6s6LCiLk: the #637 name fallback recovers a
+        workspace id from ``awf-ws_gone-postgres_data`` when its
+        ``com.docker.compose.project`` label *value* is empty, so the label-scoped
+        ``volume ls --filter label=...=awf-ws_gone`` matches nothing. Without
+        forwarding the recovered name the reaper would report the stack reaped
+        while the volume silently remained; the teardown must ``volume rm`` it by
+        name and count it in the removal log.
+        """
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.label_calls: list[tuple[str, ...]] = []
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                self.label_calls.append((operation, *args))
+                # Label-scoped probes find nothing: the volume lost its project label.
+                return ""
+
+            async def _docker(self, args: list[str], *, operation: str) -> None:
+                self.label_calls.append((operation, *args))
+
+        manager = _RecordingComposeManager()
+
+        with structlog.testing.capture_logs() as captured:
+            result = await manager.teardown_project(
+                project_name="awf-ws_gone",
+                compose_file=tmp_path / "work" / "compose" / "ws_gone" / "compose.yml",
+                workspace_id="ws_gone",
+                remove_volumes=True,
+                fallback_volume_names=("awf-ws_gone-postgres_data",),
+            )
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_PROJECT_LABEL_REMOVED"
+        # The recovered name is removed by name even though the label filter
+        # matched nothing -- the leak the fallback exists to close.
+        assert (
+            "volume rm",
+            "volume",
+            "rm",
+            "-f",
+            "awf-ws_gone-postgres_data",
+        ) in manager.label_calls
+        event = next(item for item in captured if item["event"] == "compose.project_label_removed")
+        assert event["volumes"] == 1
+
+    @pytest.mark.unit
+    async def test_remove_project_by_label_dedups_and_unions_fallback_volume_names(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Fallback names union with the label-scoped set, deduped, removed once.
+
+        A workspace surfaces several volumes (``-postgres_data`` + ``-dind_data``).
+        A volume still carrying the project label is found by the label scope; a
+        sibling that lost its label is recovered by name. The by-name removal must
+        add only the missing one (no double-remove of the label-matched volume).
+        """
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.calls: list[tuple[str, ...]] = []
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                self.calls.append((operation, *args))
+                if operation == "volume ls":
+                    return "awf-ws_dup-postgres_data\n"
+                return ""
+
+            async def _docker(self, args: list[str], *, operation: str) -> None:
+                self.calls.append((operation, *args))
+
+        manager = _RecordingComposeManager()
+
+        with structlog.testing.capture_logs() as captured:
+            await manager.remove_project_by_label(
+                project_name="awf-ws_dup",
+                workspace_id="ws_dup",
+                remove_volumes=True,
+                # The first name is already label-matched (deduped out); the second
+                # is the genuinely label-less sibling that only a by-name reap reaches.
+                fallback_volume_names=("awf-ws_dup-postgres_data", "awf-ws_dup-dind_data"),
+            )
+
+        assert (
+            "volume rm",
+            "volume",
+            "rm",
+            "-f",
+            "awf-ws_dup-postgres_data",
+            "awf-ws_dup-dind_data",
+        ) in manager.calls
+        event = next(item for item in captured if item["event"] == "compose.project_label_removed")
+        assert event["volumes"] == 2
+
+    @pytest.mark.unit
+    async def test_remove_project_by_label_skips_fallback_names_when_keeping_volumes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """``remove_volumes=False`` leaves recovered volume names in place too.
+
+        A retained-terminal stack keeps its volumes as salvage evidence; the
+        by-name fallback must honour that gate and never remove them, exactly like
+        the label-scoped volume reap it backstops.
+        """
+
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.calls: list[tuple[str, ...]] = []
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                self.calls.append((operation, *args))
+                if operation == "volume ls":
+                    raise AssertionError("volume listing should be skipped")
+                return ""
+
+            async def _docker(self, args: list[str], *, operation: str) -> None:
+                self.calls.append((operation, *args))
+
+        manager = _RecordingComposeManager()
+
+        await manager.remove_project_by_label(
+            project_name="awf-ws_keep",
+            workspace_id="ws_keep",
+            remove_volumes=False,
+            fallback_volume_names=("awf-ws_keep-postgres_data",),
+        )
+
+        assert not any(call[0] == "volume rm" for call in manager.calls)
+
+    @pytest.mark.unit
     async def test_teardown_project_fails_loud_when_label_probe_unavailable(
         self,
         tmp_path: Path,

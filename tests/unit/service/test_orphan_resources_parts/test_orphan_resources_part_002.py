@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,7 @@ class _RecordingComposeTeardown:
     def __init__(self, result: Any | None = None) -> None:
         self.calls: list[tuple[str, Path, str]] = []
         self.remove_volumes_calls: list[bool] = []
+        self.fallback_volume_names_calls: list[tuple[str, ...]] = []
         from awf.node.compose_manager import ComposeTeardownResult
 
         self._result = result or ComposeTeardownResult(
@@ -83,10 +85,17 @@ class _RecordingComposeTeardown:
         )
 
     async def __call__(
-        self, project_name: str, compose_file: Path, workspace_id: str, remove_volumes: bool
+        self,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        remove_volumes: bool,
+        *,
+        fallback_volume_names: tuple[str, ...] = (),
     ) -> Any:
         self.calls.append((project_name, compose_file, workspace_id))
         self.remove_volumes_calls.append(remove_volumes)
+        self.fallback_volume_names_calls.append(fallback_volume_names)
         return self._result
 
 
@@ -377,6 +386,7 @@ def test_build_orphan_compose_teardown_invokes_manager() -> None:
             compose_file: Path,
             workspace_id: str,
             remove_volumes: bool = True,
+            fallback_volume_names: tuple[str, ...] = (),
         ) -> ComposeTeardownResult:
             self.calls.append(
                 {
@@ -384,6 +394,7 @@ def test_build_orphan_compose_teardown_invokes_manager() -> None:
                     "compose_file": compose_file,
                     "workspace_id": workspace_id,
                     "remove_volumes": remove_volumes,
+                    "fallback_volume_names": fallback_volume_names,
                 }
             )
             return ComposeTeardownResult(
@@ -393,17 +404,28 @@ def test_build_orphan_compose_teardown_invokes_manager() -> None:
     manager = _FakeManager()
     teardown = build_orphan_compose_teardown(manager)  # type: ignore[arg-type]
     result = asyncio.run(
-        teardown("awf_ws_x", Path("/tmp/awf/compose/ws_x/compose.yml"), "ws_x", True)
+        teardown(
+            "awf_ws_x",
+            Path("/tmp/awf/compose/ws_x/compose.yml"),
+            "ws_x",
+            True,
+            fallback_volume_names=("awf-ws_x-postgres_data",),
+        )
     )
 
     assert result.ok
     assert manager.calls[0]["remove_volumes"] is True
     assert manager.calls[0]["project_name"] == "awf_ws_x"
+    # The closure forwards the recovered label-less volume names verbatim so the
+    # label-scoped teardown can remove them by name (#637, PRRT_kwDOSJAM6s6LCiLk).
+    assert manager.calls[0]["fallback_volume_names"] == ("awf-ws_x-postgres_data",)
 
     # The closure forwards the caller's per-workspace decision verbatim: a
     # retained-terminal stack is torn down without deleting its salvage volumes.
     asyncio.run(teardown("awf_ws_y", Path("/tmp/awf/compose/ws_y/compose.yml"), "ws_y", False))
     assert manager.calls[1]["remove_volumes"] is False
+    # Default forwards an empty tuple when no label-less names were recovered.
+    assert manager.calls[1]["fallback_volume_names"] == ()
 
 
 def _retained_terminal_runtime_summary(*, retained: bool) -> Any:
@@ -501,6 +523,215 @@ def test_reaper_removes_volumes_for_fully_terminal_workspace(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
+def test_reaper_row_less_only_skips_terminal_db_record_resources(tmp_path: Path) -> None:
+    """``row_less_only=True`` reaps only no-DB-record orphans, leaving terminal rows.
+
+    The on-demand ``awf service gc`` sweep forces this so it can never tear down a terminal
+    workspace the operator scoped out via ``--status``/``--exclude-status``
+    (PRRT_kwDOSJAM6s6LB30p): a terminal DB-record stack is left for the scope-honouring
+    DB-row-driven terminal reaper, while the row-less worktree (no status to scope on) is
+    still reclaimed.
+    """
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    (tmp_path / "git" / "worktrees" / "ws_dead").mkdir(parents=True)
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_done-agent-1",
+                    "project": "awf_ws_done",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        # ws_done carries a terminal row (-> "terminal"); ws_dead has no row (-> "missing").
+        workspace_view=_ok_view(terminal={"ws_done"}),
+        auto_cleanup_orphans=True,
+    )
+    container_record = next(record for record in summary.records if record.kind == "container")
+    assert container_record.classification == "terminal"
+    worktree_record = next(record for record in summary.records if record.kind == "worktree")
+    assert worktree_record.classification == "missing"
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,  # isolate the row-less filter from the age guard
+            row_less_only=True,
+        )
+    )
+
+    assert result.status == "ok"
+    # The terminal-row stack is left for the scope-honouring DB-row-driven reaper.
+    assert teardown.calls == []
+    # Only the row-less worktree is reclaimed.
+    assert [outcome.kind for outcome in result.reaped] == ["worktree"]
+    assert not (tmp_path / "git" / "worktrees" / "ws_dead").exists()
+
+
+@pytest.mark.unit
+def test_superseded_workspace_db_row_is_protected_from_row_less_sweep(tmp_path: Path) -> None:
+    """A ``superseded`` workspace still has a DB row, so the orphan view must classify
+    its resources as ``terminal`` (DB-row-driven reaper territory, under the
+    failed/superseded preservation cap) — never ``missing``.
+
+    ``superseded`` is a string-only terminal status that terminal GC and the CLI treat
+    as eligible (``gc_classify.TERMINAL_WORKSPACE_GC_STATUSES``, ``--exclude-status
+    superseded``). If the orphan view omitted it, the row would be filtered out of the
+    id view, its container/network/volume/worktree would classify as ``missing``, and
+    the on-demand ``row_less_only=True`` sweep would tear it down despite the operator
+    scoping it out — exactly the hazard the row-less restriction exists to avoid
+    (PRRT_kwDOSJAM6s6LC5a-).
+    """
+    from awf.service.orphan_resources import (
+        KNOWN_WORKSPACE_STATUSES,
+        reap_classified_orphans,
+    )
+    from awf.service.orphan_resources import (
+        _workspace_view_from_rows as workspace_view_from_rows,
+    )
+
+    # The id-view query selects superseded rows and partitions them as terminal.
+    assert "superseded" in KNOWN_WORKSPACE_STATUSES
+    view = workspace_view_from_rows(
+        [("ws_sup", "superseded", datetime(2020, 1, 1, tzinfo=UTC))],
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+        min_retention_hours=24.0,
+    )
+    assert "ws_sup" in view.terminal_ids
+    assert "ws_sup" not in view.active_ids
+
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_sup-agent-1",
+                    "project": "awf_ws_sup",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=empty_worktree_scan(),
+        workspace_view=view,
+        auto_cleanup_orphans=True,
+    )
+    container_record = next(record for record in summary.records if record.kind == "container")
+    assert container_record.classification == "terminal"  # not "missing"
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,  # isolate the row-less filter from the age guard
+            row_less_only=True,
+        )
+    )
+
+    assert result.status == "ok"
+    # The superseded DB-record stack is left for the scope-honouring DB-row-driven reaper.
+    assert teardown.calls == []
+    assert result.reaped == ()
+
+
+@pytest.mark.unit
+def test_reaper_reaps_missing_volume_via_name_fallback_and_leaves_expected(
+    tmp_path: Path,
+) -> None:
+    """A row-less ``missing`` volume + worktree are reclaimed; a live volume is left.
+
+    The no-DB-record orphan class #637 targets: ``awf-ws_dead-postgres_data`` has lost its
+    compose-project label after its workspace row was pruned, so the name fallback recovers
+    ``ws_dead``, the reaper enumerates it, classifies it ``missing`` (no DB row), and tears
+    the stack down with ``remove_volumes=True`` (the volume record is itself cleanup-ready)
+    while also removing the orphaned worktree. A parallel ``ws_live`` volume whose row is
+    active classifies ``expected`` and must not be touched.
+    """
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    (tmp_path / "git" / "worktrees" / "ws_dead").mkdir(parents=True)
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            volumes=_jsonl(
+                {"name": "awf-ws_dead-postgres_data", "project": "", "driver": "local"},
+                {
+                    "name": "awf-ws_live-postgres_data",
+                    "project": "awf-ws_live",
+                    "driver": "local",
+                },
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(active={"ws_live"}),  # ws_dead has no row -> missing
+        auto_cleanup_orphans=True,
+    )
+    dead_volume = next(
+        record
+        for record in summary.records
+        if record.kind == "volume" and record.workspace_id == "ws_dead"
+    )
+    assert dead_volume.classification == "missing"
+    assert dead_volume.compose_project == "awf-ws_dead"
+    live_volume = next(
+        record
+        for record in summary.records
+        if record.kind == "volume" and record.workspace_id == "ws_live"
+    )
+    assert live_volume.classification == "expected"
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,  # isolate the reap from the row-less age guard
+        )
+    )
+
+    assert result.status == "ok"
+    # Only the dead stack is torn down, and with --volumes (its volume is cleanup-ready);
+    # the live workspace's expected volume is never touched.
+    assert teardown.calls == [
+        ("awf-ws_dead", tmp_path / "compose" / "ws_dead" / "compose.yml", "ws_dead")
+    ]
+    assert teardown.remove_volumes_calls == [True]
+    # The recovered label-less volume name is forwarded so the label-scoped teardown
+    # can remove it by name -- without it the volume would leak while reported reaped
+    # (PRRT_kwDOSJAM6s6LCiLk). The live workspace's expected volume contributes no name.
+    assert teardown.fallback_volume_names_calls == [("awf-ws_dead-postgres_data",)]
+    assert not (tmp_path / "git" / "worktrees" / "ws_dead").exists()
+    assert sorted(outcome.kind for outcome in result.reaped) == ["compose", "worktree"]
+
+
+@pytest.mark.unit
 def test_reaper_compose_teardown_failure_is_loud(tmp_path: Path) -> None:
     from awf.node.compose_manager import ComposeTeardownResult
     from awf.service.orphan_resources import reap_classified_orphans
@@ -595,6 +826,145 @@ def test_reaper_reaps_aged_missing_worktree(tmp_path: Path) -> None:
     assert not worktree.exists()
 
 
+@pytest.mark.unit
+def test_reaper_limit_bounds_to_oldest_workspaces_first(tmp_path: Path) -> None:
+    """``--limit`` bounds the row-less sweep to the N oldest distinct workspaces.
+
+    The DB-row terminal reaper already honours ``--limit`` oldest-first; the additive
+    row-less orphan sweep must too, so ``awf service gc --execute --limit 1`` cannot tear
+    down every aged row-less orphan in one pass (PRRT_kwDOSJAM6s6LCCJZ). "Oldest" is the
+    on-disk anchor mtime — the same signal the age gate reads — since a row-less orphan
+    has no DB ``updated_at`` to sort on.
+    """
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktrees = tmp_path / "git" / "worktrees"
+    old = worktrees / "ws_old"
+    new = worktrees / "ws_new"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    os.utime(old, (1_000_000.0, 1_000_000.0))
+    os.utime(new, (2_000_000.0, 2_000_000.0))
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),  # no rows -> both worktrees classify "missing"
+        auto_cleanup_orphans=True,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,  # isolate the limit bound from the row-less age guard
+            limit=1,
+        )
+    )
+
+    assert result.status == "ok"
+    assert [outcome.workspace_id for outcome in result.reaped] == ["ws_old"]
+    assert not old.exists()
+    assert new.exists()  # the newer workspace is left for a later batch
+
+
+@pytest.mark.unit
+def test_reaper_limit_reaps_selected_workspace_records_together(tmp_path: Path) -> None:
+    """Bounding by DISTINCT workspace never half-reaps a stack (PRRT_kwDOSJAM6s6LCCJZ).
+
+    A workspace surfaces several records (a compose stack + its worktree). Under
+    ``--limit 1`` the single selected (oldest) workspace must be reaped as a unit — both
+    its compose teardown and its worktree — while the un-selected newer workspace is left
+    entirely intact.
+    """
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktrees = tmp_path / "git" / "worktrees"
+    full = worktrees / "ws_full"
+    newer = worktrees / "ws_new"
+    full.mkdir(parents=True)
+    newer.mkdir(parents=True)
+    os.utime(full, (1_000_000.0, 1_000_000.0))
+    os.utime(newer, (2_000_000.0, 2_000_000.0))
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_full-agent-1",
+                    "project": "awf_ws_full",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),  # no rows -> every record is a "missing" orphan
+        auto_cleanup_orphans=True,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,
+            limit=1,
+        )
+    )
+
+    assert result.status == "ok"
+    assert [call[2] for call in teardown.calls] == ["ws_full"]
+    assert {(outcome.kind, outcome.workspace_id) for outcome in result.reaped} == {
+        ("compose", "ws_full"),
+        ("worktree", "ws_full"),
+    }
+    assert not full.exists()
+    assert newer.exists()
+
+
+@pytest.mark.unit
+def test_reaper_limit_above_workspace_count_reaps_all(tmp_path: Path) -> None:
+    """A ``--limit`` larger than the distinct-workspace count clamps to reaping all."""
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktrees = tmp_path / "git" / "worktrees"
+    (worktrees / "ws_a").mkdir(parents=True)
+    (worktrees / "ws_b").mkdir(parents=True)
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+    )
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,
+            limit=5,
+        )
+    )
+
+    assert result.status == "ok"
+    assert {outcome.workspace_id for outcome in result.reaped} == {"ws_a", "ws_b"}
+    assert not (worktrees / "ws_a").exists()
+    assert not (worktrees / "ws_b").exists()
+
+
 class _SessionScope:
     """Async context manager test double for orphan sweep DB sessions."""
 
@@ -677,6 +1047,50 @@ def test_sweep_classified_orphans_scans_classifies_and_reaps(
     ]
     assert not (tmp_path / "git" / "worktrees" / "ws_dead").exists()
     assert set(docker_hosts) == {"unix:///test-docker.sock"}
+
+
+@pytest.mark.unit
+def test_sweep_classified_orphans_forwards_now_anchor_to_reap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep forwards its ``now`` anchor into the reap (PRRT_kwDOSJAM6s6LCs9R).
+
+    The on-demand ``service gc`` path freezes the row-less orphan grace at the API's request time by
+    threading ``now`` down the call chain. The sweep must hand that anchor to
+    :func:`reap_classified_orphans` (whose ``_missing_record_is_aged`` measures age against it)
+    rather than dropping it and letting the reaper fall back to the worker's claim-time
+    ``time.time()``.
+    """
+    import awf.service.orphan_resources as orphan_resources
+
+    monkeypatch.setattr(orphan_resources, "session_scope", lambda _factory: _SessionScope())
+
+    async def _workspace_view(_session: object, **_kwargs: object) -> WorkspaceIdView:
+        return _ok_view()
+
+    monkeypatch.setattr(orphan_resources, "workspace_id_view_from_session", _workspace_view)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_reap(_summary: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(orphan_resources, "reap_classified_orphans", _fake_reap)
+
+    asyncio.run(
+        orphan_resources.sweep_classified_orphans(
+            object(),  # type: ignore[arg-type]
+            work_dir=tmp_path,
+            docker_host="unix:///test-docker.sock",
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            run_subprocess=_run_for(),
+            now=1_700_000_000.0,
+        )
+    )
+
+    assert captured["now"] == 1_700_000_000.0
 
 
 @pytest.mark.unit

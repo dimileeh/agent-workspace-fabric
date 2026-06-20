@@ -38,12 +38,14 @@ def _make_worker(
     *,
     terminal_gc_reaper: object | None,
     claude_base_reaper: object | None = None,
+    classified_orphan_reaper: object | None = None,
 ) -> ControlWorker:
     return ControlWorker(
         session_factory=session_factory,
         provisioner=object(),  # type: ignore[arg-type]
         terminal_gc_reaper=terminal_gc_reaper,  # type: ignore[arg-type]
         claude_base_reaper=claude_base_reaper,  # type: ignore[arg-type]
+        classified_orphan_reaper=classified_orphan_reaper,  # type: ignore[arg-type]
         config=WorkerConfig(
             poll_interval_seconds=0.01,
             max_concurrent_provisions=0,
@@ -111,6 +113,229 @@ async def test_consume_runs_terminal_reaper_once_and_completes(
         assert finished.status == "completed"
         assert finished.result == report
         assert finished.error_code is None
+
+
+async def test_consume_folds_classified_orphan_reaper_with_enabled_forced(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The on-demand gc run also reaps no-DB-record orphans with ``enabled`` forced (#637).
+
+    ``awf service gc`` is DB-row-driven and never sees row-less ("no-DB-record") orphaned
+    volumes/worktrees. After the DB-driven terminal reaper, the trigger consumer also drives
+    the classification-driven orphan reaper with ``enabled=True`` forced (regardless of the
+    default-off ``auto_cleanup_orphans`` flag) and folds its report into the combined gc
+    result under ``classified_orphan_reap``.
+    """
+    from awf.service.orphan_resources import (
+        ORPHAN_REAP_OK,
+        OrphanReapOutcome,
+        OrphanReapResult,
+    )
+
+    request_id = await _seed_pending(session_factory, params={"execute": True, "limit": 3})
+    terminal_report = {"status": "succeeded", "deleted_path_count": 2}
+    orphan_calls: list[bool] = []
+    row_less_only_calls: list[bool] = []
+    limit_calls: list[int | None] = []
+    min_age_calls: list[float | None] = []
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return terminal_report
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        orphan_calls.append(enabled)
+        row_less_only_calls.append(row_less_only)
+        limit_calls.append(limit)
+        min_age_calls.append(min_age_hours)
+        return OrphanReapResult(
+            enabled=enabled,
+            status="ok",
+            reason_code=ORPHAN_REAP_OK,
+            reaped=(
+                OrphanReapOutcome(
+                    kind="worktree",
+                    workspace_id="ws_dead",
+                    status="reaped",
+                    reason_code="PATH_DELETED",
+                ),
+            ),
+        )
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    # The orphan reaper ran exactly once with enabled forced True for the operator request,
+    # and ``row_less_only=True`` so the additive sweep cannot tear down a terminal workspace
+    # the operator scoped out via ``--status``/``--exclude-status`` (PRRT_kwDOSJAM6s6LB30p).
+    assert orphan_calls == [True]
+    assert row_less_only_calls == [True]
+    # The operator's stored ``--limit`` is threaded into the additive sweep too so it is
+    # bounded oldest-first like the terminal reaper, not unbounded (PRRT_kwDOSJAM6s6LCCJZ).
+    assert limit_calls == [3]
+    # No ``min_age_hours`` was stored on this row, so ``None`` is forwarded and the sweep
+    # keeps the worker's configured orphan grace (PRRT_kwDOSJAM6s6LCiLb).
+    assert min_age_calls == [None]
+    async with session_factory() as session:
+        finished = await ServiceGCRequestRepository(session).get(request_id)
+        assert finished is not None
+        assert finished.status == "completed"
+        assert finished.error_code is None
+        result = finished.result or {}
+        # The terminal-reaper keys are preserved and the orphan report is folded in.
+        assert result["status"] == "succeeded"
+        assert result["deleted_path_count"] == 2
+        assert result["classified_orphan_reap"]["status"] == "ok"
+        assert result["classified_orphan_reap"]["enabled"] is True
+        assert result["classified_orphan_reap"]["reaped"][0]["workspace_id"] == "ws_dead"
+
+
+async def test_consume_omits_orphan_report_when_no_orphan_reaper_wired(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """With no classified-orphan reaper wired the report has no ``classified_orphan_reap`` key.
+
+    The orphan-reap fold is guarded on the dependency being present, so the existing
+    DB-only gc behaviour is preserved when the reaper is absent (back-compat, #637).
+    """
+    request_id = await _seed_pending(session_factory)
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    async with session_factory() as session:
+        finished = await ServiceGCRequestRepository(session).get(request_id)
+        assert finished is not None
+        assert finished.status == "completed"
+        assert "classified_orphan_reap" not in (finished.result or {})
+
+
+async def test_consume_marks_failed_when_orphan_reaper_raises(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An orphan-reaper raise inside the guarded run marks the row ``failed`` (#637).
+
+    Folding the orphan sweep into the same guarded ``try`` as the terminal reaper means a
+    raise is recorded on the row with the worker-reclaim reason code rather than surfacing a
+    false success — matching the no-false-success contract the consumer already guarantees.
+    """
+    request_id = await _seed_pending(session_factory)
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> object:
+        raise RuntimeError("orphan sweep blew up")
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    async with session_factory() as session:
+        failed = await ServiceGCRequestRepository(session).get(request_id)
+        assert failed is not None
+        assert failed.status == "failed"
+        assert failed.error_code == "SERVICE_GC_WORKER_RECLAIM_FAILED"
+        assert "orphan sweep blew up" in (failed.error_message or "")
+
+
+async def test_consume_downgrades_combined_status_when_orphan_reap_partial(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A non-raising ``partial`` orphan reap downgrades the combined report (PRRT_kwDOSJAM6s6LB30q).
+
+    ``reap_classified_orphans`` returns ``OrphanReapResult(status="partial")`` — rather than
+    raising — when a compose teardown or worktree deletion fails. Merely nesting that under
+    ``classified_orphan_reap`` while leaving the top-level ``status`` ``succeeded`` would let the
+    worker-delegation fold (which derives ``worker_partial`` from the *top-level* status) report a
+    successful ``service gc --execute`` even though the orphan cleanup failed. The partial state
+    must fold into the combined report's headline status so the failure surfaces.
+    """
+    from awf.service.orphan_resources import (
+        ORPHAN_REAP_PARTIAL,
+        OrphanReapOutcome,
+        OrphanReapResult,
+    )
+
+    request_id = await _seed_pending(session_factory)
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {
+            "status": "succeeded",
+            "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+            "deleted_path_count": 2,
+        }
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        return OrphanReapResult(
+            enabled=enabled,
+            status="partial",
+            reason_code=ORPHAN_REAP_PARTIAL,
+            errors=(
+                OrphanReapOutcome(
+                    kind="worktree",
+                    workspace_id="ws_stuck",
+                    status="failed",
+                    reason_code="PATH_DELETE_PERMISSION_DENIED",
+                    error="permission denied",
+                ),
+            ),
+        )
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    async with session_factory() as session:
+        finished = await ServiceGCRequestRepository(session).get(request_id)
+        assert finished is not None
+        # The reap did not raise, so the row still completes — but the combined report is
+        # downgraded to ``partial`` so the worker-delegation fold surfaces a non-success run
+        # instead of a false success while the failed orphan cleanup is left unreported.
+        assert finished.status == "completed"
+        result = finished.result or {}
+        assert result["status"] == "partial"
+        assert result["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+        assert result["classified_orphan_reap"]["status"] == "partial"
+        # The terminal-reaper detail keys still survive the downgrade.
+        assert result["deleted_path_count"] == 2
 
 
 async def test_consume_threads_operator_params_into_reaper(
@@ -242,6 +467,266 @@ async def test_consume_threads_cutoff_anchor_into_reaper(
     await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
 
     assert captured == {"min_age_hours": 1.5, "now": anchor}
+
+
+async def test_consume_threads_min_age_into_orphan_reaper(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The operator's stored ``min_age_hours`` flows into the orphan sweep too (PRRT_kwDOSJAM6s6LCiLb).
+
+    The additive row-less orphan sweep applies ``min_age_hours`` as the *only* age guard for
+    no-DB-record resources (``row_less_only=True``). Forwarding only ``--limit`` while letting
+    ``min_age_hours`` fall back to the worker's ``orphan_reconcile_min_age_hours`` default would
+    let a row-less worktree/volume that is too young for the operator's explicit safety window —
+    yet old enough for the (possibly lower) worker default — be reaped behind the operator's
+    longer ``gc --execute --min-age-hours X`` scope. The stored min-age must reach the sweep so
+    the orphan grace honours the same safety window the terminal reaper already does.
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    await _seed_pending(
+        session_factory,
+        params={"execute": True, "min_age_hours": 240.0, "limit": 3},
+    )
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        captured["min_age_hours"] = min_age_hours
+        captured["limit"] = limit
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {"min_age_hours": 240.0, "limit": 3}
+
+
+async def test_consume_threads_cutoff_anchor_into_orphan_reaper(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The API-anchored ``now`` flows into the orphan sweep too (PRRT_kwDOSJAM6s6LCs9R).
+
+    The terminal reaper already receives the parsed request-time ``now`` so its cutoff stays
+    frozen at POST time (PRRT_kwDOSJAM6s6JbriQ). The additive row-less orphan sweep measures a
+    no-DB-record resource's grace against ``now`` as well, so forwarding ``min_age_hours`` while
+    dropping ``now`` lets ``reap_classified_orphans`` fall back to the worker's claim-time
+    ``time.time()``: a worktree/volume that was still inside the operator's ``--min-age-hours``
+    safety window when ``gc --execute`` was posted could age into eligibility before the worker
+    reaches this call and be reaped — exactly the request-time drift the terminal pass avoids. The
+    parsed anchor must reach the orphan sweep so both passes share one cutoff.
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    anchor = datetime(2026, 6, 14, 21, 0, tzinfo=UTC)
+    await _seed_pending(
+        session_factory,
+        params={"execute": True, "min_age_hours": 1.5, "now": anchor.isoformat()},
+    )
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        captured["now"] = now
+        captured["min_age_hours"] = min_age_hours
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    # The same parsed ``datetime`` anchor threaded into the terminal reaper reaches the sweep.
+    assert captured == {"now": anchor, "min_age_hours": 1.5}
+
+
+async def test_consume_omits_orphan_cutoff_anchor_when_absent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A run with no stored ``now`` forwards ``None`` so the sweep keeps its claim-clock default.
+
+    The remaining-budget/min-age plumbing must not synthesise an anchor: when the operator's
+    request carried no ``now`` the orphan sweep receives ``None`` and falls back to its own clock,
+    matching the terminal reaper which likewise omits ``now`` (PRRT_kwDOSJAM6s6LCs9R).
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    await _seed_pending(session_factory, params={"execute": True})
+    captured: dict[str, object] = {"now": "unset"}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        captured["now"] = now
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {"now": None}
+
+
+async def test_consume_caps_orphan_limit_to_remaining_budget(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """``--limit`` is one total batch cap shared across both passes (PRRT_kwDOSJAM6s6LCqDd).
+
+    ``_terminal_gc_reaper`` already spends the operator's ``--limit`` against the DB-backed
+    terminal workspaces it selects, reporting the count as ``candidate_count``. Forwarding the
+    *full* stored limit into the additive row-less orphan sweep would let
+    ``awf service gc --execute --limit 1`` delete one terminal workspace *and* one row-less
+    orphan — two workspaces for a one-candidate cap. The sweep must receive the *remaining*
+    budget (stored limit minus the terminal pass's selected candidates); a fully-spent budget
+    makes it a no-op (``limit=0`` selects nothing).
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    await _seed_pending(session_factory, params={"execute": True, "limit": 1})
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        # The terminal reaper selected its one allowed candidate, spending the whole budget.
+        return {"status": "succeeded", "deleted_path_count": 1, "candidate_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        captured["limit"] = limit
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    # Budget fully spent by the terminal pass → the orphan sweep is a no-op (limit=0), not 1.
+    assert captured == {"limit": 0}
+
+
+async def test_consume_forwards_remaining_limit_to_orphan_sweep(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A partially-spent ``--limit`` leaves the orphan sweep the balance (PRRT_kwDOSJAM6s6LCqDd).
+
+    With ``--limit 3`` and one DB-backed terminal candidate selected, two of the three-candidate
+    batch budget remain, so the additive row-less sweep is bounded to two oldest-first
+    workspaces rather than the full three.
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    await _seed_pending(session_factory, params={"execute": True, "limit": 3})
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1, "candidate_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        captured["limit"] = limit
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    # 3 stored − 1 terminal candidate = 2 left for the orphan sweep.
+    assert captured == {"limit": 2}
+
+
+async def test_consume_leaves_orphan_sweep_unbounded_without_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """No stored ``--limit`` leaves the orphan sweep unbounded even when the terminal pass reaped.
+
+    The remaining-budget subtraction only applies when the operator set ``--limit``; an
+    unbounded run must stay unbounded (``None``) regardless of the terminal pass's
+    ``candidate_count`` (PRRT_kwDOSJAM6s6LCqDd).
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    await _seed_pending(session_factory, params={"execute": True})
+    captured: dict[str, object] = {"limit": "unset"}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 5, "candidate_count": 5}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+        now: datetime | None = None,
+    ) -> OrphanReapResult:
+        captured["limit"] = limit
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {"limit": None}
 
 
 async def test_consume_is_noop_without_reaper(

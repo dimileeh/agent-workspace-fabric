@@ -490,8 +490,17 @@ class ComposeManager:
         project_name: str,
         workspace_id: str,
         remove_volumes: bool = True,
+        fallback_volume_names: tuple[str, ...] = (),
     ) -> None:
-        """Best-effort removal when the compose file is unavailable."""
+        """Best-effort removal when the compose file is unavailable.
+
+        ``fallback_volume_names`` are managed volume names recovered directly from
+        a volume's *name* (#637) when its ``com.docker.compose.project`` label
+        value is gone. A label-scoped ``volume ls`` cannot find such a volume, so
+        the recovered names are unioned in (deduped against the label-matched set)
+        and removed by name -- otherwise a row-less, label-less volume would be
+        reported reaped while it silently remained (PRRT_kwDOSJAM6s6LCiLk).
+        """
         label_filter = f"label=com.docker.compose.project={project_name}"
         container_ids = await self._docker_resource_ids(
             ["ps", "-aq", "--filter", label_filter],
@@ -513,6 +522,11 @@ class ComposeManager:
                 ["volume", "ls", "-q", "--filter", label_filter],
                 operation="volume ls",
             )
+            seen = set(volume_names)
+            for name in fallback_volume_names:
+                if name and name not in seen:
+                    seen.add(name)
+                    volume_names.append(name)
             if volume_names:
                 await self._docker(["volume", "rm", "-f", *volume_names], operation="volume rm")
 
@@ -532,6 +546,7 @@ class ComposeManager:
         compose_file: Path,
         workspace_id: str,
         remove_volumes: bool = True,
+        fallback_volume_names: tuple[str, ...] = (),
     ) -> ComposeTeardownResult:
         """Tear down a per-workspace stack, reaping its volumes by default.
 
@@ -545,6 +560,12 @@ class ComposeManager:
         historical leak this reclaim path exists to recover), so a gone compose
         file also falls back to label-scoped teardown. With nothing left to
         remove that fallback is an idempotent success, never a failure.
+
+        ``fallback_volume_names`` (#637) names volumes whose compose-project label
+        value is gone, so a label-scoped reap cannot find them. They are forwarded
+        to every label-scoped fallback path and removed by name; the compose-file
+        ``down -v`` path needs none of this since it removes its declared volumes
+        by name already.
         """
         if not compose_file.exists():
             # The compose file is gone, but the Docker project (and its
@@ -561,6 +582,7 @@ class ComposeManager:
                 project_name=project_name,
                 workspace_id=workspace_id,
                 remove_volumes=remove_volumes,
+                fallback_volume_names=fallback_volume_names,
             )
         try:
             down_ran = await self.down_project(
@@ -581,6 +603,7 @@ class ComposeManager:
                 project_name=project_name,
                 workspace_id=workspace_id,
                 remove_volumes=remove_volumes,
+                fallback_volume_names=fallback_volume_names,
             )
         if not down_ran:
             # The compose file existed at the check above but vanished before
@@ -598,6 +621,7 @@ class ComposeManager:
                 project_name=project_name,
                 workspace_id=workspace_id,
                 remove_volumes=remove_volumes,
+                fallback_volume_names=fallback_volume_names,
             )
         return ComposeTeardownResult(
             status="succeeded",
@@ -610,6 +634,7 @@ class ComposeManager:
         project_name: str,
         workspace_id: str,
         remove_volumes: bool,
+        fallback_volume_names: tuple[str, ...] = (),
     ) -> ComposeTeardownResult:
         """Label-scoped reap fallback, mapped to a :class:`ComposeTeardownResult`.
 
@@ -622,6 +647,7 @@ class ComposeManager:
                 project_name=project_name,
                 workspace_id=workspace_id,
                 remove_volumes=remove_volumes,
+                fallback_volume_names=fallback_volume_names,
             )
         except ComposeOperationError as label_exc:
             return ComposeTeardownResult(
