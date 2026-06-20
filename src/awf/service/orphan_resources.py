@@ -823,6 +823,7 @@ async def reap_classified_orphans(
     enabled: bool,
     now: float | None = None,
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+    row_less_only: bool = False,
 ) -> OrphanReapResult:
     """Reap ``terminal`` / aged ``missing`` classified orphans when ``enabled``.
 
@@ -842,6 +843,16 @@ async def reap_classified_orphans(
     on-disk artifact is younger than the grace window is left alone, since a
     just-created worktree can be visible before its workspace row commits and
     would otherwise be reaped mid-provision. ``terminal`` records are not gated.
+
+    With ``row_less_only=True`` only ``missing`` (no-DB-record) records are
+    reaped; ``terminal`` (DB-record) records are skipped. The on-demand
+    ``awf service gc`` path uses this so its additive sweep cannot tear down a
+    terminal workspace the operator scoped out via ``--status``/``--exclude-status``
+    (PRRT_kwDOSJAM6s6LB30p): those workspaces have DB rows and are already handled
+    by the scope-honouring DB-row-driven terminal reaper, while row-less orphans
+    have no status to scope on and are exactly what that path cannot see (#637).
+    The periodic backstop reaps both classes under the global ``auto_cleanup_orphans``
+    flag (no per-operator scope), so it leaves ``row_less_only`` at its default.
     """
     if not enabled:
         return OrphanReapResult(
@@ -875,9 +886,10 @@ async def reap_classified_orphans(
     resolved_work_dir = Path(work_dir).expanduser().resolve()
     resolved_now = time.time() if now is None else now
     grace_seconds = max(0.0, min_age_hours) * 3600.0
+    reapable_classifications = frozenset({"missing"} if row_less_only else {"terminal", "missing"})
     orphan_records: list[ClassifiedResource] = []
     for record in summary.records:
-        if record.classification not in {"terminal", "missing"}:
+        if record.classification not in reapable_classifications:
             continue
         if record.classification == "missing" and not _missing_record_is_aged(
             record,
@@ -991,12 +1003,16 @@ async def sweep_classified_orphans(
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
     min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
     run_subprocess: SubprocessRun | None = None,
+    row_less_only: bool = False,
 ) -> OrphanReapResult:
     """Scan, classify, and reap readiness-classified orphan resources.
 
     ``min_retention_hours`` protects retained terminal salvage during
     classification, while ``min_age_hours`` only guards row-less missing
-    resources during reaping.
+    resources during reaping. ``row_less_only`` forwards to
+    :func:`reap_classified_orphans` so a caller (the on-demand ``service gc``
+    path) can restrict the reap to no-DB-record (``missing``) orphans and avoid
+    tearing down scoped-out terminal workspaces (PRRT_kwDOSJAM6s6LB30p, #637).
     """
     if not enabled:
         return OrphanReapResult(
@@ -1042,6 +1058,7 @@ async def sweep_classified_orphans(
         compose_teardown=compose_teardown,
         enabled=enabled,
         min_age_hours=min_age_hours,
+        row_less_only=row_less_only,
     )
 
 

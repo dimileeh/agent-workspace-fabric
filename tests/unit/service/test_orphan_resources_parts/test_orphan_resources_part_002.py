@@ -501,6 +501,66 @@ def test_reaper_removes_volumes_for_fully_terminal_workspace(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
+def test_reaper_row_less_only_skips_terminal_db_record_resources(tmp_path: Path) -> None:
+    """``row_less_only=True`` reaps only no-DB-record orphans, leaving terminal rows.
+
+    The on-demand ``awf service gc`` sweep forces this so it can never tear down a terminal
+    workspace the operator scoped out via ``--status``/``--exclude-status``
+    (PRRT_kwDOSJAM6s6LB30p): a terminal DB-record stack is left for the scope-honouring
+    DB-row-driven terminal reaper, while the row-less worktree (no status to scope on) is
+    still reclaimed.
+    """
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    (tmp_path / "git" / "worktrees" / "ws_dead").mkdir(parents=True)
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_done-agent-1",
+                    "project": "awf_ws_done",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        # ws_done carries a terminal row (-> "terminal"); ws_dead has no row (-> "missing").
+        workspace_view=_ok_view(terminal={"ws_done"}),
+        auto_cleanup_orphans=True,
+    )
+    container_record = next(record for record in summary.records if record.kind == "container")
+    assert container_record.classification == "terminal"
+    worktree_record = next(record for record in summary.records if record.kind == "worktree")
+    assert worktree_record.classification == "missing"
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=0,  # isolate the row-less filter from the age guard
+            row_less_only=True,
+        )
+    )
+
+    assert result.status == "ok"
+    # The terminal-row stack is left for the scope-honouring DB-row-driven reaper.
+    assert teardown.calls == []
+    # Only the row-less worktree is reclaimed.
+    assert [outcome.kind for outcome in result.reaped] == ["worktree"]
+    assert not (tmp_path / "git" / "worktrees" / "ws_dead").exists()
+
+
+@pytest.mark.unit
 def test_reaper_reaps_missing_volume_via_name_fallback_and_leaves_expected(
     tmp_path: Path,
 ) -> None:

@@ -51,6 +51,20 @@ Implementation commit: `dcfab6054 fix(gc): reclaim no-DB-record orphans from on-
   `volume_ready_workspace_ids`-driven `remove_volumes` are unchanged; DB-driven
   `run_service_workspace_gc` candidate selection and the default-off `auto_cleanup_orphans`
   periodic backstop are untouched.
+- Review follow-up (PRRT_kwDOSJAM6s6LB30p) — on-demand sweep constrained to row-less orphans:
+  Complete.
+  - `reap_classified_orphans` / `sweep_classified_orphans` gained `row_less_only: bool = False`;
+    when `True` only `missing` (no-DB-record) records are reaped, `terminal` records skipped
+    (`src/awf/service/orphan_resources.py`). `_reap_classified_orphans` threads it through
+    (`src/awf/service/worker.py`); the on-demand call passes `row_less_only=True`
+    (`src/awf/control/worker/cleanup_service_gc.py`), the periodic backstop leaves it `False`.
+  - Rationale: the on-demand sweep no longer tears down a terminal workspace the operator scoped
+    out via `--status`/`--exclude-status` — those rows are already handled by the scope-honouring
+    `_terminal_gc_reaper`; row-less orphans have no status to scope on.
+  - Evidence: `test_reaper_row_less_only_skips_terminal_db_record_resources` (terminal stack left,
+    row-less worktree reaped); `test_consume_folds_classified_orphan_reaper_with_enabled_forced`
+    now asserts `row_less_only=True` is forwarded; the worker-wiring test asserts both the
+    `False` (periodic) and `True` (on-demand) passthrough.
 
 ## Commands Run (focused — AWF/GitHub owns the broad gate)
 

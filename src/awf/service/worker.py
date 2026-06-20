@@ -311,13 +311,22 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             execute=settings.auto_cleanup_orphans,
         )
 
-    async def _reap_classified_orphans(*, enabled: bool | None = None) -> OrphanReapResult:
+    async def _reap_classified_orphans(
+        *, enabled: bool | None = None, row_less_only: bool = False
+    ) -> OrphanReapResult:
         """Sweep classified orphan resources using the worker runtime dependencies.
 
         ``enabled`` defaults to the ``auto_cleanup_orphans`` flag so the periodic
         backstop stays default-off. The on-demand ``service gc`` path passes
         ``enabled=True`` to force a reap for the explicit operator request regardless
         of the flag (#637); all other scope (retention, min-age) is unchanged.
+
+        ``row_less_only`` forwards to :func:`sweep_classified_orphans`. The on-demand
+        ``service gc`` path passes ``True`` so its additive sweep reaps only
+        no-DB-record (``missing``) orphans and never tears down a terminal workspace
+        the operator scoped out with ``--status``/``--exclude-status``
+        (PRRT_kwDOSJAM6s6LB30p); the periodic backstop leaves it ``False`` to reap
+        terminal + missing under the global ``auto_cleanup_orphans`` flag.
         """
         resolved_enabled = settings.auto_cleanup_orphans if enabled is None else enabled
         return await sweep_classified_orphans(
@@ -328,6 +337,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             enabled=resolved_enabled,
             min_age_hours=settings.orphan_reconcile_min_age_hours,
             min_retention_hours=settings.completed_workspace_retention_hours,
+            row_less_only=row_less_only,
         )
 
     async def _reap_superseded_claude_bases() -> dict[str, object]:

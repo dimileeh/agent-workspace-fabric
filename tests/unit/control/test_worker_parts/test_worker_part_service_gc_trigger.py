@@ -135,12 +135,14 @@ async def test_consume_folds_classified_orphan_reaper_with_enabled_forced(
     request_id = await _seed_pending(session_factory)
     terminal_report = {"status": "succeeded", "deleted_path_count": 2}
     orphan_calls: list[bool] = []
+    row_less_only_calls: list[bool] = []
 
     async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
         return terminal_report
 
-    async def _classified_orphan_reaper(*, enabled: bool) -> OrphanReapResult:
+    async def _classified_orphan_reaper(*, enabled: bool, row_less_only: bool) -> OrphanReapResult:
         orphan_calls.append(enabled)
+        row_less_only_calls.append(row_less_only)
         return OrphanReapResult(
             enabled=enabled,
             status="ok",
@@ -163,8 +165,11 @@ async def test_consume_folds_classified_orphan_reaper_with_enabled_forced(
 
     await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
 
-    # The orphan reaper ran exactly once with enabled forced True for the operator request.
+    # The orphan reaper ran exactly once with enabled forced True for the operator request,
+    # and ``row_less_only=True`` so the additive sweep cannot tear down a terminal workspace
+    # the operator scoped out via ``--status``/``--exclude-status`` (PRRT_kwDOSJAM6s6LB30p).
     assert orphan_calls == [True]
+    assert row_less_only_calls == [True]
     async with session_factory() as session:
         finished = await ServiceGCRequestRepository(session).get(request_id)
         assert finished is not None
@@ -217,7 +222,7 @@ async def test_consume_marks_failed_when_orphan_reaper_raises(
     async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
         return {"status": "succeeded", "deleted_path_count": 1}
 
-    async def _classified_orphan_reaper(*, enabled: bool) -> object:
+    async def _classified_orphan_reaper(*, enabled: bool, row_less_only: bool) -> object:
         raise RuntimeError("orphan sweep blew up")
 
     worker = _make_worker(

@@ -108,6 +108,27 @@ This is exactly the seam to hook the orphan reaper into.
   (which already sets `remove_volumes=True` only when a volume record is itself cleanup-ready
   via `volume_ready_workspace_ids`).
 
+## Review follow-up — constrain the on-demand sweep to row-less orphans (PRRT_kwDOSJAM6s6LB30p)
+
+Review caught that the additive on-demand sweep called the reaper with only `enabled=True`,
+so it reaped `terminal`-classified (DB-record) resources too — bypassing the operator's
+`--status`/`--exclude-status` safety scope that the DB-row-driven `_terminal_gc_reaper` honours
+(`test_consume_threads_status_filters_into_reaper`). A workspace the operator explicitly
+excluded (e.g. `--exclude-status failed`) could still have its leaked stack/worktree torn down.
+
+Refinement (keeps the #637 intent — *no-DB-record* orphans — exactly):
+- Add `row_less_only: bool = False` to `reap_classified_orphans` / `sweep_classified_orphans`
+  (`src/awf/service/orphan_resources.py`): when `True`, only `missing` (row-less) records are
+  reaped; `terminal` records are skipped.
+- Thread it through `_reap_classified_orphans` (`src/awf/service/worker.py`); the on-demand
+  call in `cleanup_service_gc.py` passes `row_less_only=True`, the periodic backstop leaves it
+  `False` (reaps terminal + missing under the global `auto_cleanup_orphans` flag, no per-operator
+  scope).
+- Rationale: terminal workspaces have DB rows and are already reaped by the scope-honouring
+  `_terminal_gc_reaper` (which tears their compose stack down with `remove_volumes=True`), so the
+  orphan sweep reaping them was both redundant and a scope violation; row-less orphans have no
+  status to scope on, so threading the status filters into a row-less-only sweep is unnecessary.
+
 ## Tests to write first (TDD)
 
 All under `tests/unit/` mirroring `src/`. Markers: `unit`.

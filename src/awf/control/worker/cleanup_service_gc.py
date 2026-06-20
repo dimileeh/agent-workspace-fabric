@@ -194,13 +194,17 @@ async def _run_claimed_service_gc_trigger(
 
     After the DB-row-driven terminal reaper, the same guarded run also drives the
     classification-driven orphan reaper with ``enabled=True`` *forced* (regardless of the
-    default-off ``auto_cleanup_orphans`` flag) so this operator-requested ``gc`` reclaims
-    no-DB-record ("row-less") orphaned volumes/worktrees the DB-row-driven candidate set
-    can never see (#637). Its ``OrphanReapResult`` is folded into the combined report under
-    ``classified_orphan_reap`` (flowing untouched into the API's
-    ``worker_reclaim.report``). The fold sits inside the same ``try`` so an orphan-sweep
-    raise is recorded on the row like any reaper failure rather than surfacing a false
-    success; it is skipped when no orphan reaper is wired (back-compat).
+    default-off ``auto_cleanup_orphans`` flag) and ``row_less_only=True`` so this
+    operator-requested ``gc`` reclaims only no-DB-record ("row-less") orphaned
+    volumes/worktrees the DB-row-driven candidate set can never see (#637). ``row_less_only``
+    keeps the additive sweep from tearing down a terminal workspace the operator scoped out
+    via ``--status``/``--exclude-status`` (PRRT_kwDOSJAM6s6LB30p): those terminal workspaces
+    have DB rows and are already reaped by the scope-honouring ``_terminal_gc_reaper`` above,
+    whereas row-less orphans have no status to scope on. Its ``OrphanReapResult`` is folded
+    into the combined report under ``classified_orphan_reap`` (flowing untouched into the
+    API's ``worker_reclaim.report``). The fold sits inside the same ``try`` so an
+    orphan-sweep raise is recorded on the row like any reaper failure rather than surfacing a
+    false success; it is skipped when no orphan reaper is wired (back-compat).
     """
     try:
         reaper_kwargs: dict[str, Any] = {}
@@ -229,10 +233,15 @@ async def _run_claimed_service_gc_trigger(
         report = await self._terminal_gc_reaper(**reaper_kwargs)
         # Additive on-demand sweep of no-DB-record orphans (#637). ``enabled=True`` is
         # forced for the explicit operator request; the same retention/min-age scope the
-        # closure already passes is reused. Guarded on the dependency being wired so the
-        # DB-only gc path stays unchanged when no orphan reaper is present.
+        # closure already passes is reused. ``row_less_only=True`` restricts the sweep to
+        # row-less ("missing") orphans so it never tears down a terminal workspace the
+        # operator scoped out via ``--status``/``--exclude-status`` — those terminal rows
+        # are already handled by the scope-honouring ``_terminal_gc_reaper`` above, and the
+        # status filters are not (and need not be) threaded into a row-less-only sweep
+        # (PRRT_kwDOSJAM6s6LB30p). Guarded on the dependency being wired so the DB-only gc
+        # path stays unchanged when no orphan reaper is present.
         if self._classified_orphan_reaper is not None:
-            orphan_result = await self._classified_orphan_reaper(enabled=True)
+            orphan_result = await self._classified_orphan_reaper(enabled=True, row_less_only=True)
             report = {**report, "classified_orphan_reap": orphan_result.to_dict()}
     except asyncio.CancelledError:
         raise

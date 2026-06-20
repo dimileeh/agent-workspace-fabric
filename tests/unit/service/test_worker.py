@@ -824,15 +824,20 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
     assert created["classified_sweep_kwargs"]["work_dir"] == Path(settings.work_dir).resolve()
     assert created["classified_sweep_kwargs"]["docker_host"] == settings.docker_host
     assert created["classified_sweep_kwargs"]["compose_teardown"] is classified_teardown
-    # No-arg call (the periodic backstop) resolves ``enabled`` to the flag default.
+    # No-arg call (the periodic backstop) resolves ``enabled`` to the flag default and reaps
+    # terminal + missing (``row_less_only`` defaults to False) under the global flag.
     assert created["classified_sweep_kwargs"]["enabled"] is auto_cleanup_orphans
     assert created["classified_sweep_kwargs"]["min_age_hours"] == 4.0
     assert created["classified_sweep_kwargs"]["min_retention_hours"] == 72.0
+    assert created["classified_sweep_kwargs"]["row_less_only"] is False
 
     # On-demand override (#637): forcing ``enabled=True`` for an operator-requested gc
     # run must pass through to the sweep regardless of the ``auto_cleanup_orphans`` flag.
-    asyncio.run(classified_reaper(enabled=True))
+    # ``row_less_only=True`` (PRRT_kwDOSJAM6s6LB30p) must thread through too so the additive
+    # sweep reaps only no-DB-record orphans, never a scoped-out terminal workspace.
+    asyncio.run(classified_reaper(enabled=True, row_less_only=True))
     assert created["classified_sweep_kwargs"]["enabled"] is True
+    assert created["classified_sweep_kwargs"]["row_less_only"] is True
 
 
 @pytest.mark.unit
