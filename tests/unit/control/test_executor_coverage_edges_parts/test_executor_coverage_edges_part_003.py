@@ -512,6 +512,38 @@ def test_plan_artifact_candidate_digests_rejects_symlinked_plan_dir(
 
 
 @pytest.mark.unit
+def test_plan_artifact_candidate_digests_rejects_symlinked_plan_dir_into_hidden(
+    tmp_path: Path,
+) -> None:
+    """A plan dir symlinked at a git-hidden in-worktree dir yields no candidates.
+
+    Physical containment alone is insufficient: a ``docs/awf-plans`` symlink
+    pointing at an in-worktree but git-ignored/hidden directory (e.g. ``.git``)
+    still resolves *under* the worktree, so a ``relative_to`` check would pass.
+    But ``glob`` and the later ``source.replace(target)`` follow the link and
+    mutate storage the porcelain dirty/changed scope checks never observe,
+    letting near-miss recovery mark the logical plan path recovered with no scope
+    evidence. The resolved-path equality check refuses it.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "docs").mkdir()
+    # An in-worktree but git-hidden directory holding a real near-miss artifact.
+    hidden = worktree / ".git" / "awf-hidden"
+    hidden.mkdir(parents=True)
+    (hidden / "ws_escape.md").write_text("# Hidden\n", encoding="utf-8")
+    (worktree / "docs" / "awf-plans").symlink_to(hidden, target_is_directory=True)
+
+    plan_path = Path("docs/awf-plans/ws_escape_plan.md")
+    candidates = executor_planning_ops._plan_artifact_candidate_digests(  # noqa: SLF001
+        worktree,
+        plan_path,
+    )
+
+    assert candidates == {}
+
+
+@pytest.mark.unit
 async def test_planning_required_near_miss_refuses_recovery_on_dirty_baseline(
     tmp_path: Path,
 ) -> None:

@@ -163,16 +163,24 @@ def _plan_artifact_candidate_digests(
     if not plan_dir.is_dir():
         return {}
 
-    # Refuse to follow a plan directory that escapes the worktree via a symlink
-    # anywhere in its path. ``is_dir()`` and ``glob`` both follow symlinks, so a
-    # repo that tracks ``docs/awf-plans`` as a link to a directory outside the
-    # checkout would yield candidates whose lexical paths look in-worktree while
-    # physically living outside it. Near-miss recovery would then ``replace``
-    # those outside paths with the elevated control-plane process, writing
-    # beyond the isolated workspace. Resolve and require physical containment.
+    # Refuse to follow a plan directory reached through a symlink anywhere in its
+    # path. ``is_dir()`` and ``glob`` both follow symlinks, so a repo that tracks
+    # ``docs/awf-plans`` as a link would yield candidates whose lexical paths look
+    # like normal in-worktree artifacts while physically living elsewhere. Plain
+    # outside-the-worktree containment is not enough: a link to an in-worktree but
+    # git-hidden directory (``.git`` or another ignored dir) still resolves under
+    # the worktree, yet ``glob`` and the later ``source.replace(target)`` would
+    # follow the link and mutate storage the porcelain dirty/changed scope checks
+    # never observe -- letting near-miss recovery mark the logical plan path
+    # recovered after writing non-artifact storage with no scope evidence. Require
+    # the plan dir to be the real directory at its lexical location, i.e. that no
+    # symlink was followed when resolving it under the worktree.
     try:
-        plan_dir.resolve(strict=True).relative_to(worktree_path.resolve(strict=True))
-    except (OSError, ValueError):
+        resolved_worktree = worktree_path.resolve(strict=True)
+        resolved_plan_dir = plan_dir.resolve(strict=True)
+    except OSError:
+        return {}
+    if resolved_plan_dir != resolved_worktree / plan_path.parent:
         return {}
 
     candidates: dict[Path, str] = {}
