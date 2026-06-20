@@ -13,9 +13,20 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.logging import get_logger
+
+DEFAULT_AGENT_WORKDIR: Final[str] = "/workspace"
+"""Default in-container working directory for tracked compose-exec commands.
+
+This is the directory the coding CLI (and other compose-exec commands) start in.
+It is the single source of truth shared with
+:data:`awf.runtime.planning.AGENT_WORKTREE_ROOT`, which anchors agent artifact
+paths at the worktree root. The two must stay equal so agent-prompt paths match
+the CLI's actual start directory; coupling them through this constant keeps a
+future workdir change from silently regressing the #620 root cause."""
 
 EXEC_PROCESS_CLEANUP_FAILED = "EXEC_PROCESS_CLEANUP_FAILED"
 _INVOCATION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -69,7 +80,7 @@ def build_tracked_compose_exec(
     source: str,
     label: str,
     service: str = "agent",
-    workdir: str = "/workspace",
+    workdir: str = DEFAULT_AGENT_WORKDIR,
     invocation_id: str | None = None,
     preserve_stdin: bool = False,
 ) -> TrackedComposeExec:

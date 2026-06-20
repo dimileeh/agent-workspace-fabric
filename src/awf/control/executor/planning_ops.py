@@ -59,6 +59,7 @@ from awf.runtime.planning import (
     ConformanceStallKind,
     ConformanceStallPolicy,
     PlanConformanceReport,
+    agent_artifact_path,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
@@ -708,6 +709,14 @@ async def _run_agent_task_with_optional_planning(
     except ValueError as exc:
         return f"planning profile is invalid: {exc}"
 
+    # Hand the agent worktree-root-anchored artifact paths so the plan/report
+    # land at the repo root even if the agent cd's into a task subdir mid-run
+    # (#620). All internal logic below — digests, scope checks, the validation
+    # handoff, stall evidence — keeps using the relative ``plan_path``/
+    # ``report_path`` resolved against ``worktree_path``.
+    agent_plan_path = agent_artifact_path(plan_path)
+    agent_report_path = agent_artifact_path(report_path)
+
     before_plan = await self._changed_paths(worktree_path)
     plan_file_digest_before = _digest_file_if_present(worktree_path / plan_path)
     plan_candidates_before = _plan_artifact_candidate_digests(worktree_path, plan_path)
@@ -730,7 +739,7 @@ async def _run_agent_task_with_optional_planning(
         compose_file=compose_file,
         prompt=build_planning_prompt(
             task_prompt=workspace.task_prompt,
-            plan_path=plan_path,
+            plan_path=agent_plan_path,
             coordination_warnings=coordination_warnings,
             workspace_runtime_context=workspace_runtime_context,
         ),
@@ -821,7 +830,7 @@ async def _run_agent_task_with_optional_planning(
             compose_file=compose_file,
             prompt=build_execution_prompt(
                 task_prompt=workspace.task_prompt,
-                plan_path=plan_path,
+                plan_path=agent_plan_path,
                 iteration=iteration,
                 gaps=gaps,
                 coordination_warnings=coordination_warnings,
@@ -857,8 +866,8 @@ async def _run_agent_task_with_optional_planning(
                 compose_file=compose_file,
                 prompt=build_conformance_prompt(
                     task_prompt=workspace.task_prompt,
-                    plan_path=plan_path,
-                    report_path=report_path,
+                    plan_path=agent_plan_path,
+                    report_path=agent_report_path,
                     iteration=iteration,
                 ),
                 model=model,
