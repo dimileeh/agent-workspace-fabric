@@ -512,6 +512,127 @@ async def test_consume_threads_min_age_into_orphan_reaper(
     assert captured == {"min_age_hours": 240.0, "limit": 3}
 
 
+async def test_consume_caps_orphan_limit_to_remaining_budget(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """``--limit`` is one total batch cap shared across both passes (PRRT_kwDOSJAM6s6LCqDd).
+
+    ``_terminal_gc_reaper`` already spends the operator's ``--limit`` against the DB-backed
+    terminal workspaces it selects, reporting the count as ``candidate_count``. Forwarding the
+    *full* stored limit into the additive row-less orphan sweep would let
+    ``awf service gc --execute --limit 1`` delete one terminal workspace *and* one row-less
+    orphan — two workspaces for a one-candidate cap. The sweep must receive the *remaining*
+    budget (stored limit minus the terminal pass's selected candidates); a fully-spent budget
+    makes it a no-op (``limit=0`` selects nothing).
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    await _seed_pending(session_factory, params={"execute": True, "limit": 1})
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        # The terminal reaper selected its one allowed candidate, spending the whole budget.
+        return {"status": "succeeded", "deleted_path_count": 1, "candidate_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+    ) -> OrphanReapResult:
+        captured["limit"] = limit
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    # Budget fully spent by the terminal pass → the orphan sweep is a no-op (limit=0), not 1.
+    assert captured == {"limit": 0}
+
+
+async def test_consume_forwards_remaining_limit_to_orphan_sweep(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A partially-spent ``--limit`` leaves the orphan sweep the balance (PRRT_kwDOSJAM6s6LCqDd).
+
+    With ``--limit 3`` and one DB-backed terminal candidate selected, two of the three-candidate
+    batch budget remain, so the additive row-less sweep is bounded to two oldest-first
+    workspaces rather than the full three.
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    await _seed_pending(session_factory, params={"execute": True, "limit": 3})
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1, "candidate_count": 1}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+    ) -> OrphanReapResult:
+        captured["limit"] = limit
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    # 3 stored − 1 terminal candidate = 2 left for the orphan sweep.
+    assert captured == {"limit": 2}
+
+
+async def test_consume_leaves_orphan_sweep_unbounded_without_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """No stored ``--limit`` leaves the orphan sweep unbounded even when the terminal pass reaped.
+
+    The remaining-budget subtraction only applies when the operator set ``--limit``; an
+    unbounded run must stay unbounded (``None``) regardless of the terminal pass's
+    ``candidate_count`` (PRRT_kwDOSJAM6s6LCqDd).
+    """
+    from awf.service.orphan_resources import ORPHAN_REAP_OK, OrphanReapResult
+
+    await _seed_pending(session_factory, params={"execute": True})
+    captured: dict[str, object] = {"limit": "unset"}
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 5, "candidate_count": 5}
+
+    async def _classified_orphan_reaper(
+        *,
+        enabled: bool,
+        row_less_only: bool,
+        limit: int | None,
+        min_age_hours: float | None = None,
+    ) -> OrphanReapResult:
+        captured["limit"] = limit
+        return OrphanReapResult(enabled=enabled, status="ok", reason_code=ORPHAN_REAP_OK)
+
+    worker = _make_worker(
+        session_factory,
+        terminal_gc_reaper=_terminal_reaper,
+        classified_orphan_reaper=_classified_orphan_reaper,
+    )
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {"limit": None}
+
+
 async def test_consume_is_noop_without_reaper(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
