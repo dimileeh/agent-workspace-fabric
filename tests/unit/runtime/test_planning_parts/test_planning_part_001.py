@@ -223,6 +223,26 @@ def test_agent_artifact_path_anchors_relative_path_at_worktree_root() -> None:
 
 
 @pytest.mark.unit
+def test_agent_worktree_root_is_coupled_to_compose_exec_default_workdir() -> None:
+    """The artifact anchor and the compose-exec start dir share one constant (#620)."""
+    from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR, build_tracked_compose_exec
+
+    # Both sides resolve from the same source of truth, so they cannot desync.
+    assert AGENT_WORKTREE_ROOT == DEFAULT_AGENT_WORKDIR
+
+    # The agent adapter launches the CLI relying on the default ``workdir``, so the
+    # directory the agent actually starts in must equal the artifact-anchor root.
+    invocation = build_tracked_compose_exec(
+        compose_project="proj",
+        compose_file=Path("docker-compose.yml"),
+        cli_args=["codex"],
+        source="agent",
+        label="codex",
+    )
+    assert invocation.workdir == AGENT_WORKTREE_ROOT
+
+
+@pytest.mark.unit
 def test_prompts_anchor_plan_artifacts_at_worktree_root() -> None:
     """Plan/conformance prompts carry the worktree-root-anchored artifact paths (#620)."""
     plan = agent_artifact_path(Path("docs/awf-plans/ws_123.md"))

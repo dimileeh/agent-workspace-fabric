@@ -17,6 +17,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 from awf.common.redaction import redact_secrets
 from awf.runtime.git_porcelain import split_porcelain_rename_paths, unquote_porcelain_path
@@ -114,13 +115,18 @@ def render_workspace_path(template: str, *, workspace_id: str) -> Path:
     return path
 
 
-AGENT_WORKTREE_ROOT: Final[str] = "/workspace"
+AGENT_WORKTREE_ROOT: Final[str] = DEFAULT_AGENT_WORKDIR
 """In-container worktree root the agent process starts in.
 
-Matches ``build_tracked_compose_exec``'s default ``workdir`` (the coding CLI is
-launched at ``/workspace``). Agents routinely ``cd`` into a task subdirectory
-mid-run, so a worktree-relative artifact path handed to the agent verbatim would
-resolve under that subdir instead of the repo root."""
+Bound to :data:`awf.common.compose_exec.DEFAULT_AGENT_WORKDIR`, the single
+source of truth for ``build_tracked_compose_exec``'s default ``workdir`` — the
+directory the coding CLI is launched in (``AgentAdapter.run`` relies on that
+default rather than passing ``workdir`` explicitly). Sharing the constant keeps
+the agent's start directory and the artifact anchor statically coupled, so
+changing the compose workdir cannot silently desync agent-prompt paths from
+where the CLI actually runs and regress #620. Agents routinely ``cd`` into a
+task subdirectory mid-run, so a worktree-relative artifact path handed to the
+agent verbatim would resolve under that subdir instead of the repo root."""
 
 
 def agent_artifact_path(relative_path: Path) -> Path:
