@@ -76,6 +76,7 @@ class _RecordingComposeTeardown:
     def __init__(self, result: Any | None = None) -> None:
         self.calls: list[tuple[str, Path, str]] = []
         self.remove_volumes_calls: list[bool] = []
+        self.fallback_volume_names_calls: list[tuple[str, ...]] = []
         from awf.node.compose_manager import ComposeTeardownResult
 
         self._result = result or ComposeTeardownResult(
@@ -83,10 +84,17 @@ class _RecordingComposeTeardown:
         )
 
     async def __call__(
-        self, project_name: str, compose_file: Path, workspace_id: str, remove_volumes: bool
+        self,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        remove_volumes: bool,
+        *,
+        fallback_volume_names: tuple[str, ...] = (),
     ) -> Any:
         self.calls.append((project_name, compose_file, workspace_id))
         self.remove_volumes_calls.append(remove_volumes)
+        self.fallback_volume_names_calls.append(fallback_volume_names)
         return self._result
 
 
@@ -377,6 +385,7 @@ def test_build_orphan_compose_teardown_invokes_manager() -> None:
             compose_file: Path,
             workspace_id: str,
             remove_volumes: bool = True,
+            fallback_volume_names: tuple[str, ...] = (),
         ) -> ComposeTeardownResult:
             self.calls.append(
                 {
@@ -384,6 +393,7 @@ def test_build_orphan_compose_teardown_invokes_manager() -> None:
                     "compose_file": compose_file,
                     "workspace_id": workspace_id,
                     "remove_volumes": remove_volumes,
+                    "fallback_volume_names": fallback_volume_names,
                 }
             )
             return ComposeTeardownResult(
@@ -393,17 +403,28 @@ def test_build_orphan_compose_teardown_invokes_manager() -> None:
     manager = _FakeManager()
     teardown = build_orphan_compose_teardown(manager)  # type: ignore[arg-type]
     result = asyncio.run(
-        teardown("awf_ws_x", Path("/tmp/awf/compose/ws_x/compose.yml"), "ws_x", True)
+        teardown(
+            "awf_ws_x",
+            Path("/tmp/awf/compose/ws_x/compose.yml"),
+            "ws_x",
+            True,
+            fallback_volume_names=("awf-ws_x-postgres_data",),
+        )
     )
 
     assert result.ok
     assert manager.calls[0]["remove_volumes"] is True
     assert manager.calls[0]["project_name"] == "awf_ws_x"
+    # The closure forwards the recovered label-less volume names verbatim so the
+    # label-scoped teardown can remove them by name (#637, PRRT_kwDOSJAM6s6LCiLk).
+    assert manager.calls[0]["fallback_volume_names"] == ("awf-ws_x-postgres_data",)
 
     # The closure forwards the caller's per-workspace decision verbatim: a
     # retained-terminal stack is torn down without deleting its salvage volumes.
     asyncio.run(teardown("awf_ws_y", Path("/tmp/awf/compose/ws_y/compose.yml"), "ws_y", False))
     assert manager.calls[1]["remove_volumes"] is False
+    # Default forwards an empty tuple when no label-less names were recovered.
+    assert manager.calls[1]["fallback_volume_names"] == ()
 
 
 def _retained_terminal_runtime_summary(*, retained: bool) -> Any:
@@ -627,6 +648,10 @@ def test_reaper_reaps_missing_volume_via_name_fallback_and_leaves_expected(
         ("awf-ws_dead", tmp_path / "compose" / "ws_dead" / "compose.yml", "ws_dead")
     ]
     assert teardown.remove_volumes_calls == [True]
+    # The recovered label-less volume name is forwarded so the label-scoped teardown
+    # can remove it by name -- without it the volume would leak while reported reaped
+    # (PRRT_kwDOSJAM6s6LCiLk). The live workspace's expected volume contributes no name.
+    assert teardown.fallback_volume_names_calls == [("awf-ws_dead-postgres_data",)]
     assert not (tmp_path / "git" / "worktrees" / "ws_dead").exists()
     assert sorted(outcome.kind for outcome in result.reaped) == ["compose", "worktree"]
 

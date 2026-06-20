@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -55,7 +55,8 @@ ORPHAN_REAP_SKIPPED_YOUNG = "ORPHAN_REAP_SKIPPED_YOUNG"
 ORPHAN_REAP_OK = "ORPHAN_REAP_OK"
 ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
 
-# (project_name, compose_file, workspace_id) -> teardown outcome.
+
+# (project_name, compose_file, workspace_id, remove_volumes) -> teardown outcome.
 #
 # Distinct from :data:`gc_reconcile.OrphanComposeTeardown`, which is
 # ``Callable[[OrphanDirTarget], ...]``. The two are deliberately *not*
@@ -64,7 +65,24 @@ ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
 # ``(project_name, compose_file, workspace_id)`` triple. The differing name
 # makes the incompatibility explicit rather than letting a same-named alias
 # imply the closures are swappable.
-OrphanResourceComposeTeardown = Callable[[str, Path, str, bool], Awaitable[ComposeTeardownOutcome]]
+#
+# ``fallback_volume_names`` carries the managed volume names recovered directly
+# from a row-less volume's *name* (#637) when its ``com.docker.compose.project``
+# label value is gone. A label-scoped reap cannot find such a volume, so the
+# teardown must remove it by name; without this the reaper would report it
+# reaped while it silently remained (PRRT_kwDOSJAM6s6LCiLk). It is keyword-only
+# with a default so non-volume teardowns and other callers stay unaffected.
+class OrphanResourceComposeTeardown(Protocol):
+    async def __call__(  # pragma: no cover - Protocol method declaration only.
+        self,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        remove_volumes: bool,
+        *,
+        fallback_volume_names: tuple[str, ...] = (),
+    ) -> ComposeTeardownOutcome: ...
+
 
 ResourceKind = Literal["container", "network", "volume", "worktree"]
 Classification = Literal["expected", "terminal", "missing", "unknown"]
@@ -763,13 +781,19 @@ def build_orphan_compose_teardown(manager: ComposeManager) -> OrphanResourceComp
     """
 
     async def _teardown(
-        project_name: str, compose_file: Path, workspace_id: str, remove_volumes: bool
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        remove_volumes: bool,
+        *,
+        fallback_volume_names: tuple[str, ...] = (),
     ) -> ComposeTeardownOutcome:
         return await manager.teardown_project(
             project_name=project_name,
             compose_file=compose_file,
             workspace_id=workspace_id,
             remove_volumes=remove_volumes,
+            fallback_volume_names=fallback_volume_names,
         )
 
     return _teardown
@@ -991,14 +1015,27 @@ async def reap_classified_orphans(
     # removing volumes here would delete the very evidence _classify protected --
     # matching the worker terminal-runtime release path's ``remove_volumes=False``.
     volume_ready_workspace_ids: set[str] = set()
+    # Managed volume names recovered from a row-less volume's *name* (#637) when its
+    # compose-project label is gone: a label-scoped teardown cannot find them, so the
+    # names are forwarded to the teardown to be removed directly. Without this a
+    # label-less volume would be reported reaped while it silently remained
+    # (PRRT_kwDOSJAM6s6LCiLk). Keyed by the same (project, workspace_id) teardown key
+    # and only populated for volume records (so only volume-cleanup-ready workspaces,
+    # which get ``remove_volumes=True``, carry names); a workspace can surface several
+    # volumes (``-dind_data`` + ``-postgres_data``), so names accumulate per key.
+    fallback_volume_names: dict[tuple[str, str], list[str]] = {}
     for record in orphan_records:
         if record.kind == "worktree":
             worktree_records.append(record)
             continue
+        project = record.compose_project or f"awf_{record.workspace_id}"
+        key = (project, record.workspace_id)
+        compose_projects[key] = None
         if record.kind == "volume":
             volume_ready_workspace_ids.add(record.workspace_id)
-        project = record.compose_project or f"awf_{record.workspace_id}"
-        compose_projects[(project, record.workspace_id)] = None
+            name = record.resource.name
+            if name:
+                fallback_volume_names.setdefault(key, []).append(name)
 
     reaped: list[OrphanReapOutcome] = []
     errors: list[OrphanReapOutcome] = []
@@ -1006,7 +1043,15 @@ async def reap_classified_orphans(
     for project_name, workspace_id in sorted(compose_projects):
         compose_file = resolved_work_dir / "compose" / workspace_id / "compose.yml"
         remove_volumes = workspace_id in volume_ready_workspace_ids
-        teardown = await compose_teardown(project_name, compose_file, workspace_id, remove_volumes)
+        teardown = await compose_teardown(
+            project_name,
+            compose_file,
+            workspace_id,
+            remove_volumes,
+            fallback_volume_names=tuple(
+                fallback_volume_names.get((project_name, workspace_id), ())
+            ),
+        )
         outcome = OrphanReapOutcome(
             kind="compose",
             workspace_id=workspace_id,
