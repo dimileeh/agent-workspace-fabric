@@ -87,8 +87,9 @@ async def test_planning_conformance_timeout_falls_back_to_stdout_report(
     )
     satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
 
+    adapter = _StdoutTimeoutAdapter(satisfied_stdout=satisfied)
     result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
-        adapter=_StdoutTimeoutAdapter(satisfied_stdout=satisfied),  # type: ignore[arg-type]
+        adapter=adapter,  # type: ignore[arg-type]
         workspace=SimpleNamespace(id="ws_stdout", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
@@ -98,3 +99,9 @@ async def test_planning_conformance_timeout_falls_back_to_stdout_report(
     )
 
     assert result is None
+    # Every agent-facing prompt (plan, execute, conformance) anchors the plan
+    # artifact at the worktree root so it cannot land nested under a subdir CWD
+    # (#620); the conformance prompt additionally anchors the report path.
+    assert len(adapter.prompts) == 3
+    assert all("/workspace/docs/awf-plans/ws_stdout.md" in prompt for prompt in adapter.prompts)
+    assert "/workspace/docs/awf-plans/ws_stdout.json" in adapter.prompts[2]

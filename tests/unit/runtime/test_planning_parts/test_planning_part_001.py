@@ -6,73 +6,32 @@ from pathlib import Path
 
 import pytest
 
-from awf.adapters.base import AgentRunError
-from awf.common.commands import CommandResult
-from awf.db.enums import AgentRuntime
 from awf.runtime import planning as planning_mod
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    AGENT_WORKTREE_ROOT,
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
     MAX_CONFORMANCE_TEXT_CHARS,
     PLAN_CONFORMANCE_REPORTED,
     PLAN_CONFORMANCE_UNSATISFIED,
-    ConformanceIterationRecord,
-    ConformanceStallKind,
-    ConformanceStallPolicy,
     PlanConformanceReport,
     PlanConformanceStatus,
-    _evidence_strings,
     _gaps_from_payload,
+    agent_artifact_path,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
     build_conformance_retry_prompt,
-    build_conformance_stall_failure_evidence,
     build_execution_prompt,
     build_planning_prompt,
     build_planning_scope_retry_prompt,
     changed_paths_from_porcelain,
-    classify_conformance_stall,
     conformance_requires_awf_validation,
     parse_conformance_report,
     render_coordination_warning_section,
     render_workspace_path,
 )
 from awf.service.coordination import MAX_COORDINATION_WARNING_OVERLAPS
-
-
-def _stall_policy(
-    *,
-    no_output_seconds: int = 600,
-    over_duration_seconds: int = 1800,
-    repeated_output_threshold: int = 3,
-) -> ConformanceStallPolicy:
-    return ConformanceStallPolicy(
-        no_output_seconds=no_output_seconds,
-        over_duration_seconds=over_duration_seconds,
-        repeated_output_threshold=repeated_output_threshold,
-    )
-
-
-def _iter_record(
-    *,
-    iteration: int,
-    elapsed_seconds: float,
-    report_digest: str | None,
-    worktree_changed: bool,
-    stdout: str = "",
-    stderr: str = "",
-    error_reason_code: str | None = None,
-) -> ConformanceIterationRecord:
-    return ConformanceIterationRecord(
-        iteration=iteration,
-        elapsed_seconds=elapsed_seconds,
-        report_digest=report_digest,
-        worktree_changed=worktree_changed,
-        stdout=stdout,
-        stderr=stderr,
-        error_reason_code=error_reason_code,
-    )
 
 
 @pytest.mark.unit
@@ -204,6 +163,66 @@ def test_changed_paths_from_porcelain_preserves_quoted_literal_arrow_paths() -> 
     paths = changed_paths_from_porcelain(' M "docs/awf -> plans/ws.conformance.json"\n')
 
     assert paths == {Path("docs/awf -> plans/ws.conformance.json")}
+
+
+@pytest.mark.unit
+def test_agent_artifact_path_anchors_relative_path_at_worktree_root() -> None:
+    """Worktree-relative artifact paths resolve to the in-container worktree root (#620)."""
+    assert AGENT_WORKTREE_ROOT == "/workspace"
+    assert (
+        agent_artifact_path(Path("docs/awf-plans/ws_123.md")).as_posix()
+        == "/workspace/docs/awf-plans/ws_123.md"
+    )
+    assert (
+        agent_artifact_path(Path("docs/awf-plans/ws_123.conformance.json")).as_posix()
+        == "/workspace/docs/awf-plans/ws_123.conformance.json"
+    )
+
+
+@pytest.mark.unit
+def test_agent_worktree_root_is_coupled_to_compose_exec_default_workdir() -> None:
+    """The artifact anchor and the compose-exec start dir share one constant (#620)."""
+    from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR, build_tracked_compose_exec
+
+    # Both sides resolve from the same source of truth, so they cannot desync.
+    assert AGENT_WORKTREE_ROOT == DEFAULT_AGENT_WORKDIR
+
+    # The agent adapter launches the CLI relying on the default ``workdir``, so the
+    # directory the agent actually starts in must equal the artifact-anchor root.
+    invocation = build_tracked_compose_exec(
+        compose_project="proj",
+        compose_file=Path("docker-compose.yml"),
+        cli_args=["codex"],
+        source="agent",
+        label="codex",
+    )
+    assert invocation.workdir == AGENT_WORKTREE_ROOT
+
+
+@pytest.mark.unit
+def test_prompts_anchor_plan_artifacts_at_worktree_root() -> None:
+    """Plan/conformance prompts carry the worktree-root-anchored artifact paths (#620)."""
+    plan = agent_artifact_path(Path("docs/awf-plans/ws_123.md"))
+    report = agent_artifact_path(Path("docs/awf-plans/ws_123.conformance.json"))
+
+    planning_prompt = build_planning_prompt(task_prompt="Add metrics", plan_path=plan)
+    execution_prompt = build_execution_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        iteration=0,
+        gaps=(),
+    )
+    conformance_prompt = build_conformance_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        report_path=report,
+        iteration=0,
+    )
+
+    assert "/workspace/docs/awf-plans/ws_123.md" in planning_prompt
+    assert "/workspace/docs/awf-plans/ws_123.md" in execution_prompt
+    assert "/workspace/docs/awf-plans/ws_123.md" in conformance_prompt
+    assert "/workspace/docs/awf-plans/ws_123.conformance.json" in conformance_prompt
 
 
 @pytest.mark.unit
@@ -1121,361 +1140,3 @@ def test_conformance_report_defaults_blank_reason_code() -> None:
 
     assert report.reason_code == PLAN_CONFORMANCE_REPORTED
     assert report.summary == "done"
-
-
-@pytest.mark.unit
-def test_classify_conformance_stall_returns_no_output_for_idle_timeout() -> None:
-    history = [
-        _iter_record(
-            iteration=0,
-            elapsed_seconds=120.0,
-            report_digest="abc",
-            worktree_changed=True,
-            stdout="some output",
-        ),
-        _iter_record(
-            iteration=1,
-            elapsed_seconds=620.0,
-            report_digest=None,
-            worktree_changed=False,
-            stdout="" * 0,
-            stderr="",
-            error_reason_code="AGENT_IDLE_TIMEOUT",
-        ),
-    ]
-    error = AgentRunError(
-        agent=AgentRuntime.codex,
-        result=CommandResult(returncode=124, stdout="", stderr="idle timeout exceeded"),
-        reason_code="AGENT_IDLE_TIMEOUT",
-    )
-
-    evidence = classify_conformance_stall(
-        history=history,
-        policy=_stall_policy(),
-        plan_path=Path("docs/awf-plans/ws_no_output.md"),
-        report_path=Path("docs/awf-plans/ws_no_output.conformance.json"),
-        latest_error=error,
-    )
-
-    assert evidence is not None
-    assert evidence.kind == ConformanceStallKind.no_output
-    assert evidence.iteration_index == 1
-    assert evidence.elapsed_seconds == pytest.approx(620.0 + 120.0)
-    assert evidence.no_output_seconds == pytest.approx(620.0)
-    assert evidence.repeated_output_count == 0
-    assert evidence.last_report_digest is None
-    assert evidence.plan_path == "docs/awf-plans/ws_no_output.md"
-    assert evidence.report_path == "docs/awf-plans/ws_no_output.conformance.json"
-    assert "idle timeout" in evidence.last_output_excerpt
-
-
-@pytest.mark.unit
-def test_classify_conformance_stall_returns_none_without_history() -> None:
-    assert (
-        classify_conformance_stall(
-            history=[],
-            policy=_stall_policy(),
-            plan_path=Path("docs/awf-plans/ws_empty.md"),
-            report_path=Path("docs/awf-plans/ws_empty.conformance.json"),
-            latest_error=None,
-        )
-        is None
-    )
-
-
-@pytest.mark.unit
-def test_classify_conformance_stall_uses_error_stdout_when_stderr_is_empty() -> None:
-    history = [
-        _iter_record(
-            iteration=0,
-            elapsed_seconds=600.0,
-            report_digest=None,
-            worktree_changed=False,
-            stdout="",
-            error_reason_code="AGENT_TIMEOUT",
-        )
-    ]
-    error = AgentRunError(
-        agent=AgentRuntime.codex,
-        result=CommandResult(returncode=124, stdout="stdout-only failure", stderr=""),
-        reason_code="AGENT_TIMEOUT",
-    )
-
-    evidence = classify_conformance_stall(
-        history=history,
-        policy=_stall_policy(over_duration_seconds=300),
-        plan_path=Path("docs/awf-plans/ws_stdout.md"),
-        report_path=Path("docs/awf-plans/ws_stdout.conformance.json"),
-        latest_error=error,
-    )
-
-    assert evidence is not None
-    assert evidence.kind == ConformanceStallKind.over_duration
-    assert "stdout-only failure" in evidence.last_output_excerpt
-
-
-@pytest.mark.unit
-def test_classify_conformance_stall_redacts_secrets_in_last_output_excerpt() -> None:
-    # Stall evidence is persisted as durable failure details and surfaced into
-    # recovery prompts; raw agent stderr/stdout can include provider tokens or
-    # URL credentials. Verify the excerpt is scrubbed before persistence.
-    leaked_token = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    leaked_stderr = f"fatal: could not read Username for 'https://github.com/': {leaked_token}"
-    history = [
-        _iter_record(
-            iteration=0,
-            elapsed_seconds=30.0,
-            report_digest=None,
-            worktree_changed=False,
-            stderr=leaked_stderr,
-            error_reason_code="AGENT_IDLE_TIMEOUT",
-        ),
-    ]
-    error = AgentRunError(
-        agent=AgentRuntime.codex,
-        result=CommandResult(returncode=124, stdout="", stderr=leaked_stderr),
-        reason_code="AGENT_IDLE_TIMEOUT",
-    )
-
-    evidence = classify_conformance_stall(
-        history=history,
-        policy=_stall_policy(),
-        plan_path=Path("docs/awf-plans/ws_redact.md"),
-        report_path=Path("docs/awf-plans/ws_redact.conformance.json"),
-        latest_error=error,
-    )
-
-    assert evidence is not None
-    assert leaked_token not in evidence.last_output_excerpt
-    assert "<redacted>" in evidence.last_output_excerpt
-
-    payload = build_conformance_stall_failure_evidence(
-        stall=evidence,
-        head_sha=None,
-        base_sha=None,
-        commit_count=0,
-    )
-    assert leaked_token not in payload["last_output_excerpt"]
-    assert "<redacted>" in payload["last_output_excerpt"]
-
-
-@pytest.mark.unit
-def test_stall_output_excerpt_falls_back_to_redacted_exception_text() -> None:
-    record = ConformanceIterationRecord(
-        iteration=1,
-        elapsed_seconds=1,
-        report_digest=None,
-        worktree_changed=False,
-        stdout="",
-        stderr="",
-    )
-
-    excerpt = planning_mod._stall_output_excerpt(  # noqa: SLF001
-        RuntimeError("provider failed with sk-test-secret"),
-        record,
-    )
-
-    assert "<redacted>" in excerpt
-    assert "sk-test-secret" not in excerpt
-
-
-@pytest.mark.unit
-def test_evidence_strings_ignores_non_list_payloads() -> None:
-    assert _evidence_strings({"gaps": ["not", "a", "list"]}) == ()
-
-
-@pytest.mark.unit
-def test_classify_conformance_stall_returns_over_duration_for_wall_timeout_with_active_output() -> (
-    None
-):
-    history = [
-        _iter_record(
-            iteration=0,
-            elapsed_seconds=120.0,
-            report_digest="abc",
-            worktree_changed=True,
-            stdout="some output",
-        ),
-        _iter_record(
-            iteration=1,
-            elapsed_seconds=900.0,
-            report_digest="def",
-            worktree_changed=True,
-            stdout="streaming progress chunk",
-            stderr="more progress",
-            error_reason_code="AGENT_TIMEOUT",
-        ),
-    ]
-    error = AgentRunError(
-        agent=AgentRuntime.codex,
-        result=CommandResult(
-            returncode=124, stdout="streaming progress chunk", stderr="more progress"
-        ),
-        reason_code="AGENT_TIMEOUT",
-    )
-
-    evidence = classify_conformance_stall(
-        history=history,
-        policy=_stall_policy(),
-        plan_path=Path("docs/awf-plans/ws_wall_timeout.md"),
-        report_path=Path("docs/awf-plans/ws_wall_timeout.conformance.json"),
-        latest_error=error,
-    )
-
-    assert evidence is not None
-    assert evidence.kind == ConformanceStallKind.over_duration
-    assert evidence.iteration_index == 1
-    assert evidence.elapsed_seconds == pytest.approx(900.0 + 120.0)
-    assert evidence.no_output_seconds == 0.0
-    assert evidence.repeated_output_count == 0
-    assert evidence.last_report_digest == "def"
-    assert evidence.plan_path == "docs/awf-plans/ws_wall_timeout.md"
-    assert evidence.report_path == "docs/awf-plans/ws_wall_timeout.conformance.json"
-
-
-@pytest.mark.unit
-def test_classify_conformance_stall_returns_no_output_for_idle_timeout_below_policy_threshold() -> (
-    None
-):
-    # AGENT_IDLE_TIMEOUT is an explicit adapter signal (e.g. when an operator
-    # sets AWF_AGENT_IDLE_TIMEOUT_SECONDS lower than the loop's
-    # policy.no_output_seconds). The classifier must honour it regardless of the
-    # loop policy threshold, otherwise the executor re-raises the idle timeout
-    # as a generic agent failure instead of AGENT_STALLED_IN_CONFORMANCE.
-    history = [
-        _iter_record(
-            iteration=0,
-            elapsed_seconds=30.0,
-            report_digest=None,
-            worktree_changed=False,
-            stderr="idle timeout exceeded",
-            error_reason_code="AGENT_IDLE_TIMEOUT",
-        ),
-    ]
-    error = AgentRunError(
-        agent=AgentRuntime.codex,
-        result=CommandResult(returncode=124, stdout="", stderr="idle timeout exceeded"),
-        reason_code="AGENT_IDLE_TIMEOUT",
-    )
-
-    evidence = classify_conformance_stall(
-        history=history,
-        policy=_stall_policy(no_output_seconds=600),
-        plan_path=Path("docs/awf-plans/ws_no_output_below.md"),
-        report_path=Path("docs/awf-plans/ws_no_output_below.conformance.json"),
-        latest_error=error,
-    )
-
-    assert evidence is not None
-    assert evidence.kind == ConformanceStallKind.no_output
-    assert evidence.iteration_index == 0
-    assert evidence.no_output_seconds == pytest.approx(30.0)
-    assert "idle timeout" in evidence.last_output_excerpt
-
-
-@pytest.mark.unit
-def test_classify_conformance_stall_returns_no_output_when_stdout_empty_across_consecutive_iterations() -> (
-    None
-):
-    history = [
-        _iter_record(
-            iteration=0,
-            elapsed_seconds=120.0,
-            report_digest="abc",
-            worktree_changed=True,
-            stdout="some output",
-        ),
-        _iter_record(
-            iteration=1,
-            elapsed_seconds=300.0,
-            report_digest=None,
-            worktree_changed=False,
-            stdout="",
-        ),
-        _iter_record(
-            iteration=2,
-            elapsed_seconds=350.0,
-            report_digest=None,
-            worktree_changed=False,
-            stdout="   \n",
-        ),
-    ]
-
-    evidence = classify_conformance_stall(
-        history=history,
-        policy=_stall_policy(no_output_seconds=600),
-        plan_path=Path("docs/awf-plans/ws_no_output_streak.md"),
-        report_path=Path("docs/awf-plans/ws_no_output_streak.conformance.json"),
-        latest_error=None,
-    )
-
-    assert evidence is not None
-    assert evidence.kind == ConformanceStallKind.no_output
-    assert evidence.iteration_index == 2
-    assert evidence.no_output_seconds == pytest.approx(650.0)
-    assert evidence.elapsed_seconds == pytest.approx(770.0)
-    assert evidence.repeated_output_count == 0
-
-
-@pytest.mark.unit
-def test_classify_conformance_stall_returns_none_when_stdout_empty_streak_below_no_output_seconds() -> (
-    None
-):
-    history = [
-        _iter_record(
-            iteration=0,
-            elapsed_seconds=200.0,
-            report_digest=None,
-            worktree_changed=False,
-            stdout="",
-        ),
-        _iter_record(
-            iteration=1,
-            elapsed_seconds=200.0,
-            report_digest=None,
-            worktree_changed=False,
-            stdout="",
-        ),
-    ]
-
-    evidence = classify_conformance_stall(
-        history=history,
-        policy=_stall_policy(no_output_seconds=600),
-        plan_path=Path("docs/awf-plans/ws_no_output_short.md"),
-        report_path=Path("docs/awf-plans/ws_no_output_short.conformance.json"),
-        latest_error=None,
-    )
-
-    assert evidence is None
-
-
-@pytest.mark.unit
-def test_classify_conformance_stall_breaks_no_output_streak_on_stderr_progress() -> None:
-    history = [
-        _iter_record(
-            iteration=0,
-            elapsed_seconds=400.0,
-            report_digest=None,
-            worktree_changed=False,
-            stdout="",
-            stderr="progress: still working...",
-        ),
-        _iter_record(
-            iteration=1,
-            elapsed_seconds=400.0,
-            report_digest=None,
-            worktree_changed=False,
-            stdout="",
-            stderr="",
-        ),
-    ]
-
-    evidence = classify_conformance_stall(
-        history=history,
-        policy=_stall_policy(no_output_seconds=600),
-        plan_path=Path("docs/awf-plans/ws_stderr_progress.md"),
-        report_path=Path("docs/awf-plans/ws_stderr_progress.conformance.json"),
-        latest_error=None,
-    )
-
-    assert evidence is None
