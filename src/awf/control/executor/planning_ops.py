@@ -163,6 +163,18 @@ def _plan_artifact_candidate_digests(
     if not plan_dir.is_dir():
         return {}
 
+    # Refuse to follow a plan directory that escapes the worktree via a symlink
+    # anywhere in its path. ``is_dir()`` and ``glob`` both follow symlinks, so a
+    # repo that tracks ``docs/awf-plans`` as a link to a directory outside the
+    # checkout would yield candidates whose lexical paths look in-worktree while
+    # physically living outside it. Near-miss recovery would then ``replace``
+    # those outside paths with the elevated control-plane process, writing
+    # beyond the isolated workspace. Resolve and require physical containment.
+    try:
+        plan_dir.resolve(strict=True).relative_to(worktree_path.resolve(strict=True))
+    except (OSError, ValueError):
+        return {}
+
     candidates: dict[Path, str] = {}
     for candidate in sorted(plan_dir.glob(_PLAN_ARTIFACT_NEAR_MISS_GLOB)):
         if candidate.is_symlink() or not candidate.is_file():

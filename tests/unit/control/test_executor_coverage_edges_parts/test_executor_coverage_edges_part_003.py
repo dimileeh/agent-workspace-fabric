@@ -491,6 +491,36 @@ async def test_planning_required_recovers_single_ignored_near_miss_plan_file(
 
 
 @pytest.mark.unit
+def test_plan_artifact_candidate_digests_rejects_symlinked_plan_dir(
+    tmp_path: Path,
+) -> None:
+    """A plan dir symlinked outside the worktree yields no candidates.
+
+    ``is_dir()``/``glob`` follow symlinks, so a repo tracking
+    ``docs/awf-plans`` as a link to an external directory would otherwise let
+    near-miss recovery ``replace`` files outside the isolated workspace with the
+    elevated control-plane process. Resolution-based containment refuses it.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "docs").mkdir()
+    external = tmp_path / "outside"
+    external.mkdir()
+    # A real near-miss artifact lives in the external dir; following the symlink
+    # would surface it under a lexically-in-worktree path.
+    (external / "ws_escape.md").write_text("# Outside\n", encoding="utf-8")
+    (worktree / "docs" / "awf-plans").symlink_to(external, target_is_directory=True)
+
+    plan_path = Path("docs/awf-plans/ws_escape_plan.md")
+    candidates = executor_planning_ops._plan_artifact_candidate_digests(  # noqa: SLF001
+        worktree,
+        plan_path,
+    )
+
+    assert candidates == {}
+
+
+@pytest.mark.unit
 async def test_planning_required_near_miss_refuses_recovery_on_dirty_baseline(
     tmp_path: Path,
 ) -> None:
