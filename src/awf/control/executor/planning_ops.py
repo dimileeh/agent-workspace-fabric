@@ -261,6 +261,7 @@ def _recover_plan_artifact_near_miss(
     changed_paths_during_planning: Sequence[Path],
     candidates_before: Mapping[Path, str],
     candidates_after: Mapping[Path, str],
+    conformance_report_present: bool,
 ) -> tuple[bool, list[dict[str, object]]]:
     """Recover a single typo-like ignored plan artifact when the rest is clean."""
     required_default_path = Path(INTERNAL_PLAN_ARTIFACT_DIR) / f"{workspace_id}.md"
@@ -274,6 +275,28 @@ def _recover_plan_artifact_near_miss(
     )
     if not changed_candidates:
         return False, []
+
+    # A near-miss recovery presumes the worktree is clean apart from one typoed
+    # plan file. If the planning phase also left a conformance report on disk
+    # (e.g. a prewritten satisfied JSON), the later success path consumes it via
+    # ``_read_text_if_present(report_path) or stdout`` and can short-circuit the
+    # conformance loop on a stale report before the compare call produces fresh
+    # output. The report lives in the same ignored plan dir, so neither the
+    # porcelain dirty diff nor the ``ws_*.md`` candidate snapshot sees it. Refuse
+    # the elevated-trust move while a report is present rather than proceed atop
+    # an ignored side file the recovery never accounted for.
+    if conformance_report_present:
+        return (
+            False,
+            [
+                _near_miss_plan_artifact_evidence(
+                    candidate=candidate,
+                    required_plan_path=required_plan_path,
+                    reason="conformance_report_present",
+                )
+                for candidate in changed_candidates
+            ],
+        )
 
     # The caller's clean check is ``after_plan - before_plan``, so any path that
     # was already dirty before planning is subtracted out and treated as clean.
@@ -822,6 +845,13 @@ async def _run_agent_task_with_optional_planning(
         if plan_file_digest_after is not None and plan_file_digest_after != plan_file_digest_before:
             after_plan = {*after_plan, plan_path}
         else:
+            # The conformance report lives in the same ignored plan dir as the
+            # plan, so it never surfaces in the porcelain dirty diff or the
+            # ``ws_*.md`` candidate snapshot. Detect it directly so a stale
+            # prewritten report blocks the near-miss move (see recovery guard).
+            conformance_report_present = (
+                _digest_file_if_present(worktree_path / report_path) is not None
+            )
             recovered_near_miss, near_miss_plan_artifacts = _recover_plan_artifact_near_miss(
                 worktree_path=worktree_path,
                 workspace_id=workspace.id,
@@ -831,6 +861,7 @@ async def _run_agent_task_with_optional_planning(
                 changed_paths_during_planning=sorted(after_plan - before_plan),
                 candidates_before=plan_candidates_before,
                 candidates_after=plan_candidates_after,
+                conformance_report_present=conformance_report_present,
             )
             if recovered_near_miss:
                 after_plan = {*after_plan, plan_path}

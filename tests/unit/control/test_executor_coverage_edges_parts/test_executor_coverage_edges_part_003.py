@@ -575,6 +575,72 @@ async def test_planning_required_near_miss_refuses_recovery_on_dirty_baseline(
 
 
 @pytest.mark.unit
+async def test_planning_required_near_miss_refuses_recovery_with_stale_report(
+    tmp_path: Path,
+) -> None:
+    """A prewritten conformance report in the ignored plan dir blocks the move.
+
+    The report sits in ``docs/awf-plans`` alongside the plan, so neither the
+    porcelain dirty diff nor the ``ws_*.md`` candidate snapshot sees it. If the
+    recovery moved the typoed plan and proceeded, the conformance success path
+    (``_read_text_if_present(report_path) or stdout``) could consume that stale
+    satisfied JSON instead of the compare call's output. Refuse the move.
+    """
+    worktree = tmp_path / "worktree"
+    required_path = worktree / "docs" / "awf-plans" / "ws_report.md"
+    near_miss_path = worktree / "docs" / "awf-plans" / "ws_reporu.md"
+    stale_report_path = worktree / "docs" / "awf-plans" / "ws_report.json"
+
+    class _StaleReportPlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                near_miss_path.parent.mkdir(parents=True, exist_ok=True)
+                near_miss_path.write_text(
+                    "# Plan\n\nTypoed plan with a co-written report.\n",
+                    encoding="utf-8",
+                )
+                stale_report_path.write_text(
+                    '{"status":"satisfied","summary":"prewritten","gaps":[]}',
+                    encoding="utf-8",
+                )
+            return result
+
+    runner = FakeCommandRunner()
+    _queue_planning_scope_failure_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _StaleReportPlanAdapter("plan written elsewhere")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_report", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-stale-report-near-miss"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.details is not None
+    assert message.details["near_miss_plan_artifacts"] == [
+        {
+            "path": "docs/awf-plans/ws_reporu.md",
+            "required_path": "docs/awf-plans/ws_report.md",
+            "reason": "conformance_report_present",
+            "filename_hamming_distance": 1,
+        }
+    ]
+    # The elevated-trust move must not have happened, and the stale report must
+    # be left for the scope-failure path to surface rather than consumed.
+    assert near_miss_path.exists()
+    assert not required_path.exists()
+    assert len(adapter.prompts) == 1
+
+
+@pytest.mark.unit
 async def test_planning_required_near_miss_fails_when_multiple_candidates(
     tmp_path: Path,
 ) -> None:
