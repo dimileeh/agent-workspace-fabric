@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -11,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
     BITBUCKET_RATE_LIMITED,
-    BITBUCKET_TASK_RESOLVE_FORBIDDEN,
     BitbucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
@@ -42,8 +42,8 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
 from awf.runtime.pr_monitor_runner.types import (
-    ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
@@ -1112,7 +1112,7 @@ async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_ownership_repa
 
 
 @pytest.mark.unit
-async def test_fix_cycle_clears_addressed_thread_state_on_protected_scope_early_return(
+async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_head_object_missing(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1124,72 +1124,156 @@ async def test_fix_cycle_clears_addressed_thread_state_on_protected_scope_early_
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    fixed_thread = ReviewThread(
-        thread_id="T_fixed",
+    thread = ReviewThread(
+        thread_id="T_head",
         path="src/foo.py",
         line=12,
-        body_excerpt="please adjust this first",
+        body_excerpt="please adjust this",
         author="reviewer",
     )
-    blocked_thread = ReviewThread(
-        thread_id="T_blocked",
-        path="src/foo.py",
-        line=24,
-        body_excerpt="then protected scope diff fails",
-        author="reviewer",
-    )
-    state = MonitorState()
 
-    async def _address_thread(**kwargs: object) -> str:
-        thread = kwargs["thread"]
-        assert isinstance(thread, ReviewThread)
-        if thread.thread_id == fixed_thread.thread_id:
-            return "fix_committed"
-        raise ProtectedScopeDiffError("diff baseline unavailable")
-
-    async def _protected_scope_result(**kwargs: object) -> _GitPushResult:
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=str(kwargs["exc"]),
-            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+    async def _head_object_missing(**_kwargs: object) -> str:
+        raise _MonitorHeadObjectMissingError(
+            "HEAD_OBJECT_MISSING_FIX_THREAD_CUSTOM",
+            "HEAD object missing for workspace ws_head_thread and recovery failed",
         )
 
-    monkeypatch.setattr(runner, "_address_thread", _address_thread)
-    monkeypatch.setattr(
-        runner,
-        "_protected_scope_diff_unavailable_push_result",
-        _protected_scope_result,
-    )
+    monkeypatch.setattr(runner, "_address_thread", _head_object_missing)
 
     result = await runner._run_fix_cycle(
-        workspace_id="ws_protected_thread",
+        workspace_id="ws_head_thread",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
         pr_head_sha="abc1234567890def",
-        initial_threads=(fixed_thread, blocked_thread),
+        initial_threads=(thread,),
         initial_reviews=(),
-        state=state,
-        remote_branch="awf/ws_protected_thread",
+        state=MonitorState(),
+        remote_branch="awf/ws_head_thread",
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
     )
 
     assert result.failed is True
-    assert "T_fixed" not in state.threads_addressed_ids
-    assert _review_thread_body_state_key("T_fixed") not in state.threads_addressed_ids
+    assert result.pushed is False
+    assert result.returncode == 1
+    assert result.reason_code == "HEAD_OBJECT_MISSING_FIX_THREAD_CUSTOM"
+    assert "HEAD object missing" in result.stderr
 
 
 @pytest.mark.unit
-async def test_fix_cycle_clears_addressed_thread_state_on_policy_blocked_thread(
+async def test_fix_cycle_falls_back_when_per_item_head_object_is_poisoned(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # #305: a _MonitorPolicyBlockedError on a later thread must roll back items
-    # already addressed this cycle (e.g. a captured defer in publish_dependent_ids),
-    # or they stay marked-addressed-but-unresolved and wedge the merge gate.
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # cat-file start^{commit}
+    cmd.queue_result(returncode=128, stderr="fatal: Not a valid object name poisoned")
+    worktrees_root = tmp_path / "worktrees"
+    worktree_path = worktrees_root / "ws_poisoned_head"
+    worktree_path.mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=worktrees_root,
+    )
+    threads = (
+        ReviewThread(
+            thread_id="T_first",
+            path="src/foo.py",
+            line=12,
+            body_excerpt="please adjust this first",
+            author="reviewer",
+        ),
+        ReviewThread(
+            thread_id="T_second",
+            path="src/foo.py",
+            line=13,
+            body_excerpt="please adjust this second",
+            author="reviewer",
+        ),
+    )
+    operation_start_heads: list[str | None] = []
+
+    async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        return ("start", None)
+
+    async def _no_dirty(**_kwargs: object) -> None:
+        return None
+
+    current_heads = iter(("start", "poisoned"))
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return next(current_heads)
+
+    async def _address(**kwargs: object) -> str:
+        operation_start_heads.append(cast(str | None, kwargs["operation_start_head"]))
+        return "false_positive"
+
+    async def _clean_status(**_kwargs: object) -> PRStatus:
+        return PRStatus(
+            number=42,
+            head_sha="start",
+            mergeable=MergeableState.MERGEABLE,
+            check_state=CheckState.SUCCESS,
+            unresolved_inline_threads=(),
+            unresolved_review_comments=(),
+            base_behind_count=0,
+            merge_state_status=MergeStateStatus.CLEAN,
+        )
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    async def _resolve_thread(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_address_thread", _address)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _clean_status)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
+    monkeypatch.setattr(runner._deps.gh, "resolve_thread", _resolve_thread)
+
+    await runner._run_fix_cycle(
+        workspace_id="ws_poisoned_head",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="start",
+        initial_threads=threads,
+        initial_reviews=(),
+        state=MonitorState(),
+        remote_branch="awf/ws_poisoned_head",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert operation_start_heads == ["start", "start"]
+    cat_file_calls = [call for call in cmd.calls if call.args[-3:-1] == ["cat-file", "-e"]]
+    assert [call.args[-1] for call in cat_file_calls] == [
+        "start^{commit}",
+        "poisoned^{commit}",
+    ]
+    assert all(call.env is not None for call in cat_file_calls)
+    assert all("GIT_OBJECT_DIRECTORY" not in call.env for call in cat_file_calls)
+    assert all("GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env for call in cat_file_calls)
+
+
+@pytest.mark.unit
+async def test_fix_cycle_returns_failed_push_when_review_fix_hits_head_object_missing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
@@ -1197,304 +1281,35 @@ async def test_fix_cycle_clears_addressed_thread_state_on_policy_blocked_thread(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    fixed_thread = ReviewThread(
-        thread_id="T_fixed", path="src/foo.py", line=12, body_excerpt="fix me first", author="rev"
+    review = ReviewComment(
+        comment_id="C_head",
+        body_excerpt="please adjust this",
+        author="reviewer",
     )
-    blocked_thread = ReviewThread(
-        thread_id="T_blocked",
-        path="src/foo.py",
-        line=24,
-        body_excerpt="then policy blocks",
-        author="rev",
-    )
-    state = MonitorState()
 
-    async def _address_thread(**kwargs: object) -> str:
-        thread = kwargs["thread"]
-        assert isinstance(thread, ReviewThread)
-        if thread.thread_id == fixed_thread.thread_id:
-            return "fix_committed"
-        raise _MonitorPolicyBlockedError("Supply-chain policy blocked thread fix.")
+    async def _head_object_missing(**_kwargs: object) -> object:
+        raise _MonitorHeadObjectMissingError(
+            "HEAD_OBJECT_MISSING_FIX_REVIEW_CUSTOM",
+            "HEAD object missing for workspace ws_head_review and recovery failed",
+        )
 
-    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner, "_address_review_comment_result", _head_object_missing)
 
     result = await runner._run_fix_cycle(
-        workspace_id="ws_policy_thread",
+        workspace_id="ws_head_review",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
         pr_head_sha="abc1234567890def",
-        initial_threads=(fixed_thread, blocked_thread),
-        initial_reviews=(),
-        state=state,
-        remote_branch="awf/ws_policy_thread",
+        initial_threads=(),
+        initial_reviews=(review,),
+        state=MonitorState(),
+        remote_branch="awf/ws_head_review",
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
     )
 
     assert result.failed is True
-    assert "Supply-chain policy blocked" in result.stderr
-    assert "T_fixed" not in state.threads_addressed_ids
-    assert _review_thread_body_state_key("T_fixed") not in state.threads_addressed_ids
-
-
-@pytest.mark.unit
-async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """A Bitbucket reviewer task whose resolution PUT is forbidden (403) must
-    downgrade to ``needs_human`` rather than clear the addressed marker (#445).
-
-    Clearing it like a comment thread would re-route the task to AddressComments
-    next poll and re-run the agent forever against a fault it cannot fix (a retry
-    storm). Instead the verdict becomes ``needs_human``: the task stays addressed so
-    it does NOT re-route to the agent, the still-open task keeps blocking merge, and
-    decide() escalates to NotifyHuman. The task-resolution reason code is preserved.
-    """
-    workspace_id = await seed_monitoring_workspace(factory)
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
-    cmd.queue_result(returncode=0, stdout=pr_payload())
-    cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout="newsha\n")
-    task_thread_id = "bbtask:dimileeh/aira-web#42:7"
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-        gh=_BitbucketResolveThreadClient(
-            cmd,
-            BitbucketClientError(
-                operation="bitbucket resolve_task",
-                status=403,
-                body="no task-resolution scope",
-                reason_code=BITBUCKET_TASK_RESOLVE_FORBIDDEN,
-            ),
-        ),
-    )
-    task_thread = ReviewThread(
-        thread_id=task_thread_id,
-        path=None,
-        line=None,
-        body_excerpt="please add a regression test",
-        author="reviewer",
-    )
-    state = MonitorState()
-
-    await runner._run_fix_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        initial_threads=(task_thread,),
-        initial_reviews=(),
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    # The task is downgraded to needs_human (kept addressed → no re-address storm),
-    # NOT cleared.
-    assert state.threads_addressed_ids.get(task_thread_id) == "needs_human"
-    async with factory() as s:
-        ws = await WorkspaceRepository(s).get(workspace_id)
-        assert ws is not None
-        # Not terminated: the forbidden task-resolve is handled in-loop as a blocker.
-        assert ws.status == WorkspaceStatus.monitoring_pr.value
-        retry_events = [
-            event
-            for event in ws.events
-            if event.event_type == "monitor.bitbucket_transient_error_retrying"
-        ]
-        resolution_events = await WorkspaceEventRepository(s).list(
-            workspace_id=workspace_id,
-            event_type="workspace.audit.comment_resolution",
-            limit=10,
-        )
-    # A deterministic 403 fault must not record transient retry events.
-    assert retry_events == []
-    assert len(resolution_events) == 1
-    payload = resolution_events[0].payload
-    assert payload is not None
-    assert payload["action"] == "resolve_thread"
-    assert payload["outcome"] == "needs_human"
-    assert resolution_events[0].reason_code == BITBUCKET_TASK_RESOLVE_FORBIDDEN
-    assert payload["evidence"]["needs_human_thread_count"] == 1
-    # Task body_excerpt should not leak into event payloads.
-    assert "please add a regression test" not in repr(resolution_events[0].payload)
-
-
-@pytest.mark.unit
-async def test_resolve_thread_exhausted_transient_blocks_as_needs_human(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """When a still-open comment thread's resolve keeps hitting a transient forge
-    fault until the bounded retry budget is exhausted, the fix cycle must escalate
-    to ``needs_human`` rather than clear the addressed marker.
-
-    Clearing the marker (the deterministic-fault path) would re-route the still-open
-    thread through AddressComments next poll, immediately re-exhaust the deliberately
-    persisted counter on the next resolve, and re-run the agent every poll — the
-    exact storm the bounded budget exists to prevent. ``needs_human`` keeps the
-    thread UNRESOLVED so the merge gate keeps blocking and decide() routes to
-    NotifyHuman, and the exhausted reason code stays diagnosable in the audit event.
-    """
-    workspace_id = await seed_monitoring_workspace(factory)
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
-    cmd.queue_result(returncode=0, stdout=pr_payload())
-    cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout="newsha\n")
-    cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-    )
-    # A budget of 0 retries exhausts on the first transient resolve fault — no
-    # backoff sleep, straight to the exhausted path within this single fix cycle.
-    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
-    thread = ReviewThread(
-        thread_id="T_resolve",
-        path="src/foo.py",
-        line=12,
-        body_excerpt="please adjust this",
-        author="review-bot",
-    )
-    state = MonitorState()
-
-    await runner._run_fix_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        initial_threads=(thread,),
-        initial_reviews=(),
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    # Escalated to needs_human (kept addressed → no re-address storm), NOT cleared.
-    assert state.threads_addressed_ids.get("T_resolve") == "needs_human"
-    async with factory() as s:
-        ws = await WorkspaceRepository(s).get(workspace_id)
-        assert ws is not None
-        # Not terminated: the workspace keeps polling.
-        assert ws.status == WorkspaceStatus.monitoring_pr.value
-        # Exhaustion is recorded as such; no further backoff sleep happened.
-        exhausted_events = [
-            event
-            for event in ws.events
-            if event.event_type == "monitor.github_transient_error_retry_exhausted"
-        ]
-        assert _retry_events(ws) == []
-        resolution_events = await WorkspaceEventRepository(s).list(
-            workspace_id=workspace_id,
-            event_type="workspace.audit.comment_resolution",
-            limit=10,
-        )
-    assert len(exhausted_events) == 1
-    assert exhausted_events[0].reason_code == "GITHUB_TRANSIENT_RETRY_EXHAUSTED"
-    assert len(resolution_events) == 1
-    payload = resolution_events[0].payload
-    assert payload is not None
-    assert payload["action"] == "resolve_thread"
-    assert payload["outcome"] == "needs_human"
-    assert resolution_events[0].reason_code == "GITHUB_TRANSIENT_RETRY_EXHAUSTED"
-    assert payload["evidence"]["needs_human_thread_count"] == 1
-    assert payload["evidence"]["thread_ids"] == ["T_resolve"]
-    assert "please adjust this" not in repr(resolution_events[0].payload)
-
-
-@pytest.mark.unit
-async def test_resolve_thread_exhausted_transient_bitbucket_blocks_as_needs_human(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """Bitbucket symmetry: an exhausted transient resolve budget on a still-open
-    comment thread escalates to ``needs_human`` with the Bitbucket exhausted reason
-    code, rather than clearing the marker and re-running the agent forever."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    adapter = FakeAdapter()
-    adapter.queue(stdout="Committed fix locally.")
-    cmd.queue_result(returncode=0, stdout=pr_payload())
-    cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout="newsha\n")
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-        gh=_BitbucketResolveThreadClient(
-            cmd,
-            BitbucketClientError(
-                operation="bitbucket resolve_thread",
-                status=429,
-                body="rate limited",
-                reason_code=BITBUCKET_RATE_LIMITED,
-            ),
-        ),
-    )
-    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
-    thread = ReviewThread(
-        thread_id="T_resolve",
-        path="src/foo.py",
-        line=12,
-        body_excerpt="please adjust this",
-        author="review-bot",
-    )
-    state = MonitorState()
-
-    await runner._run_fix_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        initial_threads=(thread,),
-        initial_reviews=(),
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert state.threads_addressed_ids.get("T_resolve") == "needs_human"
-    async with factory() as s:
-        ws = await WorkspaceRepository(s).get(workspace_id)
-        assert ws is not None
-        assert ws.status == WorkspaceStatus.monitoring_pr.value
-        exhausted_events = [
-            event
-            for event in ws.events
-            if event.event_type == "monitor.bitbucket_transient_error_retry_exhausted"
-        ]
-        resolution_events = await WorkspaceEventRepository(s).list(
-            workspace_id=workspace_id,
-            event_type="workspace.audit.comment_resolution",
-            limit=10,
-        )
-    assert len(exhausted_events) == 1
-    assert exhausted_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY_EXHAUSTED"
-    assert len(resolution_events) == 1
-    payload = resolution_events[0].payload
-    assert payload is not None
-    assert payload["action"] == "resolve_thread"
-    assert payload["outcome"] == "needs_human"
-    assert resolution_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY_EXHAUSTED"
-    assert payload["evidence"]["needs_human_thread_count"] == 1
-    assert "please adjust this" not in repr(resolution_events[0].payload)
+    assert result.pushed is False
+    assert result.returncode == 1
+    assert result.reason_code == "HEAD_OBJECT_MISSING_FIX_REVIEW_CUSTOM"
+    assert "HEAD object missing" in result.stderr

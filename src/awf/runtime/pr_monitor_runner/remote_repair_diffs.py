@@ -24,6 +24,7 @@ from awf.control.quality_gates import (
     ProtectedFileDiff,
     diff_classified_protected_paths,
 )
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS,
 )
@@ -187,7 +188,8 @@ async def _changed_paths_between_ref_and_head(
             "-z",
             diff_spec,
             "--",
-        ]
+        ],
+        env=git_env_without_object_lookup_overrides(),
     )
     if not diff_result.ok:
         raise ProtectedScopeDiffError(

@@ -183,6 +183,51 @@ def test_decision_terminal_when_no_fallbacks_configured_and_retries_exhausted() 
     assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
 
 
+def test_codex_capacity_recovery_ignores_blank_default_without_policy_model() -> None:
+    """A blank adapter default is not enough to synthesize a fallback target."""
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "provider": "openai",
+            "model": "gpt-5.1",
+        },
+        task_policy={"provider_recovery": {"max_same_provider_retries": 0}},
+        current_agent="codex",
+        current_model="gpt-5.1",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        effective_default_model="   ",
+    )
+
+    assert decision.action == "terminal"
+    assert decision.target_model is None
+    assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+
+
+def test_codex_capacity_default_fallback_is_not_reused() -> None:
+    """The implicit default-model fallback is a one-shot recovery path."""
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "failure_type": "capacity",
+            "provider": "openai",
+            "model": "gpt-5.1",
+        },
+        task_policy={
+            "provider_recovery": {"max_same_provider_retries": 0},
+            "provider_recovery_state": {"fallback_attempt_number": 1},
+        },
+        current_agent="codex",
+        current_model="gpt-5.1",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        effective_default_model="gpt-5",
+    )
+
+    assert decision.action == "terminal"
+    assert decision.fallback_attempt_number == 1
+    assert decision.terminal_reason == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+
+
 def test_provider_cooldown_not_before_returns_none_when_state_missing() -> None:
     assert provider_cooldown_not_before(None) is None
     assert provider_cooldown_not_before({}) is None

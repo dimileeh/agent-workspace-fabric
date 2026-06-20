@@ -18,10 +18,23 @@ from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
+from awf.node.git_manager import (
+    GitOperationError,
+    git_env_without_object_lookup_overrides,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+)
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
     _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
     _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
@@ -40,6 +53,8 @@ from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_worktree_constants import (
@@ -147,6 +162,7 @@ class _GitPushResult:
         """Return whether protected-scope policy blocked this push."""
         return self.failed and self.reason_code in {
             _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+            _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
             _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
         }
 
@@ -178,6 +194,8 @@ class _GitPushResult:
                 _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
                 _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
                 _PRE_EXISTING_DIRTY_WORKTREE_REASON,
+                _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                _MIRROR_HOOKS_PATH_POISONED_REASON,
                 _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
                 _REPAIR_START_HEAD_UNAVAILABLE_REASON,
                 _REPAIR_WORKTREE_STATUS_FAILED_REASON,
@@ -487,7 +505,8 @@ async def _rev_parse_head(self: Any, worktree_path: Path) -> str | None:
             str(worktree_path),
             "rev-parse",
             "HEAD",
-        ]
+        ],
+        env=git_env_without_object_lookup_overrides(),
     )
     if not result.ok:
         return None
@@ -547,7 +566,30 @@ async def _git_push_result(
             returncode=1,
             stderr=policy_block_message,
         )
-    r = await runner._deps.runner.run(git_worktree_command(worktree_path, "push", remote, refspec))
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.push_mirror_hooks_path_repair_failed",
+                workspace_id=worktree_path.name,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                error_type=exc.__class__.__name__,
+            )
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr="could not repair poisoned mirror hooks path before git push",
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                details={"phase": "git_push"},
+            )
+    git_env = git_env_without_object_lookup_overrides()
+    r = await runner._deps.runner.run(
+        git_worktree_command(worktree_path, "push", remote, refspec),
+        env=git_env,
+    )
     if r.ok:
         pushed = "up-to-date" not in (r.stderr or "").lower()
         return _GitPushResult(
@@ -635,12 +677,14 @@ async def _git_push_result(
                 "fetch",
                 remote_url,
                 f"refs/heads/{remote_branch}",
-            )
+            ),
+            env=git_env,
         )
         reset_target = "FETCH_HEAD"
     else:
         fetch_result = await runner._deps.runner.run(
-            git_worktree_command(worktree_path, "fetch", "origin", remote_branch)
+            git_worktree_command(worktree_path, "fetch", "origin", remote_branch),
+            env=git_env,
         )
         reset_target = f"origin/{remote_branch}"
     if not fetch_result.ok:
@@ -663,7 +707,8 @@ async def _git_push_result(
             stderr=stderr,
         )
     await runner._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", reset_target)
+        git_worktree_command(worktree_path, "reset", "--hard", reset_target),
+        env=git_env,
     )
     return _GitPushResult(
         pushed=False,
@@ -744,10 +789,21 @@ async def _run_sync_base(
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     worktree_path = runner._worktrees_root / workspace_id
+    operation_start_head, head_result = await runner._repair_operation_start_head_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        operation_type="sync_base",
+        fallback_head_sha=pr_head_sha,
+    )
+    if head_result is not None:
+        return head_result
 
     async def _git(*args: str) -> tuple[int, str, str]:
         """Run a git command in the sync-base worktree."""
-        r = await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
+        r = await runner._deps.runner.run(
+            git_worktree_command(worktree_path, *args),
+            env=git_env_without_object_lookup_overrides(),
+        )
         return r.returncode, r.stdout, r.stderr
 
     task_tag = await runner._resolve_task_tag(workspace_id)
@@ -757,6 +813,24 @@ async def _run_sync_base(
         worktree_path=worktree_path,
         base_branch=base_branch,
     )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.sync_base_mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                error_type=exc.__class__.__name__,
+            )
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr="could not repair poisoned mirror hooks path before sync-base merge",
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            )
     merge_args: tuple[str, ...] = ("merge", "--no-edit", f"origin/{base_branch}")
     if task_tag:
         # A clean (conflict-free) base sync produces an AWF-authored merge commit;
@@ -790,9 +864,41 @@ async def _run_sync_base(
             task_tag=task_tag,
         )
         agent_run_err = None
+        post_agent_err: Exception | None = None
         command_evidence: list[str] = []
         if await runner._provider_recovery_suppresses_cli(workspace_id):
             raise ProviderRecoveryRetryError()
+        if not await repair_agent_runtime_ownership(
+            logger=_log,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="monitor_agent_pre_launch",
+            event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+        ):
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr="agent runtime ownership repair failed before sync-base agent launch",
+                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+            )
+        if mirror_path is not None:
+            try:
+                await repair_mirror_hooks_path(mirror_path)
+            except (GitOperationError, OSError) as exc:
+                _log.warning(
+                    "monitor.sync_base_mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    error_type=exc.__class__.__name__,
+                )
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr="could not repair poisoned mirror hooks path before sync-base agent launch",
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                )
         try:
             result = await runner._deps.adapter.run(
                 compose_project=compose_project,
@@ -809,16 +915,41 @@ async def _run_sync_base(
                 stdout=exc.result.stdout,
                 stderr=exc.result.stderr,
             )
-
-        if agent_run_err is not None:
-            await runner._handle_provider_agent_run_error(workspace_id, agent_run_err)
+        except Exception as exc:
+            # Runtime plumbing can fail outside ``AgentRunError`` after the agent
+            # has already mutated the shared sync-base mirror or self-committed.
+            # Repair hooks once; if repair succeeds, still run the dirty-worktree
+            # sink below so its HEAD-object guard can verify/recover the mirror
+            # ref before the original failure is propagated.
+            if mirror_path is not None:
+                try:
+                    await repair_mirror_hooks_path(mirror_path)
+                except (GitOperationError, OSError) as repair_exc:
+                    _log.warning(
+                        "monitor.sync_base_post_agent_mirror_hooks_path_repair_failed",
+                        workspace_id=workspace_id,
+                        reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                        error_type=repair_exc.__class__.__name__,
+                        original_error_type=exc.__class__.__name__,
+                    )
+                    return _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr="could not repair poisoned mirror hooks path after sync-base agent failure",
+                        reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    )
+            post_agent_err = exc
 
         try:
             await runner._commit_dirty_worktree(
                 workspace_id=workspace_id,
                 message=f"fix: resolve PR #{pr_number} base conflicts",
                 command_evidence=command_evidence,
+                compose_project=compose_project,
+                compose_file=compose_file,
                 task_tag=task_tag,
+                operation_start_head=operation_start_head,
             )
         except _MonitorPolicyBlockedError as exc:
             return _GitPushResult(
@@ -826,6 +957,7 @@ async def _run_sync_base(
                 failed=True,
                 returncode=1,
                 stderr=str(exc),
+                reason_code=exc.reason_code,
             )
         except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
             return _GitPushResult(
@@ -835,8 +967,28 @@ async def _run_sync_base(
                 stderr=str(exc),
                 reason_code=exc.reason_code,
             )
+        except _MonitorHeadObjectMissingError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
+        except _MonitorMirrorHooksPathRepairFailedError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
+
+        if post_agent_err is not None:
+            raise post_agent_err
 
         if agent_run_err is not None:
+            await runner._handle_provider_agent_run_error(workspace_id, agent_run_err)
             _log.warning(
                 "monitor.sync_base_cli_failed",
                 workspace_id=workspace_id,
@@ -890,6 +1042,7 @@ async def _run_sync_base(
         compose_file=compose_file,
         remote_url=remote_push_url,
         state=state,
+        operation_start_head=operation_start_head,
     )
 
 

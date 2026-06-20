@@ -203,6 +203,7 @@ async def _verify_recovered_post_agent_commit(
     owned_paths: list[str],
     expected_status: WorkspaceStatus,
     execution_owner_id: str | None = None,
+    mark_failed_on_failure: bool = True,
 ) -> bool:
     changed_paths = sorted(
         await committed_changed_paths_since(
@@ -212,19 +213,20 @@ async def _verify_recovered_post_agent_commit(
         )
     )
     if not changed_paths:
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=expected_status,
-            failure_reason=FailureReason.agent_failure,
-            message=(
-                "AWF recovered a missing Git HEAD object but recovered no "
-                f"committed paths relative to base {base_commit[:10]}"
-            )[:2000],
-            reason_code=GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
-            details={"recovered_stage": "post_agent_commit"},
-        )
+        if mark_failed_on_failure:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=expected_status,
+                failure_reason=FailureReason.agent_failure,
+                message=(
+                    "AWF recovered a missing Git HEAD object but recovered no "
+                    f"committed paths relative to base {base_commit[:10]}"
+                )[:2000],
+                reason_code=GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+                details={"recovered_stage": "post_agent_commit"},
+            )
         return False
-    if await self._fail_if_plan_only_paths(
+    if mark_failed_on_failure and await self._fail_if_plan_only_paths(
         workspace_id=workspace_id,
         changed_paths=changed_paths,
         expected_status=expected_status,
@@ -246,13 +248,14 @@ async def _verify_recovered_post_agent_commit(
     if violations:
         # Pause for an operator decision instead of terminally failing — the
         # recovered commit + worktree are preserved through the block.
-        await self.enter_blocked_for_protected_violation(
-            workspace_id=workspace_id,
-            from_status=expected_status,
-            violations=violations,
-            resume_phase="post_agent_commit_recovery_verify",
-            execution_owner_id=execution_owner_id,
-        )
+        if mark_failed_on_failure:
+            await self.enter_blocked_for_protected_violation(
+                workspace_id=workspace_id,
+                from_status=expected_status,
+                violations=violations,
+                resume_phase="post_agent_commit_recovery_verify",
+                execution_owner_id=execution_owner_id,
+            )
         return False
     ancestor = await self._runner.run(
         [
@@ -267,15 +270,16 @@ async def _verify_recovered_post_agent_commit(
         ]
     )
     if not ancestor.ok:
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=expected_status,
-            failure_reason=FailureReason.agent_failure,
-            message=(
-                "AWF recovered a missing Git HEAD object but recovered HEAD "
-                f"does not descend from base commit {base_commit[:10]}"
-            )[:2000],
-        )
+        if mark_failed_on_failure:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=expected_status,
+                failure_reason=FailureReason.agent_failure,
+                message=(
+                    "AWF recovered a missing Git HEAD object but recovered HEAD "
+                    f"does not descend from base commit {base_commit[:10]}"
+                )[:2000],
+            )
         return False
     return True
 
@@ -289,6 +293,7 @@ async def _verify_recovered_post_agent_commit_or_mark_failed(
     owned_paths: list[str],
     expected_status: WorkspaceStatus,
     execution_owner_id: str | None = None,
+    mark_failed_on_failure: bool = True,
 ) -> bool:
     try:
         return cast(
@@ -300,6 +305,7 @@ async def _verify_recovered_post_agent_commit_or_mark_failed(
                 owned_paths=owned_paths,
                 expected_status=expected_status,
                 execution_owner_id=execution_owner_id,
+                mark_failed_on_failure=mark_failed_on_failure,
             ),
         )
     except Exception as exc:
@@ -307,13 +313,14 @@ async def _verify_recovered_post_agent_commit_or_mark_failed(
             "executor.commit_step_missing_head_recovery_verification_failed",
             workspace_id=workspace_id,
         )
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=expected_status,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=(f"post-agent missing HEAD recovery verification failed: {exc!r}")[:2000],
-            reason_code=GIT_OBJECT_MISSING_REASON_CODE,
-        )
+        if mark_failed_on_failure:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=expected_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(f"post-agent missing HEAD recovery verification failed: {exc!r}")[:2000],
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
         return False
 
 

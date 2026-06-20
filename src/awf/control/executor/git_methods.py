@@ -206,18 +206,20 @@ async def _recover_missing_git_head_or_mark_failed(
     stage: str,
     error: BaseException,
     task_tag: str | None = None,
+    mark_failed_on_failure: bool = True,
 ) -> bool:
     if base_commit is None:
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=from_status,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=(
-                "Git object recovery failed: workspace HEAD points at a "
-                "missing object and base_commit is not available"
-            ),
-            reason_code=GIT_OBJECT_MISSING_REASON_CODE,
-        )
+        if mark_failed_on_failure:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=from_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "Git object recovery failed: workspace HEAD points at a "
+                    "missing object and base_commit is not available"
+                ),
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
         return False
     try:
         recovery = await _recover_missing_head_from_filesystem(
@@ -234,30 +236,32 @@ async def _recover_missing_git_head_or_mark_failed(
             workspace_id=workspace_id,
             stage=stage,
         )
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=from_status,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=(
-                "Git object recovery failed: workspace HEAD points at a "
-                f"missing object during {stage}, but AWF could not run "
-                f"filesystem recovery: {exc!r}"
-            )[:2000],
-            reason_code=GIT_OBJECT_MISSING_REASON_CODE,
-        )
+        if mark_failed_on_failure:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=from_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "Git object recovery failed: workspace HEAD points at a "
+                    f"missing object during {stage}, but AWF could not run "
+                    f"filesystem recovery: {exc!r}"
+                )[:2000],
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
         return False
     if recovery is None:
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=from_status,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=(
-                "Git object recovery failed: workspace HEAD points at a "
-                f"missing object during {stage}, and AWF could not rebuild "
-                f"a valid commit from the filesystem state: {error!r}"
-            )[:2000],
-            reason_code=GIT_OBJECT_MISSING_REASON_CODE,
-        )
+        if mark_failed_on_failure:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=from_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "Git object recovery failed: workspace HEAD points at a "
+                    f"missing object during {stage}, and AWF could not rebuild "
+                    f"a valid commit from the filesystem state: {error!r}"
+                )[:2000],
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
         return False
     try:
         await self._record_git_object_recovery_event(
@@ -271,16 +275,17 @@ async def _recover_missing_git_head_or_mark_failed(
             workspace_id=workspace_id,
             stage=stage,
         )
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=from_status,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=(
-                "Git object recovery failed: rebuilt HEAD during "
-                f"{stage}, but could not record the recovery event: {exc!r}"
-            )[:2000],
-            reason_code=GIT_OBJECT_MISSING_REASON_CODE,
-        )
+        if mark_failed_on_failure:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=from_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "Git object recovery failed: rebuilt HEAD during "
+                    f"{stage}, but could not record the recovery event: {exc!r}"
+                )[:2000],
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
         return False
     return True
 

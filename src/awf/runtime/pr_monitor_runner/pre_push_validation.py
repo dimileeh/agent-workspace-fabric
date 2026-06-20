@@ -24,10 +24,24 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.node.git_manager import (
+    GitOperationError,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+    verify_head_object_exists,
+)
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
+from awf.runtime.ownership import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.pr_monitor_runner.constants import (
-    _MONITOR_POLICY_BLOCKED_REASON,
+    _HEAD_OBJECT_MISSING_RECOVERED_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
@@ -56,14 +70,22 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_failures import (
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass import (
     _cleanup_committed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
     _head_descends_from,  # noqa: F401  (re-exported for tests)
+    _protected_scope_violations_for_recovered_commit,
     _reparent_fix_pass_commit,  # noqa: F401  (re-exported for tests)
     _rollback_failed_pre_push_validation_fix_pass,  # noqa: F401  (re-exported for tests)
     _run_pre_push_validation_fix_pass,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.remote_repair import (
+    _mirror_commit_object_exists,
+    _open_merge_candidate_head_sha,
+    _recover_missing_head_object_from_filesystem,
+)
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation import profile_phase_command_plan
@@ -392,10 +414,11 @@ async def _run_pre_push_validation_with_fix_passes(
                 workspace_id=workspace_id,
                 pass_number=pass_index + 1,
                 error=repr(exc),
+                reason_code=exc.reason_code,
             )
             return replace(
                 validation_result,
-                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+                reason_code=exc.reason_code,
                 message=(
                     "PR monitor pre-push validation fix pass blocked: "
                     f"monitor policy blocked the commit: {exc}"
@@ -415,6 +438,37 @@ async def _run_pre_push_validation_with_fix_passes(
                 message=(
                     "PR monitor pre-push validation fix pass blocked: "
                     f"agent runtime ownership repair failed: {exc}"
+                ),
+            )
+        except _MonitorHeadObjectMissingError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_head_object_missing",
+                workspace_id=workspace_id,
+                pass_number=pass_index + 1,
+                error=repr(exc),
+                reason_code=exc.reason_code,
+            )
+            return replace(
+                validation_result,
+                reason_code=exc.reason_code,
+                message=(
+                    f"PR monitor pre-push validation fix pass blocked: HEAD object missing: {exc}"
+                ),
+            )
+        except _MonitorMirrorHooksPathRepairFailedError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_mirror_hooks_path_poisoned",
+                workspace_id=workspace_id,
+                pass_number=pass_index + 1,
+                error=repr(exc),
+                reason_code=exc.reason_code,
+            )
+            return replace(
+                validation_result,
+                reason_code=exc.reason_code,
+                message=(
+                    "PR monitor pre-push validation fix pass blocked: "
+                    f"mirror hooks path poisoned: {exc}"
                 ),
             )
         if fix_pass_failure_reason is not None:
@@ -576,6 +630,35 @@ def _pre_push_cleanup_result(
     )
 
 
+async def _post_pre_push_validation_mirror_hooks_repair_result(
+    *,
+    workspace_id: str,
+    validation_run_id: str | None,
+    workspace_head_sha: str | None,
+    mirror_path: Path | None,
+) -> _PrePushValidationResult | None:
+    if mirror_path is None:
+        return None
+    try:
+        await repair_mirror_hooks_path(mirror_path)
+    except (GitOperationError, OSError) as exc:
+        _log.warning(
+            "monitor.post_pre_push_validation_mirror_hooks_path_repair_failed",
+            workspace_id=workspace_id,
+            reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            error_type=exc.__class__.__name__,
+        )
+        return _PrePushValidationResult(
+            passed=False,
+            validation_run_id=validation_run_id,
+            workspace_head_sha=workspace_head_sha,
+            reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            message="could not repair poisoned mirror hooks path after pre-push validation",
+            extra_details={"post_validation_mirror_repair_failed": True},
+        )
+    return None
+
+
 async def _run_pre_push_validation(
     self: Any,
     *,
@@ -604,6 +687,236 @@ async def _run_pre_push_validation(
         base_commit = ws.base_commit
 
     workspace_head_sha = await self._rev_parse_head(worktree_path)
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                error_type=exc.__class__.__name__,
+            )
+            return _PrePushValidationResult(
+                passed=False,
+                validation_run_id=None,
+                workspace_head_sha=workspace_head_sha,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                message="could not repair poisoned mirror hooks path before pre-push validation",
+            )
+
+    head_object_exists = await verify_head_object_exists(worktree_path)
+    if not head_object_exists:
+        _log.warning(
+            "monitor.pre_push_validation_head_object_missing",
+            workspace_id=workspace_id,
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+        recovery_head = operation_start_head
+        if recovery_head and mirror_path is not None:
+            recovery_head_exists = await _mirror_commit_object_exists(
+                self, mirror_path, recovery_head
+            )
+            if not recovery_head_exists:
+                _log.warning(
+                    "monitor.pre_push_validation_head_object_missing_recovery_anchor_missing",
+                    workspace_id=workspace_id,
+                    operation_start_head=recovery_head[:10],
+                )
+                recovery_head = None
+        if not recovery_head:
+            recovery_head = await _open_merge_candidate_head_sha(self, workspace_id)
+        if recovery_head is None:
+            return _PrePushValidationResult(
+                passed=False,
+                validation_run_id=None,
+                workspace_head_sha=workspace_head_sha,
+                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                message="HEAD object missing before PR monitor pre-push validation",
+            )
+        command_evidence = tuple(
+            step.command.command
+            for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
+        )
+        try:
+            recovered = await _recover_missing_head_object_from_filesystem(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                operation_start_head=recovery_head,
+                command_evidence=command_evidence,
+            )
+        except _MonitorPolicyBlockedError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_recovered_head_policy_blocked",
+                workspace_id=workspace_id,
+                recovered_head=recovery_head[:10],
+                reason_code=exc.reason_code,
+            )
+            cleanup = await _pre_push_validation_cleanup(
+                self,
+                worktree_path=worktree_path,
+                restore_ref=recovery_head,
+            )
+            if not cleanup.ok:
+                _log.warning(
+                    "monitor.pre_push_validation_recovered_head_policy_blocked_cleanup_failed",
+                    workspace_id=workspace_id,
+                    recovered_head=recovery_head[:10],
+                    cleanup_reason_code=cleanup.reason_code,
+                    cleanup_message=cleanup.message[:400],
+                    cleanup_stderr=cleanup.cleanup_stderr[:400],
+                )
+            return _PrePushValidationResult(
+                passed=False,
+                validation_run_id=None,
+                workspace_head_sha=recovery_head,
+                reason_code=exc.reason_code,
+                message=(
+                    "PR monitor pre-push validation blocked: "
+                    f"recovered HEAD failed supply-chain policy: {exc}"
+                ),
+            )
+        if recovered is None:
+            return _PrePushValidationResult(
+                passed=False,
+                validation_run_id=None,
+                workspace_head_sha=workspace_head_sha,
+                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                message="HEAD object missing before PR monitor pre-push validation",
+            )
+        _log.info(
+            "monitor.pre_push_validation_head_object_missing_recovered",
+            workspace_id=workspace_id,
+            recovered_head=recovered[:10],
+            reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
+        )
+        recovered_paths: tuple[str, ...] = ()
+        if recovered != recovery_head:
+            try:
+                recovered_paths = await self._changed_paths_between_ref_and_head(
+                    worktree_path=worktree_path,
+                    ref=recovery_head,
+                    error_context="for recovered pre-push validation HEAD",
+                )
+            except ProtectedScopeDiffError as exc:
+                _log.warning(
+                    "monitor.pre_push_validation_recovered_head_diff_unavailable",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                    error=repr(exc),
+                )
+                await _pre_push_validation_cleanup(
+                    self,
+                    worktree_path=worktree_path,
+                    restore_ref=recovery_head,
+                )
+                return _PrePushValidationResult(
+                    passed=False,
+                    validation_run_id=None,
+                    workspace_head_sha=recovered,
+                    reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                    message=(
+                        "PR monitor pre-push validation blocked: recovered HEAD "
+                        f"diff unavailable: {exc}"
+                    ),
+                )
+        if recovered_paths:
+            if not await repair_agent_runtime_ownership(
+                logger=_log,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                reason="dirty_worktree_pre_commit",
+                event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            ):
+                _log.warning(
+                    "monitor.pre_push_validation_recovered_head_ownership_repair_failed",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+                )
+                await _pre_push_validation_cleanup(
+                    self,
+                    worktree_path=worktree_path,
+                    restore_ref=recovery_head,
+                )
+                return _PrePushValidationResult(
+                    passed=False,
+                    validation_run_id=None,
+                    workspace_head_sha=recovered,
+                    reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+                    message=(
+                        "PR monitor pre-push validation blocked: "
+                        "agent runtime ownership repair failed for recovered HEAD"
+                    ),
+                )
+            try:
+                violations = await _protected_scope_violations_for_recovered_commit(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    base_ref=recovery_head,
+                    changed_paths=recovered_paths,
+                )
+            except ProtectedScopeDiffError as exc:
+                _log.warning(
+                    "monitor.pre_push_validation_recovered_head_diff_unavailable",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                    error=repr(exc),
+                )
+                await _pre_push_validation_cleanup(
+                    self,
+                    worktree_path=worktree_path,
+                    restore_ref=recovery_head,
+                )
+                return _PrePushValidationResult(
+                    passed=False,
+                    validation_run_id=None,
+                    workspace_head_sha=recovered,
+                    reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                    message=(
+                        "PR monitor pre-push validation blocked: recovered HEAD "
+                        f"diff unavailable: {exc}"
+                    ),
+                )
+            if violations:
+                _log.warning(
+                    "monitor.pre_push_validation_recovered_head_protected_scope_repair_failed",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    paths=[violation.path for violation in violations],
+                    reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                )
+                cleanup = await _pre_push_validation_cleanup(
+                    self,
+                    worktree_path=worktree_path,
+                    restore_ref=recovery_head,
+                )
+                if not cleanup.ok:
+                    _log.warning(
+                        "monitor.pre_push_validation_recovered_head_protected_scope_cleanup_failed",
+                        workspace_id=workspace_id,
+                        recovered_head=recovered[:10],
+                        cleanup_reason_code=cleanup.reason_code,
+                        cleanup_message=cleanup.message[:400],
+                        cleanup_stderr=cleanup.cleanup_stderr[:400],
+                    )
+                return _PrePushValidationResult(
+                    passed=False,
+                    validation_run_id=None,
+                    workspace_head_sha=recovered,
+                    reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                    message=(
+                        "PR monitor pre-push validation blocked: "
+                        "recovered HEAD protected-scope repair failed"
+                    ),
+                )
+        workspace_head_sha = recovered
+
     pre_validation_check = await _pre_push_validation_worktree_check(
         self,
         worktree_path=worktree_path,
@@ -709,6 +1022,14 @@ async def _run_pre_push_validation(
                 status="failed",
                 reason_code=cleanup_result.reason_code,
             )
+            mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                workspace_head_sha=workspace_head_sha,
+                mirror_path=mirror_path,
+            )
+            if mirror_repair_result is not None:
+                return mirror_repair_result
             return _pre_push_cleanup_result(
                 validation_run_id=validation_run_id,
                 workspace_head_sha=workspace_head_sha,
@@ -721,6 +1042,14 @@ async def _run_pre_push_validation(
             status="failed",
             reason_code=exc.reason_code,
         )
+        mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            workspace_head_sha=workspace_head_sha,
+            mirror_path=mirror_path,
+        )
+        if mirror_repair_result is not None:
+            return mirror_repair_result
         return _PrePushValidationResult(
             passed=False,
             validation_run_id=validation_run_id,
@@ -752,6 +1081,14 @@ async def _run_pre_push_validation(
                 status="failed",
                 reason_code=cleanup_result.reason_code,
             )
+            mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                workspace_head_sha=workspace_head_sha,
+                mirror_path=mirror_path,
+            )
+            if mirror_repair_result is not None:
+                return mirror_repair_result
             return _pre_push_cleanup_result(
                 validation_run_id=validation_run_id,
                 workspace_head_sha=workspace_head_sha,
@@ -764,6 +1101,14 @@ async def _run_pre_push_validation(
             status="failed",
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
         )
+        mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            workspace_head_sha=workspace_head_sha,
+            mirror_path=mirror_path,
+        )
+        if mirror_repair_result is not None:
+            return mirror_repair_result
         return _PrePushValidationResult(
             passed=False,
             validation_run_id=validation_run_id,
@@ -784,6 +1129,14 @@ async def _run_pre_push_validation(
             status="failed",
             reason_code=cleanup_result.reason_code,
         )
+        mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+            workspace_id=workspace_id,
+            validation_run_id=validation_run_id,
+            workspace_head_sha=workspace_head_sha,
+            mirror_path=mirror_path,
+        )
+        if mirror_repair_result is not None:
+            return mirror_repair_result
         return _pre_push_cleanup_result(
             validation_run_id=validation_run_id,
             workspace_head_sha=workspace_head_sha,
@@ -838,6 +1191,14 @@ async def _run_pre_push_validation(
         coverage=_validation_run_coverage_metadata(result),
         command_retries=[c.retry_count for c in result.commands],
     )
+    mirror_repair_result = await _post_pre_push_validation_mirror_hooks_repair_result(
+        workspace_id=workspace_id,
+        validation_run_id=validation_run_id,
+        workspace_head_sha=workspace_head_sha,
+        mirror_path=mirror_path,
+    )
+    if mirror_repair_result is not None:
+        return mirror_repair_result
     return _PrePushValidationResult(
         passed=result.all_passed,
         validation_run_id=validation_run_id,

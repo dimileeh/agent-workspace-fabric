@@ -120,6 +120,7 @@ class AsyncCommandRunnerLike(Protocol):
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> Any: ...
 
 

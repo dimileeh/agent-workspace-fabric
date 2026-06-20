@@ -94,6 +94,19 @@ def _status_for_helpers(
     )
 
 
+def _queue_ci_repair_start(
+    cmd: FakeCommandRunner,
+    tmp_path: Path,
+    workspace_id: str,
+    *,
+    head_sha: str = "abc1234567890def",
+) -> None:
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True, exist_ok=True)
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # operation start HEAD
+    cmd.queue_result(returncode=0)  # operation start HEAD exists
+
+
 _PROTECTED_WORKFLOW_OLD = """
 name: CI
 on: [pull_request]
@@ -561,9 +574,11 @@ async def test_ci_fix_protected_scope_repair_ownership_repair_failure_returns_fa
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="attempted ci fix")
+    cmd = FakeCommandRunner()
+    _queue_ci_repair_start(cmd, tmp_path, workspace_id)
     runner = make_runner(
         factory=factory,
-        cmd=FakeCommandRunner(),
+        cmd=cmd,
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
@@ -617,9 +632,11 @@ async def test_ci_fix_ownership_repair_failure_blocks_push(
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="attempted ci fix")
+    cmd = FakeCommandRunner()
+    _queue_ci_repair_start(cmd, tmp_path, workspace_id)
     runner = make_runner(
         factory=factory,
-        cmd=FakeCommandRunner(),
+        cmd=cmd,
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
@@ -682,9 +699,11 @@ async def test_ci_fix_records_provider_agent_run_error_before_commit_sink_early_
         stderr=expected_stderr,
         returncode=1,
     )
+    cmd = FakeCommandRunner()
+    _queue_ci_repair_start(cmd, tmp_path, workspace_id)
     runner = make_runner(
         factory=factory,
-        cmd=FakeCommandRunner(),
+        cmd=cmd,
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
@@ -801,9 +820,11 @@ async def test_ci_fix_preserves_commit_sink_failure_when_provider_recovers(
         stderr=expected_stderr,
         returncode=1,
     )
+    cmd = FakeCommandRunner()
+    _queue_ci_repair_start(cmd, tmp_path, workspace_id)
     runner = make_runner(
         factory=factory,
-        cmd=FakeCommandRunner(),
+        cmd=cmd,
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",

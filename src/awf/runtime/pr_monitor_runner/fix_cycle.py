@@ -21,6 +21,7 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
 )
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     MonitorState,
@@ -45,6 +46,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_TRANSIENT_RETRY_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
 )
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _defer_reason_state_key,
@@ -62,6 +64,8 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 
@@ -122,6 +126,7 @@ async def _run_fix_cycle(
         worktree_path=worktree_path,
         operation_type="comment_repair",
         fallback_head_sha=pr_head_sha,
+        allow_candidate_fallback=False,
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
@@ -149,10 +154,25 @@ async def _run_fix_cycle(
             queued_id for queued_id in threads_to_resolve if queued_id != item_id
         ]
 
+    async def _current_item_operation_start_head() -> str:
+        if not worktree_path.exists():
+            return cast(str, operation_start_head)
+        current_head = cast(str | None, await self._rev_parse_head(worktree_path))
+        if not current_head:
+            return cast(str, operation_start_head)
+        current_head_ok = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "cat-file", "-e", f"{current_head}^{{commit}}"),
+            env=git_env_without_object_lookup_overrides(),
+        )
+        if current_head_ok.ok:
+            return current_head
+        return cast(str, operation_start_head)
+
     for _pass_num in range(self._runner_config.max_fix_cycle_passes):
         # 1) Address each item in the current batch.
         for t in threads:
             try:
+                item_operation_start_head = await _current_item_operation_start_head()
                 verdict = await self._address_thread(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -163,6 +183,7 @@ async def _run_fix_cycle(
                     state=state,
                     owned_paths=owned_paths,
                     task_tag=task_tag,
+                    operation_start_head=item_operation_start_head,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
@@ -187,8 +208,29 @@ async def _run_fix_cycle(
                     failed=True,
                     returncode=1,
                     stderr=str(exc),
+                    reason_code=exc.reason_code,
                 )
             except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
+            except _MonitorHeadObjectMissingError as exc:
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
+            except _MonitorMirrorHooksPathRepairFailedError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
                 return _GitPushResult(
@@ -255,6 +297,7 @@ async def _run_fix_cycle(
                     workflow_scope_resolution_dependent_ids.append(t.thread_id)
         for c in reviews:
             try:
+                item_operation_start_head = await _current_item_operation_start_head()
                 verdict_result = await self._address_review_comment_result(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -265,6 +308,7 @@ async def _run_fix_cycle(
                     state=state,
                     owned_paths=owned_paths,
                     task_tag=task_tag,
+                    operation_start_head=item_operation_start_head,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
@@ -289,8 +333,29 @@ async def _run_fix_cycle(
                     failed=True,
                     returncode=1,
                     stderr=str(exc),
+                    reason_code=exc.reason_code,
                 )
             except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
+            except _MonitorHeadObjectMissingError as exc:
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
+            except _MonitorMirrorHooksPathRepairFailedError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
                 return _GitPushResult(

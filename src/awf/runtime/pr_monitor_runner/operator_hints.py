@@ -36,6 +36,8 @@ from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedS
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 
@@ -182,6 +184,7 @@ async def _run_operator_hint_cycle(
                 compose_file=compose_file,
                 state=state,
                 task_tag=task_tag,
+                operation_start_head=operation_start_head,
             )
         except ProtectedScopeDiffError as exc:
             push_result = cast(
@@ -203,6 +206,26 @@ async def _run_operator_hint_cycle(
             return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
         except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
             reason = str(exc) or "agent runtime ownership repair failed"
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=reason,
+                reason_code=exc.reason_code,
+            )
+        except _MonitorHeadObjectMissingError as exc:
+            reason = str(exc) or "HEAD commit object is missing from the canonical mirror"
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=reason,
+                reason_code=exc.reason_code,
+            )
+        except _MonitorMirrorHooksPathRepairFailedError as exc:
+            reason = str(exc) or "mirror hooks path repair failed"
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(
                 pushed=False,

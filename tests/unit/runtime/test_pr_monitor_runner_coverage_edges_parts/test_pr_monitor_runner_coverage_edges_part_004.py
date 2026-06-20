@@ -814,6 +814,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     for result in [
+        (0, "start-sha\n", ""),
         (0, "", ""),
         (0, "", ""),
         (1, "", "merge conflict"),
@@ -857,7 +858,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
         worktree_path=worktree,
         remote_branch=f"awf/{workspace_id}",
     )
-    assert [call.args[-2:] for call in cmd.calls[:2]] == [
+    assert [call.args[-2:] for call in cmd.calls[1:3]] == [
         ["merge", "--abort"],
         ["origin", "+refs/heads/development:refs/remotes/origin/development"],
     ]
@@ -889,6 +890,7 @@ async def test_sync_base_conflict_supply_chain_command_evidence_blocks_before_co
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     for result in [
+        (0, "start-sha\n", ""),
         (0, "", ""),
         (0, "", ""),
         (1, "", "merge conflict"),
@@ -940,6 +942,7 @@ async def test_sync_base_conflict_ownership_repair_failure_blocks_push(
     workspace_id = await seed_monitoring_workspace(factory)
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
     for result in [
+        (0, "start-sha\n", ""),
         (0, "", ""),
         (0, "", ""),
         (1, "", "merge conflict"),

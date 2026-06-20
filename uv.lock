@@ -46,6 +46,7 @@ dev = [
     { name = "testcontainers" },
     { name = "types-jinja2" },
     { name = "types-pyyaml" },
+    { name = "wrapt" },
 ]
 
 [package.metadata]
@@ -81,6 +82,7 @@ requires-dist = [
     { name = "types-jinja2", marker = "extra == 'dev'", specifier = ">=2.11.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.49.0" },
+    { name = "wrapt", marker = "extra == 'dev'", specifier = ">=2.1.2,<2.2.0" },
 ]
 provides-extras = ["dev"]
 

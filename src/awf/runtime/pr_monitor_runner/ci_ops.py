@@ -20,9 +20,18 @@ from awf.common.command_evidence import (
     append_command_evidence,
 )
 from awf.common.github_client import RepoRef
+from awf.node.git_manager import (
+    GitOperationError,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import (
     fix_ci_prompt,
+)
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor import (
     CheckFailure,
@@ -31,13 +40,14 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.constants import (
-    _MONITOR_POLICY_BLOCKED_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
     _REPAIR_WORKTREE_STATUS_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
 )
 from awf.runtime.pr_monitor_runner.types import (
@@ -46,6 +56,8 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 
@@ -199,6 +211,7 @@ async def _run_ci_fix(
         worktree_path=worktree_path,
         operation_type="ci_repair",
         fallback_head_sha=status.head_sha if status is not None else None,
+        allow_candidate_fallback=False,
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
@@ -214,7 +227,40 @@ async def _run_ci_fix(
         task_tag=task_tag,
     )
     agent_run_err = None
+    post_agent_err: Exception | None = None
     command_evidence: list[str] = []
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="monitor_agent_pre_launch",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="agent runtime ownership repair failed before CI fix agent launch",
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            _log.warning(
+                "monitor.ci_fix_mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                error_type=exc.__class__.__name__,
+            )
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr="could not repair poisoned mirror hooks path before CI fix agent launch",
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            )
     try:
         result = await self._deps.adapter.run(
             compose_project=compose_project,
@@ -231,6 +277,31 @@ async def _run_ci_fix(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+    except Exception as exc:
+        # Runtime plumbing can fail outside ``AgentRunError`` after the agent
+        # has already mutated the shared mirror or self-committed. Repair
+        # hooks once; if repair succeeds, still run the dirty-worktree sink
+        # below so its HEAD-object guard can verify/recover the mirror ref
+        # before the original failure is propagated.
+        if mirror_path is not None:
+            try:
+                await repair_mirror_hooks_path(mirror_path)
+            except (GitOperationError, OSError) as repair_exc:
+                _log.warning(
+                    "monitor.ci_fix_post_agent_mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    error_type=repair_exc.__class__.__name__,
+                    original_error_type=exc.__class__.__name__,
+                )
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr="could not repair poisoned mirror hooks path",
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                )
+        post_agent_err = exc
 
     # The rollback anchor for the provider-recovery ``except`` clause below is
     # captured INSIDE that clause (after ``_commit_dirty_worktree`` raised),
@@ -256,6 +327,7 @@ async def _run_ci_fix(
             compose_file=compose_file,
             command_evidence=command_evidence,
             task_tag=task_tag,
+            operation_start_head=operation_start_head,
         )
     except (
         ProviderRecoveryRetryError,
@@ -372,8 +444,27 @@ async def _run_ci_fix(
             failed=True,
             returncode=1,
             stderr=str(exc),
-            reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+            reason_code=exc.reason_code,
         )
+    except _MonitorHeadObjectMissingError as exc:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=str(exc),
+            reason_code=exc.reason_code,
+        )
+    except _MonitorMirrorHooksPathRepairFailedError as exc:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=str(exc),
+            reason_code=exc.reason_code,
+        )
+
+    if post_agent_err is not None:
+        raise post_agent_err
 
     if agent_run_err is not None:
         # ``_commit_dirty_worktree`` returns False for two reasons: the

@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Protocol
@@ -49,6 +49,7 @@ class AsyncCommandRunner(Protocol):
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult: ...
 
 
@@ -80,6 +81,7 @@ class AsyncioSubprocessRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -87,6 +89,7 @@ class AsyncioSubprocessRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=None if env is None else dict(env),
         )
         try:
             stdout_bytes, stderr_bytes = await proc.communicate(input=input_bytes)
@@ -249,6 +252,7 @@ class _RecordedCall:
     args: list[str]
     input_bytes: bytes | None
     cwd: str | None
+    env: dict[str, str] | None
 
 
 class FakeCommandRunner:
@@ -278,8 +282,16 @@ class FakeCommandRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult:
-        self.calls.append(_RecordedCall(args=list(args), input_bytes=input_bytes, cwd=cwd))
+        self.calls.append(
+            _RecordedCall(
+                args=list(args),
+                input_bytes=input_bytes,
+                cwd=cwd,
+                env=None if env is None else dict(env),
+            )
+        )
         if not self._queued:
             return CommandResult(returncode=0, stdout="", stderr="")
         return self._queued.pop(0)
