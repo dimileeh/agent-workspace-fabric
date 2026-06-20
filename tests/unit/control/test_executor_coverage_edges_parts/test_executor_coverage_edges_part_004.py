@@ -685,6 +685,30 @@ async def test_verify_recovered_post_agent_commit_fails_when_no_paths_recovered(
 
 
 @pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_can_return_false_without_marking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    async def _changed_paths(*_args: object, **_kwargs: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr(executor_quality_methods, "committed_changed_paths_since", _changed_paths)
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_no_paths_cleanup",
+        worktree_path=tmp_path / "worktree",
+        base_commit="a" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+        mark_failed_on_failure=False,
+    )
+    executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
 async def test_verify_recovered_post_agent_commit_stops_on_plan_only_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -849,3 +873,24 @@ async def test_verify_recovered_post_agent_commit_wrapper_marks_infra_failure(
     )
     executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
     assert "verification failed" in executor._mark_failed.await_args.kwargs["message"]  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_wrapper_can_suppress_mark_failed(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._verify_recovered_post_agent_commit = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("verification exploded")
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit_or_mark_failed(
+        workspace_id="ws_verify_wrapper_cleanup",
+        worktree_path=tmp_path / "worktree",
+        base_commit="a" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+        mark_failed_on_failure=False,
+    )
+    executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]

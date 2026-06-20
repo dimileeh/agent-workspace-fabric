@@ -542,7 +542,180 @@ async def test_execute_recovers_missing_head_before_agent_cleanup_failure(
         owned_paths=[],
         expected_status=WorkspaceStatus.running,
         execution_owner_id=None,
+        mark_failed_on_failure=False,
     )
+    assert mark_failed_calls == [
+        {
+            "workspace_id": workspace.id,
+            "from_status": WorkspaceStatus.running,
+            "failure_reason": FailureReason.infrastructure_failure,
+            "message": (
+                "EXEC_PROCESS_CLEANUP_FAILED: agent agent invocation "
+                "awf_agent_cleanup: tagged process still running"
+            ),
+            "reason_code": "EXEC_PROCESS_CLEANUP_FAILED",
+        }
+    ]
+
+
+@pytest.mark.unit
+async def test_execute_preserves_agent_cleanup_failure_when_recovered_head_verify_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile_snapshot = WorkspaceProfile(
+        name="mirror-hooks-agent-cleanup-head-verify-fails"
+    ).model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    workspace = Workspace(
+        id="ws_agent_cleanup_head_verify_fails",
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        branch_name="awf/ws_agent_cleanup_head_verify_fails",
+        base_commit="abc123",
+        task_title="Mirror hooks",
+        task_prompt="Preserve cleanup failure when recovered HEAD verification fails.",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=profile_snapshot,
+    )
+    mirror_path = tmp_path / "mirror.git"
+    worktree_path = tmp_path / "worktrees" / workspace.id
+    mark_failed_calls: list[dict[str, Any]] = []
+    verify_head = AsyncMock(return_value=False)
+    recover_head = AsyncMock(return_value=True)
+    current_status = {"value": WorkspaceStatus.running}
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: Any) -> object:
+            return execution_flow.ValidationResult()
+
+        async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
+            return execution_flow.ValidationResult()
+
+    class _Executor:
+        _config = SimpleNamespace(
+            agent_idle_timeout_seconds=30,
+            agent_wall_timeout_seconds=60,
+            compose_projects_root=tmp_path / "compose",
+            planning_max_iterations_default=6,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        _log_store = None
+        _runner = object()
+        _usage_sampler = None
+        _validation = _Validation()
+
+        async def _begin_execution(self, *_args: object, **_kwargs: object) -> object:
+            return workspace, False, False, None
+
+        async def _reject_unsupported_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _block_open_pr_reexecution_without_recovery(
+            self, *_args: object, **_kwargs: object
+        ) -> object:
+            return SimpleNamespace(blocked=False, recovery=None)
+
+        async def _dispatch_non_feature_task_kind(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _prepare_conformance_salvage_for_execution(
+            self, *_args: object, **_kwargs: object
+        ) -> None:
+            return None
+
+        def _defaults_for(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def _mark_failed(self, **kwargs: Any) -> None:
+            if kwargs["from_status"] != current_status["value"]:
+                return
+            mark_failed_calls.append(kwargs)
+            current_status["value"] = WorkspaceStatus.failed
+
+        async def _finish_active_recovery_operations(self, **_kwargs: Any) -> None:
+            raise AssertionError("no recovery operation should be finished")
+
+        async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+            return None
+
+        async def _record_runtime_toolchain_findings_safe(self, **_kwargs: Any) -> None:
+            return None
+
+        async def _run_agent_git_writability_preflight(self, **_kwargs: Any) -> bool:
+            return True
+
+        async def _ensure_ollama_model_or_mark_failed(self, **_kwargs: Any) -> bool:
+            return True
+
+        async def _recheck_status(self, *_args: object, **_kwargs: object) -> bool:
+            return True
+
+        async def _measure_and_persist_baseline_coverage(self, **_kwargs: Any) -> None:
+            return None
+
+        async def _run_agent_task_with_optional_planning(self, **_kwargs: Any) -> None:
+            raise ComposeExecCleanupError(
+                invocation_id="awf_agent_cleanup",
+                source="agent",
+                label="agent",
+                message="tagged process still running",
+            )
+
+        async def _recover_missing_git_head_or_mark_failed(self, **kwargs: Any) -> bool:
+            return await recover_head(**kwargs)
+
+        async def _verify_recovered_post_agent_commit_or_mark_failed(self, **kwargs: Any) -> bool:
+            assert kwargs["mark_failed_on_failure"] is False
+            if kwargs.get("mark_failed_on_failure", True):
+                await self._mark_failed(
+                    workspace_id=kwargs["workspace_id"],
+                    from_status=kwargs["expected_status"],
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message="post-agent missing HEAD recovery verification failed",
+                    reason_code="GIT_OBJECT_MISSING",
+                )
+            return False
+
+    async def _repair_agent_runtime_ownership(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def _apply_agent_scratch_excludes(**_kwargs: Any) -> None:
+        return None
+
+    async def _repair_mirror_hooks_path(_path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        execution_flow,
+        "get_adapter",
+        lambda *_args, **_kwargs: SimpleNamespace(runtime_scratch_paths=()),
+    )
+    monkeypatch.setattr(
+        execution_flow,
+        "apply_agent_scratch_excludes",
+        _apply_agent_scratch_excludes,
+    )
+    monkeypatch.setattr(
+        execution_flow,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(execution_flow, "mirror_path_for_worktree", lambda _path: mirror_path)
+    monkeypatch.setattr(execution_flow, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+    monkeypatch.setattr(execution_flow, "verify_head_object_exists", verify_head, raising=False)
+
+    await execution_flow.execute(_Executor(), workspace.id)
+
+    verify_head.assert_awaited_once_with(worktree_path)
+    recover_head.assert_awaited_once()
+    assert current_status["value"] == WorkspaceStatus.failed
     assert mark_failed_calls == [
         {
             "workspace_id": workspace.id,
@@ -838,8 +1011,10 @@ async def test_execute_fails_blocked_agent_cleanup_recovery_verification_protect
         async def _recover_missing_git_head_or_mark_failed(self, **kwargs: Any) -> bool:
             return await recover_head(**kwargs)
 
-        async def _verify_recovered_post_agent_commit_or_mark_failed(self, **_kwargs: Any) -> bool:
-            current_status["value"] = WorkspaceStatus.blocked
+        async def _verify_recovered_post_agent_commit_or_mark_failed(self, **kwargs: Any) -> bool:
+            assert kwargs["mark_failed_on_failure"] is False
+            if kwargs.get("mark_failed_on_failure", True):
+                current_status["value"] = WorkspaceStatus.blocked
             return False
 
     async def _repair_agent_runtime_ownership(*_args: object, **_kwargs: object) -> bool:
@@ -878,7 +1053,7 @@ async def test_execute_fails_blocked_agent_cleanup_recovery_verification_protect
     assert mark_failed_calls == [
         {
             "workspace_id": workspace.id,
-            "from_status": WorkspaceStatus.blocked,
+            "from_status": WorkspaceStatus.running,
             "failure_reason": FailureReason.infrastructure_failure,
             "message": (
                 "EXEC_PROCESS_CLEANUP_FAILED: agent agent invocation "
