@@ -1222,6 +1222,10 @@ async def execute(
         resume_disable_fix_passes=resume_disable_fix_passes,
     )
     if validation_result.stop:
+        await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="after validation stop",
+            failure_from_status=WorkspaceStatus.validating,
+        )
         return
     assert profile is not None
     successful_validation_run_id = validation_result.successful_validation_run_id

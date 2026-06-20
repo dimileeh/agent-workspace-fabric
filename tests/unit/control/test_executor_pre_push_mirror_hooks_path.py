@@ -12,6 +12,7 @@ from awf.adapters import registry as _registry  # noqa: F401 - populates adapter
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.executor import execution_flow as execution_flow_module
+from awf.control.executor.validation_cleanup_guards import ExecutionValidationResult
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -137,4 +138,80 @@ async def test_execute_repairs_mirror_hooks_path_after_validation_before_pr_push
         assert ws.status == WorkspaceStatus.failed.value
         assert ws.failure_reason == FailureReason.infrastructure_failure.value
         assert ws.failure_message == "could not repair poisoned mirror hooks path before PR push"
+        assert ws.events[-1].reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+
+
+@pytest.mark.unit
+async def test_execute_repairs_mirror_hooks_path_on_validation_stop(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A terminal validation stop must still repair a poisoned shared mirror."""
+    ws_id = await _seed_ready_workspace(factory)
+    mirror_path = tmp_path / "mirror.git"
+    repair_calls: list[Path] = []
+
+    async def _repair_mirror_hooks_path(path: Path) -> bool:
+        repair_calls.append(path)
+        if len(repair_calls) == 6:
+            raise GitOperationError(
+                operation="mirror.hooks_path_repair",
+                returncode=128,
+                stdout="",
+                stderr="could not lock config file\n",
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+        return True
+
+    async def _run_validation_and_fix_cycle(
+        self: WorkspaceExecutor, **_kwargs: object
+    ) -> ExecutionValidationResult:
+        assert await self._transition_if_current(
+            ws_id,
+            from_status=WorkspaceStatus.running,
+            to=WorkspaceStatus.validating,
+            reason="AGENT_RUN_OK",
+            action="start_validation",
+        )
+        return ExecutionValidationResult(
+            stop=True,
+            successful_validation_run_id=None,
+            successful_validation_workspace_head_sha=None,
+        )
+
+    monkeypatch.setattr(
+        execution_flow_module, "mirror_path_for_worktree", lambda _path: mirror_path
+    )
+    monkeypatch.setattr(
+        execution_flow_module, "repair_mirror_hooks_path", _repair_mirror_hooks_path
+    )
+    monkeypatch.setattr(
+        execution_flow_module._execution_validation,
+        "run_validation_and_fix_cycle",
+        _run_validation_and_fix_cycle,
+    )
+
+    fake.queue_result(returncode=0)  # adapter
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base is-ancestor ok
+
+    await executor.execute(ws_id)
+
+    assert repair_calls == [mirror_path] * 6
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert (
+            ws.failure_message
+            == "could not repair poisoned mirror hooks path after validation stop"
+        )
         assert ws.events[-1].reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
