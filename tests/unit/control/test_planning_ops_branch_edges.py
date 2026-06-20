@@ -589,6 +589,75 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
 
 
 @pytest.mark.unit
+async def test_post_validation_conformance_prompt_anchors_agent_facing_paths(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6LBm4k regression: the post-validation conformance rerun
+    must hand the agent worktree-root-anchored ``/workspace/...`` plan/report
+    paths (like the initial loop, #620) so a rerun from a task subdir cannot
+    write the report under ``apps/console/docs/awf-plans/...`` and trip the
+    scope check. Internal scope logic still uses the relative handoff paths."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    plan_path = Path("docs/awf-plans/ws_post.md")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=1, stdout="", stderr="error: path not tracked")
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+
+    async def _record_event(**kwargs: object) -> None:
+        return None
+
+    executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=plan_path,
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    adapter = _ReportWritingAdapter(report_abs_path=report_abs, content=satisfied)
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+    )
+
+    assert failure is None
+    assert len(adapter.prompts) == 1
+    prompt = adapter.prompts[0]
+    # The agent is instructed to read the plan and write the report at the
+    # worktree-root-anchored paths, immune to the agent's CWD.
+    assert "`/workspace/docs/awf-plans/ws_post.md`" in prompt
+    assert "`/workspace/docs/awf-plans/ws_post.conformance.json`" in prompt
+
+
+@pytest.mark.unit
 async def test_post_validation_conformance_missing_artifact_root_skips_deposit(
     tmp_path: Path,
 ) -> None:

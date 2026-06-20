@@ -56,6 +56,7 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
     PlanConformanceReport,
+    agent_artifact_path,
     build_conformance_failure_evidence,
     build_conformance_prompt,
     parse_conformance_report,
@@ -237,14 +238,20 @@ async def _run_post_validation_conformance_check(
     report_path = worktree_path / handoff.report_path
     before_report_text = _read_text_if_present(report_path)
     before_report_digest = _digest_text(before_report_text) if before_report_text else None
+    # Hand the agent worktree-root-anchored artifact paths so the report lands
+    # at the repo root even if the agent cd's into a task subdir during this
+    # rerun (#620). The relative ``handoff.plan_path``/``handoff.report_path``
+    # keep driving every internal scope check, digest, and cleanup below.
+    agent_plan_path = agent_artifact_path(handoff.plan_path)
+    agent_report_path = agent_artifact_path(handoff.report_path)
     await self._update_subphase(workspace.id, "conformance")
     compare_result = await adapter.run(
         compose_project=compose_project,
         compose_file=compose_file,
         prompt=build_conformance_prompt(
             task_prompt=workspace.task_prompt,
-            plan_path=handoff.plan_path,
-            report_path=handoff.report_path,
+            plan_path=agent_plan_path,
+            report_path=agent_report_path,
             iteration=handoff.iteration + 1,
             validation_evidence=evidence,
         ),
