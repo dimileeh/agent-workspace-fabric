@@ -490,14 +490,18 @@ async def execute(
                 action="baseline_coverage_preflight",
             ):
                 return
-            baseline_coverage = await self._measure_and_persist_baseline_coverage(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                profile=profile,
-                reuse=baseline_coverage,
-                skip_measure=resume_from_blocked,
-            )
+            try:
+                baseline_coverage = await self._measure_and_persist_baseline_coverage(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    profile=profile,
+                    reuse=baseline_coverage,
+                    skip_measure=resume_from_blocked,
+                )
+            except ComposeExecCleanupError:
+                await _repair_mirror_hooks_path_after_agent_cleanup_failure()
+                raise
             if not await self._recheck_status(
                 workspace_id,
                 expected=WorkspaceStatus.running,
