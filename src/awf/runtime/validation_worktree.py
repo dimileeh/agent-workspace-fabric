@@ -747,11 +747,28 @@ async def check_validation_worktree_clean(
         )
     # A stray *empty* internal plan directory at any depth (e.g. left behind by
     # an agent that cd'd into a subdir) is AWF-owned ephemeral state, so drop it
-    # from the dirty snapshot just like the untracked entries above (#620).
+    # from the dirty snapshot just like the untracked entries above (#620). When
+    # the artifact dir's parent chain was created solely to hold it — e.g.
+    # ``apps/console/docs/awf-plans/`` under a checkout lacking
+    # ``apps/console/docs`` — those now-empty ancestors (``apps/console/docs/``,
+    # ``apps/console/`` …) are equally ephemeral and must be dropped too;
+    # otherwise the dirty guard still fails the subdir-CWD case whenever the
+    # artifact dir is empty (created without a file, or after the file is
+    # removed). A genuine non-artifact empty sibling is never an ancestor of the
+    # artifact dir, so it survives as its own candidate and keeps the tree dirty.
+    plan_artifact_ancestor_dirs: set[str] = set()
+    for dir_path in empty_untracked_dirs:
+        if not is_under_internal_plan_artifact_dir(dir_path):
+            continue
+        for parent in PurePosixPath(dir_path.rstrip("/")).parents:
+            if str(parent) == ".":
+                break
+            plan_artifact_ancestor_dirs.add(f"{parent.as_posix()}/")
     empty_untracked_dirs = tuple(
         dir_path
         for dir_path in empty_untracked_dirs
         if not is_under_internal_plan_artifact_dir(dir_path)
+        and dir_path not in plan_artifact_ancestor_dirs
     )
     paths = tuple(
         dict.fromkeys(

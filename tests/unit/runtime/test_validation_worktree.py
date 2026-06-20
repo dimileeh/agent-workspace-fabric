@@ -622,6 +622,67 @@ async def test_check_validation_worktree_clean_suppresses_empty_nested_plan_dir(
 
 
 @pytest.mark.unit
+async def test_check_validation_worktree_clean_suppresses_empty_plan_dir_ancestors(
+    tmp_path: Path,
+) -> None:
+    """Empty ancestors created solely for the plan dir are suppressed too.
+
+    Regression for PR #638 review thread PRRT_kwDOSJAM6s6LBxR6: when the agent's
+    CWD lacks ``apps/console/docs`` and the plan tooling creates an *empty*
+    ``apps/console/docs/awf-plans/`` there, the snapshot records the plan dir AND
+    its now-empty parents (``apps/console/docs/``, ``apps/console/``, ``apps/``).
+    Dropping only the entry that itself matches ``docs/awf-plans`` left the empty
+    ancestors flagging the worktree ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``;
+    they are AWF-owned ephemeral state too and must be dropped.
+    """
+    worktree = _init_fake_worktree(tmp_path)
+    (worktree / "apps" / "console" / "docs" / "awf-plans").mkdir(parents=True)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status that cannot report the empty plan directory chain."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is True
+    assert check.reason_code is None
+    assert check.paths == ()
+    assert check.untracked_paths == ()
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_keeps_empty_sibling_of_plan_dir(
+    tmp_path: Path,
+) -> None:
+    """A non-plan empty sibling in the plan dir's new parent chain stays dirty.
+
+    Suppressing the plan dir and its ancestors must not also swallow a genuine
+    empty directory (``apps/console/docs/other/``) that happens to share the
+    newly-created parent: only the plan dir's ancestors are ephemeral, and the
+    sibling — never an ancestor of the plan dir — keeps the tree dirty.
+    """
+    worktree = _init_fake_worktree(tmp_path)
+    docs = worktree / "apps" / "console" / "docs"
+    (docs / "awf-plans").mkdir(parents=True)
+    (docs / "other").mkdir(parents=True)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status that cannot report the empty directory chain."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert check.untracked_paths == ("apps/console/docs/other/",)
+    assert "apps/console/docs/awf-plans/" not in check.untracked_paths
+
+
+@pytest.mark.unit
 async def test_check_validation_worktree_clean_removes_empty_untracked_dirs_when_asked(
     tmp_path: Path,
 ) -> None:
