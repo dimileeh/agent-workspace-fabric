@@ -31,11 +31,8 @@ from awf.common.task_tag import (
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor import pr_open_step as _pr_open_step
-from awf.control.executor.constants import (
-    _AUDIT_GIT_PUSH_EVENT,
-    _AUDIT_PR_CREATED_EVENT,
-    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
-)
+from awf.control.executor.constants import GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
+from awf.control.executor.execution_pr_handoff import persist_pr_and_handoff
 from awf.control.executor.forge_gate import (
     unsupported_forge_error,
 )
@@ -48,7 +45,6 @@ from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _agent_run_model_for_workspace,
     _call_pr_monitor_factory,
-    _extract_pr_number,
     _failure_reason_for_phase,
     _profile_for_workspace,
     _provider_recovery_default_model_for_monitor_handoff,
@@ -1421,125 +1417,14 @@ async def execute(
         return
 
     # ── Step 4: persist PR URL + (optionally) hand off to monitor ──────
-    async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
-        persisted = await repo.get(workspace_id)
-        if persisted is None:  # pragma: no cover - destroyed mid-flight
-            return
-        if persisted.status != WorkspaceStatus.pushing.value:
-            await self._record_stale_action_skip(
-                repo,
-                persisted,
-                action="persist_pr",
-                expected=WorkspaceStatus.pushing,
-                reason_code="EXECUTOR_STALE_STATUS",
-            )
-            await session.commit()
-            return
-        had_existing_pr_url = bool(persisted.pr_url)
-        persisted.pr_url = pr.url
-        persisted.pr_number = _extract_pr_number(pr.url)
-        if pr.head_sha:
-            persisted.monitor_last_commit_sha = pr.head_sha
-        if persisted.task_kind == "feature_branch_pr" and not persisted.remote_push_branch:
-            persisted.remote_push_branch = (
-                pr.branch or persisted.branch_name or f"awf/{workspace_id}"
-            )
-        pr_reason_code = "PR_UPDATED" if had_existing_pr_url else "PR_OPENED"
-        await self._add_executor_pr_audit_event(
-            repo,
-            persisted,
-            event_type=_AUDIT_GIT_PUSH_EVENT,
-            action="git_push",
-            outcome="succeeded",
-            reason_code=pr_reason_code,
-            branch_name=persisted.branch_name or pr.branch,
-            remote_branch=persisted.remote_push_branch or pr.branch,
-            pr_number=persisted.pr_number,
-            pr_url=persisted.pr_url,
-            source_head_sha=pr.head_sha,
-        )
-        await self._add_executor_pr_audit_event(
-            repo,
-            persisted,
-            event_type=_AUDIT_PR_CREATED_EVENT,
-            action="pr_create",
-            outcome="reused" if had_existing_pr_url else "succeeded",
-            reason_code=pr_reason_code,
-            branch_name=persisted.branch_name or pr.branch,
-            remote_branch=persisted.remote_push_branch or pr.branch,
-            pr_number=persisted.pr_number,
-            pr_url=persisted.pr_url,
-            source_head_sha=pr.head_sha,
-            evidence=pr.open_metadata,
-        )
-        # Resolve which monitor (if any) to hand off to.
-        monitor: _MonitorRunnerProto | None = self._pr_monitor
-        if monitor is None and self._pr_monitor_factory is not None:
-            monitor = _call_pr_monitor_factory(
-                self._pr_monitor_factory,
-                adapter=adapter,
-                profile=profile,
-                workspace=persisted,
-                provider_recovery_default_model=(
-                    _provider_recovery_default_model_for_monitor_handoff(
-                        adapter=adapter,
-                        defaults=defaults,
-                    )
-                ),
-            )
-
-        if monitor is not None:
-            # The monitor owns the final completed/failed transition.
-            await repo.transition(
-                persisted,
-                to=WorkspaceStatus.monitoring_pr,
-                reason_code=pr_reason_code,
-            )
-            await session.commit()
-        else:
-            # Preserve the legacy no-monitor ``pushing -> completed`` contract.
-            await repo.transition(
-                persisted,
-                to=WorkspaceStatus.completed,
-                reason_code=pr_reason_code,
-            )
-            await session.commit()
-
-    if successful_validation_run_id is not None and pr.head_sha:
-        try:
-            await self._set_validation_run_target_head_sha(
-                validation_run_id=successful_validation_run_id,
-                target_head_sha=pr.head_sha,
-            )
-        except Exception:
-            _log.exception(
-                "executor.validation_run_target_head_sha_update_failed",
-                workspace_id=workspace_id,
-                validation_run_id=successful_validation_run_id,
-                target_head_sha=pr.head_sha,
-            )
-
-    if monitor is not None:
-        _log.info(
-            "executor.handoff_to_pr_monitor",
-            workspace_id=workspace_id,
-            pr_url=pr.url,
-        )
-        if not await self._recheck_status(
-            workspace_id,
-            expected=WorkspaceStatus.monitoring_pr,
-            action="run_pr_monitor",
-        ):
-            return
-        await monitor.run(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-        )
-        return
-    _log.info(
-        "executor.completed",
+    await persist_pr_and_handoff(
+        self,
         workspace_id=workspace_id,
-        pr_url=pr.url,
+        pr=pr,
+        adapter=adapter,
+        profile=profile,
+        defaults=defaults,
+        successful_validation_run_id=successful_validation_run_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
     )
