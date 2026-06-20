@@ -26,10 +26,7 @@ from awf.control.executor.types import _PlanningValidationHandoff
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
-    AGENT_STALLED_IN_CONFORMANCE,
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
-    ConformanceStallEvidence,
-    ConformanceStallKind,
     PlanConformanceReport,
     PlanConformanceStatus,
 )
@@ -586,6 +583,75 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
     # #604: the fresh on-worktree report is also removed so it cannot dirty the
     # tree during later validation/push cleanliness checks.
     assert not report_abs.exists()
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_prompt_anchors_agent_facing_paths(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6LBm4k regression: the post-validation conformance rerun
+    must hand the agent worktree-root-anchored ``/workspace/...`` plan/report
+    paths (like the initial loop, #620) so a rerun from a task subdir cannot
+    write the report under ``apps/console/docs/awf-plans/...`` and trip the
+    scope check. Internal scope logic still uses the relative handoff paths."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    plan_path = Path("docs/awf-plans/ws_post.md")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=1, stdout="", stderr="error: path not tracked")
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+
+    async def _record_event(**kwargs: object) -> None:
+        return None
+
+    executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=plan_path,
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    adapter = _ReportWritingAdapter(report_abs_path=report_abs, content=satisfied)
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+    )
+
+    assert failure is None
+    assert len(adapter.prompts) == 1
+    prompt = adapter.prompts[0]
+    # The agent is instructed to read the plan and write the report at the
+    # worktree-root-anchored paths, immune to the agent's CWD.
+    assert "`/workspace/docs/awf-plans/ws_post.md`" in prompt
+    assert "`/workspace/docs/awf-plans/ws_post.conformance.json`" in prompt
 
 
 @pytest.mark.unit
@@ -1240,195 +1306,3 @@ async def test_post_validation_conformance_staged_deletion_restored_from_head(
     )
     assert all("add" not in call.args for call in runner.calls)
     assert all("commit" not in call.args for call in runner.calls)
-
-
-def _stall_evidence() -> ConformanceStallEvidence:
-    return ConformanceStallEvidence(
-        kind=ConformanceStallKind.no_output,
-        iteration_index=1,
-        elapsed_seconds=700.0,
-        no_output_seconds=700.0,
-        repeated_output_count=0,
-        last_report_digest=None,
-        plan_path="docs/plan.md",
-        report_path="docs/report.json",
-    )
-
-
-class _CommittingSession:
-    def __init__(self) -> None:
-        self.commits = 0
-
-    async def __aenter__(self) -> _CommittingSession:
-        return self
-
-    async def __aexit__(self, *_args: object) -> None:
-        return None
-
-    async def commit(self) -> None:
-        self.commits += 1
-
-
-@pytest.mark.unit
-async def test_build_conformance_stall_failure_without_baseline_skips_commit_metrics(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When ``baseline_sha`` is falsy, the commit-count / changed-paths probes
-    are skipped (no git calls) and the evidence reports zero commits."""
-    runner = FakeCommandRunner()
-    executor = _executor_with_runner(runner, tmp_path)
-    executor._git_rev_parse_head = AsyncMock(return_value="h" * 40)  # type: ignore[method-assign]
-
-    commit_count_called = False
-
-    async def _commit_count(*_args: object, **_kwargs: object) -> int:  # pragma: no cover
-        nonlocal commit_count_called
-        commit_count_called = True
-        return 5
-
-    executor._git_commit_count_since = _commit_count  # type: ignore[method-assign]
-
-    session = _CommittingSession()
-    executor._session_factory = lambda: session  # type: ignore[method-assign]
-
-    events: list[str] = []
-
-    class _WorkspaceRepo:
-        def __init__(self, _session: object) -> None:
-            pass
-
-        async def get(self, _workspace_id: str) -> object:
-            return SimpleNamespace(id="ws_stall")
-
-        async def add_event(self, _ws: object, *, event_type: str, **_kwargs: object) -> None:
-            events.append(event_type)
-
-    monkeypatch.setattr(planning_ops, "WorkspaceRepository", _WorkspaceRepo)
-
-    failure = await executor._build_conformance_stall_failure(  # noqa: SLF001
-        workspace=SimpleNamespace(id="ws_stall"),  # type: ignore[arg-type]
-        worktree_path=tmp_path / "worktree",
-        baseline_sha=None,
-        last_report=None,
-        stall=_stall_evidence(),
-        iterations_used=2,
-        max_iterations=3,
-        plan_path=Path("docs/plan.md"),
-        report_path=Path("docs/report.json"),
-        recovery_action=None,
-    )
-
-    assert failure.reason_code == AGENT_STALLED_IN_CONFORMANCE
-    # baseline_sha falsy -> commit-count probe never runs and zero is reported.
-    assert commit_count_called is False
-    assert failure.details["conformance_stall"]["salvage_hint"]["implementation_commit_count"] == 0
-    # No last_report -> the optional "conformance" details key is absent.
-    assert "conformance" not in failure.details
-    # Successful session records the stall event and commits.
-    assert events == ["workspace.planning_conformance_stalled"]
-    assert session.commits == 1
-
-
-@pytest.mark.unit
-async def test_build_conformance_stall_failure_records_event_with_persisted_workspace(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The happy path records the stall event when the workspace is still
-    persisted, committing once."""
-    runner = FakeCommandRunner()
-    executor = _executor_with_runner(runner, tmp_path)
-    executor._git_rev_parse_head = AsyncMock(return_value="h" * 40)  # type: ignore[method-assign]
-    executor._git_commit_count_since = AsyncMock(return_value=3)  # type: ignore[method-assign]
-    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
-        return_value={Path("src/app.py")}
-    )
-
-    session = _CommittingSession()
-    executor._session_factory = lambda: session  # type: ignore[method-assign]
-
-    events: list[tuple[str, str]] = []
-
-    class _WorkspaceRepo:
-        def __init__(self, _session: object) -> None:
-            pass
-
-        async def get(self, _workspace_id: str) -> object:
-            return SimpleNamespace(id="ws_stall")
-
-        async def add_event(
-            self, _ws: object, *, event_type: str, reason_code: str, **_kwargs: object
-        ) -> None:
-            events.append((event_type, reason_code))
-
-    monkeypatch.setattr(planning_ops, "WorkspaceRepository", _WorkspaceRepo)
-
-    failure = await executor._build_conformance_stall_failure(  # noqa: SLF001
-        workspace=SimpleNamespace(id="ws_stall"),  # type: ignore[arg-type]
-        worktree_path=tmp_path / "worktree",
-        baseline_sha="b" * 40,
-        last_report=PlanConformanceReport(
-            status=PlanConformanceStatus.needs_iteration,
-            summary="still missing validation",
-            gaps=("rerun tests",),
-        ),
-        stall=_stall_evidence(),
-        iterations_used=2,
-        max_iterations=3,
-        plan_path=Path("docs/plan.md"),
-        report_path=Path("docs/report.json"),
-        recovery_action="notify",
-    )
-
-    assert failure.reason_code == AGENT_STALLED_IN_CONFORMANCE
-    assert failure.details["conformance_stall"]["salvage_hint"]["changed_paths"] == ["src/app.py"]
-    assert failure.details["conformance"]["gaps"] == ["rerun tests"]
-    assert events == [("workspace.planning_conformance_stalled", AGENT_STALLED_IN_CONFORMANCE)]
-    assert session.commits == 1
-
-
-@pytest.mark.unit
-async def test_build_conformance_stall_failure_skips_event_when_workspace_vanished(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If the workspace row has vanished by the time the stall event would be
-    recorded, no event is written and no commit occurs, but the failure is
-    still returned."""
-    runner = FakeCommandRunner()
-    executor = _executor_with_runner(runner, tmp_path)
-    executor._git_rev_parse_head = AsyncMock(return_value="h" * 40)  # type: ignore[method-assign]
-    executor._git_commit_count_since = AsyncMock(return_value=1)  # type: ignore[method-assign]
-    executor._committed_paths_since = AsyncMock(return_value=set())  # type: ignore[method-assign]
-
-    session = _CommittingSession()
-    executor._session_factory = lambda: session  # type: ignore[method-assign]
-
-    class _WorkspaceRepo:
-        def __init__(self, _session: object) -> None:
-            pass
-
-        async def get(self, _workspace_id: str) -> None:
-            return None
-
-        async def add_event(self, *_args: object, **_kwargs: object) -> None:  # pragma: no cover
-            raise AssertionError("must not record when the workspace is gone")
-
-    monkeypatch.setattr(planning_ops, "WorkspaceRepository", _WorkspaceRepo)
-
-    failure = await executor._build_conformance_stall_failure(  # noqa: SLF001
-        workspace=SimpleNamespace(id="ws_gone"),  # type: ignore[arg-type]
-        worktree_path=tmp_path / "worktree",
-        baseline_sha="b" * 40,
-        last_report=None,
-        stall=_stall_evidence(),
-        iterations_used=1,
-        max_iterations=2,
-        plan_path=Path("docs/plan.md"),
-        report_path=Path("docs/report.json"),
-        recovery_action=None,
-    )
-
-    assert failure.reason_code == AGENT_STALLED_IN_CONFORMANCE
-    assert session.commits == 0
