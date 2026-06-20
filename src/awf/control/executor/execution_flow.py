@@ -698,7 +698,8 @@ async def execute(
         )
     except Exception as exc:  # unexpected — surface with generic reason
         if _git_error_indicates_missing_head_object(str(exc)):
-            if await self._recover_missing_git_head_or_mark_failed(
+            recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
+            if recover_missing_head is not None and await recover_missing_head(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 base_commit=ws.base_commit,
@@ -1156,16 +1157,19 @@ async def execute(
         # recovery fall-through redeposits at the post-validation block.
         _deposit_planning_artifacts()
         if _git_error_indicates_missing_head_object(str(exc)):
-            if await self._recover_missing_git_head_or_mark_failed(
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                base_commit=base_commit,
-                branch_name=expected_branch,
-                from_status=WorkspaceStatus.running,
-                stage="post_agent_commit",
-                error=exc,
-                task_tag=ws.task_tag,
-            ):
+            recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
+            if recover_missing_head is not None:
+                if not await recover_missing_head(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    base_commit=base_commit,
+                    branch_name=expected_branch,
+                    from_status=WorkspaceStatus.running,
+                    stage="post_agent_commit",
+                    error=exc,
+                    task_tag=ws.task_tag,
+                ):
+                    return
                 _log.warning(
                     "executor.commit_step_missing_head_recovered",
                     workspace_id=workspace_id,
@@ -1180,6 +1184,13 @@ async def execute(
                 ):
                     return
             else:
+                _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=f"post-agent commit step failed: {exc!r}"[:2000],
+                )
                 return
         else:
             _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
