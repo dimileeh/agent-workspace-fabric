@@ -535,6 +535,100 @@ class TestFindOrCreateReleasePr:
         ]
 
     @pytest.mark.unit
+    async def test_transient_create_failure_recheck_list_error_retries_then_succeeds(
+        self,
+    ) -> None:
+        # The post-create reconcile ``gh pr list`` itself fails. That call raises
+        # ``PullRequestMetadataError`` (not ``GitHubClientError``); the lookup must
+        # treat it as a failed reconcile so the bounded transient-retry loop still
+        # runs instead of letting the metadata error escape.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(returncode=1, stderr="HTTP 500 from GitHub")  # gh pr create -> fails
+        fake.queue_result(
+            returncode=1, stderr="HTTP 502 from GitHub"
+        )  # gh pr list recheck -> errors
+        fake.queue_result(returncode=0, stdout="https://github.com/o/r/pull/321\n")
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=321))  # gh pr view
+        gh = GitHubClient(fake)
+        slept: list[float] = []
+
+        async def _record_sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        metadata, created = await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body="b",
+            sleep=_record_sleep,
+        )
+
+        assert created is True
+        assert metadata.number == 321
+        assert slept == [5.0]
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "view"],
+        ]
+
+    @pytest.mark.unit
+    async def test_duplicate_create_failure_recheck_list_error_retries_lookup(self) -> None:
+        # A duplicate (non-transient) create failure whose reconcile ``gh pr list``
+        # errors must still drive the duplicate-lookup retry: the
+        # ``PullRequestMetadataError`` is caught as a failed lookup rather than
+        # escaping and bypassing the retry path.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(
+            returncode=1,
+            stderr='a pull request for branch "development" into branch "main" already exists',
+        )  # gh pr create -> duplicate rejected
+        fake.queue_result(
+            returncode=1, stderr="HTTP 500 from GitHub"
+        )  # gh pr list recheck -> errors
+        fake.queue_result(
+            returncode=1,
+            stderr='a pull request for branch "development" into branch "main" already exists',
+        )  # gh pr create (retry) -> still duplicate
+        fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=88))  # recheck -> found
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=88))  # gh pr view
+        gh = GitHubClient(fake)
+
+        async def _no_sleep(_seconds: float) -> None:
+            return None
+
+        metadata, created = await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body="b",
+            sleep=_no_sleep,
+        )
+
+        assert created is False
+        assert metadata.number == 88
+        # First recheck errors (caught, not escaped) -> the duplicate-lookup retry
+        # re-runs create, whose recheck then adopts the raced PR.
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+            ["gh", "pr", "view"],
+        ]
+
+    @pytest.mark.unit
     async def test_deterministic_create_failure_reraises_without_recheck(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none

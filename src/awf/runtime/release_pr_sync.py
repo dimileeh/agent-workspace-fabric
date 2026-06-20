@@ -28,6 +28,7 @@ from awf.common.forge import ForgeClient
 from awf.common.github_client import (
     GitHubClientError,
     PullRequestAdoptionMetadata,
+    PullRequestMetadataError,
     RepoRef,
     fetch_pull_request_adoption_metadata,
     list_open_pull_requests_for_branch,
@@ -257,6 +258,18 @@ async def _lookup_release_pr_after_create_failure(
             "operation": exc.operation,
             "returncode": exc.returncode,
             "error_message": exc.stderr.strip(),
+        }
+    except PullRequestMetadataError as exc:
+        # ``gh pr list`` (via ``list_open_pull_requests_for_branch``) raises this
+        # rather than ``GitHubClientError``. Treat it as a failed lookup so the
+        # bounded create-retry / duplicate-lookup-retry loop still runs instead
+        # of letting it escape and bypass the retry path entirely.
+        detail = exc.detail or {}
+        return None, {
+            "status": "failed",
+            "operation": "gh pr list",
+            "returncode": detail.get("returncode"),
+            "error_message": exc.message.strip(),
         }
     return number, {"status": "found" if number is not None else "not_found", "number": number}
 
