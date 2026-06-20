@@ -218,11 +218,14 @@ async def _repair_operation_start_head_result(
         stderr: str,
     ) -> tuple[str, _GitPushResult | None]:
         mirror_path = mirror_path_for_worktree(worktree_path)
-        fallback_exists = (
-            await _mirror_commit_object_exists(self, mirror_path, fallback_head)
-            if mirror_path is not None
-            else await _worktree_commit_object_exists(self, worktree_path, fallback_head)
-        )
+        if mirror_path is not None:
+            fallback_exists = await _mirror_commit_object_exists(self, mirror_path, fallback_head)
+        elif worktree_path.exists():
+            fallback_exists = await _worktree_commit_object_exists(
+                self, worktree_path, fallback_head
+            )
+        else:
+            fallback_exists = await verify_head_object_exists(worktree_path)
         if not fallback_exists:
             _log.warning(
                 "monitor.repair_operation_start_head_fallback_unavailable",
