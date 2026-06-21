@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -58,6 +59,9 @@ from awf.control.executor.mirror_hooks_repair import (
     repair_mirror_hooks_path_after_agent_cleanup_failure,
     repair_mirror_hooks_path_or_mark_failed,
 )
+from awf.control.executor.missing_head_recovery import (
+    recover_missing_head_after_cleanup_failure,
+)
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
@@ -72,9 +76,10 @@ from awf.control.executor.recovery_payloads import (
     _recovery_needs_existing_pr_push,
     _validate_only_recovery_target_head_sha,
 )
-from awf.control.executor.state_ops import _sync_resolved_profile
+from awf.control.executor.state_ops import ProviderFailureDivert, _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import (
+    PauseResumeReason,
     _MonitorRebaseRecoveryError,
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
@@ -112,7 +117,7 @@ async def execute(
     *,
     execution_owner_id: str | None = None,
     execution_lease_expires_at: datetime | None = None,
-    resume_from_blocked: bool = False,
+    resume_reason: PauseResumeReason | None = None,
 ) -> None:
     """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
 
@@ -120,17 +125,27 @@ async def execute(
     workspace that is not currently in ``ready`` — useful when a poll
     loop races with a manual invocation.
 
-    ``resume_from_blocked`` re-enters a workspace the worker already moved
+    ``resume_reason == "blocked"`` re-enters a workspace the worker already moved
     ``blocked -> running`` after an operator resolved a protected quality-gate
     violation; ``_begin_execution`` decides whether to re-run the agent (a
     revert/redo directive) or skip it (an approve-and-keep grant). Active
     operator grants are honored by every gate and consumed once the gate passes;
     if a protected violation still stands the gate re-blocks (bumping
     ``block_epoch``, invalidating the now-stale grants).
+
+    ``resume_reason == "recovering"`` re-enters a workspace the worker moved
+    ``recovering -> running`` after the provider cooldown elapsed (#612): a fresh
+    agent re-run on the worker-reset worktree with no operator-grant/baseline
+    replay. Only the ``blocked`` resume consumes grants and reuses the persisted
+    baseline, so those are gated on ``resume_from_blocked`` below.
     """
+    # ``blocked`` is the only resume that reuses the persisted baseline
+    # (``skip_measure``) and consumes operator grants after the push CAS; the
+    # ``recovering`` resume re-measures and has no grants to consume.
+    resume_from_blocked = resume_reason == "blocked"
     begin = await self._begin_execution(
         workspace_id,
-        resume_from_blocked=resume_from_blocked,
+        resume_reason=resume_reason,
         execution_owner_id=execution_owner_id,
         execution_lease_expires_at=execution_lease_expires_at,
     )
@@ -277,78 +292,20 @@ async def execute(
     async def _repair_hooks_after_agent_cleanup_failure() -> bool:
         return await _repair_mirror_hooks_path_after_cleanup_failure()
 
-    async def _recover_missing_head_after_setup_cleanup_failure(
-        exc: ComposeExecCleanupError,
-    ) -> bool:
-        if await verify_head_object_exists(worktree_path):
-            return True
-        recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
-        if recover_missing_head is None:
-            return False
-        recovered = await recover_missing_head(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=ws.base_commit,
-            branch_name=expected_branch,
-            from_status=WorkspaceStatus.running,
-            stage="profile_setup_cleanup_failure",
-            error=exc,
-            task_tag=ws.task_tag,
-            mark_failed_on_failure=False,
-        )
-        return bool(recovered)
-
-    async def _recover_missing_head_after_baseline_cleanup_failure(
-        exc: ComposeExecCleanupError,
-    ) -> bool:
-        if await verify_head_object_exists(worktree_path):
-            return True
-        recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
-        if recover_missing_head is None:
-            return False
-        recovered = await recover_missing_head(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=ws.base_commit,
-            branch_name=expected_branch,
-            from_status=WorkspaceStatus.running,
-            stage="baseline_coverage_cleanup_failure",
-            error=exc,
-            task_tag=ws.task_tag,
-            mark_failed_on_failure=False,
-        )
-        return bool(recovered)
-
-    async def _recover_missing_head_after_agent_cleanup_failure(
-        exc: ComposeExecCleanupError,
-    ) -> bool:
-        if await verify_head_object_exists(worktree_path):
-            return True
-        recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
-        if recover_missing_head is None:
-            return False
-        if not await recover_missing_head(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=ws.base_commit,
-            branch_name=expected_branch,
-            from_status=WorkspaceStatus.running,
-            stage="agent_run_cleanup_failure",
-            error=exc,
-            task_tag=ws.task_tag,
-            mark_failed_on_failure=False,
-        ):
-            return False
-        recovered_commit_verified = await self._verify_recovered_post_agent_commit_or_mark_failed(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=ws.base_commit,
-            owned_paths=list(ws.owned_paths),
-            expected_status=WorkspaceStatus.running,
-            execution_owner_id=execution_owner_id,
-            mark_failed_on_failure=False,
-        )
-        return bool(recovered_commit_verified)
+    # Bind the worktree-scoped recovery args once; each cleanup-failure path
+    # supplies only its ``stage`` (plus the post-agent commit re-verify for the
+    # agent-run path). ``verify_head_object_exists`` is captured here so test
+    # monkeypatches on this module's name still apply.
+    _recover_missing_head_after_cleanup_failure = partial(
+        recover_missing_head_after_cleanup_failure,
+        executor=self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        base_commit=ws.base_commit,
+        branch_name=expected_branch,
+        task_tag=ws.task_tag,
+        verify_head_object_exists_fn=verify_head_object_exists,
+    )
 
     try:
         agent = AgentRuntime(ws.agent)
@@ -454,7 +411,9 @@ async def execute(
                 failure_stage="after profile setup cleanup failure"
             ):
                 return
-            if not await _recover_missing_head_after_setup_cleanup_failure(exc):
+            if not await _recover_missing_head_after_cleanup_failure(
+                exc, stage="profile_setup_cleanup_failure"
+            ):
                 raise
             raise
         try:
@@ -587,7 +546,9 @@ async def execute(
             except ComposeExecCleanupError as exc:
                 if not await _repair_mirror_hooks_path_after_cleanup_failure():
                     return
-                if not await _recover_missing_head_after_baseline_cleanup_failure(exc):
+                if not await _recover_missing_head_after_cleanup_failure(
+                    exc, stage="baseline_coverage_cleanup_failure"
+                ):
                     raise
                 raise
             if not await self._recheck_status(
@@ -620,7 +581,13 @@ async def execute(
             except ComposeExecCleanupError as exc:
                 if not await _repair_hooks_after_agent_cleanup_failure():
                     return
-                if not await _recover_missing_head_after_agent_cleanup_failure(exc):
+                if not await _recover_missing_head_after_cleanup_failure(
+                    exc,
+                    stage="agent_run_cleanup_failure",
+                    owned_paths=list(ws.owned_paths),
+                    execution_owner_id=execution_owner_id,
+                    verify_post_agent_commit=True,
+                ):
                     raise
                 raise
             except AgentRunError:
@@ -1065,6 +1032,31 @@ async def execute(
                 # Plan/Validation controls. This branch returns before the
                 # post-validation deposit block. Best-effort and idempotent.
                 _deposit_planning_artifacts()
+                # A retryable provider failure with retry budget remaining diverts
+                # into the auto-healing ``recovering`` pause INSTEAD of going
+                # terminal: the warm stack + worktree + execution claim survive the
+                # provider cooldown and the agent is re-run in place (#612). The
+                # decision (classify + budget) is the SAME one the fail-and-relaunch
+                # path runs downstream, hoisted here so the divert lands before the
+                # terminal teardown (T7). Gated on
+                # ``agent_run_failure_reason == agent_failure`` — the same gate as
+                # the provider-recovery call below — so the recovered missing-HEAD
+                # path (which also sets ``agent_run_reason_code``) never diverts.
+                if agent_run_failure_reason == FailureReason.agent_failure:
+                    divert = await self.enter_recovering_for_provider_failure(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        message=message,
+                        reason_code=agent_run_reason_code,
+                        details=agent_run_details,
+                        execution_owner_id=execution_owner_id,
+                    )
+                    # ``paused`` (entered ``recovering`` for in-place retry) or
+                    # ``fenced`` (a newer claimant holds the running row — a stale
+                    # executor must not drive it to ``failed`` via the non-owner-gated
+                    # ``_mark_failed`` below) both skip the terminal teardown.
+                    if divert is not ProviderFailureDivert.terminal:
+                        return
                 # Provider recovery reads the failed state event, so
                 # persist the structured reason/details first. The
                 # recovery service creates an authorized delayed retry

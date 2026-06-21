@@ -79,6 +79,7 @@ from awf.db.repositories.workspace_repo_host_ports import (
 )
 from awf.db.repositories.workspace_repo_resumable import (
     list_resumable_blocked_ids,
+    list_resumable_recovering_ids,
 )
 
 
@@ -261,8 +262,22 @@ class WorkspaceRepository:
         await self._session.execute(stmt)
         await self._session.flush()
 
-    async def get(self, workspace_id: str) -> Workspace | None:
-        """Return a workspace by primary key, if it exists."""
+    async def get(self, workspace_id: str, *, populate_existing: bool = False) -> Workspace | None:
+        """Return a workspace by primary key, if it exists.
+
+        Pass ``populate_existing=True`` to force a DB round-trip that refreshes the
+        identity-mapped instance instead of returning the session-cached row. This
+        is required after a failed owner-gated CAS that races a newer claimant: a
+        plain ``session.get`` would return the stale instance loaded before the
+        claim moved, defeating the fence check that reads ``execution_claimed_by``.
+        """
+        if populate_existing:
+            stmt = (
+                select(Workspace)
+                .where(Workspace.id == workspace_id)
+                .execution_options(populate_existing=True)
+            )
+            return (await self._session.execute(stmt)).scalar_one_or_none()
         return await self._session.get(Workspace, workspace_id)
 
     async def get_with_secret_leases(self, workspace_id: str) -> Workspace | None:
@@ -695,6 +710,31 @@ class WorkspaceRepository:
             self._session,
             self._dialect_name,
             limit=limit,
+            exclude_ids=exclude_ids,
+            node_id=node_id,
+        )
+
+    async def list_resumable_recovering_ids(
+        self,
+        *,
+        limit: int,
+        now: datetime,
+        exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
+    ) -> builtins.list[str]:
+        """Return ``recovering`` workspace IDs whose provider cooldown elapsed (#612).
+
+        A ``recovering`` workspace is resumable once ``now`` has reached the
+        provider cooldown deadline persisted at
+        ``task_policy.provider_recovery_state.not_before``; rows still inside the
+        cooldown are excluded so the worker does not resume early. Node-scoped and
+        FIFO by ``updated_at`` exactly like ``list_resumable_blocked_ids``.
+        """
+        return await list_resumable_recovering_ids(
+            self._session,
+            self._dialect_name,
+            limit=limit,
+            now=now,
             exclude_ids=exclude_ids,
             node_id=node_id,
         )

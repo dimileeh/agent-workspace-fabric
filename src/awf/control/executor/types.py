@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from awf.runtime.planning import PlanConformanceReport
 from awf.runtime.validation import ValidationCoverageResult
+
+# A non-terminal pause that the worker resumes in place. ``blocked`` is the
+# operator-driven protected-gate pause (revert/redo directive or approve-and-keep
+# grant); ``recovering`` is the auto-healing provider-failure pause (#612) that
+# re-runs the agent in place once the cooldown elapses. Both flow through one
+# resume concurrency path (epoch-fenced CAS + execution-claim heartbeat).
+PauseResumeReason = Literal["blocked", "recovering"]
 
 
 @dataclass(frozen=True)

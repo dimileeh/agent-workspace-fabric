@@ -33,6 +33,7 @@ from awf.control.executor import monitor_handoff as _monitor_handoff
 from awf.control.executor.config import ExecutorConfig
 from awf.control.executor.mixins import ExecutorDelegatesMixin  # noqa: E402
 from awf.control.executor.protocols import _MonitorRunnerProto
+from awf.control.executor.types import PauseResumeReason
 from awf.db.enums import AgentRuntime
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.logs import LogStore
@@ -99,6 +100,30 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
             execution_lease_expires_at=execution_lease_expires_at,
         )
 
+    async def resume_paused_execution(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: PauseResumeReason,
+        execution_owner_id: str | None = None,
+        execution_lease_expires_at: datetime | None = None,
+    ) -> None:
+        """Resume a non-terminal paused workspace the worker re-claimed to ``running``.
+
+        One shared resume entry for both pause causes; ``reason`` selects the
+        ``_begin_execution`` branch. ``blocked`` (operator-cleared protected-gate
+        pause) honors operator directives/grants and may skip the agent;
+        ``recovering`` (auto-healing provider-failure pause, #612) is a fresh agent
+        re-run on the worker-reset worktree. The execution claim was already
+        (re-)acquired by the worker's epoch-fenced resume CAS."""
+        return await _execution_flow.execute(
+            self,
+            workspace_id=workspace_id,
+            execution_owner_id=execution_owner_id,
+            execution_lease_expires_at=execution_lease_expires_at,
+            resume_reason=reason,
+        )
+
     async def resume_blocked_execution(
         self: Any,
         workspace_id: str,
@@ -108,16 +133,35 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
     ) -> None:
         """Resume a ``blocked`` workspace the worker has re-claimed to ``running``.
 
-        Drives the normal execution flow in ``resume_from_blocked`` mode: an
-        approve-and-keep grant skips the agent and re-runs setup + validation; a
-        revert/redo directive re-invokes the agent. The execution claim was
-        already (re-)acquired by the worker's epoch-fenced resume CAS."""
-        return await _execution_flow.execute(
-            self,
-            workspace_id=workspace_id,
+        Thin shim over ``resume_paused_execution(reason="blocked")`` — kept so the
+        worker's blocked-resume dispatch and existing tests address the pause by
+        its public name. An approve-and-keep grant skips the agent and re-runs
+        setup + validation; a revert/redo directive re-invokes the agent."""
+        await self.resume_paused_execution(
+            workspace_id,
+            reason="blocked",
             execution_owner_id=execution_owner_id,
             execution_lease_expires_at=execution_lease_expires_at,
-            resume_from_blocked=True,
+        )
+
+    async def resume_recovering_execution(
+        self: Any,
+        workspace_id: str,
+        *,
+        execution_owner_id: str | None = None,
+        execution_lease_expires_at: datetime | None = None,
+    ) -> None:
+        """Resume a ``recovering`` workspace the worker re-claimed to ``running`` (#612).
+
+        Thin shim over ``resume_paused_execution(reason="recovering")``. A fresh
+        agent re-run on the same warm stack after the provider cooldown elapsed —
+        the worker has already stashed + reset the worktree to HEAD before this
+        runs, so it re-runs the agent from the last clean commit."""
+        await self.resume_paused_execution(
+            workspace_id,
+            reason="recovering",
+            execution_owner_id=execution_owner_id,
+            execution_lease_expires_at=execution_lease_expires_at,
         )
 
     async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
