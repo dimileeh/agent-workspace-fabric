@@ -440,7 +440,7 @@ def test_required_ci_gate_rolls_up_full_coverage_and_required_jobs() -> None:
 @pytest.mark.parametrize(
     ("action", "ref"),
     [
-        ("actions/checkout", "v6"),
+        ("actions/checkout", "v7"),
         ("astral-sh/setup-uv", "v8"),
         ("actions/upload-artifact", "v7"),
         ("actions/download-artifact", "v8"),

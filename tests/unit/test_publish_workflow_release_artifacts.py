@@ -74,7 +74,7 @@ def _uploaded_paths(job: dict[str, Any]) -> set[str]:
 @pytest.mark.parametrize(
     ("action", "ref"),
     [
-        ("actions/checkout", "v6"),
+        ("actions/checkout", "v7"),
         ("astral-sh/setup-uv", "v8"),
         ("actions/upload-artifact", "v7"),
         ("actions/download-artifact", "v8"),
