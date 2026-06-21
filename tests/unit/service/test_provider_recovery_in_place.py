@@ -175,6 +175,34 @@ def test_in_place_recovery_task_policy_appends_existing_fingerprints() -> None:
 
 
 @pytest.mark.unit
+def test_in_place_recovery_task_policy_dedupes_repeated_fingerprint() -> None:
+    # A resumed in-place run that re-fails with the SAME provider fingerprint must
+    # not duplicate that fingerprint in the persisted state: the loop-detection
+    # count would otherwise inflate. The append guard skips a fingerprint already
+    # present, so the recorded list stays a single entry.
+    decision = should_recover_in_place(
+        reason_code="AGENT_IDLE_TIMEOUT",
+        message="idle timeout exceeded after 600s",
+        details={"provider": "openai", "model": "gpt-5"},
+        task_policy={},
+        agent="codex",
+        current_model="gpt-5",
+        now=_NOW,
+    )
+    assert decision is not None
+    fingerprint = decision.metadata["failure_fingerprint"]
+
+    policy = in_place_recovery_task_policy(
+        {"provider_recovery_state": {"failure_fingerprints": [fingerprint]}},
+        decision=decision,
+    )
+
+    fingerprints = policy["provider_recovery_state"]["failure_fingerprints"]
+    assert fingerprints == [fingerprint]
+    assert fingerprints.count(fingerprint) == 1
+
+
+@pytest.mark.unit
 def test_in_place_recovery_task_policy_preserves_spent_fallback_budget() -> None:
     # The workspace is already a provider fallback attempt
     # (``fallback_attempt_number == 1``). An in-place same-agent retry must carry
