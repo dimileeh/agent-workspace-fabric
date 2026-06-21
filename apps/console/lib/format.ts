@@ -47,6 +47,7 @@ export function fallbackLifecycleStages(
   const activeIndex = lifecycleStages.indexOf(status);
   const terminal = status === "failed" || status === "cancelled";
   const terminalSourceIndex = lifecycleStages.indexOf(terminalSourceStage as WorkspaceStatus);
+  const terminalSource = terminalSourceStage as WorkspaceStatus | null;
   const completedThroughIndex = terminal ? Math.max(-1, terminalSourceIndex) : activeIndex - 1;
   // `blocked` can be entered from running/validating/pushing, but it sits at a
   // fixed position (after `pushing`) in this linear list. Without the real
@@ -71,7 +72,19 @@ export function fallbackLifecycleStages(
   return lifecycleStages.map((stage, index): WorkspaceLifecycleStage => {
     let stageStatus: WorkspaceLifecycleStage["status"];
     if (terminal) {
-      stageStatus = index <= completedThroughIndex ? "completed" : "terminal_skipped";
+      // The same optional-pause invariant the non-terminal path enforces below
+      // applies to a terminal workspace: `recovering`/`blocked` sit at fixed
+      // positions, so a terminal source past them (e.g. failed from
+      // monitoring_pr) would otherwise mark them `completed` even though the
+      // workspace never entered them. Keep an optional pause out of `completed`
+      // unless the terminal transition explicitly came from that pause.
+      const isOptionalPause = pauseStages.has(stage);
+      const pauseExplicitlyObserved = terminalSource === stage;
+      if (isOptionalPause && !pauseExplicitlyObserved) {
+        stageStatus = "pending";
+      } else {
+        stageStatus = index <= completedThroughIndex ? "completed" : "terminal_skipped";
+      }
     } else if (stage === status) {
       stageStatus = "active";
     } else if (pausesMidExecution && index >= executionStartIndex) {

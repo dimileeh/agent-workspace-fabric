@@ -61,6 +61,38 @@ test("fallbackLifecycleStages marks terminal successors skipped", () => {
   assert.equal(stages.completed, "terminal_skipped");
 });
 
+test("fallbackLifecycleStages never marks a skipped optional pause completed on a terminal rail", () => {
+  // A workspace that failed from a stage past `recovering`/`blocked` (e.g.
+  // monitoring_pr) never necessarily entered those optional pauses. The terminal
+  // rail must mirror the non-terminal guard and keep an unobserved pause out of
+  // `completed`, otherwise it falsely tells the operator the workspace
+  // auto-retried (recovering) or paused for them (blocked).
+  const stages = Object.fromEntries(
+    fallbackLifecycleStages("failed", "monitoring_pr").map((stage) => [stage.stage, stage.status]),
+  );
+
+  assert.notEqual(stages.recovering, "completed");
+  assert.notEqual(stages.blocked, "completed");
+  assert.equal(stages.recovering, "pending");
+  assert.equal(stages.blocked, "pending");
+  // Non-pause stages up to the terminal source still read completed.
+  assert.equal(stages.running, "completed");
+  assert.equal(stages.validating, "completed");
+  assert.equal(stages.pushing, "completed");
+});
+
+test("fallbackLifecycleStages marks an explicitly-entered terminal pause completed", () => {
+  // When the terminal transition came *from* the pause itself, it was observed,
+  // so the rail should render it completed rather than pending.
+  const stages = Object.fromEntries(
+    fallbackLifecycleStages("failed", "blocked").map((stage) => [stage.stage, stage.status]),
+  );
+
+  assert.equal(stages.blocked, "completed");
+  // A different optional pause that was not the terminal source stays pending.
+  assert.equal(stages.recovering, "pending");
+});
+
 test("fallbackLifecycleStages skips all stages for unknown terminal source", () => {
   const stages = Object.fromEntries(
     fallbackLifecycleStages("failed", "unknown_legacy_stage").map((stage) => [
