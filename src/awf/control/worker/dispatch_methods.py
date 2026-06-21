@@ -183,7 +183,8 @@ async def _reset_recovering_worktree(self: Any, workspace_id: str) -> bool:
     unstashed work; a stash failure also aborts the reset for the same reason.
 
     Returns ``True`` when the worktree is in a safe-to-resume state (no preserved
-    worktree path to act on, already clean, or successfully stashed + reset), and
+    worktree path to act on, the worktree directory is gone so the executor must
+    drive the resume, already clean, or successfully stashed + reset), and
     ``False`` when a ``git status``/``stash``/``reset`` failure means the worktree
     may still hold partial edits — the caller must abort the in-place retry and
     preserve the paused state for a later safe resume rather than re-running the
@@ -191,6 +192,16 @@ async def _reset_recovering_worktree(self: Any, workspace_id: str) -> bool:
     runner."""
     worktree_path = self._preserved_active_worktree_path(workspace_id)
     if worktree_path is None:
+        return True
+    if not worktree_path.is_dir():
+        # The warm worktree directory was removed while the row stayed
+        # ``recovering`` (e.g. a cleanup/restart between cooldown and resume).
+        # There is no dirt to stash and no tree to reset, and ``git status`` could
+        # never succeed against a missing path — treating that failure as a
+        # transient reset abort would re-arm the cooldown and busy-loop forever.
+        # Report safe (mirroring the executor's own ``is_dir`` gate) so the resume
+        # reaches ``_ensure_worktree_available``, which marks a missing worktree
+        # ``failed`` rather than recovering it again (#647).
         return True
     status_ok, status_out, status_err = await self._run_preserved_active_git(
         worktree_path, "status", "--porcelain=v1", "--untracked-files=all"

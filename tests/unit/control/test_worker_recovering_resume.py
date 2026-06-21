@@ -344,6 +344,33 @@ async def test_reset_recovering_worktree_skips_when_status_fails(
 
 
 @pytest.mark.unit
+async def test_reset_recovering_worktree_missing_dir_defers_to_executor(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A recorded worktree path whose directory was removed while the row stayed
+    # ``recovering`` (cleanup/restart between cooldown and resume) is reported safe
+    # (``True``) without running any git: there is no dirt to stash and no tree to
+    # reset, and ``git status`` could never succeed against a missing path. Deferring
+    # to the executor lets ``_ensure_worktree_available`` mark the missing worktree
+    # ``failed`` instead of re-arming the cooldown forever (#647).
+    missing = tmp_path / "gone"  # never created
+
+    worker = _worker(
+        session_factory,
+        _RecordingRecoveringExecutor(),
+        provisioner=_TransitioningProvisioner(worktree_path=missing),
+    )
+
+    async def _fail_if_called(*_args: object, **_kwargs: object) -> tuple[bool, str, str]:
+        raise AssertionError("git must not run against a missing worktree")
+
+    worker._run_preserved_active_git = _fail_if_called  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert await worker._reset_recovering_worktree("ws_gone") is True  # noqa: SLF001
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("event", "responses"),
     [
