@@ -7,6 +7,7 @@ export type WorkspaceStatus =
   | "pushing"
   | "monitoring_pr"
   | "blocked"
+  | "recovering"
   | "completed"
   | "failed"
   | "cancelled"
@@ -674,6 +675,7 @@ export interface WorkspaceSaturationCounts {
   pushing: number;
   monitoring_pr: number;
   blocked: number;
+  recovering: number;
   destroying: number;
   completed: number;
   failed: number;

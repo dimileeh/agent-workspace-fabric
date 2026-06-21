@@ -24,6 +24,11 @@ export const lifecycleStages: WorkspaceStatus[] = [
   "provisioning",
   "ready",
   "running",
+  // `recovering` is the non-terminal in-place provider-retry pause (#612). It is a
+  // benign auto-heal that resumes back into `running` after the provider cooldown,
+  // so it sits right after `running` (not at the push→monitor boundary like
+  // `blocked`) and reads as in-flight, not terminal and not awaiting the operator.
+  "recovering",
   "validating",
   "pushing",
   // `blocked` is the non-terminal operator-pause state (protected-file violation).
@@ -48,8 +53,10 @@ export function fallbackLifecycleStages(
   // lifecycle data we can't tell which execution stage it paused at, so we must
   // NOT claim the execution stages completed (a validating-time pause would
   // otherwise falsely render `pushing` as done). Stages before execution
-  // (requested/provisioning/ready) are still safely "completed".
+  // (requested/provisioning/ready) are still safely "completed". `recovering`
+  // is the same shape — a mid-run provider pause — so it gets the same guard.
   const executionStartIndex = lifecycleStages.indexOf("running");
+  const pausesMidExecution = status === "blocked" || status === "recovering";
 
   return lifecycleStages.map((stage, index): WorkspaceLifecycleStage => {
     let stageStatus: WorkspaceLifecycleStage["status"];
@@ -57,7 +64,7 @@ export function fallbackLifecycleStages(
       stageStatus = index <= completedThroughIndex ? "completed" : "terminal_skipped";
     } else if (stage === status) {
       stageStatus = "active";
-    } else if (status === "blocked" && index >= executionStartIndex) {
+    } else if (pausesMidExecution && index >= executionStartIndex) {
       stageStatus = "pending";
     } else if (index < activeIndex) {
       stageStatus = "completed";
@@ -76,34 +83,36 @@ export function fallbackLifecycleStages(
 }
 
 // The backend lifecycle (`LIFECYCLE_STAGES`, workspace_observability.py) omits the
-// non-terminal `blocked` pause. So a real blocked workspace arrives with its linear
-// stages and NO active stage: the stage it paused at is marked `completed` once left,
-// and `blocked` isn't a lifecycle stage, so `_stage_summary` never marks anything
-// active. Inject a synthetic active `blocked` stage at its canonical position (after
-// `pushing`) so the operator sees the workspace is paused awaiting them, instead of a
-// rail with no active step. No-op unless the workspace is blocked and the supplied
-// lifecycle lacks a blocked stage (idempotent + safe for every other status).
+// non-terminal `blocked` and `recovering` pauses. So a real paused workspace arrives
+// with its linear stages and NO active stage: the stage it paused at is marked
+// `completed` once left, and the pause status isn't a lifecycle stage, so
+// `_stage_summary` never marks anything active. Inject a synthetic active stage at the
+// pause's canonical position so the operator sees an active step (paused awaiting them
+// for `blocked`, auto-retrying for `recovering`) instead of a rail with no active step.
+// No-op unless the workspace is in a pause status and the supplied lifecycle lacks that
+// stage (idempotent + safe for every other status).
 export function normalizeLifecycle(
   status: WorkspaceStatus,
   lifecycle: WorkspaceLifecycleStage[],
 ): WorkspaceLifecycleStage[] {
-  if (status !== "blocked" || lifecycle.some((stage) => stage.stage === "blocked")) {
+  const isPause = status === "blocked" || status === "recovering";
+  if (!isPause || lifecycle.some((stage) => stage.stage === status)) {
     return lifecycle;
   }
-  const blockedStage: WorkspaceLifecycleStage = {
-    stage: "blocked",
+  const pauseStage: WorkspaceLifecycleStage = {
+    stage: status,
     started_at: null,
     ended_at: null,
     duration_seconds: null,
     status: "active",
   };
-  const blockedOrder = lifecycleStages.indexOf("blocked");
+  const pauseOrder = lifecycleStages.indexOf(status);
   const insertAt = lifecycle.findIndex(
-    (stage) => lifecycleStages.indexOf(stage.stage as WorkspaceStatus) > blockedOrder,
+    (stage) => lifecycleStages.indexOf(stage.stage as WorkspaceStatus) > pauseOrder,
   );
   return insertAt === -1
-    ? [...lifecycle, blockedStage]
-    : [...lifecycle.slice(0, insertAt), blockedStage, ...lifecycle.slice(insertAt)];
+    ? [...lifecycle, pauseStage]
+    : [...lifecycle.slice(0, insertAt), pauseStage, ...lifecycle.slice(insertAt)];
 }
 
 export function fallbackLlmUsage(
@@ -432,8 +441,18 @@ export function statusTone(status: string): StatusTone {
   ) {
     return "warn";
   }
+  // `recovering` is a benign in-flight auto-retry (provider cooldown then in-place
+  // resume) — info-class, NOT `warn`: unlike `blocked` it needs no operator action.
   if (
-    ["running", "validating", "pushing", "monitoring_pr", "provisioning", "ready"].includes(status)
+    [
+      "running",
+      "validating",
+      "pushing",
+      "monitoring_pr",
+      "provisioning",
+      "ready",
+      "recovering",
+    ].includes(status)
   ) {
     return "info";
   }
@@ -474,6 +493,11 @@ export function statusGlyph(status: string): string {
       // Pause glyph — a distinct shape (used nowhere else) so the operator-pause
       // state reads as "halted, awaiting you" without relying on color alone.
       return "⏸";
+    case "recovering":
+      // Refresh/retry glyph — a distinct shape (used nowhere else) so the
+      // auto-heal state reads as "retrying, no action needed", clearly different
+      // from blocked's pause and the steady `●` of an active run.
+      return "↻";
     case "destroying":
       return "◌";
     case "monitoring_pr":

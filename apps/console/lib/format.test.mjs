@@ -176,6 +176,81 @@ test("normalizeLifecycle appends blocked when no later stage is present to ancho
   ]);
 });
 
+test("fallbackLifecycleStages does not claim execution stages completed for a recovering workspace", () => {
+  // `recovering` is a mid-run provider pause that resumes back to running; like
+  // blocked the fallback must not falsely render a later execution stage as done.
+  const stages = Object.fromEntries(
+    fallbackLifecycleStages("recovering").map((stage) => [stage.stage, stage.status]),
+  );
+
+  assert.equal(stages.requested, "completed");
+  assert.equal(stages.provisioning, "completed");
+  assert.equal(stages.ready, "completed");
+  assert.equal(stages.running, "pending");
+  assert.equal(stages.recovering, "active");
+  assert.equal(stages.validating, "pending");
+  assert.equal(stages.pushing, "pending");
+  assert.equal(stages.monitoring_pr, "pending");
+});
+
+test("statusTone marks a recovering workspace as info (auto-heal, no action) not warn", () => {
+  // recovering is a benign in-flight auto-retry, distinct from blocked's warn.
+  assert.equal(statusTone("recovering"), "info");
+  assert.notEqual(statusTone("recovering"), "warn");
+});
+
+test("statusGlyph renders a distinct refresh glyph for a recovering workspace", () => {
+  assert.equal(statusGlyph("recovering"), "↻");
+  // Must not reuse blocked's pause glyph — the two pauses read differently.
+  assert.notEqual(statusGlyph("recovering"), statusGlyph("blocked"));
+});
+
+test("lifecycleStages includes recovering as an in-flight stage after running, before monitoring_pr", () => {
+  assert.ok(lifecycleStages.includes("recovering"));
+  assert.ok(lifecycleStages.indexOf("recovering") > lifecycleStages.indexOf("running"));
+  assert.ok(lifecycleStages.indexOf("recovering") < lifecycleStages.indexOf("monitoring_pr"));
+  // recovering stays non-terminal, so it must not appear after completed.
+  assert.ok(lifecycleStages.indexOf("recovering") < lifecycleStages.indexOf("completed"));
+});
+
+test("normalizeLifecycle injects an active recovering stage for a real recovering workspace", () => {
+  // Mirrors the backend for a pause from running: stages it left are completed,
+  // downstream pending, and (since recovering isn't a lifecycle stage) nothing active.
+  const backend = [
+    stage("requested", "completed"),
+    stage("provisioning", "completed"),
+    stage("ready", "completed"),
+    stage("running", "completed"),
+    stage("validating", "pending"),
+    stage("pushing", "pending"),
+    stage("monitoring_pr", "pending"),
+    stage("completed", "pending"),
+  ];
+
+  const result = normalizeLifecycle("recovering", backend);
+  const rendered = result.map((s) => [s.stage, s.status]);
+
+  // recovering is inserted at its canonical position (after running, before validating)
+  // and is the single active stage; the backend stages are untouched.
+  assert.deepEqual(rendered, [
+    ["requested", "completed"],
+    ["provisioning", "completed"],
+    ["ready", "completed"],
+    ["running", "completed"],
+    ["recovering", "active"],
+    ["validating", "pending"],
+    ["pushing", "pending"],
+    ["monitoring_pr", "pending"],
+    ["completed", "pending"],
+  ]);
+  assert.equal(result.filter((s) => s.status === "active").length, 1);
+});
+
+test("normalizeLifecycle is idempotent when a recovering stage is already present", () => {
+  const backend = [stage("running", "completed"), stage("recovering", "active")];
+  assert.equal(normalizeLifecycle("recovering", backend), backend);
+});
+
 test("formatUsageProvenance maps ccusage source and reason codes to friendly labels", () => {
   assert.equal(formatUsageProvenance("ccusage", null), "ccusage");
   assert.equal(formatUsageProvenance("ccusage", "ccusage_no_records"), "ccusage / no usage recorded yet");
