@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import re
 
+from awf.common.github_transient import (
+    NON_TRANSIENT_GITHUB_ERROR_MARKERS,
+    TRANSIENT_GITHUB_ERROR_MARKERS,
+)
 from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.runtime.pr_monitor_operations import RETRYABLE_MONITOR_OPERATION_STATUSES
 from awf.service.staleness import (
@@ -43,67 +47,8 @@ _TASK_TAG_UNSET = _TaskTagUnset()
 # on a valid token (#515) and is handled as bounded-retryable below. These strong
 # markers are checked first in ``_is_transient_github_client_error`` and win, so a
 # 401 combined with e.g. ``Bad credentials`` still fails fast.
-_NON_TRANSIENT_GITHUB_ERROR_MARKERS = (
-    "bad credentials",
-    "not logged in",
-    "please run gh auth login",
-    "not found",
-    "could not resolve to a repository",
-    "could not resolve to a node",
-)
-
-_TRANSIENT_GITHUB_ERROR_MARKERS = (
-    "http 500",
-    "http 502",
-    "http 503",
-    "http 504",
-    "500 internal server",
-    "502 bad gateway",
-    "503 service unavailable",
-    "504 gateway timeout",
-    "bad gateway",
-    "gateway timeout",
-    "internal server error",
-    "returned error: 500",
-    "returned error: 502",
-    "returned error: 503",
-    "returned error: 504",
-    "service unavailable",
-    "temporarily unavailable",
-    "try again",
-    "timed out",
-    "timeout",
-    "connection reset",
-    "connection refused",
-    "connection aborted",
-    "tls handshake timeout",
-    "network",
-    "eof",
-    "rate limit",
-    "secondary rate limit",
-    "abuse detection",
-    "something went wrong",
-    "could not resolve host",
-    "temporary failure in name resolution",
-    "name or service not known",
-    "could not resolve proxy",
-)
-
-# Ambiguous auth blips: a bare ``HTTP 401`` / ``Requires authentication`` with no
-# strong permanent marker is a recoverable transient on the GitHub *API* client
-# path (a GraphQL blip on a valid token, #515). The strong markers above are
-# checked first and win, so a genuine bad-credentials 401 still fails fast.
-#
-# These markers apply ONLY to ``_is_transient_github_client_error``, never to raw
-# git base-fetch stderr: git's smart-HTTP transport surfaces genuine credential
-# failures as ``error: RPC failed; HTTP 401`` (a contiguous ``HTTP 401``
-# substring), which must fail fast rather than be bounded-retried. They are
-# therefore deliberately kept out of ``_TRANSIENT_GITHUB_ERROR_MARKERS`` so
-# ``_is_transient_base_fetch_error`` never matches them.
-_AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = (
-    "http 401",
-    "requires authentication",
-)
+_NON_TRANSIENT_GITHUB_ERROR_MARKERS = NON_TRANSIENT_GITHUB_ERROR_MARKERS
+_TRANSIENT_GITHUB_ERROR_MARKERS = TRANSIENT_GITHUB_ERROR_MARKERS
 
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 
@@ -120,6 +65,14 @@ _BITBUCKET_TRANSIENT_HTTP_STATUSES = frozenset({500, 502, 503, 504})
 _PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
 
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
+
+# A push rejected non-fast-forward whose divergence-recovery ``reset --hard`` was
+# deliberately SUPPRESSED by the caller (``allow_resync_on_rejection=False``) so a
+# preserved protected commit is not dropped before its approve-and-keep grant is
+# consumed. Distinct from ``_GIT_PUSH_FAILED_REASON`` so the operator-hint resume
+# can recognize the kept-commit rejection and re-block instead of treating it as a
+# generic failure (PRRT_kwDOSJAM6s6KZK1v).
+_GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON = "GIT_PUSH_REJECTED_NON_FAST_FORWARD"
 
 _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON = "GITHUB_WORKFLOW_SCOPE_REQUIRED"
 
@@ -152,6 +105,11 @@ _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 
+# A protected-scope violation in an unpushed monitor commit pauses the workspace
+# into ``blocked`` for an operator decision (WS-2) instead of silently rolling
+# the commit back. The offending commit is PRESERVED until the operator resolves.
+_PROTECTED_SCOPE_PAUSED_REASON = "PROTECTED_SCOPE_PAUSED_BLOCKED"
+
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 
 _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
@@ -159,6 +117,15 @@ _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
 _REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"
 
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
+
+# ``_commit_dirty_worktree`` returned False *because the commit sink failed*
+# (``git add`` / ``git commit`` errored after the agent left repair output
+# dirty/staged), leaving operation-owned dirt in the worktree. Surfacing this
+# reason (terminal) instead of letting provider recovery raise a retry keeps
+# the dirty repair output from being stranded for the next monitor attempt,
+# which would otherwise trip ``PRE_EXISTING_DIRTY_WORKTREE`` and hide the
+# commit-sink failure. See PRRT_kwDOSJAM6s6KY4Wi.
+_REPAIR_DIRTY_COMMIT_FAILED_REASON = "REPAIR_DIRTY_COMMIT_FAILED"
 
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 
@@ -303,6 +270,12 @@ _PR_MONITOR_STALE_REASON_MESSAGES = {
     "STALE_SCHEMA": "Target branch changed schema files for this merge candidate.",
     "stale": "Merge candidate is stale.",
 }
+
+_HEAD_OBJECT_MISSING_RECOVERED_REASON = "HEAD_OBJECT_MISSING_RECOVERED"
+
+_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON = "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+
+_MIRROR_HOOKS_PATH_POISONED_REASON = "MIRROR_HOOKS_PATH_POISONED"
 
 _PR_MONITOR_REASON_CODES_BY_STALE_REASON = {
     "validation_insufficient_tier": "VALIDATION_INSUFFICIENT_TIER",

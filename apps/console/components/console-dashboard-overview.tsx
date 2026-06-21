@@ -36,8 +36,10 @@ useState
 
 import { formatAgentLabel,formatAgentTitle } from "@/lib/agent-format";
 import { copyTextToClipboard } from "@/lib/clipboard";
+import { blockedAgeSeconds, blockedSince } from "@/lib/blocked-format";
 import { summarizeVisibleCoordinationWarnings } from "@/lib/coordination-format";
 import {
+compactDuration,
 compactId,
 formatDateTime,
 lifecycleStages,
@@ -244,7 +246,7 @@ export function FleetHealthStrip({ kpis }: { kpis: FleetKpi[] }) {
           some values show the last snapshot — live data may be stale
         </div>
       ) : null}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-9">
         {kpis.map((kpi) => (
           <KpiStat
             key={kpi.id}
@@ -673,6 +675,11 @@ export function WorkspaceList({
       {items.map((item) => {
         const recoveryBadge = formatRecoveryBadge(item.recovery, item.status);
         const coordinationSummary = summarizeVisibleCoordinationWarnings(item.coordination_warnings, item.status);
+        // "Blocked for N" from the authoritative `blocked_at` the overview now
+        // carries while blocked; `blockedSince` falls back to the blocked
+        // transition event / `updated_at` only when it is absent.
+        const blockedFor =
+          item.status === "blocked" ? blockedAgeSeconds(blockedSince(item)) : null;
         return (
           <div
             key={item.workspace_id}
@@ -759,6 +766,15 @@ export function WorkspaceList({
                   <span className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900">
                     <AlertCircle size={12} aria-hidden />
                     <span className="truncate">Stale running</span>
+                  </span>
+                ) : null}
+                {item.status === "blocked" ? (
+                  <span
+                    data-testid={`workspace-blocked-age-${item.workspace_id}`}
+                    className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900"
+                  >
+                    <AlertCircle size={12} aria-hidden />
+                    <span className="truncate">Blocked for {compactDuration(blockedFor)}</span>
                   </span>
                 ) : null}
                 {recoveryBadge ? (

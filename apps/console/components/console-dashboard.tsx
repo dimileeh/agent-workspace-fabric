@@ -822,8 +822,13 @@ const searchParams = useSearchParams();
       {
         id: "running",
         label: "Running",
-        value: counts ? counts.running : dash,
-        tone: counts?.running ? "info" : undefined,
+        // "Running" is the active-execution phase (running + validating + pushing) so a
+        // workspace does not vanish from this KPI while it validates or pushes.
+        value: counts ? counts.running + counts.validating + counts.pushing : dash,
+        tone:
+          counts && counts.running + counts.validating + counts.pushing > 0
+            ? "info"
+            : undefined,
         stale: saturationStale,
       },
       {
@@ -831,6 +836,30 @@ const searchParams = useSearchParams();
         label: "Monitoring PR",
         value: counts ? counts.monitoring_pr : dash,
         tone: counts?.monitoring_pr ? "info" : undefined,
+        stale: saturationStale,
+      },
+      {
+        // Protected-file pause: a `blocked` workspace is awaiting an operator
+        // guide decision while it still holds its slot + stack. It counts inside
+        // Active (server-side, via active_total) but deliberately NOT inside
+        // Running (running+validating+pushing, the PR #598 contract) — it is
+        // halted, not executing.
+        id: "blocked",
+        label: "Awaiting operator",
+        value: counts ? (counts.blocked ?? 0) : dash,
+        tone: counts?.blocked ? "warn" : undefined,
+        stale: saturationStale,
+      },
+      {
+        // In-place provider retry: a `recovering` workspace auto-heals after the
+        // provider cooldown (resumes in place, no operator action) while it still
+        // holds its slot + stack. Like `blocked` it counts inside Active
+        // (active_total) but NOT inside Running — it is paused, not executing.
+        // The `info` tone (vs blocked's `warn`) signals "no action needed".
+        id: "recovering",
+        label: "Auto-retrying",
+        value: counts ? (counts.recovering ?? 0) : dash,
+        tone: counts?.recovering ? "info" : undefined,
         stale: saturationStale,
       },
       {

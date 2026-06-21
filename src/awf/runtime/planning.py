@@ -15,10 +15,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
+from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 from awf.common.redaction import redact_secrets
+from awf.runtime.git_porcelain import split_porcelain_rename_paths, unquote_porcelain_path
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
 
 if TYPE_CHECKING:
@@ -111,6 +113,33 @@ def render_workspace_path(template: str, *, workspace_id: str) -> Path:
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"path template must stay inside the workspace: {template!r}")
     return path
+
+
+AGENT_WORKTREE_ROOT: Final[str] = DEFAULT_AGENT_WORKDIR
+"""In-container worktree root the agent process starts in.
+
+Bound to :data:`awf.common.compose_exec.DEFAULT_AGENT_WORKDIR`, the single
+source of truth for ``build_tracked_compose_exec``'s default ``workdir`` — the
+directory the coding CLI is launched in (``AgentAdapter.run`` relies on that
+default rather than passing ``workdir`` explicitly). Sharing the constant keeps
+the agent's start directory and the artifact anchor statically coupled, so
+changing the compose workdir cannot silently desync agent-prompt paths from
+where the CLI actually runs and regress #620. Agents routinely ``cd`` into a
+task subdirectory mid-run, so a worktree-relative artifact path handed to the
+agent verbatim would resolve under that subdir instead of the repo root."""
+
+
+def agent_artifact_path(relative_path: Path) -> Path:
+    """Anchor a worktree-relative artifact path at the in-container worktree root.
+
+    ``render_workspace_path`` guarantees ``relative_path`` is relative, so the
+    absolute base always wins cleanly. Handing the agent the anchored
+    ``/workspace/...`` path keeps the plan/conformance artifact at the worktree
+    root regardless of the agent's CWD, so it can never land nested under a task
+    subdir (e.g. ``apps/console/docs/awf-plans/``) and trip the dirty-tree guard
+    (#620). The control plane is Linux-only, so ``Path`` is ``PosixPath`` and
+    ``.as_posix()`` yields the correct ``/workspace/...`` string."""
+    return Path(AGENT_WORKTREE_ROOT) / relative_path
 
 
 def render_coordination_warning_section(
@@ -922,12 +951,15 @@ def changed_paths_from_porcelain(output: str) -> set[Path]:
     for raw in output.splitlines():
         if not raw:
             continue
+        status = raw[:2] if len(raw) >= 2 else ""
         path_text = raw[3:] if len(raw) > 3 else raw
-        if " -> " in path_text:
-            path_text = path_text.split(" -> ", 1)[1]
+        if status[:1] in {"R", "C"} or status[1:2] in {"R", "C"}:
+            rename_paths = split_porcelain_rename_paths(path_text)
+            if rename_paths:
+                path_text = rename_paths[1]
         path_text = path_text.strip()
         if path_text:
-            paths.add(Path(path_text))
+            paths.add(Path(unquote_porcelain_path(path_text)))
     return paths
 
 

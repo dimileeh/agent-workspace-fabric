@@ -39,19 +39,45 @@ class TestValidTransitions:
             (WorkspaceStatus.ready, WorkspaceStatus.destroying),
             (WorkspaceStatus.running, WorkspaceStatus.validating),
             (WorkspaceStatus.running, WorkspaceStatus.monitoring_pr),
+            (WorkspaceStatus.running, WorkspaceStatus.blocked),
+            # A transient provider failure mid-run diverts into the auto-healing
+            # ``recovering`` pause instead of terminally failing (#612 slice 2
+            # wires the divert; the edge is declared here in slice 1).
+            (WorkspaceStatus.running, WorkspaceStatus.recovering),
             (WorkspaceStatus.running, WorkspaceStatus.failed),
             (WorkspaceStatus.running, WorkspaceStatus.cancelled),
             # Worker-restart salvage can rewind an abandoned active phase so
             # the executor can reclaim validation recovery.
             (WorkspaceStatus.validating, WorkspaceStatus.running),
             (WorkspaceStatus.validating, WorkspaceStatus.pushing),
+            (WorkspaceStatus.validating, WorkspaceStatus.blocked),
             (WorkspaceStatus.validating, WorkspaceStatus.failed),
             (WorkspaceStatus.validating, WorkspaceStatus.cancelled),
             (WorkspaceStatus.pushing, WorkspaceStatus.running),
             (WorkspaceStatus.pushing, WorkspaceStatus.monitoring_pr),
+            (WorkspaceStatus.pushing, WorkspaceStatus.blocked),
             (WorkspaceStatus.pushing, WorkspaceStatus.completed),
             (WorkspaceStatus.pushing, WorkspaceStatus.failed),
             (WorkspaceStatus.pushing, WorkspaceStatus.cancelled),
+            # A blocked workspace resumes (operator grant) or is terminated.
+            # A monitor-origin (post-PR) block resumes back into the monitor.
+            (WorkspaceStatus.blocked, WorkspaceStatus.running),
+            (WorkspaceStatus.blocked, WorkspaceStatus.validating),
+            (WorkspaceStatus.blocked, WorkspaceStatus.pushing),
+            (WorkspaceStatus.blocked, WorkspaceStatus.monitoring_pr),
+            (WorkspaceStatus.blocked, WorkspaceStatus.failed),
+            (WorkspaceStatus.blocked, WorkspaceStatus.cancelled),
+            # A recovering workspace auto-resumes after the provider cooldown
+            # (-> running), re-fails when the retry budget is exhausted or the
+            # failure is non-retryable (-> failed), or an operator cancels it
+            # (-> cancelled). Like blocked, it never jumps straight to
+            # completed/destroying.
+            (WorkspaceStatus.recovering, WorkspaceStatus.running),
+            (WorkspaceStatus.recovering, WorkspaceStatus.failed),
+            (WorkspaceStatus.recovering, WorkspaceStatus.cancelled),
+            # A protected-scope violation during the PR monitor pauses the PR
+            # owner for an operator decision instead of failing (post-PR block).
+            (WorkspaceStatus.monitoring_pr, WorkspaceStatus.blocked),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.completed),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.failed),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.cancelled),
@@ -90,10 +116,31 @@ class TestInvalidTransitions:
             # Cannot go backwards.
             (WorkspaceStatus.running, WorkspaceStatus.ready),
             (WorkspaceStatus.completed, WorkspaceStatus.running),
+            # blocked is non-terminal but cannot jump straight to completed /
+            # destroying — only resume or terminate. (blocked → monitoring_pr is
+            # now allowed for the post-PR monitor resume.)
+            (WorkspaceStatus.blocked, WorkspaceStatus.completed),
+            (WorkspaceStatus.blocked, WorkspaceStatus.destroying),
+            (WorkspaceStatus.blocked, WorkspaceStatus.blocked),
+            # recovering is non-terminal and auto-healing: it may only resume
+            # (-> running) or terminate (-> failed/cancelled). It cannot jump to
+            # completed/destroying, self-loop, or resume into any phase other
+            # than running. The validating/pushing -> recovering entry edges are
+            # deferred to slice 2 (the only divert fork runs in ``running``), so
+            # they must stay rejected here.
+            (WorkspaceStatus.recovering, WorkspaceStatus.completed),
+            (WorkspaceStatus.recovering, WorkspaceStatus.destroying),
+            (WorkspaceStatus.recovering, WorkspaceStatus.recovering),
+            (WorkspaceStatus.recovering, WorkspaceStatus.monitoring_pr),
+            (WorkspaceStatus.recovering, WorkspaceStatus.validating),
+            (WorkspaceStatus.recovering, WorkspaceStatus.pushing),
+            (WorkspaceStatus.validating, WorkspaceStatus.recovering),
+            (WorkspaceStatus.pushing, WorkspaceStatus.recovering),
             # Cannot self-transition.
             (WorkspaceStatus.running, WorkspaceStatus.running),
-            # monitoring_pr is a dead-end for its own inputs — only the
-            # monitor owns transitions out, and only to completed/failed/cancelled.
+            # monitoring_pr exits to completed/failed/cancelled (and now blocked
+            # for a protected-scope pause) — never to its own input or back to
+            # pushing/validating.
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.pushing),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.validating),
@@ -137,6 +184,8 @@ class TestTerminalDetection:
             WorkspaceStatus.running,
             WorkspaceStatus.validating,
             WorkspaceStatus.pushing,
+            WorkspaceStatus.blocked,
+            WorkspaceStatus.recovering,
             WorkspaceStatus.completed,  # terminal *for the attempt*, but workspace can still destroy
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
@@ -171,6 +220,8 @@ class TestTerminalDetection:
             WorkspaceStatus.validating,
             WorkspaceStatus.pushing,
             WorkspaceStatus.monitoring_pr,
+            WorkspaceStatus.blocked,
+            WorkspaceStatus.recovering,
         ],
     )
     def test_not_callback_terminal(self, state: WorkspaceStatus) -> None:

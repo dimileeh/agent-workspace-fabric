@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -28,15 +29,34 @@ from awf.service.gc_classify import (
     PATH_DELETED,
 )
 from awf.service.gc_reconcile import ComposeTeardownOutcome, build_and_delete_gc_path
-
-if TYPE_CHECKING:
-    from awf.node.compose_manager import ComposeManager
+from awf.service.orphan_reaping import (
+    OrphanReapOutcome as OrphanReapOutcome,
+)
+from awf.service.orphan_reaping import (
+    OrphanReapResult as OrphanReapResult,
+)
+from awf.service.orphan_reaping import (
+    _limit_records_to_oldest_workspaces,
+    _missing_record_is_aged,
+)
+from awf.service.orphan_reaping import (
+    build_orphan_compose_teardown as build_orphan_compose_teardown,
+)
 
 _log = get_logger(__name__)
 
 CHECK_TIMEOUT_SECONDS = 5.0
 ORPHAN_EXAMPLE_LIMIT = 5
 AWF_PROJECT_PREFIXES = ("awf_", "awf-")
+
+# Row-less volume name fallback (#637). Mirrors :mod:`awf.service.orphans`'s managed
+# name parsing so a pruned ``awf-ws_<id>-postgres_data`` volume whose compose-project
+# label is gone is still enumerated by the classification-driven reaper. A row-less
+# orphan has no DB row to match against, so the ``known_workspace_ids`` branch the
+# status path carries is intentionally dropped here.
+_WORKSPACE_ID_PATTERN = r"ws_[A-Za-z0-9][A-Za-z0-9_]*"
+_WORKSPACE_ID_RE = re.compile(rf"^{_WORKSPACE_ID_PATTERN}$")
+_HYPHEN_DELIMITED_MANAGED_TAIL_RE = re.compile(rf"^(?P<workspace_id>{_WORKSPACE_ID_PATTERN})-")
 
 # Reason codes for the flag-gated readiness-driven reaper.
 ORPHAN_REAP_DISABLED = "ORPHAN_REAP_DISABLED"
@@ -45,7 +65,8 @@ ORPHAN_REAP_SKIPPED_YOUNG = "ORPHAN_REAP_SKIPPED_YOUNG"
 ORPHAN_REAP_OK = "ORPHAN_REAP_OK"
 ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
 
-# (project_name, compose_file, workspace_id) -> teardown outcome.
+
+# (project_name, compose_file, workspace_id, remove_volumes) -> teardown outcome.
 #
 # Distinct from :data:`gc_reconcile.OrphanComposeTeardown`, which is
 # ``Callable[[OrphanDirTarget], ...]``. The two are deliberately *not*
@@ -54,7 +75,24 @@ ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
 # ``(project_name, compose_file, workspace_id)`` triple. The differing name
 # makes the incompatibility explicit rather than letting a same-named alias
 # imply the closures are swappable.
-OrphanResourceComposeTeardown = Callable[[str, Path, str, bool], Awaitable[ComposeTeardownOutcome]]
+#
+# ``fallback_volume_names`` carries the managed volume names recovered directly
+# from a row-less volume's *name* (#637) when its ``com.docker.compose.project``
+# label value is gone. A label-scoped reap cannot find such a volume, so the
+# teardown must remove it by name; without this the reaper would report it
+# reaped while it silently remained (PRRT_kwDOSJAM6s6LCiLk). It is keyword-only
+# with a default so non-volume teardowns and other callers stay unaffected.
+class OrphanResourceComposeTeardown(Protocol):
+    async def __call__(  # pragma: no cover - Protocol method declaration only.
+        self,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        remove_volumes: bool,
+        *,
+        fallback_volume_names: tuple[str, ...] = (),
+    ) -> ComposeTeardownOutcome: ...
+
 
 ResourceKind = Literal["container", "network", "volume", "worktree"]
 Classification = Literal["expected", "terminal", "missing", "unknown"]
@@ -69,6 +107,15 @@ ACTIVE_WORKSPACE_STATUSES = frozenset(
         WorkspaceStatus.validating.value,
         WorkspaceStatus.pushing.value,
         WorkspaceStatus.monitoring_pr.value,
+        # A blocked workspace is paused awaiting an operator decision with its
+        # worktree + warm stack preserved (mirrors PROTECTED_WORKSPACE_GC_STATUSES
+        # in gc_classify). It must classify as active here so the orphan reaper
+        # never tears down the warm stack this state exists to keep.
+        WorkspaceStatus.blocked.value,
+        # A recovering workspace is paused auto-retrying across the provider
+        # cooldown with its worktree + warm stack preserved (#612); it must
+        # classify as active for the same reason — never reap the warm stack.
+        WorkspaceStatus.recovering.value,
         WorkspaceStatus.destroying.value,
     }
 )
@@ -76,6 +123,17 @@ TERMINAL_WORKSPACE_STATUSES = frozenset(
     {
         WorkspaceStatus.completed.value,
         WorkspaceStatus.failed.value,
+        # ``superseded`` is not in the WorkspaceStatus enum (it is a string-only
+        # terminal status), but terminal GC and the CLI treat it as an eligible
+        # terminal status — it appears in gc_classify.TERMINAL_WORKSPACE_GC_STATUSES,
+        # carries the failed/superseded preservation cap, and accepts
+        # ``--status``/``--exclude-status superseded``. It MUST be terminal here too:
+        # if omitted, a superseded workspace row is filtered out of the id view
+        # (KNOWN_WORKSPACE_STATUSES), its containers/networks/volumes/worktree classify
+        # as ``missing``, and the on-demand ``row_less_only=True`` sweep would tear it
+        # down despite ``--exclude-status superseded`` and before the DB-row-driven
+        # terminal reaper's preservation cap applies (PRRT_kwDOSJAM6s6LC5a-).
+        "superseded",
         WorkspaceStatus.cancelled.value,
         WorkspaceStatus.destroyed.value,
     }
@@ -115,6 +173,7 @@ class AsyncCommandRunnerLike(Protocol):
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> Any: ...
 
 
@@ -492,16 +551,28 @@ def parse_docker_resource_rows(kind: ResourceKind, stdout: str) -> tuple[Detecte
         if not isinstance(row, dict):
             continue
         project = str(row.get("project") or "")
+        name = _optional_str(row.get("name"))
         workspace_id = workspace_id_from_project(project)
+        compose_project: str | None = project
+        # Row-less volume name fallback (#637): once a workspace row is pruned the
+        # volume can lose its compose-project label, so recover the id from the
+        # managed name and infer the project the reaper must tear down. Volume-only:
+        # containers/networks always carry the project label under the scan filter,
+        # so an empty project on those kinds is genuinely unmanaged.
+        if workspace_id is None and kind == "volume" and not project and name is not None:
+            fallback_id = workspace_id_from_managed_volume_name(name)
+            if fallback_id is not None:
+                workspace_id = fallback_id
+                compose_project = _infer_project_from_managed_name(name, fallback_id)
         if workspace_id is None:
             continue
         resources.append(
             DetectedResource(
                 kind=kind,
                 workspace_id=workspace_id,
-                compose_project=project,
+                compose_project=compose_project,
                 id=_optional_str(row.get("id")),
-                name=_optional_str(row.get("name")),
+                name=name,
                 service=_optional_str(row.get("service")),
                 state=_optional_str(row.get("state")),
                 status_text=_optional_str(row.get("status")),
@@ -680,113 +751,6 @@ def build_orphan_resource_summary(
     )
 
 
-@dataclass(frozen=True)
-class OrphanReapOutcome:
-    """Outcome of reaping one classified orphan (a compose stack or a worktree)."""
-
-    kind: Literal["compose", "worktree"]
-    workspace_id: str
-    status: Literal["reaped", "already_removed", "failed"]
-    reason_code: str
-    error: str | None = None
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "kind": self.kind,
-            "workspace_id": self.workspace_id,
-            "status": self.status,
-            "reason_code": self.reason_code,
-        }
-        if self.error is not None:
-            payload["error"] = self.error
-        return payload
-
-
-@dataclass(frozen=True)
-class OrphanReapResult:
-    """Result of a flag-gated readiness-driven reap pass over a summary."""
-
-    enabled: bool
-    status: Literal["disabled", "skipped", "ok", "partial"]
-    reason_code: str
-    reaped: tuple[OrphanReapOutcome, ...] = ()
-    errors: tuple[OrphanReapOutcome, ...] = ()
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "enabled": self.enabled,
-            "status": self.status,
-            "reason_code": self.reason_code,
-            "reaped": [outcome.to_dict() for outcome in self.reaped],
-            "errors": [outcome.to_dict() for outcome in self.errors],
-        }
-
-
-def build_orphan_compose_teardown(manager: ComposeManager) -> OrphanResourceComposeTeardown:
-    """Compose-teardown closure over a ``ComposeManager`` (WS-B1 path).
-
-    The caller decides ``remove_volumes`` per workspace: a terminal workspace
-    that is still within its retention window has its live containers/networks
-    classified ``terminal`` (reapable leaked runtime) while its volumes stay
-    ``expected`` salvage evidence, so tearing the stack down must not pass
-    ``--volumes`` and delete those protected volumes. This mirrors the worker
-    terminal-runtime release path (:mod:`awf.control.worker.cleanup`), which
-    tears down retained-terminal runtime with ``remove_volumes=False``.
-    """
-
-    async def _teardown(
-        project_name: str, compose_file: Path, workspace_id: str, remove_volumes: bool
-    ) -> ComposeTeardownOutcome:
-        return await manager.teardown_project(
-            project_name=project_name,
-            compose_file=compose_file,
-            workspace_id=workspace_id,
-            remove_volumes=remove_volumes,
-        )
-
-    return _teardown
-
-
-def _missing_record_is_aged(
-    record: ClassifiedResource,
-    *,
-    resolved_work_dir: Path,
-    grace_seconds: float,
-    now: float,
-) -> bool:
-    """Confirm a row-less (``missing``) resource is older than the grace window.
-
-    Mirrors :func:`gc_reconcile.scan_orphan_workspace_dirs`'s minimum-age grace:
-    a just-created worktree (or compose stack) can be visible on the filesystem
-    before its workspace row commits, and during that window :func:`_classify`
-    returns ``WORKSPACE_MISSING``. Reaping it would delete an in-flight provision
-    rather than a confirmed orphan, so a ``missing`` record is only reaped once
-    its on-disk provision artifact is older than ``grace_seconds``. ``terminal``
-    records skip this check entirely -- their workspace row confirms they are
-    done, so they are not gated here.
-    """
-    if grace_seconds <= 0.0:
-        return True
-    if record.kind == "worktree":
-        path_text = record.resource.path
-        if not path_text:  # pragma: no cover - worktree records always carry a path.
-            return False
-        anchor = Path(path_text)
-    else:
-        # Docker resources (container/network/volume) anchor on the per-workspace
-        # compose dir -- the same root gc_reconcile protects. If no compose dir
-        # exists, there is no in-flight provision to protect (row and dir both
-        # gone, only docker lingers), so the lingering stack is a genuine orphan.
-        anchor = resolved_work_dir / "compose" / record.workspace_id
-        if not anchor.exists():
-            return True
-    try:
-        mtime = anchor.stat().st_mtime
-    except OSError:  # pragma: no cover - reaper runs as root over its own dirs.
-        return False
-    return (now - mtime) >= grace_seconds
-
-
 async def reap_classified_orphans(
     summary: OrphanResourceSummary,
     *,
@@ -795,6 +759,8 @@ async def reap_classified_orphans(
     enabled: bool,
     now: float | None = None,
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+    row_less_only: bool = False,
+    limit: int | None = None,
 ) -> OrphanReapResult:
     """Reap ``terminal`` / aged ``missing`` classified orphans when ``enabled``.
 
@@ -814,6 +780,23 @@ async def reap_classified_orphans(
     on-disk artifact is younger than the grace window is left alone, since a
     just-created worktree can be visible before its workspace row commits and
     would otherwise be reaped mid-provision. ``terminal`` records are not gated.
+
+    With ``row_less_only=True`` only ``missing`` (no-DB-record) records are
+    reaped; ``terminal`` (DB-record) records are skipped. The on-demand
+    ``awf service gc`` path uses this so its additive sweep cannot tear down a
+    terminal workspace the operator scoped out via ``--status``/``--exclude-status``
+    (PRRT_kwDOSJAM6s6LB30p): those workspaces have DB rows and are already handled
+    by the scope-honouring DB-row-driven terminal reaper, while row-less orphans
+    have no status to scope on and are exactly what that path cannot see (#637).
+    The periodic backstop reaps both classes under the global ``auto_cleanup_orphans``
+    flag (no per-operator scope), so it leaves ``row_less_only`` at its default.
+
+    ``limit`` bounds the reap to that many distinct, oldest-first workspaces
+    (:func:`_limit_records_to_oldest_workspaces`) so the on-demand ``service gc`` path's
+    additive sweep honours ``awf service gc --execute --limit N`` like the DB-row
+    terminal reaper does, instead of tearing down every aged row-less orphan in one
+    pass (PRRT_kwDOSJAM6s6LCCJZ). ``None`` (the periodic backstop, and an on-demand run
+    with no ``--limit``) leaves the reap unbounded.
     """
     if not enabled:
         return OrphanReapResult(
@@ -847,9 +830,10 @@ async def reap_classified_orphans(
     resolved_work_dir = Path(work_dir).expanduser().resolve()
     resolved_now = time.time() if now is None else now
     grace_seconds = max(0.0, min_age_hours) * 3600.0
+    reapable_classifications = frozenset({"missing"} if row_less_only else {"terminal", "missing"})
     orphan_records: list[ClassifiedResource] = []
     for record in summary.records:
-        if record.classification not in {"terminal", "missing"}:
+        if record.classification not in reapable_classifications:
             continue
         if record.classification == "missing" and not _missing_record_is_aged(
             record,
@@ -864,6 +848,10 @@ async def reap_classified_orphans(
             )
             continue
         orphan_records.append(record)
+    if limit is not None:
+        orphan_records = _limit_records_to_oldest_workspaces(
+            orphan_records, limit=limit, resolved_work_dir=resolved_work_dir
+        )
     # One teardown per (project, workspace) so multiple docker resources from the
     # same stack do not trigger redundant downs.
     compose_projects: dict[tuple[str, str], None] = {}
@@ -875,14 +863,27 @@ async def reap_classified_orphans(
     # removing volumes here would delete the very evidence _classify protected --
     # matching the worker terminal-runtime release path's ``remove_volumes=False``.
     volume_ready_workspace_ids: set[str] = set()
+    # Managed volume names recovered from a row-less volume's *name* (#637) when its
+    # compose-project label is gone: a label-scoped teardown cannot find them, so the
+    # names are forwarded to the teardown to be removed directly. Without this a
+    # label-less volume would be reported reaped while it silently remained
+    # (PRRT_kwDOSJAM6s6LCiLk). Keyed by the same (project, workspace_id) teardown key
+    # and only populated for volume records (so only volume-cleanup-ready workspaces,
+    # which get ``remove_volumes=True``, carry names); a workspace can surface several
+    # volumes (``-dind_data`` + ``-postgres_data``), so names accumulate per key.
+    fallback_volume_names: dict[tuple[str, str], list[str]] = {}
     for record in orphan_records:
         if record.kind == "worktree":
             worktree_records.append(record)
             continue
+        project = record.compose_project or f"awf_{record.workspace_id}"
+        key = (project, record.workspace_id)
+        compose_projects[key] = None
         if record.kind == "volume":
             volume_ready_workspace_ids.add(record.workspace_id)
-        project = record.compose_project or f"awf_{record.workspace_id}"
-        compose_projects[(project, record.workspace_id)] = None
+            name = record.resource.name
+            if name:
+                fallback_volume_names.setdefault(key, []).append(name)
 
     reaped: list[OrphanReapOutcome] = []
     errors: list[OrphanReapOutcome] = []
@@ -890,7 +891,15 @@ async def reap_classified_orphans(
     for project_name, workspace_id in sorted(compose_projects):
         compose_file = resolved_work_dir / "compose" / workspace_id / "compose.yml"
         remove_volumes = workspace_id in volume_ready_workspace_ids
-        teardown = await compose_teardown(project_name, compose_file, workspace_id, remove_volumes)
+        teardown = await compose_teardown(
+            project_name,
+            compose_file,
+            workspace_id,
+            remove_volumes,
+            fallback_volume_names=tuple(
+                fallback_volume_names.get((project_name, workspace_id), ())
+            ),
+        )
         outcome = OrphanReapOutcome(
             kind="compose",
             workspace_id=workspace_id,
@@ -963,12 +972,22 @@ async def sweep_classified_orphans(
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
     min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
     run_subprocess: SubprocessRun | None = None,
+    row_less_only: bool = False,
+    limit: int | None = None,
+    now: float | None = None,
 ) -> OrphanReapResult:
     """Scan, classify, and reap readiness-classified orphan resources.
 
     ``min_retention_hours`` protects retained terminal salvage during
     classification, while ``min_age_hours`` only guards row-less missing
-    resources during reaping.
+    resources during reaping. ``row_less_only`` and ``limit`` forward to
+    :func:`reap_classified_orphans` so a caller (the on-demand ``service gc``
+    path) can restrict the reap to no-DB-record (``missing``) orphans
+    (PRRT_kwDOSJAM6s6LB30p, #637) and bound it to the operator's ``--limit`` batch,
+    oldest-first (PRRT_kwDOSJAM6s6LCCJZ). ``now`` (an epoch float) forwards to
+    :func:`reap_classified_orphans` as the age-check anchor so the on-demand path can
+    freeze the row-less grace at the API's request time rather than the worker's claim
+    clock; ``None`` lets the reaper default to ``time.time()`` (PRRT_kwDOSJAM6s6LCs9R).
     """
     if not enabled:
         return OrphanReapResult(
@@ -1014,6 +1033,9 @@ async def sweep_classified_orphans(
         compose_teardown=compose_teardown,
         enabled=enabled,
         min_age_hours=min_age_hours,
+        row_less_only=row_less_only,
+        limit=limit,
+        now=now,
     )
 
 
@@ -1117,6 +1139,60 @@ def workspace_id_from_project(project: str) -> str | None:
             if workspace_id.startswith("ws_"):
                 return workspace_id
     return None
+
+
+def workspace_id_from_managed_volume_name(name: str) -> str | None:
+    """Recover a workspace id from a managed volume name when the project label is gone.
+
+    Mirrors :func:`awf.service.orphans._workspace_id_from_managed_name`'s legacy
+    fallback (hyphen-delimited tail, then an underscore-walk) so a row-less
+    ``awf-ws_<id>-postgres_data`` volume whose ``com.docker.compose.project`` label was
+    pruned is still enumerated by the reaper. Returns ``None`` for any name that does not
+    carry an ``awf_``/``awf-`` managed prefix wrapping a ``ws_`` id (#637, layer 2).
+    """
+    tail = _managed_name_tail(name)
+    if tail is None:
+        return None
+    workspace_id = _legacy_workspace_id_from_managed_tail(tail)
+    if workspace_id is not None and _looks_like_workspace_id(workspace_id):
+        return workspace_id
+    return None
+
+
+def _managed_name_tail(name: str) -> str | None:
+    for prefix in AWF_PROJECT_PREFIXES:
+        if name.startswith(prefix):
+            return name.removeprefix(prefix)
+    return None
+
+
+def _legacy_workspace_id_from_managed_tail(tail: str) -> str | None:
+    match = _HYPHEN_DELIMITED_MANAGED_TAIL_RE.match(tail)
+    if match is not None:
+        return match.group("workspace_id")
+
+    if not tail.startswith("ws_"):
+        return None
+
+    suffix = tail.removeprefix("ws_")
+    workspace_suffix = ""
+    for char in suffix:
+        if not char.isalnum():
+            break
+        workspace_suffix += char
+    if not workspace_suffix:
+        return None
+    return f"ws_{workspace_suffix}"
+
+
+def _infer_project_from_managed_name(name: str, workspace_id: str) -> str:
+    if name.startswith("awf-"):
+        return f"awf-{workspace_id}"
+    return f"awf_{workspace_id}"
+
+
+def _looks_like_workspace_id(value: str) -> bool:
+    return bool(_WORKSPACE_ID_RE.match(value))
 
 
 async def workspace_id_view_from_session(

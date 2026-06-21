@@ -781,4 +781,17 @@ def _is_active(status_value: WorkspaceStatus) -> bool:
         WorkspaceStatus.validating,
         WorkspaceStatus.pushing,
         WorkspaceStatus.monitoring_pr,
+        # ``blocked`` is a non-terminal pause that still holds a warm stack,
+        # worktree, and execution claim. It must classify as active so stop/
+        # destroy route it through ``cancelled`` before stack teardown and so
+        # destroy honours the ``force`` guard — otherwise cleanup would run
+        # while the row stays ``blocked`` pointing at removed resources, and
+        # ``blocked`` cannot transition directly to ``destroying``.
+        WorkspaceStatus.blocked,
+        # ``recovering`` is the auto-healing provider-retry pause (#612) — the
+        # same kind of non-terminal hold (warm stack + worktree + execution
+        # claim) that also cannot transition directly to ``destroying``. It must
+        # classify as active for the identical reason, so stop/destroy route it
+        # through ``cancelled`` and the force guard applies.
+        WorkspaceStatus.recovering,
     }

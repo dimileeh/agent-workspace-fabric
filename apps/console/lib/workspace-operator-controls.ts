@@ -54,6 +54,17 @@ const cancellableStatuses = new Set([
   "validating",
   "pushing",
   "monitoring_pr",
+  // A paused (blocked) workspace holds its execution slot + warm stack while it
+  // awaits an operator decision. Cancel stays the manual capacity-reclaim lever
+  // (the state machine allows blocked → cancelled), so the operator can abandon a
+  // workspace that should not be resumed instead of being forced to grant/revert.
+  "blocked",
+  // A recovering workspace is an auto-retry pause that likewise keeps its slot +
+  // warm stack during the provider cooldown. The state machine allows
+  // recovering → cancelled, so cancel must stay the manual capacity-reclaim lever
+  // for operators who want to reclaim capacity instead of waiting out a long
+  // auto-retry — otherwise the only escape is the CLI/API.
+  "recovering",
 ]);
 
 const terminalOperationStatuses = new Set(["succeeded", "failed", "cancelled", "canceled"]);

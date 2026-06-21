@@ -221,6 +221,32 @@ def arm_operator_hint_freeze(
         ] = started_at
 
 
+def pre_pr_operator_hint_from_payload(payload: object) -> OperatorHint | None:
+    """Reconstruct a pre-PR ``OperatorHint`` from the dedicated workspace column.
+
+    Mirrors :func:`operator_hint_from_threads` but reads the standalone
+    ``Workspace.pending_operator_hint`` JSON column (used by the pre-PR
+    ``blocked`` resume path) rather than the monitor-state map. Returns ``None``
+    for an absent/malformed payload or one whose status is not ``pending``."""
+    if not isinstance(payload, dict):
+        return None
+    reason = payload.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    status = payload.get("status")
+    if status not in {"pending", "needs_human", "agent_failed"}:
+        status = "pending"
+    return OperatorHint(
+        reason=reason,
+        directive=_optional_stripped_string(payload.get("directive")),
+        operation_id=_optional_string(payload.get("operation_id")),
+        requested_at=_optional_string(payload.get("requested_at")),
+        reason_code=_optional_string(payload.get("reason_code")) or "OPERATOR_GUIDE",
+        status=cast(Literal["pending", "needs_human", "agent_failed"], status),
+        status_reason=_optional_string(payload.get("status_reason")),
+    )
+
+
 def build_pending_operator_hint_payload(hint: OperatorHint) -> dict[str, object]:
     return {
         key: value

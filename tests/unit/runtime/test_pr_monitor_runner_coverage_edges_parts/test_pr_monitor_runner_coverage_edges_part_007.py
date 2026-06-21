@@ -1421,6 +1421,7 @@ async def test_provider_recovery_suppression_blocks_all_monitor_agent_invocation
             remote_branch="awf/ws_suppressed",
         )
 
+    cmd.queue_result(returncode=0, stdout="abc123\n")
     cmd.queue_result(returncode=0)  # git merge --abort
     cmd.queue_result(returncode=0)  # git fetch origin development
     cmd.queue_result(returncode=1, stderr="conflict")  # git merge
@@ -1455,6 +1456,7 @@ async def test_protected_scope_repair_returns_none_when_recheck_fails(
     adapter.queue(stdout="removed workflow edit")
     cmd.queue_result(returncode=0)  # cat-file HEAD:.github/workflows/ci.yml
     cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
+    cmd.queue_result(returncode=0, stdout="a" * 40)  # rev-parse HEAD before repair
     cmd.queue_result(returncode=128, stderr="fatal: not a git repository")
     runner = make_runner(
         factory=factory,

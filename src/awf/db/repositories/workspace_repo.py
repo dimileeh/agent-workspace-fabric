@@ -77,6 +77,10 @@ from awf.db.repositories.workspace_repo_host_ports import (
     find_active_owned_path_overlaps,
     find_host_port_conflicts,
 )
+from awf.db.repositories.workspace_repo_resumable import (
+    list_resumable_blocked_ids,
+    list_resumable_recovering_ids,
+)
 
 
 def _transition_releases_provisioning_execution_claim(
@@ -258,8 +262,22 @@ class WorkspaceRepository:
         await self._session.execute(stmt)
         await self._session.flush()
 
-    async def get(self, workspace_id: str) -> Workspace | None:
-        """Return a workspace by primary key, if it exists."""
+    async def get(self, workspace_id: str, *, populate_existing: bool = False) -> Workspace | None:
+        """Return a workspace by primary key, if it exists.
+
+        Pass ``populate_existing=True`` to force a DB round-trip that refreshes the
+        identity-mapped instance instead of returning the session-cached row. This
+        is required after a failed owner-gated CAS that races a newer claimant: a
+        plain ``session.get`` would return the stale instance loaded before the
+        claim moved, defeating the fence check that reads ``execution_claimed_by``.
+        """
+        if populate_existing:
+            stmt = (
+                select(Workspace)
+                .where(Workspace.id == workspace_id)
+                .execution_options(populate_existing=True)
+            )
+            return (await self._session.execute(stmt)).scalar_one_or_none()
         return await self._session.get(Workspace, workspace_id)
 
     async def get_with_secret_leases(self, workspace_id: str) -> Workspace | None:
@@ -654,6 +672,72 @@ class WorkspaceRepository:
             )
         stmt = stmt.limit(limit)
         return list((await self._session.execute(stmt)).scalars())
+
+    async def list_resumable_blocked_ids(
+        self,
+        *,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
+    ) -> builtins.list[str]:
+        """Return ``blocked`` workspace IDs an operator has cleared for resume.
+
+        A pre-PR ``blocked`` workspace is resumable only once an operator has
+        acted on it: ``guide`` either arms a non-empty directive in
+        ``pending_operator_hint`` (revert/redo) or records at least one grant
+        active for the workspace's CURRENT ``block_epoch`` (approve-and-keep).
+        Blocked workspaces still awaiting an operator decision carry neither, so
+        they are excluded here — otherwise the worker would spin them through
+        ``blocked -> running -> blocked`` re-running the same gate every cycle.
+
+        When ``node_id`` is given the result is scoped to that owning node
+        (mirroring the scheduler/cleanup ``node_id == node_id OR node_id IS
+        NULL`` predicate): a blocked workspace's warm compose stack/worktree is
+        preserved on the node that ran it, so a worker on another node must not
+        claim it and resume against resources that only exist elsewhere. NULL
+        rows (legacy/unstamped) stay adoptable by any node.
+
+        The hint branch matches the resume path's acceptance test exactly: a
+        directive-less, whitespace-only, or non-string ``directive`` in
+        ``pending_operator_hint`` (which ``execution_flow`` treats as absent via
+        ``_optional_stripped_string`` — including non-``str`` JSON values such as
+        ``true``/``123``, running neither the revert/redo nor the approve-and-keep
+        branch) is NOT eligible on its own — selecting it would reproduce the very
+        spin loop the non-null guard was meant to avoid.
+        Oldest ``updated_at`` first for FIFO fairness across cleared workspaces.
+        """
+        return await list_resumable_blocked_ids(
+            self._session,
+            self._dialect_name,
+            limit=limit,
+            exclude_ids=exclude_ids,
+            node_id=node_id,
+        )
+
+    async def list_resumable_recovering_ids(
+        self,
+        *,
+        limit: int,
+        now: datetime,
+        exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
+    ) -> builtins.list[str]:
+        """Return ``recovering`` workspace IDs whose provider cooldown elapsed (#612).
+
+        A ``recovering`` workspace is resumable once ``now`` has reached the
+        provider cooldown deadline persisted at
+        ``task_policy.provider_recovery_state.not_before``; rows still inside the
+        cooldown are excluded so the worker does not resume early. Node-scoped and
+        FIFO by ``updated_at`` exactly like ``list_resumable_blocked_ids``.
+        """
+        return await list_resumable_recovering_ids(
+            self._session,
+            self._dialect_name,
+            limit=limit,
+            now=now,
+            exclude_ids=exclude_ids,
+            node_id=node_id,
+        )
 
     async def list_schedulable_ids(
         self,

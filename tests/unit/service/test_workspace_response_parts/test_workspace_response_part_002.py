@@ -444,3 +444,86 @@ def test_profile_requested_validation_tier_ignores_non_integer_profile_value() -
     )
 
     assert _profile_requested_validation_tier(workspace) == 1  # type: ignore[arg-type]
+
+
+def _blocked_workspace_fixture(*, status: str) -> SimpleNamespace:
+    workspace = _workspace_response_fixture(
+        workspace_id="ws_blocked",
+        status=status,
+        events=[],
+    )
+    workspace.block_type = "protected_quality_gate"
+    workspace.block_reason_code = "QUALITY_GATE_POLICY_CHANGED"
+    workspace.block_resume_phase = "validation_fix_cycle"
+    workspace.block_epoch = 2
+    workspace.blocked_at = datetime(2026, 4, 27, 11, 0, tzinfo=UTC)
+    workspace.block_violations = [
+        {
+            "path": "pyproject.toml",
+            "protected_pattern": "pyproject.toml",
+            "section": "tool.coverage",
+            "line": 12,
+            "reason": "Coverage threshold lowered.",
+        },
+        "not-a-mapping",
+    ]
+    return workspace
+
+
+@pytest.mark.unit
+def test_workspace_response_projects_block_state_while_blocked() -> None:
+    workspace = _blocked_workspace_fixture(status=WorkspaceStatus.blocked.value)
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.block_state is not None
+    assert response.block_state.block_type == "protected_quality_gate"
+    assert response.block_state.block_reason_code == "QUALITY_GATE_POLICY_CHANGED"
+    assert response.block_state.block_resume_phase == "validation_fix_cycle"
+    assert response.block_state.block_epoch == 2
+    assert response.block_state.blocked_at == datetime(2026, 4, 27, 11, 0, tzinfo=UTC)
+    assert len(response.block_state.violations) == 1
+    violation = response.block_state.violations[0]
+    assert violation.path == "pyproject.toml"
+    assert violation.section == "tool.coverage"
+    assert violation.line == 12
+    assert violation.reason == "Coverage threshold lowered."
+
+
+@pytest.mark.unit
+def test_workspace_response_omits_stale_block_state_after_resume() -> None:
+    workspace = _blocked_workspace_fixture(status=WorkspaceStatus.running.value)
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.block_state is None
+
+
+@pytest.mark.unit
+def test_workspace_response_skips_malformed_block_violation_mapping() -> None:
+    workspace = _blocked_workspace_fixture(status=WorkspaceStatus.blocked.value)
+    # A corrupt persisted entry whose ``line`` cannot coerce to int must be
+    # skipped rather than 500 the whole workspace GET.
+    workspace.block_violations = [
+        {
+            "path": "pyproject.toml",
+            "protected_pattern": "pyproject.toml",
+            "section": "tool.coverage",
+            "line": "not-an-int",
+            "reason": "Corrupt line type.",
+        },
+        {
+            "path": "Makefile",
+            "protected_pattern": "Makefile",
+            "section": None,
+            "line": 7,
+            "reason": "Protected file changed.",
+        },
+    ]
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.block_state is not None
+    assert len(response.block_state.violations) == 1
+    assert response.block_state.violations[0].path == "Makefile"
+    assert response.block_state.violations[0].line == 7

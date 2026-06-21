@@ -450,11 +450,14 @@ async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
         _runner = object()
         _usage_sampler = None
 
-        async def _claim_ready(self, *args: object, **kwargs: object) -> Workspace:
-            return workspace
-
-        async def _recheck_status(self, *args: object, **kwargs: object) -> bool:
-            return True
+        async def _begin_execution(
+            self,
+            *args: object,
+            **kwargs: object,
+        ) -> tuple[Workspace, bool, bool, None]:
+            # Fresh-claim entry: workspace acquired + confirmed ``running``,
+            # no blocked-resume skip, no disabled fix passes, no persisted baseline.
+            return workspace, False, False, None
 
         async def _reject_unsupported_task_kind(
             self,
@@ -642,9 +645,9 @@ async def test_validation_cycle_syncs_profile_before_command_planning(
 
     assert result.stop is True
     assert events == [
-        ("transition", "start_validation"),
         ("resolve", 6),
         ("sync", 6),
+        ("transition", "start_validation"),
         ("plan", "first-writer"),
         ("tier", "first-writer"),
         ("recheck", "validate"),

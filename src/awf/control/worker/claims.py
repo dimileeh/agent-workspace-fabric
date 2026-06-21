@@ -18,6 +18,7 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.control.executor.types import PauseResumeReason
 from awf.control.worker.admission import (
     _acquire_requested_admission_locks,
     _requested_admission_lock_node_ids,
@@ -26,8 +27,12 @@ from awf.control.worker.admission import (
 from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+    _BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE,
+    _BLOCKED_RESUME_REASON_CODE,
     _MONITOR_RECOVERY_EVENT_TYPE,
     _MONITOR_RECOVERY_REASON_CODE,
+    _RECOVERING_RESUME_NO_EXECUTOR_REASON_CODE,
+    _RECOVERING_RESUME_REASON_CODE,
     _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL,
     LOCAL_CAPACITY_DEFERRED_REASON,
     LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON,
@@ -82,6 +87,7 @@ from awf.db.repositories import (
 )
 from awf.db.repositories._scheduler import _scheduler_node_scope_condition
 from awf.db.resilience import run_db_operation_with_retry
+from awf.service.provider_recovery import rearm_recovering_cooldown_task_policy
 from awf.service.scheduler import SchedulerOrderCursor
 
 
@@ -571,6 +577,272 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
         return claimed
 
 
+_PAUSED_RESUME_FROM_STATUS: dict[str, WorkspaceStatus] = {
+    "blocked": WorkspaceStatus.blocked,
+    "recovering": WorkspaceStatus.recovering,
+}
+
+_PAUSED_RESUME_CLAIM_REASON_CODE: dict[str, str] = {
+    "blocked": _BLOCKED_RESUME_REASON_CODE,
+    "recovering": _RECOVERING_RESUME_REASON_CODE,
+}
+
+
+async def _claim_paused_for_resume(
+    self: Any, workspace_id: str, *, reason: PauseResumeReason
+) -> bool:
+    """Atomically claim a paused (``blocked``/``recovering``) workspace for resume.
+
+    Epoch-fenced: the ``<paused> -> running`` transition is the CAS — exactly one
+    worker wins (the loser sees ``running`` and updates 0 rows), so a double
+    resume cannot run the warm stack twice. ``reason`` selects the paused source
+    status (``blocked`` operator pause vs ``recovering`` provider-failure pause).
+    The execution claim + fencing epoch are (re-)stamped via the shared
+    ``_apply_execution_claim`` so a stale prior executor is fenced on its next
+    write."""
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=_PAUSED_RESUME_FROM_STATUS[reason],
+            to=WorkspaceStatus.running,
+            reason_code=_PAUSED_RESUME_CLAIM_REASON_CODE[reason],
+        )
+        if ws is None:
+            return False
+        _apply_execution_claim(self, ws, owner_id=self._worker_id)
+        await session.commit()
+        return True
+
+
+async def _claim_blocked_for_resume(self: Any, workspace_id: str) -> bool:
+    """Claim a ``blocked`` workspace for resume — shim over ``_claim_paused_for_resume``."""
+    return await _claim_paused_for_resume(self, workspace_id, reason="blocked")
+
+
+async def _claim_recovering_for_resume(self: Any, workspace_id: str) -> bool:
+    """Claim a ``recovering`` workspace for resume — shim over ``_claim_paused_for_resume`` (#612)."""
+    return await _claim_paused_for_resume(self, workspace_id, reason="recovering")
+
+
+async def _restore_paused_resume_claim(
+    self: Any,
+    workspace_id: str,
+    *,
+    reason: PauseResumeReason,
+    reason_code: str,
+    rearm_recovering_cooldown: bool = False,
+) -> None:
+    """Revert a won paused-resume back to its paused status when it cannot be driven.
+
+    ``_claim_paused_for_resume`` performs the ``<paused> -> running`` CAS *before*
+    dispatch, so if the resume never starts the row would otherwise be left
+    stranded in ``running`` (its claim released elsewhere) until stale-active
+    recovery FAILS it — dropping the paused state operators/auto-retry expect.
+    Reverting to the paused status restores it: the claim CAS never touched the
+    pause bookkeeping (``block_epoch``/``pending_operator_hint``/grants for
+    ``blocked``; ``provider_recovery_state``/cooldown for ``recovering``), so the
+    next cycle resumes it cleanly once it can run. Owner-gated so a newer claimant
+    that already fenced us is never clobbered. The ``reason_code`` records *why*
+    the resume was abandoned (no executor vs. an aborted post-claim dispatch).
+
+    ``rearm_recovering_cooldown`` (#647) re-arms ``provider_recovery_state``
+    ``not_before`` to a fresh cooldown for every ``recovering`` revert that did not
+    make progress (worktree-reset abort, post-claim executor failure, and
+    dispatch abort): those paths leave the cooldown in the past, so without
+    re-arming ``list_resumable_recovering_ids`` would re-select the row every poll
+    and a persistent failure would busy-loop the executor slot instead of backing
+    off for a later safe retry."""
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).transition_if_current(
+                workspace_id,
+                from_status=WorkspaceStatus.running,
+                to=_PAUSED_RESUME_FROM_STATUS[reason],
+                reason_code=reason_code,
+                extra_conditions=(Workspace.execution_claimed_by == self._worker_id,),
+            )
+            if ws is not None:
+                if rearm_recovering_cooldown:
+                    rearmed = rearm_recovering_cooldown_task_policy(
+                        ws.task_policy, now=datetime.now(UTC)
+                    )
+                    # A ``recovering`` row reverted on the reset-abort path always
+                    # carries ``provider_recovery_state`` (the divert into recovering
+                    # writes it), so ``rearmed`` is never ``None`` here; the ``None``
+                    # arc is unreachable defensive code for a malformed row — hence
+                    # ``# pragma: no branch``.
+                    if rearmed is not None:  # pragma: no branch
+                        ws.task_policy = rearmed
+                await session.commit()
+    except Exception:
+        _log.exception(
+            f"worker.{reason}_resume_restore_failed",
+            workspace_id=workspace_id,
+            worker_id=self._worker_id,
+            reason_code=reason_code,
+        )
+
+
+async def _restore_blocked_resume_claim(self: Any, workspace_id: str, *, reason_code: str) -> None:
+    """Revert a won blocked-resume to ``blocked`` — shim over ``_restore_paused_resume_claim``."""
+    await _restore_paused_resume_claim(
+        self, workspace_id, reason="blocked", reason_code=reason_code
+    )
+
+
+async def _restore_recovering_resume_claim(
+    self: Any, workspace_id: str, *, reason_code: str
+) -> None:
+    """Revert a won recovering-resume to ``recovering`` — shim over ``_restore_paused_resume_claim`` (#612).
+
+    Re-arms the provider cooldown (#647) like the worktree-reset-abort path: this
+    shim drives the post-claim dispatch-abort revert (a failed ordered-decision
+    write, etc.), which leaves ``not_before`` in the past. Without re-arming a
+    persistent dispatch abort would let ``list_resumable_recovering_ids`` re-select
+    the row every poll and busy-loop the executor slot instead of backing off a
+    full cooldown before the next safe retry."""
+    await _restore_paused_resume_claim(
+        self,
+        workspace_id,
+        reason="recovering",
+        reason_code=reason_code,
+        rearm_recovering_cooldown=True,
+    )
+
+
+_PAUSED_RESUME_NO_EXECUTOR_REASON_CODE: dict[str, str] = {
+    "blocked": _BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE,
+    "recovering": _RECOVERING_RESUME_NO_EXECUTOR_REASON_CODE,
+}
+
+
+async def _restore_paused_after_missing_executor(
+    self: Any, workspace_id: str, *, reason: PauseResumeReason
+) -> None:
+    """Revert a won paused-resume back to its paused status when no executor can drive it.
+
+    Used inside the dispatched resume task (the claim is released by the caller's
+    ``finally``); ``reason`` selects the paused status + no-executor reason code.
+
+    Like the other ``recovering`` revert paths (worktree-reset abort, post-claim
+    dispatch abort), re-arm the provider cooldown (#647) for ``recovering``: this
+    revert also leaves ``not_before`` in the past, so without re-arming
+    ``list_resumable_recovering_ids`` would re-select the row every poll and a
+    worker that persistently has no executor would busy-loop the executor slot
+    instead of backing off a full cooldown before the next safe retry."""
+    await _restore_paused_resume_claim(
+        self,
+        workspace_id,
+        reason=reason,
+        reason_code=_PAUSED_RESUME_NO_EXECUTOR_REASON_CODE[reason],
+        rearm_recovering_cooldown=(reason == "recovering"),
+    )
+
+
+async def _restore_blocked_after_missing_executor(self: Any, workspace_id: str) -> None:
+    """Revert a won blocked-resume to ``blocked`` — shim over ``_restore_paused_after_missing_executor``."""
+    await _restore_paused_after_missing_executor(self, workspace_id, reason="blocked")
+
+
+async def _restore_recovering_after_missing_executor(self: Any, workspace_id: str) -> None:
+    """Revert a won recovering-resume to ``recovering`` — shim over ``_restore_paused_after_missing_executor`` (#612).
+
+    Re-arms the provider cooldown (#647) via the ``reason == "recovering"`` gate so
+    a worker that persistently lacks an executor backs off a full cooldown instead
+    of re-selecting the row every poll and busy-looping the slot."""
+    await _restore_paused_after_missing_executor(self, workspace_id, reason="recovering")
+
+
+async def _restore_paused_resume_claim_after_cancellation(
+    self: Any, workspace_id: str, *, reason: PauseResumeReason, reason_code: str
+) -> None:
+    """Restore a cancelled paused-resume back to its paused status even if cancelled again.
+
+    ``_safely_resume_paused_claimed``'s ``CancelledError`` handler must revert the
+    post-claim ``running`` row to its paused status before re-raising, but the
+    restore is itself a cancellable DB write. A second cancellation (e.g. worker
+    shutdown cancelling outstanding tasks) landing mid-write would propagate out of
+    the un-shielded restore (which only catches ``Exception``), skipping the commit
+    so the caller's ``finally`` releases the claim and leaves the row stranded in
+    ``running`` for stale-active recovery to FAIL. Shield the restore and re-await
+    across repeated cancellations so it always runs to completion, mirroring
+    ``_release_execution_claim_after_cancellation``.
+
+    Re-arm the provider cooldown (#647) for a ``recovering`` revert exactly like the
+    post-claim executor-failure path: the claim CAS already moved the row to
+    ``running`` while leaving ``not_before`` in the past, so without re-arming
+    ``list_resumable_recovering_ids`` would re-select the row every poll and a
+    repeated cancellation loop (e.g. worker shutdown) would busy-loop the executor
+    slot instead of backing off a full cooldown. ``blocked`` reverts carry no
+    cooldown, so the rearm is gated to ``recovering``.
+    """
+    restore_task = asyncio.create_task(
+        self._restore_paused_resume_claim(
+            workspace_id,
+            reason=reason,
+            reason_code=reason_code,
+            rearm_recovering_cooldown=reason == "recovering",
+        ),
+        name=f"awf-{reason}-resume-restore-{workspace_id}",
+    )
+    while not restore_task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(restore_task)
+
+
+async def _restore_blocked_resume_claim_after_cancellation(
+    self: Any, workspace_id: str, *, reason_code: str
+) -> None:
+    """Shielded blocked-resume restore — shim over ``_restore_paused_resume_claim_after_cancellation``."""
+    await _restore_paused_resume_claim_after_cancellation(
+        self, workspace_id, reason="blocked", reason_code=reason_code
+    )
+
+
+async def _restore_recovering_resume_claim_after_cancellation(
+    self: Any, workspace_id: str, *, reason_code: str
+) -> None:
+    """Shielded recovering-resume restore — shim over ``_restore_paused_resume_claim_after_cancellation`` (#612)."""
+    await _restore_paused_resume_claim_after_cancellation(
+        self, workspace_id, reason="recovering", reason_code=reason_code
+    )
+
+
+async def _claim_paused_resume_ids(
+    self: Any, workspace_ids: list[str], *, limit: int, reason: PauseResumeReason
+) -> list[str]:
+    """Claim each resumable paused workspace for resume, in order.
+
+    Mirrors ``_claim_monitoring_pr_ids``: the per-workspace CAS in
+    ``_claim_paused_for_resume`` performs the ``<paused> -> running`` transition,
+    so only the rows it actually wins (and that are not already running locally)
+    are returned for dispatch. ``reason`` selects the paused source status."""
+    claimed: list[str] = []
+    for workspace_id in workspace_ids:
+        if len(claimed) >= limit:
+            break
+        if workspace_id in self._execution_tasks:
+            continue
+        if await _claim_paused_for_resume(self, workspace_id, reason=reason):
+            claimed.append(workspace_id)
+    return claimed
+
+
+async def _claim_blocked_resume_ids(
+    self: Any, workspace_ids: list[str], *, limit: int
+) -> list[str]:
+    """Claim ``blocked`` resumes — shim over ``_claim_paused_resume_ids``."""
+    return await _claim_paused_resume_ids(self, workspace_ids, limit=limit, reason="blocked")
+
+
+async def _claim_recovering_resume_ids(
+    self: Any, workspace_ids: list[str], *, limit: int
+) -> list[str]:
+    """Claim ``recovering`` resumes — shim over ``_claim_paused_resume_ids`` (#612)."""
+    return await _claim_paused_resume_ids(self, workspace_ids, limit=limit, reason="recovering")
+
+
 async def _safely_resume_claimed_pr_monitor(
     self: Any,
     workspace_id: str,
@@ -758,10 +1030,39 @@ async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
     )
 
 
-async def _release_execution_claim(self: Any, workspace_id: str) -> None:
+async def _release_execution_claim(
+    self: Any, workspace_id: str, *, skip_if_blocked: bool = False
+) -> None:
     try:
         async with self._session_factory() as session:
-            released = await WorkspaceRepository(session).release_execution_claim(
+            repo = WorkspaceRepository(session)
+            if skip_if_blocked:
+                ws = await repo.get(workspace_id)
+                if ws is not None and ws.status in {
+                    WorkspaceStatus.blocked.value,
+                    WorkspaceStatus.recovering.value,
+                }:
+                    # A ``blocked`` (operator pause) or ``recovering`` (auto-healing
+                    # provider-failure pause, #612) workspace keeps its worktree,
+                    # warm stack, and execution claim as the *durable lease* (see
+                    # ``enter_blocked_for_protected_violation`` /
+                    # ``enter_recovering_for_provider_failure`` and
+                    # ``tests/.../test_*_status_membership``). When a genuine
+                    # execution pauses into one of these statuses, this ``finally``
+                    # reaches here right after the pause; releasing the claim now
+                    # would leave the row paused with ``execution_claimed_by``
+                    # cleared, stranding it without the fencing/ownership the
+                    # membership contract and the resume path expect until a resume
+                    # re-stamps it. Skip the release so the warm-stack lease stays
+                    # held across the operator decision / provider cooldown.
+                    #
+                    # Only the execution dispatch passes ``skip_if_blocked``: the
+                    # paused-resume paths deliberately release when they revert to
+                    # the paused status after finding no executor, so a capable
+                    # worker can re-claim it (see
+                    # ``test_resume_blocked_claimed_releases_claim_when_executor_missing``).
+                    return
+            released = await repo.release_execution_claim(
                 workspace_id,
                 owner_id=self._worker_id,
                 execution_claim_epoch=self._execution_claim_epochs.get(workspace_id),

@@ -29,13 +29,316 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from awf.common.git_auth import GitAuthNotConfiguredError, verify_bitbucket_git_auth
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
+_GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+_POISONED_MIRROR_HOOKS_PATH_PATTERNS = {
+    "/dev/null": "^/dev/null$",
+    "/tmp/awf-poisoned-hooks": "^/tmp/awf-poisoned-hooks$",
+}
 AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
+
+
+@dataclass(frozen=True)
+class _HooksPathConfigValue:
+    hooks_path: str
+    origin_path: Path | None
+
+
+def _mirror_hooks_path_unset_pattern(hooks_path: str) -> str:
+    if hooks_path in _POISONED_MIRROR_HOOKS_PATH_PATTERNS:
+        return _POISONED_MIRROR_HOOKS_PATH_PATTERNS[hooks_path]
+    return f"^{re.escape(hooks_path)}$"
+
+
+def _config_origin_path(origin: str) -> Path | None:
+    file_prefix = "file:"
+    if not origin.startswith(file_prefix):
+        return None
+    return Path(origin.removeprefix(file_prefix))
+
+
+def _parse_hooks_path_config_values(config_output: str) -> tuple[_HooksPathConfigValue, ...]:
+    parts = config_output.split("\0")
+    if parts and parts[-1] == "":
+        parts.pop()
+    values: list[_HooksPathConfigValue] = []
+    for index in range(0, len(parts) - 1, 2):
+        values.append(
+            _HooksPathConfigValue(
+                hooks_path=parts[index + 1],
+                origin_path=_config_origin_path(parts[index]),
+            )
+        )
+    return tuple(values)
+
+
+def _paths_match(left: Path | None, right: Path) -> bool:
+    if left is None:
+        return False
+    return left.resolve() == right.resolve()
+
+
+def _resolve_git_include_path(include_path: str, config_path: Path) -> Path:
+    path = Path(include_path).expanduser()
+    if not path.is_absolute():
+        path = config_path.parent / path
+    return path.resolve()
+
+
+async def _run_git_config(
+    *,
+    git_args: tuple[str, ...],
+    config_scope_args: tuple[str, ...],
+    args: tuple[str, ...],
+) -> tuple[int, str, str]:
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        *git_args,
+        "config",
+        *config_scope_args,
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=git_env_without_object_lookup_overrides(),
+    )
+    stdout_bytes, stderr_bytes = await proc.communicate()
+    assert proc.returncode is not None
+    return (
+        proc.returncode,
+        stdout_bytes.decode("utf-8", errors="replace"),
+        stderr_bytes.decode("utf-8", errors="replace"),
+    )
+
+
+async def _run_git_worktree_prune(mirror_path: Path) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "--git-dir",
+        str(mirror_path),
+        "worktree",
+        "prune",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=git_env_without_object_lookup_overrides(),
+    )
+    stdout_bytes, stderr_bytes = await proc.communicate()
+    assert proc.returncode is not None
+    if proc.returncode != 0:
+        raise GitOperationError(
+            operation="mirror.worktree_prune",
+            returncode=proc.returncode,
+            stdout=stdout_bytes.decode("utf-8", errors="replace"),
+            stderr=stderr_bytes.decode("utf-8", errors="replace"),
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+
+
+async def _probe_hooks_path_config(
+    *,
+    git_args: tuple[str, ...],
+    config_scope_args: tuple[str, ...],
+    operation_prefix: str,
+) -> tuple[_HooksPathConfigValue, ...]:
+    returncode, stdout, stderr = await _run_git_config(
+        git_args=git_args,
+        config_scope_args=config_scope_args,
+        args=("--includes", "--show-origin", "--null", "--get-all", "core.hooksPath"),
+    )
+    if returncode == 1:
+        return ()
+    if returncode != 0:
+        raise GitOperationError(
+            operation=f"{operation_prefix}.hooks_path_probe",
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+    return _parse_hooks_path_config_values(stdout)
+
+
+async def _unset_matching_include_path(
+    *,
+    git_args: tuple[str, ...],
+    config_scope_args: tuple[str, ...],
+    config_path: Path,
+    included_origin: Path,
+    operation_prefix: str,
+) -> bool:
+    returncode, stdout, stderr = await _run_git_config(
+        git_args=git_args,
+        config_scope_args=config_scope_args,
+        args=("--get-all", "include.path"),
+    )
+    if returncode == 1:
+        stdout = ""
+    elif returncode != 0:
+        raise GitOperationError(
+            operation=f"{operation_prefix}.hooks_path_include_probe",
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+
+    include_paths = [("include.path", include_path) for include_path in stdout.splitlines()]
+    returncode, stdout, stderr = await _run_git_config(
+        git_args=git_args,
+        config_scope_args=config_scope_args,
+        args=("--get-regexp", r"^includeIf\..*\.path$"),
+    )
+    if returncode not in (0, 1):
+        raise GitOperationError(
+            operation=f"{operation_prefix}.hooks_path_include_probe",
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+    if returncode == 0:
+        for line in stdout.splitlines():
+            key, separator, include_path = line.partition(" ")
+            if separator:
+                include_paths.append((key, include_path))
+
+    removed = False
+    for include_key, include_path in include_paths:
+        if _resolve_git_include_path(include_path, config_path) != included_origin.resolve():
+            continue
+        unset_returncode, unset_stdout, unset_stderr = await _run_git_config(
+            git_args=git_args,
+            config_scope_args=config_scope_args,
+            args=(
+                "--unset-all",
+                include_key,
+                f"^{re.escape(include_path)}$",
+            ),
+        )
+        if unset_returncode not in (0, 5):
+            raise GitOperationError(
+                operation=f"{operation_prefix}.hooks_path_include_repair",
+                returncode=unset_returncode,
+                stdout=unset_stdout,
+                stderr=unset_stderr,
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+        removed = True
+    return removed
+
+
+async def _worktree_config_extension_enabled(config_path: Path) -> bool:
+    returncode, stdout, stderr = await _run_git_config(
+        git_args=(),
+        config_scope_args=("--file", str(config_path), "--bool"),
+        args=("--get", "extensions.worktreeConfig"),
+    )
+    if returncode == 1:
+        return False
+    if returncode != 0:
+        raise GitOperationError(
+            operation="mirror.worktree_config_probe",
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+    return stdout.strip().lower() == "true"
+
+
+async def _repair_hooks_path_config(
+    *,
+    git_args: tuple[str, ...],
+    config_scope_args: tuple[str, ...],
+    config_path: Path,
+    operation_prefix: str,
+) -> bool:
+    disallowed_hooks_paths = await _probe_hooks_path_config(
+        git_args=git_args,
+        config_scope_args=config_scope_args,
+        operation_prefix=operation_prefix,
+    )
+    if not disallowed_hooks_paths:
+        return False
+
+    repaired_included_origins: set[Path] = set()
+    for value in dict.fromkeys(disallowed_hooks_paths):
+        if not _paths_match(value.origin_path, config_path):
+            if value.origin_path is None:
+                raise GitOperationError(
+                    operation=f"{operation_prefix}.hooks_path_include_repair",
+                    returncode=1,
+                    stdout=value.hooks_path,
+                    stderr="included core.hooksPath origin is not directly included",
+                    reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+                )
+
+            included_origin = value.origin_path.resolve()
+            if included_origin in repaired_included_origins:
+                continue
+            if not await _unset_matching_include_path(
+                git_args=git_args,
+                config_scope_args=config_scope_args,
+                config_path=config_path,
+                included_origin=included_origin,
+                operation_prefix=operation_prefix,
+            ):
+                current_disallowed_hooks_paths = await _probe_hooks_path_config(
+                    git_args=git_args,
+                    config_scope_args=config_scope_args,
+                    operation_prefix=f"{operation_prefix}.hooks_path_include_repair_reprobe",
+                )
+                if any(
+                    _paths_match(current.origin_path, included_origin)
+                    for current in current_disallowed_hooks_paths
+                ):
+                    raise GitOperationError(
+                        operation=f"{operation_prefix}.hooks_path_include_repair",
+                        returncode=1,
+                        stdout=value.hooks_path,
+                        stderr="included core.hooksPath origin is not directly included",
+                        reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+                    )
+            repaired_included_origins.add(included_origin)
+            continue
+
+        unset_returncode, unset_stdout, unset_stderr = await _run_git_config(
+            git_args=git_args,
+            config_scope_args=config_scope_args,
+            args=(
+                "--unset-all",
+                "core.hooksPath",
+                _mirror_hooks_path_unset_pattern(value.hooks_path),
+            ),
+        )
+        if unset_returncode not in (0, 5):
+            raise GitOperationError(
+                operation=f"{operation_prefix}.hooks_path_repair",
+                returncode=unset_returncode,
+                stdout=unset_stdout,
+                stderr=unset_stderr,
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+
+    remaining_hooks_paths = await _probe_hooks_path_config(
+        git_args=git_args,
+        config_scope_args=config_scope_args,
+        operation_prefix=f"{operation_prefix}.hooks_path_repair_reprobe",
+    )
+    if remaining_hooks_paths:
+        raise GitOperationError(
+            operation=f"{operation_prefix}.hooks_path_repair",
+            returncode=1,
+            stdout="\n".join(value.hooks_path for value in remaining_hooks_paths),
+            stderr="core.hooksPath remained after repair",
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+    return True
 
 
 class GitOperationError(Exception):
@@ -680,6 +983,62 @@ def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
     return git_dir
 
 
+def _linked_worktree_path_from_git_dir(linked_git_dir: Path) -> Path:
+    """Return the worktree path from Git's linked-worktree back-reference."""
+    metadata_gitdir = linked_git_dir / "gitdir"
+    try:
+        raw_gitdir = metadata_gitdir.read_text(encoding="utf-8").strip()
+        if not raw_gitdir:
+            raise GitOperationError(
+                operation="worktree.hooks_path_probe",
+                returncode=1,
+                stdout="",
+                stderr=f"empty linked-worktree gitdir back-reference at {metadata_gitdir}",
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+        git_file = Path(raw_gitdir)
+        if not git_file.is_absolute():
+            git_file = linked_git_dir / git_file
+        return git_file.resolve().parent
+    except FileNotFoundError as exc:
+        # The back-reference file is gone (ENOENT): the linked worktree was
+        # removed out from under us, i.e. genuinely stale metadata that
+        # ``git worktree prune`` can safely clear.
+        raise GitOperationError(
+            operation="worktree.hooks_path_probe",
+            returncode=1,
+            stdout="",
+            stderr=f"cannot read linked-worktree gitdir back-reference at {metadata_gitdir}",
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        ) from exc
+    except OSError as exc:
+        # The back-reference exists but is unreadable (e.g. permission denied):
+        # this is a live worktree we merely cannot inspect, not stale metadata.
+        # Surface a non-stale error so repair fails closed instead of pruning —
+        # ``git worktree prune`` would delete the live worktree's admin files.
+        raise GitOperationError(
+            operation="worktree.hooks_path_probe",
+            returncode=1,
+            stdout="",
+            stderr=f"cannot access linked-worktree gitdir back-reference at {metadata_gitdir}",
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        ) from exc
+    except RuntimeError as exc:
+        raise GitOperationError(
+            operation="worktree.hooks_path_probe",
+            returncode=1,
+            stdout="",
+            stderr=f"cannot resolve linked-worktree gitdir back-reference at {metadata_gitdir}",
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        ) from exc
+
+
+def _is_stale_linked_worktree_metadata_error(exc: GitOperationError) -> bool:
+    return exc.operation == "worktree.hooks_path_probe" and exc.stderr.startswith(
+        "cannot read linked-worktree gitdir back-reference at "
+    )
+
+
 def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> None:
     seen: set[tuple[Path, bool, bool]] = set()
     for target in targets:
@@ -694,6 +1053,175 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
             os.lchown(target.path, uid, gid)
         else:
             os.chown(target.path, uid, gid)
+
+
+async def _repair_mirror_hooks_path_once(mirror_path: Path) -> tuple[bool, bool]:
+    repaired = await _repair_hooks_path_config(
+        git_args=("--git-dir", str(mirror_path)),
+        config_scope_args=("--local",),
+        config_path=mirror_path / "config",
+        operation_prefix="mirror",
+    )
+
+    stale_worktree_metadata = False
+    worktrees_dir = mirror_path / "worktrees"
+    if worktrees_dir.exists():
+        try:
+            linked_worktree_dirs = sorted(path for path in worktrees_dir.iterdir() if path.is_dir())
+        except OSError:
+            linked_worktree_dirs = []
+            stale_worktree_metadata = True
+    else:
+        linked_worktree_dirs = []
+    worktree_config_enabled: bool | None = None
+    for linked_worktree_dir in linked_worktree_dirs:
+        try:
+            worktree_path = _linked_worktree_path_from_git_dir(linked_worktree_dir)
+        except GitOperationError as exc:
+            if not _is_stale_linked_worktree_metadata_error(exc):
+                raise
+            stale_worktree_metadata = True
+            continue
+        if not worktree_path.exists():
+            stale_worktree_metadata = True
+            continue
+        repaired = (
+            await _repair_hooks_path_config(
+                git_args=(
+                    *git_safe_directory_config_args(worktree_path),
+                    "-C",
+                    str(worktree_path),
+                ),
+                config_scope_args=("--local",),
+                config_path=mirror_path / "config",
+                operation_prefix="mirror",
+            )
+            or repaired
+        )
+        config_path = linked_worktree_dir / "config.worktree"
+        if not config_path.exists():
+            continue
+        if worktree_config_enabled is None:
+            worktree_config_enabled = await _worktree_config_extension_enabled(
+                mirror_path / "config"
+            )
+        if not worktree_config_enabled:
+            continue
+        repaired = (
+            await _repair_hooks_path_config(
+                git_args=(
+                    *git_safe_directory_config_args(worktree_path),
+                    "-C",
+                    str(worktree_path),
+                ),
+                config_scope_args=("--worktree",),
+                config_path=config_path,
+                operation_prefix="worktree",
+            )
+            or repaired
+        )
+    return repaired, stale_worktree_metadata
+
+
+async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
+    """Remove poisoned ``core.hooksPath`` values from mirror and worktree config.
+
+    Returns ``True`` if repair was needed and succeeded, ``False`` if no repair
+    was needed. Raises ``GitOperationError`` if the probe or unset fails.
+    """
+    lock = GitManager._lock_for_mirror(mirror_path)
+    async with lock:
+        repaired, stale_worktree_metadata = await _repair_mirror_hooks_path_once(mirror_path)
+        if not stale_worktree_metadata:
+            return repaired
+
+        await _run_git_worktree_prune(mirror_path)
+        retry_repaired, retry_stale_worktree_metadata = await _repair_mirror_hooks_path_once(
+            mirror_path
+        )
+        if retry_stale_worktree_metadata:
+            # Prune clears dead metadata races, but stale metadata that survives
+            # the prune (e.g. an unreadable ``worktrees`` directory, or a missing
+            # gitdir back-reference prune cannot reap) leaves a worktree whose
+            # ``config.worktree`` was skipped on both passes, so a poisoned
+            # ``core.hooksPath`` may still be present. Fail closed rather than
+            # letting the monitor proceed on an unverified mirror.
+            raise GitOperationError(
+                operation="mirror.worktree_metadata_stale",
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "linked-worktree metadata still stale after worktree prune at "
+                    f"{mirror_path}; cannot guarantee core.hooksPath repair of worktree config"
+                ),
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+        return repaired or retry_repaired
+
+
+async def verify_head_object_exists(worktree_path: Path) -> bool:
+    """Return ``True`` when HEAD's commit object is reachable in the object database.
+
+    Uses ``git cat-file -e HEAD^{commit}`` which exits 0 when the object exists
+    and non-zero when the ref exists but the commit object is missing. Repository
+    alternates are cleared before probing because they can make a shared mirror
+    appear to contain objects that only exist in a workspace-private store.
+    """
+    if not _clear_repository_object_alternates(worktree_path):
+        return False
+
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "-C",
+        str(worktree_path),
+        "cat-file",
+        "-e",
+        "HEAD^{commit}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=git_env_without_object_lookup_overrides(),
+    )
+    await proc.communicate()
+    assert proc.returncode is not None
+    return proc.returncode == 0
+
+
+def _clear_repository_object_alternates(worktree_path: Path) -> bool:
+    alternates_path = _repository_alternates_path_for_worktree(worktree_path)
+    if alternates_path is None:
+        return True
+    try:
+        alternates_path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        _log.warning(
+            "git.repository_alternates_clear_failed",
+            path=str(alternates_path),
+            error=str(exc),
+        )
+        return False
+    _log.warning("git.repository_alternates_cleared", path=str(alternates_path))
+    return True
+
+
+def _repository_alternates_path_for_worktree(worktree_path: Path) -> Path | None:
+    common_dir = mirror_path_for_worktree(worktree_path)
+    if common_dir is not None:
+        return common_dir / "objects" / "info" / "alternates"
+
+    git_dir = worktree_path / ".git"
+    if git_dir.is_dir():
+        return git_dir / "objects" / "info" / "alternates"
+    return None
+
+
+def git_env_without_object_lookup_overrides() -> dict[str, str]:
+    env = dict(os.environ)
+    for key in _GIT_OBJECT_LOOKUP_ENV_KEYS:
+        env.pop(key, None)
+    return env
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:

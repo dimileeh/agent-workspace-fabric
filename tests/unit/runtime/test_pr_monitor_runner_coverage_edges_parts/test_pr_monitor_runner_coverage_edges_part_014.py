@@ -10,6 +10,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.repositories import (
@@ -27,7 +28,6 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewComment,
     ReviewThread,
-    _review_thread_body_state_key,
 )
 from awf.runtime.pr_monitor_runner import comments as pr_monitor_runner_comments
 from awf.runtime.pr_monitor_runner.helpers import (
@@ -92,10 +92,6 @@ def _git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
     return ["git", "-c", f"safe.directory={worktree_path}", "-C", str(worktree_path), *args]
 
 
-def _name_status_z(*paths: str) -> str:
-    return "".join(f"M\0{path}\0" for path in paths)
-
-
 @pytest.mark.unit
 async def test_fix_cycle_clears_addressed_thread_state_on_policy_blocked_review(
     factory: async_sessionmaker[AsyncSession],
@@ -145,31 +141,32 @@ async def test_fix_cycle_clears_addressed_thread_state_on_policy_blocked_review(
 
 
 @pytest.mark.unit
-async def test_fix_cycle_rolls_back_protected_scope_delta_and_keeps_comment_unaddressed(
+async def test_fix_cycle_pauses_into_blocked_and_preserves_protected_commit(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """WS-2: a protected-scope violation in an unpushed fix-cycle commit pauses
+    the workspace into ``blocked`` (NOT failed), PRESERVES the offending commit
+    (no ``git reset --hard``), records the preserved HEAD, and posts a PR
+    notification comment — instead of the old silent rollback."""
     workspace_id = await seed_monitoring_workspace(factory)
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="start-sha\n")  # operation start HEAD
-    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
-    cmd.queue_result(
-        returncode=0,
-        stdout=_name_status_z(".github/workflows/ci.yml", "plans/PR282_CI_SETUP_UV_VALIDATION.md"),
-    )
-    cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0, stdout="HEAD is now at start-sha\n")
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="start-sha\n")  # per-item recovery anchor
+    cmd.queue_result(returncode=0)  # per-item recovery anchor object check
+    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # preserved HEAD
+    gh = _RecordingGh()
     runner = make_runner(
         factory=factory,
         cmd=cmd,
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+        gh=gh,
     )
     thread = ReviewThread(
         thread_id="T_protected",
@@ -199,10 +196,10 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_and_keeps_comment_unad
         )
 
     async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
-        pytest.fail("protected-scope rollback must not push")
+        pytest.fail("a paused workspace must not push")
 
     monkeypatch.setattr(runner, "_address_thread", _address_thread)
-    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _fetch_clean_status)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _fetch_clean_status, raising=False)
     monkeypatch.setattr(runner, "_protected_scope_push_block", _protected_block)
     monkeypatch.setattr(runner, "_git_push_result", _unexpected_push)
 
@@ -220,60 +217,546 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_and_keeps_comment_unad
     )
 
     assert result.failed is True
-    assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert result.paused_into_blocked is True
+    assert result.reason_code == "PROTECTED_SCOPE_PAUSED_BLOCKED"
     assert result.details is not None
-    assert result.details["branch_restored"] is True
-    assert "T_protected" not in state.threads_addressed_ids
-    assert _review_thread_body_state_key("T_protected") not in state.threads_addressed_ids
-    assert _git_worktree_command(worktree, "reset", "--hard", "start-sha") in [
+    assert result.details["preserved_head_sha"] == "blocked-head-sha"
+    # The offending commit is PRESERVED — no reset/clean before the operator decides.
+    assert _git_worktree_command(worktree, "reset", "--hard", "start-sha") not in [
         call.args for call in cmd.calls
     ]
+    assert not any(call.args[5:7] == ["reset", "--hard"] for call in cmd.calls)
+    # An operator notification comment was posted to the PR.
+    assert len(gh.posts) == 1
 
     async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == "blocked"
+        assert workspace.block_epoch == 1
+        assert workspace.block_resume_phase == "monitor_protected_scope_push"
         events = await WorkspaceEventRepository(session).list(
             workspace_id=workspace_id,
-            event_type="workspace.audit.git_push",
+            event_type="workspace.monitor_protected_scope_paused",
             limit=10,
         )
-
     assert any(
-        event.payload
-        and event.payload["action"] == "protected_scope_transactional_rollback"
-        and event.payload["outcome"] == "succeeded"
+        event.payload and event.payload.get("preserved_head_sha") == "blocked-head-sha"
         for event in events
     )
 
 
 @pytest.mark.unit
-async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_fails(
+async def test_protected_pause_fences_on_stale_monitor_claim_owner(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """PRRT_kwDOSJAM6s6KHtX5: a monitor whose expired lease was reclaimed by a
+    newer worker must NOT win the ``monitoring_pr -> blocked`` CAS. The pause
+    fences on ``monitor_claimed_by``; a superseded owner returns a plain failed
+    result (NOT paused) and leaves the row in ``monitoring_pr`` for the live
+    claimant, so its stale preserved worktree commit cannot clobber the takeover."""
     workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
-    cmd.queue_result(returncode=0, stdout="start-sha\n")  # operation start HEAD
-    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
-    cmd.queue_result(
-        returncode=0,
-        stdout="M\0.github/workflows/ci.yml\0R100\0docs/old.yml\0",
-    )
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\0plans/fallback.md\0")
-    cmd.queue_result(returncode=0, stdout="?? plans/orphan dir/file one.md\0")
-    cmd.queue_result(returncode=0, stdout="HEAD is now at start-sha\n")
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="stale-preserved-head\n")  # rev-parse HEAD
+    gh = _RecordingGh()
     runner = make_runner(
         factory=factory,
         cmd=cmd,
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    runner._monitor_owner_id = "stale-worker"  # superseded — lease lost to worker-current
+    block = _ProtectedScopePushBlock(
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            ),
+        ),
+    )
+
+    result = await runner._pause_monitor_for_protected_scope_block(
+        workspace_id=workspace_id,
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        protected_scope_block=block,
+        worktree_path=worktree,
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.failed is True
+    # The stale CAS path is taken: a plain failed result, NOT a pause.
+    assert result.paused_into_blocked is not True
+    assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    # No clobber: no PR notification, row stays in monitoring_pr for the live owner.
+    assert gh.posts == []
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "monitoring_pr"
+
+
+@pytest.mark.unit
+async def test_protected_pause_inline_handoff_fences_on_recovery_monitor_claim(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KKmGo: the inline initial handoff runs the monitor with no
+    monitor claim (``_monitor_owner_id`` is None) while the row sits in
+    ``monitoring_pr`` with a NULL lease, which ``claim_monitoring_pr`` can reclaim
+    for a recovery monitor on another worker. A status-only CAS would let this
+    unclaimed inline monitor clobber the takeover, so the pause must fail closed
+    once the row has been claimed by anyone: a plain failed result (NOT paused),
+    leaving the row in ``monitoring_pr`` for the recovery claimant."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        # A recovery monitor on another worker reclaimed the unclaimed handoff row.
+        ws.monitor_claimed_by = "worker-recovery"
+        await session.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="stale-preserved-head\n")  # rev-parse HEAD
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    # Inline handoff: no monitor claim was taken, so the runner owner stays None.
+    assert runner._monitor_owner_id is None
+    block = _ProtectedScopePushBlock(
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            ),
+        ),
+    )
+
+    result = await runner._pause_monitor_for_protected_scope_block(
+        workspace_id=workspace_id,
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        protected_scope_block=block,
+        worktree_path=worktree,
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.failed is True
+    # The fail-closed CAS path is taken: a plain failed result, NOT a pause.
+    assert result.paused_into_blocked is not True
+    assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    # No clobber: no PR notification, row stays in monitoring_pr for the claimant.
+    assert gh.posts == []
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "monitoring_pr"
+
+
+@pytest.mark.unit
+async def test_protected_pause_inline_handoff_unclaimed_pauses_into_blocked(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The fail-closed fence only rejects an inline monitor when the row has since
+    been claimed: the normal inline handoff (no monitor claim, row still
+    unclaimed) still pauses into ``blocked`` and preserves the offending commit."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="preserved-head\n")  # rev-parse HEAD
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    assert runner._monitor_owner_id is None  # inline handoff holds no monitor claim
+    block = _ProtectedScopePushBlock(
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            ),
+        ),
+    )
+
+    result = await runner._pause_monitor_for_protected_scope_block(
+        workspace_id=workspace_id,
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        protected_scope_block=block,
+        worktree_path=worktree,
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.paused_into_blocked is True
+    assert result.reason_code == "PROTECTED_SCOPE_PAUSED_BLOCKED"
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "blocked"
+        assert ws.block_epoch == 1
+
+
+@pytest.mark.unit
+async def test_protected_pause_with_matching_monitor_owner_pauses_into_blocked(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The owner fence only rejects a superseded runner: the live monitor claim
+    owner still pauses into ``blocked`` and preserves the offending commit."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="preserved-head\n")  # rev-parse HEAD
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    runner._monitor_owner_id = "worker-current"  # the live claimant
+    block = _ProtectedScopePushBlock(
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            ),
+        ),
+    )
+
+    result = await runner._pause_monitor_for_protected_scope_block(
+        workspace_id=workspace_id,
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        protected_scope_block=block,
+        worktree_path=worktree,
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.paused_into_blocked is True
+    assert result.reason_code == "PROTECTED_SCOPE_PAUSED_BLOCKED"
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "blocked"
+        assert ws.block_epoch == 1
+
+
+@pytest.mark.unit
+async def test_terminate_failed_fences_on_superseded_monitor_owner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KIep5: the protected-scope pause fence makes a superseded
+    runner return a TERMINAL failed push result (NOT paused). The monitor loop
+    treats that as ``terminal_monitor_failure`` and calls ``_terminate_failed``.
+    Because the new owner kept the row in ``monitoring_pr``, the status guard
+    alone does not catch the race, so ``_terminate_failed`` must additionally
+    fence on the monitor claim owner — a superseded runner must NOT move the live
+    claimant's workspace to ``failed``; it records an ignored terminal callback
+    and leaves the row in ``monitoring_pr`` for the takeover."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = "stale-worker"  # superseded — lease lost to worker-current
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        # No clobber: the row stays in monitoring_pr for the live claimant and no
+        # failure provenance is stamped by the superseded runner.
+        assert ws.status == "monitoring_pr"
+        assert ws.failure_reason is None
+        assert ws.failure_message is None
+        ignored_events = [
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
+        ]
+    assert ignored_events
+    assert ignored_events[-1].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "terminal_failed",
+        "expected_status": "monitoring_pr",
+        "actual_status": "monitoring_pr",
+        "requested_status": "failed",
+        "reason_code": "PROTECTED_SCOPE_PUSH_BLOCKED",
+    }
+
+
+@pytest.mark.unit
+async def test_terminate_failed_with_matching_monitor_owner_still_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The owner fence only rejects a superseded runner: the live monitor claim
+    owner (and the inline handoff with no monitor claim) still terminally fails
+    the workspace on a genuine protected-scope push failure."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = "worker-current"  # the live claimant
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "failed"
+        assert ws.failure_message == "protected scope blocked"
+
+
+@pytest.mark.unit
+async def test_terminate_failed_fences_inline_handoff_after_recovery_claim(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KTj4R: the inline initial monitor handoff runs with no
+    monitor claim (``_monitor_owner_id`` is None). When a recovery monitor on
+    another worker claims the unclaimed ``monitoring_pr`` row, the inline pause
+    fails closed and returns a TERMINAL protected-scope failed push, which the
+    loop turns into ``_terminate_failed``. The owner fence only ignored
+    superseded runners when ``_monitor_owner_id`` was set, so the stale inline
+    runner could still clobber the live takeover to ``failed``. It must instead
+    fence on ``monitor_claimed_by`` being set and record an ignored callback."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "recovery-worker"  # a recovery monitor took over
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = None  # inline initial handoff holds no monitor claim
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        # No clobber: the row stays in monitoring_pr for the live recovery monitor.
+        assert ws.status == "monitoring_pr"
+        assert ws.failure_reason is None
+        assert ws.failure_message is None
+        ignored_events = [
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
+        ]
+    assert ignored_events
+    assert ignored_events[-1].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "terminal_failed",
+        "expected_status": "monitoring_pr",
+        "actual_status": "monitoring_pr",
+        "requested_status": "failed",
+        "reason_code": "PROTECTED_SCOPE_PUSH_BLOCKED",
+    }
+
+
+@pytest.mark.unit
+async def test_terminate_failed_inline_handoff_without_claim_still_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The inline-handoff fence only triggers once a recovery monitor has claimed
+    the row. A genuine inline handoff (no monitor claim, ``monitor_claimed_by`` is
+    None) on a real terminal failure must still move the workspace to ``failed``."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = None  # inline initial handoff, row still unclaimed
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "failed"
+        assert ws.failure_message == "protected scope blocked"
+
+
+@pytest.mark.unit
+async def test_terminate_failed_locks_row_before_owner_fence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Address review comment 4514137893: the owner fence + ``failed`` transition
+    must be atomic. ``_terminate_failed`` must load the row with ``get_for_update``
+    (``SELECT ... FOR UPDATE``) — not the non-locking ``get`` — so a newer worker
+    cannot reclaim the monitor lease in the TOCTOU window between reading
+    ``monitor_claimed_by`` and committing the state change. Guard the lock here so
+    the fix cannot silently regress to an unlocked read."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = "worker-current"  # the live claimant
+
+    locked_ids: list[str] = []
+    original_get_for_update = WorkspaceRepository.get_for_update
+
+    async def _recording_get_for_update(
+        self: WorkspaceRepository,
+        requested_workspace_id: str,
+        *,
+        skip_locked: bool = False,
+    ) -> object | None:
+        locked_ids.append(requested_workspace_id)
+        return await original_get_for_update(self, requested_workspace_id, skip_locked=skip_locked)
+
+    async def _forbidden_get(
+        self: WorkspaceRepository,
+        requested_workspace_id: str,
+    ) -> object | None:
+        raise AssertionError("_terminate_failed must lock the row with get_for_update, not get")
+
+    monkeypatch.setattr(WorkspaceRepository, "get_for_update", _recording_get_for_update)
+    monkeypatch.setattr(WorkspaceRepository, "get", _forbidden_get)
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+    )
+    monkeypatch.undo()  # restore real get/get_for_update for the verification read
+
+    assert locked_ids == [workspace_id]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "failed"
+        assert ws.failure_message == "protected scope blocked"
+
+
+@pytest.mark.unit
+async def test_protected_pause_notification_forge_failure_does_not_strand_block(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WS-2: after the ``monitoring_pr -> blocked`` commit, a transient/permission
+    forge fault on the best-effort PR notification comment MUST NOT escape. If it
+    did, the caller would never reach its ``paused_into_blocked`` branch, leaving
+    the monitor operation running and state markers unpersisted while the row is
+    already blocked. The pause result must still come back ``paused_into_blocked``
+    and the notification dedupe marker must stay unset so a resume re-notifies."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="start-sha\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # preserved HEAD
+    gh = _FailingPostGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
     )
     thread = ReviewThread(
-        thread_id="T_protected_parse",
+        thread_id="T_protected",
         path="tests/unit/control/test_ci_workflow_toolchain.py",
         line=49,
         body_excerpt="this test requires a protected workflow edit",
@@ -300,13 +783,14 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
         )
 
     async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
-        pytest.fail("protected-scope rollback must not push")
+        pytest.fail("a paused workspace must not push")
 
     monkeypatch.setattr(runner, "_address_thread", _address_thread)
-    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _fetch_clean_status)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _fetch_clean_status, raising=False)
     monkeypatch.setattr(runner, "_protected_scope_push_block", _protected_block)
     monkeypatch.setattr(runner, "_git_push_result", _unexpected_push)
 
+    # The forge fault on the notification comment must not propagate out.
     result = await runner._run_fix_cycle(
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
@@ -320,41 +804,17 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
         compose_file=tmp_path / "compose.yml",
     )
 
+    assert result.paused_into_blocked is True
     assert result.failed is True
-    assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
-    assert result.details is not None
-    assert result.details["branch_restored"] is True
-    assert result.details["reverted_paths"] == [
-        ".github/workflows/ci.yml",
-        "plans/fallback.md",
-        "plans/orphan dir/file one.md",
-    ]
-    assert "reverted_path_collection_errors" not in result.details
-    assert _git_worktree_command(worktree, "reset", "--hard", "start-sha") in [
-        call.args for call in cmd.calls
-    ]
-    assert _git_worktree_command(
-        worktree,
-        "--literal-pathspecs",
-        "clean",
-        "-fd",
-        "--",
-        "plans/orphan dir/file one.md",
-    ) in [call.args for call in cmd.calls]
+    # The notification was attempted but failed; the dedupe marker stays unset so a
+    # later resume re-notifies rather than silently suppressing the comment.
+    assert gh.attempts == 1
+    assert not any(key.startswith("__awf_protected_block__") for key in state.threads_addressed_ids)
 
     async with factory() as session:
-        events = await WorkspaceEventRepository(session).list(
-            workspace_id=workspace_id,
-            event_type="workspace.audit.git_push",
-            limit=10,
-        )
-
-    assert any(
-        event.payload
-        and event.payload["action"] == "protected_scope_transactional_rollback"
-        and event.payload["outcome"] == "succeeded"
-        for event in events
-    )
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == "blocked"
 
 
 @pytest.mark.unit
@@ -559,6 +1019,69 @@ async def test_post_human_notification_dedup_skips_github_call(
     )
 
     assert cmd.calls == []
+
+
+class _RecordingGh:
+    """Minimal gh double that records ``post_comment`` invocations."""
+
+    def __init__(self) -> None:
+        self.posts: list[dict[str, object]] = []
+
+    async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
+        self.posts.append({"repo": repo, "pr_number": pr_number, "body": body})
+
+
+class _FailingPostGh:
+    """gh double whose ``post_comment`` raises a forge fault (transient/permission)."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
+        self.attempts += 1
+        raise ForgeClientError("forge unavailable")
+
+
+@pytest.mark.unit
+def test_protected_block_notification_key_is_stable_per_epoch_and_content() -> None:
+    """The protected-block key changes with epoch or violation content so a second
+    different violation is not suppressed by the once-per-lifetime dedupe."""
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _protected_block_notification_key,
+        _protected_block_violations_digest,
+    )
+
+    v1 = (
+        QualityGateViolation(
+            path="pyproject.toml",
+            protected_pattern="pyproject.toml",
+            section="pyproject.toml",
+            line=None,
+            reason="weakened coverage",
+        ),
+    )
+    v2 = (
+        QualityGateViolation(
+            path=".coveragerc",
+            protected_pattern=".coveragerc",
+            section=".coveragerc",
+            line=None,
+            reason="weakened coverage",
+        ),
+    )
+    digest1 = _protected_block_violations_digest(v1)
+    # Order-independent: same violations in any order produce the same digest.
+    assert _protected_block_violations_digest(tuple(reversed(v1 + v1))) == (
+        _protected_block_violations_digest(v1 + v1)
+    )
+    key_epoch1 = _protected_block_notification_key(block_epoch=1, violations_digest=digest1)
+    key_epoch2 = _protected_block_notification_key(block_epoch=2, violations_digest=digest1)
+    key_v2 = _protected_block_notification_key(
+        block_epoch=1, violations_digest=_protected_block_violations_digest(v2)
+    )
+    assert key_epoch1 != key_epoch2  # new epoch → new key
+    assert key_epoch1 != key_v2  # different content → new key
+    assert key_epoch1.startswith("__awf_protected_block__:")
 
 
 @pytest.mark.unit

@@ -472,6 +472,90 @@ async def test_fix_cycle_fetches_prompt_owned_paths_once_for_comment_batch(
 
 
 @pytest.mark.unit
+async def test_fix_cycle_uses_current_head_as_per_item_recovery_anchor(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Later item repairs use the current HEAD, not the cycle-opening anchor."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty status
+    cmd.queue_result(returncode=0, stdout="cycle-start-head\n")
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[], reviews=[]))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    threaded_heads: list[str | None] = []
+    observed_worktrees: list[Path] = []
+    current_heads = iter(("cycle-start-head", "after-thread-fix-head"))
+
+    async def _rev_parse_head(worktree_path: Path) -> str | None:
+        observed_worktrees.append(worktree_path)
+        return next(current_heads)
+
+    async def _address_thread(**kwargs: object) -> str:
+        threaded_heads.append(kwargs["operation_start_head"])  # type: ignore[arg-type]
+        return "needs_human"
+
+    async def _address_review_comment_result(**kwargs: object) -> VerdictResult:
+        threaded_heads.append(kwargs["operation_start_head"])  # type: ignore[arg-type]
+        return VerdictResult(verdict="needs_human")
+
+    async def _protected_scope_push_block(**_kwargs: object) -> None:
+        return None
+
+    async def _validated_git_push_result(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    async def _fetch_pr_status(**_kwargs: object) -> object:
+        return _status()
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner, "_address_review_comment_result", _address_review_comment_result)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _protected_scope_push_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated_git_push_result)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _fetch_pr_status, raising=False)
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(
+            ReviewThread(
+                thread_id="T_anchor",
+                path="src/awf/runtime/example.py",
+                line=3,
+                body_excerpt="please fix this first",
+                author="reviewer",
+            ),
+        ),
+        initial_reviews=(
+            ReviewComment(
+                comment_id="issue:anchor",
+                body_excerpt="please fix this after the thread",
+                author="reviewer",
+            ),
+        ),
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert threaded_heads == ["cycle-start-head", "after-thread-fix-head"]
+    assert observed_worktrees == [worktree, worktree]
+
+
+@pytest.mark.unit
 async def test_fix_cycle_continues_with_empty_owned_paths_when_prompt_load_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

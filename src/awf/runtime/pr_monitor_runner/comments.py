@@ -12,13 +12,31 @@ from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
 from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
+from awf.node.git_manager import (
+    GitOperationError,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+)
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
     ready_to_merge_comment,
 )
-from awf.runtime.pr_monitor_runner.constants import _TASK_TAG_UNSET, _TaskTagUnset
-from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
+from awf.runtime.pr_monitor_runner.constants import (
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _TASK_TAG_UNSET,
+    _TaskTagUnset,
+)
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.types import (
+    ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorMirrorHooksPathRepairFailedError,
+)
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
@@ -51,6 +69,7 @@ async def _address_thread(
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> Verdict:
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
@@ -88,6 +107,7 @@ async def _address_thread(
         compose_file=compose_file,
         state=state,
         task_tag=resolved_task_tag,
+        operation_start_head=operation_start_head,
     )
     # Stash the agent's defer reason so the deferred-capture path can preserve it
     # in the filed tracking issue (the verdict alone loses that follow-up detail).
@@ -116,6 +136,7 @@ async def _address_review_comment(
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> Verdict:
     result = await runner._address_review_comment_result(
         workspace_id=workspace_id,
@@ -127,6 +148,7 @@ async def _address_review_comment(
         state=state,
         owned_paths=owned_paths,
         task_tag=task_tag,
+        operation_start_head=operation_start_head,
     )
     return result.verdict
 
@@ -143,6 +165,7 @@ async def _address_review_comment_result(
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> VerdictResult:
     prompt_owned_paths = (
         owned_paths
@@ -175,6 +198,7 @@ async def _address_review_comment_result(
         compose_file=compose_file,
         state=state,
         task_tag=resolved_task_tag,
+        operation_start_head=operation_start_head,
     )
 
 
@@ -215,6 +239,7 @@ async def _invoke_cli_for_verdict(
     compose_file: Path,
     state: MonitorState | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> Verdict:
     return (
         await runner._invoke_cli_for_verdict_result(
@@ -225,6 +250,7 @@ async def _invoke_cli_for_verdict(
             compose_file=compose_file,
             state=state,
             task_tag=task_tag,
+            operation_start_head=operation_start_head,
         )
     ).verdict
 
@@ -239,6 +265,7 @@ async def _invoke_cli_for_verdict_result(
     compose_file: Path,
     state: MonitorState | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> VerdictResult:
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -247,6 +274,34 @@ async def _invoke_cli_for_verdict_result(
     command_evidence: list[str] = []
     if await runner._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
+    worktree_path = runner._worktrees_root / workspace_id
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="monitor_agent_pre_launch",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+        )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            repair_details = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="before_comment_agent",
+                mirror_path=mirror_path,
+            )
+            _log.warning(
+                "monitor.mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                **repair_details,
+            )
+            raise _MonitorMirrorHooksPathRepairFailedError() from exc
     agent_run_err = None
     try:
         result = await runner._deps.adapter.run(
@@ -271,6 +326,34 @@ async def _invoke_cli_for_verdict_result(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+    except Exception:
+        if mirror_path is not None:
+            try:
+                await repair_mirror_hooks_path(mirror_path)
+            except (GitOperationError, OSError) as exc:
+                repair_details = mirror_hooks_repair_failure_details(
+                    exc,
+                    repair_stage="after_comment_agent_exception",
+                    mirror_path=mirror_path,
+                )
+                _log.warning(
+                    "monitor.mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                    reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                    **repair_details,
+                )
+                raise _MonitorMirrorHooksPathRepairFailedError() from exc
+        await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message=commit_message,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+            command_evidence=command_evidence,
+            task_tag=task_tag,
+            operation_start_head=operation_start_head,
+        )
+        raise
 
     committed_dirty_changes = await runner._commit_dirty_worktree(
         workspace_id=workspace_id,
@@ -280,6 +363,7 @@ async def _invoke_cli_for_verdict_result(
         state=state,
         command_evidence=command_evidence,
         task_tag=task_tag,
+        operation_start_head=operation_start_head,
     )
 
     if agent_run_err is not None:
@@ -306,6 +390,14 @@ async def _post_human_notification_once(
     state: MonitorState,
     blocker_reason: str | None = None,
 ) -> None:
+    """Post a single human-attention PR comment, deduped once per (head, reason).
+
+    The dedupe key is head/reason scoped (``_notification_key``), matching the
+    once-per-(head, reason) behavior every caller relies on. The protected-block
+    pause needs different semantics (epoch-keyed dedupe, ``ForgeClientError``
+    swallowing, best-effort skip on missing monitor context) and so posts via its
+    own ``_post_protected_block_notification`` rather than through this helper.
+    """
     from awf.runtime.pr_monitor_runner.helpers import _notification_key, _notify_human_reason
 
     reason = blocker_reason if blocker_reason is not None else _notify_human_reason(status, state)

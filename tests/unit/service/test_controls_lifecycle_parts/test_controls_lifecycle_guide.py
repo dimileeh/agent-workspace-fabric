@@ -7,16 +7,19 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.ids import new_operator_grant_id
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import MergeCandidate
+from awf.db.models import MergeCandidate, OperatorGrantAuditRecord
 from awf.db.repositories import MergeCandidateRepository, OperationRepository, TaskAttemptRepository
 from awf.runtime.monitor_state_keys import _non_check_reviewer_settle_done_key
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_STATE_KEY,
     operator_hint_from_threads,
+    utcnow,
 )
 from awf.service.controls import (
     WorkspaceGuideEmptyDirectiveError,
@@ -47,6 +50,15 @@ async def _monitoring_workspace(session: AsyncSession) -> object:
     workspace.monitor_last_commit_sha = "h" * 40
     await session.flush()
     return workspace
+
+
+async def _grants(session: AsyncSession, workspace_id: str) -> list[OperatorGrantAuditRecord]:
+    rows = await session.execute(
+        select(OperatorGrantAuditRecord).where(
+            OperatorGrantAuditRecord.workspace_id == workspace_id
+        )
+    )
+    return list(rows.scalars().all())
 
 
 @pytest.mark.unit
@@ -91,6 +103,75 @@ async def test_guide_arms_pending_hint_with_directive_distinct_from_reason(
     audit_event = next(e for e in events if e.event_type == "workspace.audit.control_operation")
     assert audit_event.reason_code == "OPERATOR_GUIDE"
     assert audit_event.payload["action"] == OperationType.guide.value
+
+
+@pytest.mark.unit
+async def test_guide_monitoring_directive_revokes_stale_grant(
+    session: AsyncSession,
+) -> None:
+    # A monitor-origin protected block was first approved with an approve-and-keep
+    # grant (current epoch), reopening the workspace into monitoring_pr. Before the
+    # resume pushes, the operator changes course and sends a directive on the
+    # monitoring_pr workspace. The directive is the latest decision and must revoke
+    # the stale current-epoch grant — otherwise the resume push gate still loads it
+    # via _active_operator_grant_specs() and suppresses a protected violation the
+    # directive failed to revert, pushing the protected change anyway. Mirrors the
+    # pre-PR _guide_blocked_workspace directive path: the latest directive wins.
+    workspace = await _monitoring_workspace(session)
+    workspace.block_epoch = 2
+    await session.flush()
+    session.add(
+        OperatorGrantAuditRecord(
+            id=new_operator_grant_id(),
+            workspace_id=workspace.id,
+            operator="alice@example.com",
+            reason="approved keeping the workflow change",
+            normalized_path=".github/workflows/ci.yml",
+            block_epoch=2,
+            approve_policy_downgrade=True,
+            created_at=utcnow(),
+        )
+    )
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="actually revert the workflow change after all",
+        reason="changed my mind, revert it",
+        operator="alice@example.com",
+        idempotency_key="guide-monitoring-directive-revokes-grant",
+        expected_version=workspace.version,
+    )
+
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
+    assert grants[0].revoked_at is not None
+    events = await _events(session, workspace.id)
+    guide_event = next(e for e in events if e.event_type == "workspace.guide_requested")
+    assert guide_event.payload["revoked_grants"] == [".github/workflows/ci.yml"]
+
+
+@pytest.mark.unit
+async def test_guide_monitoring_directive_without_grant_records_no_revocation(
+    session: AsyncSession,
+) -> None:
+    # The common case: a directive guide on a monitoring_pr workspace with no
+    # pre-existing grant revokes nothing and surfaces no revoked_grants noise.
+    workspace = await _monitoring_workspace(session)
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="address the deferred finding",
+        idempotency_key="guide-monitoring-directive-no-grant",
+        expected_version=workspace.version,
+    )
+
+    assert await _grants(session, workspace.id) == []
+    events = await _events(session, workspace.id)
+    guide_event = next(e for e in events if e.event_type == "workspace.guide_requested")
+    assert guide_event.payload["revoked_grants"] is None
 
 
 @pytest.mark.unit
@@ -364,6 +445,7 @@ async def test_guide_rejects_wrong_state_and_missing_pr_before_creating_operatio
         "eligible_statuses": [
             WorkspaceStatus.monitoring_pr.value,
             WorkspaceStatus.failed.value,
+            WorkspaceStatus.blocked.value,
         ],
     }
     assert missing_pr_error.value.detail == {"status": WorkspaceStatus.monitoring_pr.value}

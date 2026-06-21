@@ -24,8 +24,18 @@ export const lifecycleStages: WorkspaceStatus[] = [
   "provisioning",
   "ready",
   "running",
+  // `recovering` is the non-terminal in-place provider-retry pause (#612). It is a
+  // benign auto-heal that resumes back into `running` after the provider cooldown,
+  // so it sits right after `running` (not at the push→monitor boundary like
+  // `blocked`) and reads as in-flight, not terminal and not awaiting the operator.
+  "recovering",
   "validating",
   "pushing",
+  // `blocked` is the non-terminal operator-pause state (protected-file violation).
+  // It sits just before monitoring_pr — the push→monitor boundary where both the
+  // pre-PR and post-PR pauses cluster — so the status filter and fallback progress
+  // bar treat it as in-flight, not terminal.
+  "blocked",
   "monitoring_pr",
   "completed",
 ];
@@ -37,14 +47,51 @@ export function fallbackLifecycleStages(
   const activeIndex = lifecycleStages.indexOf(status);
   const terminal = status === "failed" || status === "cancelled";
   const terminalSourceIndex = lifecycleStages.indexOf(terminalSourceStage as WorkspaceStatus);
+  const terminalSource = terminalSourceStage as WorkspaceStatus | null;
   const completedThroughIndex = terminal ? Math.max(-1, terminalSourceIndex) : activeIndex - 1;
+  // `blocked` can be entered from running/validating/pushing, but it sits at a
+  // fixed position (after `pushing`) in this linear list. Without the real
+  // lifecycle data we can't tell which execution stage it paused at, so we must
+  // NOT claim the execution stages completed (a validating-time pause would
+  // otherwise falsely render `pushing` as done). Stages before execution
+  // (requested/provisioning/ready) are still safely "completed".
+  //
+  // `recovering` and `blocked` are *optional* non-terminal pauses: most
+  // workspaces never enter them. So even when the active status sits past a
+  // pause's fixed position (e.g. validating/pushing/monitoring_pr is past
+  // `recovering`), the fallback must NOT mark the pause stage `completed` —
+  // doing so falsely tells the operator the workspace auto-retried (recovering)
+  // or paused for them (blocked) when it never did. The backend lifecycle omits
+  // these pauses entirely for a workspace that skipped them, so the real-data
+  // path (`normalizeLifecycle`) never renders them completed; the fallback
+  // mirrors that by leaving a skipped pause `pending`, never `completed`.
+  const executionStartIndex = lifecycleStages.indexOf("running");
+  const pausesMidExecution = status === "blocked";
+  const pauseStages = new Set<WorkspaceStatus>(["recovering", "blocked"]);
 
   return lifecycleStages.map((stage, index): WorkspaceLifecycleStage => {
     let stageStatus: WorkspaceLifecycleStage["status"];
     if (terminal) {
-      stageStatus = index <= completedThroughIndex ? "completed" : "terminal_skipped";
+      // The same optional-pause invariant the non-terminal path enforces below
+      // applies to a terminal workspace: `recovering`/`blocked` sit at fixed
+      // positions, so a terminal source past them (e.g. failed from
+      // monitoring_pr) would otherwise mark them `completed` even though the
+      // workspace never entered them. Keep an optional pause out of `completed`
+      // unless the terminal transition explicitly came from that pause.
+      const isOptionalPause = pauseStages.has(stage);
+      const pauseExplicitlyObserved = terminalSource === stage;
+      if (isOptionalPause && !pauseExplicitlyObserved) {
+        stageStatus = "pending";
+      } else {
+        stageStatus = index <= completedThroughIndex ? "completed" : "terminal_skipped";
+      }
     } else if (stage === status) {
       stageStatus = "active";
+    } else if (pausesMidExecution && index >= executionStartIndex) {
+      stageStatus = "pending";
+    } else if (pauseStages.has(stage)) {
+      // A non-active optional pause never reads as completed (see above).
+      stageStatus = "pending";
     } else if (index < activeIndex) {
       stageStatus = "completed";
     } else {
@@ -59,6 +106,50 @@ export function fallbackLifecycleStages(
       status: stageStatus,
     };
   });
+}
+
+// The backend lifecycle (`LIFECYCLE_STAGES`, workspace_observability.py) omits the
+// non-terminal `blocked` and `recovering` pauses. So a real paused workspace arrives
+// with its linear stages and NO active stage: the stage it paused at is marked
+// `completed` once left, and the pause status isn't a lifecycle stage, so
+// `_stage_summary` never marks anything active. Inject a synthetic active stage at the
+// pause's canonical position so the operator sees an active step (paused awaiting them
+// for `blocked`, auto-retrying for `recovering`) instead of a rail with no active step.
+// No-op unless the workspace is in a pause status and the supplied lifecycle lacks that
+// stage (idempotent + safe for every other status).
+export function normalizeLifecycle(
+  status: WorkspaceStatus,
+  lifecycle: WorkspaceLifecycleStage[],
+): WorkspaceLifecycleStage[] {
+  const isPause = status === "blocked" || status === "recovering";
+  if (!isPause || lifecycle.some((stage) => stage.stage === status)) {
+    return lifecycle;
+  }
+  const pauseStage: WorkspaceLifecycleStage = {
+    stage: status,
+    started_at: null,
+    ended_at: null,
+    duration_seconds: null,
+    status: "active",
+  };
+  const pauseOrder = lifecycleStages.indexOf(status);
+  const canonicalAt = lifecycle.findIndex(
+    (stage) => lifecycleStages.indexOf(stage.stage as WorkspaceStatus) > pauseOrder,
+  );
+  // The active pause must never render to the LEFT of a `completed` stage — that
+  // reverses the real transition order. A `blocked` pause entered from
+  // `monitoring_pr` (the post-PR monitor-repair pause) arrives with
+  // `monitoring_pr` already `completed`, yet `blocked`'s canonical slot sits
+  // before `monitoring_pr`. Clamp the insertion to just after the last completed
+  // stage so the active pause stays right of everything already finished while
+  // keeping its canonical slot for the common pre-PR case.
+  const lastCompletedIndex = lifecycle.reduce(
+    (latest, stage, index) => (stage.status === "completed" ? index : latest),
+    -1,
+  );
+  const insertAt =
+    canonicalAt === -1 ? lifecycle.length : Math.max(canonicalAt, lastCompletedIndex + 1);
+  return [...lifecycle.slice(0, insertAt), pauseStage, ...lifecycle.slice(insertAt)];
 }
 
 export function fallbackLlmUsage(
@@ -377,11 +468,28 @@ export function statusTone(status: string): StatusTone {
   if (status === "failed" || status === "destroyed" || status === "error" || status === "dead") {
     return "bad";
   }
-  if (status === "cancelled" || status === "destroying" || status === "unhealthy") {
+  // `blocked` is operator-attention (awaiting a guide decision), distinct from the
+  // `info` in-flight states and the `bad` failure states.
+  if (
+    status === "cancelled" ||
+    status === "destroying" ||
+    status === "unhealthy" ||
+    status === "blocked"
+  ) {
     return "warn";
   }
+  // `recovering` is a benign in-flight auto-retry (provider cooldown then in-place
+  // resume) — info-class, NOT `warn`: unlike `blocked` it needs no operator action.
   if (
-    ["running", "validating", "pushing", "monitoring_pr", "provisioning", "ready"].includes(status)
+    [
+      "running",
+      "validating",
+      "pushing",
+      "monitoring_pr",
+      "provisioning",
+      "ready",
+      "recovering",
+    ].includes(status)
   ) {
     return "info";
   }
@@ -418,6 +526,15 @@ export function statusGlyph(status: string): string {
       return "✕";
     case "cancelled":
       return "⊘";
+    case "blocked":
+      // Pause glyph — a distinct shape (used nowhere else) so the operator-pause
+      // state reads as "halted, awaiting you" without relying on color alone.
+      return "⏸";
+    case "recovering":
+      // Refresh/retry glyph — a distinct shape (used nowhere else) so the
+      // auto-heal state reads as "retrying, no action needed", clearly different
+      // from blocked's pause and the steady `●` of an active run.
+      return "↻";
     case "destroying":
       return "◌";
     case "monitoring_pr":

@@ -12,7 +12,7 @@ import re as re
 import shlex as shlex
 import time as time
 import traceback as traceback
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,12 +28,14 @@ from awf.common.command_evidence import (
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
+from awf.common.owned_paths import (
+    INTERNAL_PLAN_ARTIFACT_DIR,
+)
 from awf.control.executor.constants import _FILE_DIGEST_CHUNK_SIZE, PLAN_CONFORMANCE_UNSATISFIED
 from awf.control.executor.helpers import (
     _digest_file_if_present,
     _digest_text,
     _read_text_if_present,
-    _validation_evidence_json,
 )
 from awf.control.executor.planning_scope import _build_planning_scope_failure
 from awf.control.executor.quality_gates import (
@@ -41,32 +43,23 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.time_utils import _monotonic
 from awf.control.executor.types import (
-    _ConformanceSalvageExecutionResult,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
 )
-from awf.db.enums import (
-    FailureReason,
-    WorkspaceStatus,
-)
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
-    ValidationRunRepository,
     WorkspaceRepository,
-)
-from awf.db.validation_runs import (
-    validation_run_coverage_payload,
 )
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
-    CONFORMANCE_REQUIRES_AWF_VALIDATION,
     ConformanceIterationRecord,
     ConformanceStallEvidence,
     ConformanceStallKind,
     ConformanceStallPolicy,
     PlanConformanceReport,
+    agent_artifact_path,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
@@ -128,357 +121,305 @@ _PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES = frozenset(
     }
 )
 _PLANNING_SCOPE_AUTO_RETRY_TERMINAL_RELEASE_SCAN_LIMIT = 100
+_PLAN_ARTIFACT_NEAR_MISS_GLOB = "ws_*.md"
+_PLAN_ARTIFACT_NEAR_MISS_MAX_DISTANCE = 2
 
 
-async def _prepare_conformance_salvage_for_execution(
-    self: Any,
-    *,
-    workspace_id: str,
-    workspace: Workspace,
-    worktree_path: Path,
-) -> _ConformanceSalvageExecutionResult | None:
-    from awf.control.executor.git_ops import _prepare_conformance_salvage_for_execution
-
-    return await _prepare_conformance_salvage_for_execution(
-        self,
-        workspace_id=workspace_id,
-        workspace=workspace,
-        worktree_path=worktree_path,
-    )
-
-
-async def _fail_conformance_salvage_execution(
-    self: Any,
-    *,
-    workspace_id: str,
-    reason_code: str,
-    message: str,
-    salvage: Mapping[str, Any],
-) -> _ConformanceSalvageExecutionResult:
-    await self._mark_failed(
-        workspace_id=workspace_id,
-        from_status=WorkspaceStatus.running,
-        failure_reason=FailureReason.infrastructure_failure,
-        message=f"{reason_code}: {message}"[:2000],
-        reason_code=reason_code,
-        details={
-            "reason_code": reason_code,
-            "conformance_salvage": dict(salvage),
-        },
-    )
-    return _ConformanceSalvageExecutionResult(status="failed")
-
-
-async def _record_conformance_salvage_event(
-    self: Any,
-    *,
-    workspace_id: str,
-    event_type: str,
-    reason_code: str,
-    payload: dict[str, Any],
-) -> None:
-    async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        if workspace is None:  # pragma: no cover - destroyed mid-flight
-            return
-        await repo.add_event(
-            workspace,
-            event_type=event_type,
-            reason_code=reason_code,
-            payload=payload,
-        )
-        await session.commit()
-
-
-def _materialize_salvage_patch_for_agent(
-    self: Any,
-    *,
-    worktree_path: Path,
-    patch_path: Path,
-    patch_bytes: bytes,
-) -> str:
-    relative_path = Path(".awf") / "salvage" / patch_path.name
-    agent_patch_path = worktree_path / relative_path
-    agent_patch_path.parent.mkdir(parents=True, exist_ok=True)
-    agent_patch_path.write_bytes(patch_bytes)
-    self._exclude_agent_salvage_artifacts(worktree_path)
-    return relative_path.as_posix()
-
-
-def _exclude_agent_salvage_artifacts(self: Any, worktree_path: Path) -> None:
-    _ = self
-    git_dir_file = worktree_path / ".git"
-    exclude_path = worktree_path / ".git" / "info" / "exclude"
-    if git_dir_file.is_file():
-        content = git_dir_file.read_text(encoding="utf-8", errors="replace").strip()
-        prefix = "gitdir:"
-        # A worktree ``.git`` file always carries a ``gitdir:`` pointer; the
-        # non-pointer else-arc is unreachable defensive code (and would leave
-        # ``exclude_path`` under a regular file, so the mkdir below could not
-        # succeed anyway).
-        if content.startswith(prefix):  # pragma: no branch
-            git_dir = Path(content[len(prefix) :].strip())
-            if not git_dir.is_absolute():
-                git_dir = (worktree_path / git_dir).resolve()
-            exclude_path = git_dir / "info" / "exclude"
-    exclude_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
-    pattern = "/.awf/salvage/"
-    if pattern not in existing.splitlines():
-        suffix = "" if existing.endswith("\n") or not existing else "\n"
-        exclude_path.write_text(f"{existing}{suffix}{pattern}\n", encoding="utf-8")
-
-
-async def _record_planning_validation_handoff_event(
-    self: Any,
-    *,
-    workspace_id: str,
-    handoff: _PlanningValidationHandoff,
-) -> None:
-    async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        if workspace is None:
-            return
-        await repo.add_event(
-            workspace,
-            event_type="workspace.planning_conformance_requires_awf_validation",
-            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
-            payload={
-                "summary": handoff.report.summary,
-                "gaps": list(handoff.report.gaps),
-                "report_reason_code": handoff.report.reason_code,
-                "plan_path": handoff.plan_path.as_posix(),
-                "report_path": handoff.report_path.as_posix(),
-                "iteration": handoff.iteration,
-                "max_iterations": handoff.max_iterations,
-            },
-        )
-        await session.commit()
-
-
-async def _run_post_validation_conformance_check(
-    self: Any,
-    *,
-    adapter: AgentAdapter,
-    workspace: Workspace,
-    profile: WorkspaceProfile,
-    compose_project: str,
-    compose_file: Path,
-    worktree_path: Path,
-    model: str | None,
-    handoff: _PlanningValidationHandoff,
-    validation_run_id: str,
-) -> _PlanningRunFailure | None:
-    # Post-validation conformance is strictly report-only, regardless of
-    # ordinary planning unexplained-deviation policy.
-    del profile
-    evidence = await self._validation_run_evidence_for_conformance(validation_run_id)
-    # Snapshot before the adapter run and before any AWF-synthesized
-    # satisfied report write below; this scope check only polices changes
-    # made during the report-only conformance command.
-    before_compare = await self._changed_paths(worktree_path)
-    before_compare_head = await self._git_rev_parse_head(worktree_path)
-    allowed_paths = {handoff.report_path}
-    # Path-set subtraction misses edits to already-dirty paths, so keep a
-    # content snapshot for every pre-dirty non-report path.
-    before_dirty_digests = {
-        path: self._digest_dirty_content(worktree_path, {path})
-        for path in before_compare - allowed_paths
+# Compatibility re-exports for tests that still reference these names via the
+# original ``planning_ops`` module. They are mechanically moved to
+# ``planning_conformance``; keeping the aliases here avoids churn in existing
+# test files.
+_COMPAT_REEXPORT_NAMES = frozenset(
+    {
+        "_deposit_satisfied_conformance_report",
+        "_exclude_agent_salvage_artifacts",
+        "_record_planning_validation_handoff_event",
+        "_record_post_validation_conformance_event",
+        "_validation_run_evidence_for_conformance",
+        "deposit_workspace_planning_artifacts",
+        "ValidationRunRepository",
+        "WorkspaceRepository",
     }
-    # A stale handoff report may still be present at this path; prefer
-    # stdout unless the conformance rerun actually refreshed the file.
-    report_path = worktree_path / handoff.report_path
-    before_report_text = _read_text_if_present(report_path)
-    before_report_digest = _digest_text(before_report_text) if before_report_text else None
-    await self._update_subphase(workspace.id, "conformance")
-    compare_result = await adapter.run(
-        compose_project=compose_project,
-        compose_file=compose_file,
-        prompt=build_conformance_prompt(
-            task_prompt=workspace.task_prompt,
-            plan_path=handoff.plan_path,
-            report_path=handoff.report_path,
-            iteration=handoff.iteration + 1,
-            validation_evidence=evidence,
-        ),
-        model=model,
-        workspace_id=workspace.id,
-    )
-    after_compare = await self._changed_paths(worktree_path)
-    committed_compare = (
-        await self._committed_paths_since(worktree_path, before_compare_head)
-        if before_compare_head is not None
-        else set()
-    )
-    edited_pre_dirty_extra = {
+)
+
+
+def __getattr__(name: str) -> object:
+    if name in _COMPAT_REEXPORT_NAMES:
+        import awf.control.executor.planning_conformance as _planning_conformance
+
+        return getattr(_planning_conformance, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _plan_artifact_candidate_digests(
+    worktree_path: Path,
+    plan_path: Path,
+) -> dict[Path, str]:
+    """Digest direct ignored-plan candidates without changing git dirty semantics."""
+    if plan_path.parent.as_posix() != INTERNAL_PLAN_ARTIFACT_DIR:
+        return {}
+
+    plan_dir = worktree_path / plan_path.parent
+    if not plan_dir.is_dir():
+        return {}
+
+    # Refuse to follow a plan directory reached through a symlink anywhere in its
+    # path. ``is_dir()`` and ``glob`` both follow symlinks, so a repo that tracks
+    # ``docs/awf-plans`` as a link would yield candidates whose lexical paths look
+    # like normal in-worktree artifacts while physically living elsewhere. Plain
+    # outside-the-worktree containment is not enough: a link to an in-worktree but
+    # git-hidden directory (``.git`` or another ignored dir) still resolves under
+    # the worktree, yet ``glob`` and the later ``source.replace(target)`` would
+    # follow the link and mutate storage the porcelain dirty/changed scope checks
+    # never observe -- letting near-miss recovery mark the logical plan path
+    # recovered after writing non-artifact storage with no scope evidence. Require
+    # the plan dir to be the real directory at its lexical location, i.e. that no
+    # symlink was followed when resolving it under the worktree.
+    try:
+        resolved_worktree = worktree_path.resolve(strict=True)
+        resolved_plan_dir = plan_dir.resolve(strict=True)
+    except OSError:  # pragma: no cover - plan dir removed between is_dir() and resolve()
+        return {}
+    if resolved_plan_dir != resolved_worktree / plan_path.parent:
+        return {}
+
+    candidates: dict[Path, str] = {}
+    for candidate in sorted(plan_dir.glob(_PLAN_ARTIFACT_NEAR_MISS_GLOB)):
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        try:
+            relative_candidate = candidate.relative_to(worktree_path)
+        except ValueError:  # pragma: no cover - glob children always sit under the worktree
+            continue
+        if relative_candidate.parent != plan_path.parent:
+            continue  # pragma: no cover - non-recursive glob yields only direct children
+        digest = _digest_file_if_present(candidate)
+        if digest is not None:
+            candidates[relative_candidate] = digest
+    return candidates
+
+
+def _changed_plan_artifact_candidates(
+    before: Mapping[Path, str],
+    after: Mapping[Path, str],
+    *,
+    required_plan_path: Path,
+) -> tuple[Path, ...]:
+    changed = [
         path
-        for path, digest in before_dirty_digests.items()
-        if self._digest_dirty_content(worktree_path, {path}) != digest
-    }
-    dirty_extra = after_compare - before_compare - allowed_paths
-    committed_extra = committed_compare - allowed_paths
-    extra = sorted(dirty_extra | committed_extra | edited_pre_dirty_extra)
-    if extra:
-        return _build_planning_scope_failure(
-            scope_phase="conformance",
-            required_paths=(handoff.report_path,),
-            offending_paths=extra,
-            summary=(
-                f"post-validation conformance phase changed files outside `{handoff.report_path}`"
-            ),
-        )
+        for path, digest in after.items()
+        if path != required_plan_path and before.get(path) != digest
+    ]
+    return tuple(sorted(changed))
 
-    report_text = _read_text_if_present(report_path)
-    report_from_fresh_file = (
-        report_text is not None and _digest_text(report_text) != before_report_digest
-    )
-    if not report_from_fresh_file:
-        report_text = None
-    if report_text is None and compare_result.stdout:
-        report_text = compare_result.stdout
-    report = parse_conformance_report(report_text or "")
-    if report.satisfied:
-        if not report_from_fresh_file:
-            try:
-                self._write_satisfied_post_validation_conformance_report(
-                    worktree_path=worktree_path,
-                    report_path=handoff.report_path,
-                    report=report,
-                )
-            except OSError as exc:
-                # The report is written to ``docs/awf-plans/`` purely as an
-                # inspectable on-worktree copy (the path is gitignored and the
-                # file is deliberately not committed). The conformance outcome
-                # is already durably captured by the event recorded below plus
-                # the validation-run artifacts, so a write failure (e.g. a
-                # read-only worktree or a full disk) must never discard the
-                # agent's completed work. Log and proceed instead of failing.
-                _log.warning(
-                    "executor.post_validation_conformance_report_write_failed",
-                    workspace_id=workspace.id,
-                    validation_run_id=validation_run_id,
-                    report_path=handoff.report_path.as_posix(),
-                    error_type=type(exc).__name__,
-                    errno=exc.errno,
-                )
-        await self._record_post_validation_conformance_event(
-            workspace_id=workspace.id,
-            handoff=handoff,
-            report=report,
-            validation_run_id=validation_run_id,
-        )
+
+def _filename_hamming_distance(left: str, right: str) -> int | None:
+    if len(left) != len(right):
         return None
-
-    gap_text = "; ".join(report.gaps) or report.summary
-    return _PlanningRunFailure(
-        message=f"post-validation plan conformance was not satisfied: {gap_text}",
-        reason_code=PLAN_CONFORMANCE_UNSATISFIED,
-        details={
-            "conformance": build_conformance_failure_evidence(
-                report=report,
-                iterations_used=handoff.iteration + 2,
-                max_iterations=handoff.max_iterations,
-                plan_path=handoff.plan_path,
-                report_path=handoff.report_path,
-            ),
-            "validation_run_id": validation_run_id,
-        },
+    return sum(
+        1 for left_char, right_char in zip(left, right, strict=True) if left_char != right_char
     )
 
 
-def _write_satisfied_post_validation_conformance_report(
+class _UnsetFilenameDistance:
+    """Sentinel marking that the Hamming distance was not pre-computed."""
+
+
+_UNSET_FILENAME_DISTANCE = _UnsetFilenameDistance()
+
+
+def _near_miss_plan_artifact_evidence(
+    *,
+    candidate: Path,
+    required_plan_path: Path,
+    reason: str,
+    filename_distance: int | None | _UnsetFilenameDistance = _UNSET_FILENAME_DISTANCE,
+) -> dict[str, object]:
+    distance = (
+        _filename_hamming_distance(candidate.name, required_plan_path.name)
+        if isinstance(filename_distance, _UnsetFilenameDistance)
+        else filename_distance
+    )
+    evidence: dict[str, object] = {
+        "path": candidate.as_posix(),
+        "required_path": required_plan_path.as_posix(),
+        "reason": reason,
+    }
+    if distance is not None:
+        evidence["filename_hamming_distance"] = distance
+    return evidence
+
+
+def _classify_plan_artifact_near_miss(
+    candidate: Path, required_plan_path: Path
+) -> tuple[bool, int | None]:
+    """Return ``(is_safe, distance)`` so callers can forward the pre-computed distance."""
+    distance = _filename_hamming_distance(candidate.name, required_plan_path.name)
+    is_safe = distance is not None and 0 < distance <= _PLAN_ARTIFACT_NEAR_MISS_MAX_DISTANCE
+    return is_safe, distance
+
+
+def _recover_plan_artifact_near_miss(
     *,
     worktree_path: Path,
-    report_path: Path,
-    report: PlanConformanceReport,
-) -> None:
-    path = worktree_path / report_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "status": report.status.value,
-                "summary": report.summary,
-                "reason_code": report.reason_code,
-                "gaps": list(report.gaps),
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
-async def _record_post_validation_conformance_event(
-    self: Any,
-    *,
     workspace_id: str,
-    handoff: _PlanningValidationHandoff,
-    report: PlanConformanceReport,
-    validation_run_id: str,
-) -> None:
-    async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        if workspace is None:
-            return
-        await repo.add_event(
-            workspace,
-            event_type="workspace.post_validation_conformance_satisfied",
-            reason_code=report.reason_code,
-            payload={
-                "summary": report.summary,
-                "plan_path": handoff.plan_path.as_posix(),
-                "report_path": handoff.report_path.as_posix(),
-                "validation_run_id": validation_run_id,
-            },
+    required_plan_path: Path,
+    required_plan_digest_after: str | None,
+    dirty_paths_before_planning: Sequence[Path],
+    changed_paths_during_planning: Sequence[Path],
+    candidates_before: Mapping[Path, str],
+    candidates_after: Mapping[Path, str],
+    conformance_report_present: bool,
+) -> tuple[bool, list[dict[str, object]]]:
+    """Recover a single typo-like ignored plan artifact when the rest is clean."""
+    required_default_path = Path(INTERNAL_PLAN_ARTIFACT_DIR) / f"{workspace_id}.md"
+    if required_plan_path != required_default_path:
+        return False, []
+
+    changed_candidates = _changed_plan_artifact_candidates(
+        candidates_before,
+        candidates_after,
+        required_plan_path=required_plan_path,
+    )
+    if not changed_candidates:
+        return False, []
+
+    # A near-miss recovery presumes the worktree is clean apart from one typoed
+    # plan file. If the planning phase also left a conformance report on disk
+    # (e.g. a prewritten satisfied JSON), the later success path consumes it via
+    # ``_read_text_if_present(report_path) or stdout`` and can short-circuit the
+    # conformance loop on a stale report before the compare call produces fresh
+    # output. The report lives in the same ignored plan dir, so neither the
+    # porcelain dirty diff nor the ``ws_*.md`` candidate snapshot sees it. Refuse
+    # the elevated-trust move while a report is present rather than proceed atop
+    # an ignored side file the recovery never accounted for.
+    if conformance_report_present:
+        return (
+            False,
+            [
+                _near_miss_plan_artifact_evidence(
+                    candidate=candidate,
+                    required_plan_path=required_plan_path,
+                    reason="conformance_report_present",
+                )
+                for candidate in changed_candidates
+            ],
         )
-        await session.commit()
 
+    # The caller's clean check is ``after_plan - before_plan``, so any path that
+    # was already dirty before planning is subtracted out and treated as clean.
+    # In a preserved/resumed workspace that lets the planning agent edit a
+    # pre-dirty source file while only writing an ignored near-miss plan: the
+    # diff stays empty and the plan-only scope guard would be bypassed by the
+    # elevated-trust move. Refuse recovery unless the worktree started clean.
+    dirty_baseline_strings = [path.as_posix() for path in dirty_paths_before_planning]
+    if dirty_baseline_strings:
+        evidence = [
+            _near_miss_plan_artifact_evidence(
+                candidate=candidate,
+                required_plan_path=required_plan_path,
+                reason="dirty_baseline_before_planning",
+            )
+            for candidate in changed_candidates
+        ]
+        for item in evidence:
+            item["dirty_baseline_paths"] = dirty_baseline_strings[:20]
+        return False, evidence
 
-async def _validation_run_evidence_for_conformance(self: Any, validation_run_id: str) -> str:
-    async with self._session_factory() as session:
-        run = await ValidationRunRepository(session).get(validation_run_id)
-        if run is None:
-            payload: dict[str, Any] = {
-                "validation_run_id": validation_run_id,
-                "status": "missing",
-                "reason_code": "VALIDATION_RUN_NOT_FOUND",
-            }
-        else:
-            log_stream_refs = dict(run.log_stream_refs or {})
-            log_stream_refs.pop("coverage", None)
-            coverage = validation_run_coverage_payload(run)
-            payload = {
-                "validation_run_id": run.id,
-                "status": run.status,
-                "reason_code": run.reason_code,
-                "coverage": coverage,
-                "workspace_head_sha": run.workspace_head_sha,
-                "target_branch": run.target_branch,
-                "target_head_sha": run.target_head_sha,
-                "base_commit": run.base_commit,
-                "base_sha": run.base_sha,
-                "tier": run.tier,
-                "retry_count": run.retry_count,
-                "command_set_hash": run.command_set_hash,
-                # Command records are metadata-only; stdout/stderr stay in log refs.
-                # If that changes, update evidence compaction before passing them through.
-                "commands": list(run.commands or []),
-                "log_stream_refs": log_stream_refs,
-                "profile_name": run.profile_name,
-                "profile_version": run.profile_version,
-                "profile_source": run.profile_source,
-                "resolved_profile_digest": run.resolved_profile_digest,
-                "environment_identity_digest": run.environment_identity_digest,
-            }
-    # Preserve the complete evidence shape when it fits. If it does not,
-    # compact bulky fields as JSON values so the fenced evidence stays
-    # parseable while retaining the validation result fields first.
-    safe_serialized_payload = _validation_evidence_json(payload)
-    return f"AWF persisted validation run evidence:\n```json\n{safe_serialized_payload}\n```"
+    changed_path_strings = [path.as_posix() for path in changed_paths_during_planning]
+    if changed_path_strings:
+        evidence = [
+            _near_miss_plan_artifact_evidence(
+                candidate=candidate,
+                required_plan_path=required_plan_path,
+                reason="planning_changed_other_paths",
+            )
+            for candidate in changed_candidates
+        ]
+        for item in evidence:
+            item["offending_paths"] = changed_path_strings[:20]
+        return False, evidence
+
+    # Key this guard on the required path's *current* presence, not on a stale
+    # pre-planning snapshot. A preserved/resumed workspace can carry a plan
+    # digest from a prior run; if the planning agent deletes that plan and only
+    # a typo sibling remains, the required path is genuinely gone and recovery
+    # must proceed. Refuse only when the required plan still exists after
+    # planning (``digest_after is not None``) so we never clobber a live plan.
+    if required_plan_digest_after is not None:
+        return (
+            False,
+            [
+                _near_miss_plan_artifact_evidence(
+                    candidate=candidate,
+                    required_plan_path=required_plan_path,
+                    reason="required_plan_already_existed",
+                )
+                for candidate in changed_candidates
+            ],
+        )
+
+    if len(changed_candidates) != 1:
+        return (
+            False,
+            [
+                _near_miss_plan_artifact_evidence(
+                    candidate=candidate,
+                    required_plan_path=required_plan_path,
+                    reason="ambiguous_near_miss_candidates",
+                )
+                for candidate in changed_candidates
+            ],
+        )
+
+    candidate = changed_candidates[0]
+    is_safe, filename_distance = _classify_plan_artifact_near_miss(candidate, required_plan_path)
+    if not is_safe:
+        return (
+            False,
+            [
+                _near_miss_plan_artifact_evidence(
+                    candidate=candidate,
+                    required_plan_path=required_plan_path,
+                    reason="filename_not_close_enough",
+                    filename_distance=filename_distance,
+                )
+            ],
+        )
+
+    source = worktree_path / candidate
+    target = worktree_path / required_plan_path
+    if target.exists():
+        return (
+            False,
+            [
+                _near_miss_plan_artifact_evidence(
+                    candidate=candidate,
+                    required_plan_path=required_plan_path,
+                    reason="required_plan_path_exists",
+                )
+            ],
+        )
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(target)
+    except OSError as exc:
+        move_evidence = _near_miss_plan_artifact_evidence(
+            candidate=candidate,
+            required_plan_path=required_plan_path,
+            reason="recovery_move_failed",
+        )
+        move_evidence["error"] = str(exc)
+        return False, [move_evidence]
+
+    _log.info(
+        "executor.planning_near_miss_plan_artifact_recovered",
+        workspace_id=workspace_id,
+        required_path=required_plan_path.as_posix(),
+        recovered_from=candidate.as_posix(),
+    )
+    return True, []
 
 
 async def _auto_retry_planning_scope_failure(
@@ -856,8 +797,17 @@ async def _run_agent_task_with_optional_planning(
     except ValueError as exc:
         return f"planning profile is invalid: {exc}"
 
+    # Hand the agent worktree-root-anchored artifact paths so the plan/report
+    # land at the repo root even if the agent cd's into a task subdir mid-run
+    # (#620). All internal logic below — digests, scope checks, the validation
+    # handoff, stall evidence — keeps using the relative ``plan_path``/
+    # ``report_path`` resolved against ``worktree_path``.
+    agent_plan_path = agent_artifact_path(plan_path)
+    agent_report_path = agent_artifact_path(report_path)
+
     before_plan = await self._changed_paths(worktree_path)
     plan_file_digest_before = _digest_file_if_present(worktree_path / plan_path)
+    plan_candidates_before = _plan_artifact_candidate_digests(worktree_path, plan_path)
     baseline_sha: str | None = None
     rev_r = await self._runner.run(
         [
@@ -877,7 +827,7 @@ async def _run_agent_task_with_optional_planning(
         compose_file=compose_file,
         prompt=build_planning_prompt(
             task_prompt=workspace.task_prompt,
-            plan_path=plan_path,
+            plan_path=agent_plan_path,
             coordination_warnings=coordination_warnings,
             workspace_runtime_context=workspace_runtime_context,
         ),
@@ -896,16 +846,40 @@ async def _run_agent_task_with_optional_planning(
         else set()
     )
     after_plan = dirty_paths | committed_paths
+    plan_candidates_after = _plan_artifact_candidate_digests(worktree_path, plan_path)
+    near_miss_plan_artifacts: list[dict[str, object]] = []
     if plan_path not in after_plan:
         plan_file_digest_after = _digest_file_if_present(worktree_path / plan_path)
         if plan_file_digest_after is not None and plan_file_digest_after != plan_file_digest_before:
             after_plan = {*after_plan, plan_path}
+        else:
+            # The conformance report lives in the same ignored plan dir as the
+            # plan, so it never surfaces in the porcelain dirty diff or the
+            # ``ws_*.md`` candidate snapshot. Detect it directly so a stale
+            # prewritten report blocks the near-miss move (see recovery guard).
+            conformance_report_present = (
+                _digest_file_if_present(worktree_path / report_path) is not None
+            )
+            recovered_near_miss, near_miss_plan_artifacts = _recover_plan_artifact_near_miss(
+                worktree_path=worktree_path,
+                workspace_id=workspace.id,
+                required_plan_path=plan_path,
+                required_plan_digest_after=plan_file_digest_after,
+                dirty_paths_before_planning=sorted(before_plan),
+                changed_paths_during_planning=sorted(after_plan - before_plan),
+                candidates_before=plan_candidates_before,
+                candidates_after=plan_candidates_after,
+                conformance_report_present=conformance_report_present,
+            )
+            if recovered_near_miss:
+                after_plan = {*after_plan, plan_path}
     if plan_path not in after_plan:
         return _build_planning_scope_failure(
             scope_phase="planning",
             required_paths=(plan_path,),
             offending_paths=sorted(after_plan - before_plan),
             summary=(f"planning phase did not create or modify required plan file `{plan_path}`"),
+            near_miss_plan_artifacts=near_miss_plan_artifacts,
         )
     if planning.enforce_plan_only_changes:
         extra = sorted(after_plan - before_plan - {plan_path})
@@ -953,7 +927,7 @@ async def _run_agent_task_with_optional_planning(
             compose_file=compose_file,
             prompt=build_execution_prompt(
                 task_prompt=workspace.task_prompt,
-                plan_path=plan_path,
+                plan_path=agent_plan_path,
                 iteration=iteration,
                 gaps=gaps,
                 coordination_warnings=coordination_warnings,
@@ -989,8 +963,8 @@ async def _run_agent_task_with_optional_planning(
                 compose_file=compose_file,
                 prompt=build_conformance_prompt(
                     task_prompt=workspace.task_prompt,
-                    plan_path=plan_path,
-                    report_path=report_path,
+                    plan_path=agent_plan_path,
+                    report_path=agent_report_path,
                     iteration=iteration,
                 ),
                 model=model,

@@ -49,10 +49,42 @@ class _CommandResultLike:
 
 
 def _init_fake_worktree(tmp_path: Path) -> Path:
-    """Create a fake worktree path with a minimal `.git` marker."""
+    """Create a fake worktree path backed by a real temporary git repo.
+
+    Cleanup calls ``_gitlink_paths`` which runs ``git ls-tree -z -r -d HEAD``
+    against the worktree path. A fake gitdir pointer to a non-existent repo
+    causes git to exit 128, so tests that stub every other git command still
+    need a real repo with a resolvable HEAD.
+    """
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
-    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", str(repo_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.email", "awf@example.test"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.name", "AWF Test"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "commit", "--allow-empty", "-m", "init"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (worktree / ".git").write_text(f"gitdir: {repo_dir / '.git'}\n", encoding="utf-8")
     return worktree
 
 

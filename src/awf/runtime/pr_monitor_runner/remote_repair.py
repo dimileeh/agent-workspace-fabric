@@ -11,48 +11,49 @@ import json as json
 import os as os
 import re as re
 import time as time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
-from awf.adapters.base import AgentRunError
-from awf.common.audit import redact_audit_text
 from awf.common.commands import CommandResult
 from awf.common.git_identity import (
+    git_identity_config_args,
     git_safe_directory_config_args,
 )
 from awf.common.task_tag import commit_message_with_task_tag
-from awf.control.protected_file_diffs import (
-    protected_file_diffs_for_committed_paths,
-)
+from awf.control.protected_file_diffs import protected_file_diffs_for_committed_paths
 from awf.control.quality_gates import (
     QualityGateViolation,
     find_protected_quality_gate_changes,
-    quality_gate_violation_details,
     quality_gate_violation_message,
 )
 from awf.db.repositories import (
     MergeCandidateRepository,
-    WorkspaceEventCreate,
     WorkspaceRepository,
 )
-from awf.runtime.logs import WorkspaceLogSink
+from awf.node.git_manager import (
+    GitOperationError,
+    git_env_without_object_lookup_overrides,
+    mirror_path_for_worktree,
+    repair_agent_writable_worktree,
+    repair_mirror_hooks_path,
+    verify_head_object_exists,
+)
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor import (
     MonitorState,
-    PRStatus,
 )
 from awf.runtime.pr_monitor_runner.commit_autofix import (
     _retry_monitor_precommit_autofix_commit_once,
 )
 from awf.runtime.pr_monitor_runner.constants import (
-    _AUDIT_GIT_PUSH_EVENT,
+    _HEAD_OBJECT_MISSING_RECOVERED_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
-    _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
-    _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
     _REPAIR_START_HEAD_UNAVAILABLE_REASON,
     _REPAIR_WORKTREE_STATUS_FAILED_REASON,
@@ -63,27 +64,24 @@ from awf.runtime.pr_monitor_runner.git_utils import (
     git_worktree_command,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
-    _changed_paths_from_name_only_z,
-    _changed_paths_from_name_status_z,
     _changed_paths_from_porcelain,
-    _changed_paths_from_porcelain_z,
-    _quality_gate_violation_paths,
     _untracked_paths_from_porcelain,
-    _untracked_paths_from_porcelain_z,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.path_parsing import (
+    _changed_paths_from_name_status_z,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
-    _ProtectedScopePushBlock,
 )
 from awf.runtime.pr_monitor_runner.types import (
-    BaseFetchError,
     ProtectedScopeDiffError,
-    ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
-    _ProtectedScopeRollbackDeltaEvidence,
 )
 from awf.runtime.validation_worktree import (
     is_under_agent_runtime_root,
@@ -107,7 +105,8 @@ async def _pre_existing_dirty_repair_worktree_result(
     # Enumerating leaf paths lets the agent-runtime filter below see and drop the
     # memory files. Mirrors ``check_validation_worktree_clean``.
     status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all"),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not status.ok:
         stderr = status.stderr[:400]
@@ -178,26 +177,157 @@ async def _repair_operation_start_head_result(
     worktree_path: Path,
     operation_type: str,
     fallback_head_sha: str | None = None,
+    allow_candidate_fallback: bool = True,
 ) -> tuple[str, _GitPushResult | None]:
-    if not worktree_path.exists():
-        source = "status" if fallback_head_sha else "candidate"
-        fallback_head = fallback_head_sha or await self._open_merge_candidate_head_sha(workspace_id)
-        if fallback_head:
-            _log.info(
-                "monitor.repair_operation_start_head_from_fallback",
+    def failure_result(
+        *,
+        returncode: int,
+        stdout: str,
+        stderr: str,
+        fallback_head: str | None = None,
+        fallback_source: str | None = None,
+    ) -> _GitPushResult:
+        details: dict[str, object] = {
+            "phase": "repair_start",
+            "operation_type": operation_type,
+            "head_stdout": stdout,
+            "head_stderr": stderr,
+            "pushed": False,
+        }
+        if fallback_head is not None:
+            details["fallback_head_sha"] = fallback_head
+        if fallback_source is not None:
+            details["fallback_source"] = fallback_source
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=returncode if returncode != 0 else 1,
+            stderr=(
+                "Could not capture repair operation start HEAD before starting the agent; "
+                "refusing to start repair because protected-scope rollback would not have "
+                "a stable baseline."
+            ),
+            reason_code=_REPAIR_START_HEAD_UNAVAILABLE_REASON,
+            details=details,
+        )
+
+    async def validated_fallback_result(
+        fallback_head: str,
+        *,
+        source: str,
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> tuple[str, _GitPushResult | None]:
+        mirror_path = mirror_path_for_worktree(worktree_path)
+        if mirror_path is not None:
+            fallback_exists = await _mirror_commit_object_exists(self, mirror_path, fallback_head)
+        elif worktree_path.exists():
+            fallback_exists = await _worktree_commit_object_exists(
+                self, worktree_path, fallback_head
+            )
+        else:
+            fallback_exists = await verify_head_object_exists(worktree_path)
+        if not fallback_exists:
+            _log.warning(
+                "monitor.repair_operation_start_head_fallback_unavailable",
                 workspace_id=workspace_id,
                 operation_type=operation_type,
                 head_sha=fallback_head[:10],
                 source=source,
+                mirror_path=str(mirror_path) if mirror_path is not None else None,
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
             )
-            return fallback_head, None
-    result = await self._deps.runner.run(git_worktree_command(worktree_path, "rev-parse", "HEAD"))
+            return "", failure_result(
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+                fallback_head=fallback_head,
+                fallback_source=source,
+            )
+        _log.info(
+            "monitor.repair_operation_start_head_from_fallback",
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            head_sha=fallback_head[:10],
+            source=source,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return fallback_head, None
+
+    async def start_head_fallback() -> tuple[str | None, str]:
+        if fallback_head_sha:
+            return fallback_head_sha, "status"
+        if not allow_candidate_fallback:
+            return None, "candidate"
+        return await self._open_merge_candidate_head_sha(workspace_id), "candidate"
+
+    if not worktree_path.exists():
+        fallback_head, source = await start_head_fallback()
+        if fallback_head:
+            return await validated_fallback_result(
+                fallback_head,
+                source=source,
+                returncode=1,
+                stdout="",
+                stderr="repair worktree is missing",
+            )
+    result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "rev-parse", "HEAD"),
+        env=git_env_without_object_lookup_overrides(),
+    )
     head_sha = result.stdout.strip()
     if result.ok and head_sha:
+        mirror_path = mirror_path_for_worktree(worktree_path)
+        if mirror_path is not None:
+            head_exists = await _mirror_commit_object_exists(self, mirror_path, head_sha)
+        else:
+            head_exists = await _worktree_commit_object_exists(self, worktree_path, head_sha)
+        if not head_exists:
+            stdout = result.stdout[:400]
+            stderr = result.stderr[:400]
+            _log.warning(
+                "monitor.repair_operation_start_head_primary_unavailable",
+                workspace_id=workspace_id,
+                operation_type=operation_type,
+                head_sha=head_sha[:10],
+                mirror_path=str(mirror_path) if mirror_path is not None else None,
+                returncode=result.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+            fallback_head, source = await start_head_fallback()
+            if fallback_head:
+                return await validated_fallback_result(
+                    fallback_head,
+                    source=source,
+                    returncode=result.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            return "", failure_result(
+                returncode=result.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
         return head_sha, None
 
     stdout = result.stdout[:400]
     stderr = result.stderr[:400]
+    fallback_head, source = await start_head_fallback()
+    if fallback_head:
+        return await validated_fallback_result(
+            fallback_head,
+            source=source,
+            returncode=result.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
     _log.warning(
         "monitor.repair_operation_start_head_unavailable",
         workspace_id=workspace_id,
@@ -206,23 +336,10 @@ async def _repair_operation_start_head_result(
         stdout=stdout,
         stderr=stderr,
     )
-    return "", _GitPushResult(
-        pushed=False,
-        failed=True,
+    return "", failure_result(
         returncode=result.returncode if result.returncode != 0 else 1,
-        stderr=(
-            "Could not capture repair operation start HEAD before starting the agent; "
-            "refusing to start repair because protected-scope rollback would not have "
-            "a stable baseline."
-        ),
-        reason_code=_REPAIR_START_HEAD_UNAVAILABLE_REASON,
-        details={
-            "phase": "repair_start",
-            "operation_type": operation_type,
-            "head_stdout": stdout,
-            "head_stderr": stderr,
-            "pushed": False,
-        },
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
@@ -233,11 +350,462 @@ async def _open_merge_candidate_head_sha(self: Any, workspace_id: str) -> str | 
         return candidate.head_sha if candidate is not None else None
 
 
+async def _mirror_commit_object_exists(self: Any, mirror_path: Path, commit_sha: str) -> bool:
+    if _mirror_declares_object_alternates(mirror_path):
+        return False
+
+    result = cast(
+        CommandResult,
+        await self._deps.runner.run(
+            ["git", "--git-dir", str(mirror_path), "cat-file", "-e", f"{commit_sha}^{{commit}}"],
+            env=git_env_without_object_lookup_overrides(),
+        ),
+    )
+    return result.ok
+
+
+def _mirror_declares_object_alternates(mirror_path: Path) -> bool:
+    alternates_path = mirror_path / "objects" / "info" / "alternates"
+    try:
+        alternates_path.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # pragma: no cover - fail closed when the alternates probe is unreadable.
+    return True
+
+
+async def _worktree_commit_object_exists(self: Any, worktree_path: Path, commit_sha: str) -> bool:
+    result = cast(
+        CommandResult,
+        await self._deps.runner.run(
+            git_worktree_command(worktree_path, "cat-file", "-e", f"{commit_sha}^{{commit}}"),
+            env=git_env_without_object_lookup_overrides(),
+        ),
+    )
+    return result.ok
+
+
+async def _protected_scope_violations_for_recovered_dirty_commit(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    base_ref: str,
+    changed_paths: Sequence[str],
+) -> list[QualityGateViolation]:
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:
+            raise ProtectedScopeDiffError(
+                f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
+                "for recovered dirty-worktree commit validation."
+            )
+        owned_paths = list(workspace.owned_paths)
+    try:
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._deps.runner,
+            worktree_path=worktree_path,
+            base_ref=base_ref,
+            changed_paths=changed_paths,
+            owned_paths=owned_paths,
+        )
+    except RuntimeError as exc:
+        raise ProtectedScopeDiffError(
+            "Could not read recovered dirty-worktree committed protected-scope "
+            f"file contents for validation before treating the recovery as fixed: {exc}"
+        ) from exc
+    return find_protected_quality_gate_changes(
+        changed_paths=tuple(changed_paths),
+        owned_paths=owned_paths,
+        protected_file_diffs=protected_file_diffs,
+    )
+
+
 async def _resolve_task_tag(self: Any, workspace_id: str) -> str | None:
     """Load the workspace's optional Jira issue key for commit-message tagging."""
     async with self._deps.session_factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         return workspace.task_tag if workspace is not None else None
+
+
+def _branch_name_to_ref(branch_name: str) -> str:
+    return branch_name if branch_name.startswith("refs/") else f"refs/heads/{branch_name}"
+
+
+async def _resolve_workspace_branch_ref(self: Any, workspace_id: str) -> str | None:
+    """Load the workspace's expected local branch ref."""
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None or not workspace.branch_name:
+            return None
+        return _branch_name_to_ref(workspace.branch_name)
+
+
+async def _recover_missing_head_object_from_filesystem(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    operation_start_head: str,
+    task_tag: str | None = None,
+    expected_branch_ref: str | None = None,
+    command_evidence: Sequence[str] = (),
+) -> str | None:
+    """Rebuild a valid branch commit from filesystem state when HEAD's object is missing."""
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is None:
+        return None
+
+    async def mirror_git(args: list[str]) -> CommandResult:
+        return cast(
+            CommandResult,
+            await self._deps.runner.run(
+                ["git", "--git-dir", str(mirror_path), *args],
+                env=git_env_without_object_lookup_overrides(),
+            ),
+        )
+
+    async def worktree_git(args: list[str]) -> CommandResult:
+        return cast(
+            CommandResult,
+            await self._deps.runner.run(
+                [
+                    "git",
+                    *git_safe_directory_config_args(worktree_path),
+                    "-C",
+                    str(worktree_path),
+                    *args,
+                ],
+                env=git_env_without_object_lookup_overrides(),
+            ),
+        )
+
+    async def cleanup_after_abort(
+        reason: str,
+        *,
+        untracked_cleanup_paths: Sequence[str] = (),
+    ) -> None:
+        cleanup = await worktree_git(["reset", "--hard", operation_start_head])
+        if not cleanup.ok:
+            _log.warning(
+                "monitor.head_object_missing_recovery_abort_cleanup_failed",
+                workspace_id=workspace_id,
+                reason=reason,
+                returncode=cleanup.returncode,
+                stderr=cleanup.stderr[:400],
+            )
+        elif untracked_cleanup_paths:
+            clean = await worktree_git(
+                [
+                    "--literal-pathspecs",
+                    "clean",
+                    "-fd",
+                    "--",
+                    *untracked_cleanup_paths,
+                ]
+            )
+            if not clean.ok:
+                _log.warning(
+                    "monitor.head_object_missing_recovery_abort_clean_failed",
+                    workspace_id=workspace_id,
+                    reason=reason,
+                    returncode=clean.returncode,
+                    stderr=clean.stderr[:400],
+                )
+
+    start_ok = await mirror_git(["cat-file", "-e", f"{operation_start_head}^{{commit}}"])
+    if not start_ok.ok:
+        return None
+
+    branch_ref = await _resolve_worktree_branch_ref(worktree_path)
+    if branch_ref is None:
+        return None
+    expected_ref = expected_branch_ref or await _resolve_workspace_branch_ref(self, workspace_id)
+    if expected_ref is None or branch_ref != expected_ref:
+        _log.warning(
+            "monitor.head_object_missing_recovery_branch_ref_mismatch",
+            workspace_id=workspace_id,
+            branch_ref=branch_ref,
+            expected_branch_ref=expected_ref,
+        )
+        return None
+
+    reset_ref = await mirror_git(["update-ref", branch_ref, operation_start_head])
+    if not reset_ref.ok:
+        return None
+
+    if _worktree_has_merge_head(worktree_path):
+        _log.warning(
+            "monitor.head_object_missing_recovery_merge_in_progress",
+            workspace_id=workspace_id,
+            branch_ref=branch_ref,
+        )
+        return None
+
+    reset_index = await worktree_git(["reset", "--mixed", "HEAD"])
+    if not reset_index.ok:
+        await cleanup_after_abort("reset_index_failed")
+        return None
+
+    add = await worktree_git(["add", "-A"])
+    if not add.ok:
+        await cleanup_after_abort("add_failed")
+        return None
+
+    staged = await worktree_git(["diff", "--cached", "--name-status", "-z"])
+    if not staged.ok:
+        await cleanup_after_abort("staged_diff_failed")
+        return None
+    staged_paths = list(_changed_paths_from_name_status_z(staged.stdout))
+    staged_untracked_cleanup_paths = list(
+        _untracked_cleanup_paths_from_name_status_z(staged.stdout)
+    )
+    excluded = [p for p in staged_paths if is_under_agent_runtime_root(p)]
+    if excluded:
+        unstage = await worktree_git(
+            ["--literal-pathspecs", "reset", "-q", "HEAD", "--", *excluded]
+        )
+        if not unstage.ok:
+            await cleanup_after_abort("runtime_path_unstage_failed")
+            return None
+        staged = await worktree_git(["diff", "--cached", "--name-status", "-z"])
+        if not staged.ok:
+            await cleanup_after_abort("staged_diff_after_runtime_path_unstage_failed")
+            return None
+        staged_paths = list(_changed_paths_from_name_status_z(staged.stdout))
+        staged_untracked_cleanup_paths = list(
+            _untracked_cleanup_paths_from_name_status_z(staged.stdout)
+        )
+
+    if staged_paths:
+        policy_message = await self._refresh_supply_chain_policy_before_push(
+            workspace_id=workspace_id,
+            command_evidence=command_evidence,
+            changed_paths=staged_paths,
+        )
+        if policy_message is not None:
+            cleanup = await worktree_git(["reset", "--hard", operation_start_head])
+            if not cleanup.ok:
+                _log.warning(
+                    "monitor.head_object_missing_recovery_policy_blocked_cleanup_failed",
+                    workspace_id=workspace_id,
+                    returncode=cleanup.returncode,
+                    stderr=cleanup.stderr[:400],
+                )
+            elif staged_untracked_cleanup_paths:
+                clean = await worktree_git(
+                    [
+                        "--literal-pathspecs",
+                        "clean",
+                        "-fd",
+                        "--",
+                        *staged_untracked_cleanup_paths,
+                    ]
+                )
+                if not clean.ok:
+                    _log.warning(
+                        "monitor.head_object_missing_recovery_policy_blocked_clean_failed",
+                        workspace_id=workspace_id,
+                        returncode=clean.returncode,
+                        stderr=clean.stderr[:400],
+                    )
+            raise _MonitorPolicyBlockedError(policy_message)
+        commit = await self._deps.runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                *git_identity_config_args(),
+                "commit",
+                "-m",
+                commit_message_with_task_tag(
+                    f"awf: recover {workspace_id} from missing git object", task_tag
+                )[:72],
+                "-m",
+                (
+                    f"AWF recovered workspace {workspace_id} after HEAD pointed at "
+                    "a commit object missing from the canonical mirror. The commit "
+                    "squashes the workspace filesystem state onto operation start "
+                    f"head {operation_start_head[:10]}."
+                ),
+            ],
+            env=git_env_without_object_lookup_overrides(),
+        )
+        if not commit.ok:
+            await cleanup_after_abort(
+                "commit_failed",
+                untracked_cleanup_paths=staged_untracked_cleanup_paths,
+            )
+            return None
+
+    await asyncio.to_thread(repair_agent_writable_worktree, mirror_path, worktree_path)
+
+    head = await worktree_git(["rev-parse", "HEAD"])
+    recovered_head_sha = head.stdout.strip()
+    if not head.ok or not recovered_head_sha:
+        await cleanup_after_abort("recovered_head_unavailable")
+        return None
+    recovered_head_ok = await mirror_git(["cat-file", "-e", f"{recovered_head_sha}^{{commit}}"])
+    if not recovered_head_ok.ok:
+        await cleanup_after_abort("recovered_head_missing_from_mirror")
+        return None
+    return recovered_head_sha
+
+
+async def _cleanup_recovered_missing_head_delta(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    recovery_head: str,
+    reason: str,
+    untracked_cleanup_paths: Sequence[str] = (),
+) -> None:
+    cleanup = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "reset", "--hard", recovery_head),
+        env=git_env_without_object_lookup_overrides(),
+    )
+    if not cleanup.ok:
+        _log.warning(
+            "monitor.head_object_missing_recovered_cleanup_failed",
+            workspace_id=workspace_id,
+            reason=reason,
+            returncode=cleanup.returncode,
+            stderr=cleanup.stderr[:400],
+        )
+        return
+    if not untracked_cleanup_paths:
+        return
+    clean = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "--literal-pathspecs",
+            "clean",
+            "-fd",
+            "--",
+            *untracked_cleanup_paths,
+        ),
+        env=git_env_without_object_lookup_overrides(),
+    )
+    if not clean.ok:
+        _log.warning(
+            "monitor.head_object_missing_recovered_clean_failed",
+            workspace_id=workspace_id,
+            reason=reason,
+            returncode=clean.returncode,
+            stderr=clean.stderr[:400],
+        )
+
+
+def _untracked_cleanup_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
+    if not diff_stdout:
+        return ()
+    fields = diff_stdout.split("\0")
+    if fields[-1] != "":
+        raise ProtectedScopeDiffError(
+            "truncated `--name-status -z` output: missing terminating NUL"
+        )
+    fields = fields[:-1]
+
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        if not status:
+            raise ProtectedScopeDiffError("malformed `--name-status -z` output: empty status field")
+        index += 1
+        path_count = 2 if status.startswith(("R", "C")) else 1
+        if index + path_count > len(fields):
+            raise ProtectedScopeDiffError(
+                f"truncated `--name-status -z` record for status {status!r}"
+            )
+        record_paths = fields[index : index + path_count]
+        index += path_count
+        if any(not path for path in record_paths):
+            raise ProtectedScopeDiffError(
+                f"malformed `--name-status -z` record for status {status!r}"
+            )
+        if status.startswith("A"):
+            paths.append(record_paths[0])
+        elif status.startswith(("R", "C")):
+            paths.append(record_paths[1])
+    return tuple(dict.fromkeys(paths))
+
+
+def _worktree_git_dir(worktree_path: Path) -> Path | None:
+    git_path = worktree_path / ".git"
+    if git_path.is_dir():
+        return git_path
+    try:
+        git_file = git_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    prefix = "gitdir:"
+    if not git_file.startswith(prefix):
+        return None
+    git_dir = Path(git_file[len(prefix) :].strip())
+    if not git_dir.is_absolute():
+        git_dir = worktree_path / git_dir
+    return git_dir
+
+
+def _worktree_has_merge_head(worktree_path: Path) -> bool:
+    git_dir = _worktree_git_dir(worktree_path)
+    return git_dir is not None and (git_dir / "MERGE_HEAD").exists()
+
+
+async def _resolve_worktree_branch_ref(worktree_path: Path) -> str | None:
+    """Resolve the full branch ref for a worktree."""
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "-C",
+        str(worktree_path),
+        "symbolic-ref",
+        "HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=git_env_without_object_lookup_overrides(),
+    )
+    stdout_bytes, _ = await proc.communicate()
+    assert proc.returncode is not None
+    if proc.returncode != 0:
+        return None
+    return stdout_bytes.decode("utf-8", errors="replace").strip()
+
+
+async def _resolve_block_resume_phase(self: Any, workspace_id: str) -> str | None:
+    """Load the workspace's recorded protected-scope block resume phase.
+
+    Persisted by ``enter_blocked_for_protected_violation_in_session`` and used to
+    discriminate a sync-base-originated pause (``monitor_protected_scope_sync_base``)
+    from a generic push pause or a no-block remonitor when selecting the
+    protected-scope validator on an operator-hint resume."""
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        return workspace.block_resume_phase if workspace is not None else None
+
+
+async def _clear_block_resume_phase(self: Any, workspace_id: str) -> None:
+    """Clear the recorded protected-scope block resume phase once its resume settles.
+
+    The phase column discriminates a sync-base-originated pause
+    (``monitor_protected_scope_sync_base``) when ``_run_operator_hint_cycle`` selects
+    the protected-scope validator. It is set at block time and never overwritten
+    except by a fresh block. A later operator-hint or remonitor cycle on
+    ``monitoring_pr`` arms a hint WITHOUT re-blocking, so the stale sync-base phase
+    would still select the sync-base-aware validator — letting a repair that reverts
+    an unowned protected file back to base contents push without a grant or re-block.
+    Reset it to ``None`` once the resume is finalized so the next cycle falls back to
+    the generic unpushed-commit validator (PRRT_kwDOSJAM6s6KFqEg)."""
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None or workspace.block_resume_phase is None:
+            return
+        workspace.block_resume_phase = None
+        await session.commit()
 
 
 async def _commit_dirty_worktree(
@@ -252,6 +820,7 @@ async def _commit_dirty_worktree(
     protected_scope_revert_remote_branch: str | None = None,
     remote_push_url: str | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> bool:
     """Commit dirty monitor-agent edits so PR feedback is not stranded.
 
@@ -264,6 +833,291 @@ async def _commit_dirty_worktree(
     worktree_path = self._worktrees_root / workspace_id
     if not worktree_path.exists():
         return False
+
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            log_kwargs = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="commit_dirty_worktree",
+                mirror_path=mirror_path,
+            )
+            _log.warning(
+                "monitor.mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                **log_kwargs,
+            )
+            raise _MonitorMirrorHooksPathRepairFailedError() from exc
+
+    head_object_exists = await verify_head_object_exists(worktree_path)
+    if not head_object_exists:
+        _log.warning(
+            "monitor.head_object_missing",
+            workspace_id=workspace_id,
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+        recovery_head = operation_start_head
+        candidate_head: str | None = None
+        attempted_mirror_recovery_heads: set[str] = set()
+        attempted_worktree_recovery_heads: set[str] = set()
+
+        async def verified_mirror_recovery_head(
+            recovery_head_sha: str,
+            *,
+            source: str,
+        ) -> str | None:
+            attempted_mirror_recovery_heads.add(recovery_head_sha)
+            recovery_head_exists = await _mirror_commit_object_exists(
+                self, cast(Path, mirror_path), recovery_head_sha
+            )
+            if recovery_head_exists:
+                return recovery_head_sha
+            _log.warning(
+                "monitor.head_object_missing_recovery_anchor_missing",
+                workspace_id=workspace_id,
+                operation_start_head=recovery_head_sha[:10],
+                recovery_source=source,
+            )
+            return None
+
+        async def verified_worktree_recovery_head(
+            recovery_head_sha: str,
+            *,
+            source: str,
+        ) -> str | None:
+            attempted_worktree_recovery_heads.add(recovery_head_sha)
+            recovery_head_exists = await _worktree_commit_object_exists(
+                self, worktree_path, recovery_head_sha
+            )
+            if recovery_head_exists:
+                return recovery_head_sha
+            _log.warning(
+                "monitor.head_object_missing_recovery_anchor_missing",
+                workspace_id=workspace_id,
+                operation_start_head=recovery_head_sha[:10],
+                recovery_source=source,
+            )
+            return None
+
+        if recovery_head and mirror_path is not None:
+            recovery_head = await verified_mirror_recovery_head(
+                recovery_head,
+                source="operation_start_head",
+            )
+        elif recovery_head:
+            recovery_head = await verified_worktree_recovery_head(
+                recovery_head,
+                source="operation_start_head",
+            )
+        if not recovery_head:
+            candidate_head = candidate_head or await _open_merge_candidate_head_sha(
+                self, workspace_id
+            )
+            recovery_head = candidate_head
+            if recovery_head and mirror_path is None:
+                if recovery_head in attempted_worktree_recovery_heads:
+                    recovery_head = None
+                else:
+                    recovery_head = await verified_worktree_recovery_head(
+                        recovery_head,
+                        source="candidate",
+                    )
+            elif recovery_head and mirror_path is not None:
+                if recovery_head in attempted_mirror_recovery_heads:
+                    recovery_head = None
+                else:
+                    recovery_head = await verified_mirror_recovery_head(
+                        recovery_head,
+                        source="candidate",
+                    )
+        if recovery_head is None:
+            raise _MonitorHeadObjectMissingError(
+                _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                f"HEAD object missing for workspace {workspace_id} and no recovery head available",
+            )
+        recovered = await _recover_missing_head_object_from_filesystem(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            operation_start_head=recovery_head,
+            command_evidence=command_evidence,
+            task_tag=(
+                await _resolve_task_tag(self, workspace_id)
+                if isinstance(task_tag, _TaskTagUnset)
+                else task_tag
+            ),
+        )
+        if recovered is None:
+            raise _MonitorHeadObjectMissingError(
+                _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                f"HEAD object missing for workspace {workspace_id} and recovery failed",
+            )
+        _log.info(
+            "monitor.head_object_missing_recovered",
+            workspace_id=workspace_id,
+            recovered_head=recovered[:10],
+            reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
+        )
+        if recovered != recovery_head:
+            diff = await self._deps.runner.run(
+                git_worktree_command(
+                    worktree_path,
+                    "diff",
+                    "--name-status",
+                    "-z",
+                    f"{recovery_head}..{recovered}",
+                    "--",
+                ),
+                env=git_env_without_object_lookup_overrides(),
+            )
+            if not diff.ok:
+                _log.warning(
+                    "monitor.head_object_missing_recovered_diff_failed",
+                    workspace_id=workspace_id,
+                    returncode=diff.returncode,
+                    stderr=diff.stderr[:400],
+                    reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                )
+                await _cleanup_recovered_missing_head_delta(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    recovery_head=recovery_head,
+                    reason="recovered_diff_failed",
+                )
+                raise _MonitorHeadObjectMissingError(
+                    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                    f"HEAD object recovered for workspace {workspace_id} but recovered diff failed",
+                )
+            try:
+                recovered_untracked_cleanup_paths = _untracked_cleanup_paths_from_name_status_z(
+                    diff.stdout
+                )
+                recovered_diff_paths = _changed_paths_from_name_status_z(diff.stdout)
+            except ProtectedScopeDiffError as exc:
+                _log.warning(
+                    "monitor.head_object_missing_recovered_diff_failed",
+                    workspace_id=workspace_id,
+                    returncode=diff.returncode,
+                    stderr=str(exc)[:400],
+                    reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                )
+                await _cleanup_recovered_missing_head_delta(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    recovery_head=recovery_head,
+                    reason="recovered_diff_malformed",
+                )
+                raise _MonitorHeadObjectMissingError(
+                    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                    f"HEAD object recovered for workspace {workspace_id} but recovered diff was malformed",
+                ) from exc
+            recovered_paths = [
+                p for p in recovered_diff_paths if not is_under_agent_runtime_root(p)
+            ]
+            if not recovered_paths:
+                return False
+            if not await repair_agent_runtime_ownership(
+                logger=_log,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                reason="dirty_worktree_pre_commit",
+                event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+            ):
+                await _cleanup_recovered_missing_head_delta(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    recovery_head=recovery_head,
+                    reason="ownership_repair_failed",
+                    untracked_cleanup_paths=recovered_untracked_cleanup_paths,
+                )
+                raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+                    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+                )
+            recovered_violations = await _protected_scope_violations_for_recovered_dirty_commit(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_ref=recovery_head,
+                changed_paths=tuple(recovered_paths),
+            )
+            if recovered_violations:
+                _log.warning(
+                    "monitor.head_object_missing_recovered_protected_scope_blocked",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    paths=[violation.path for violation in recovered_violations],
+                )
+                await _cleanup_recovered_missing_head_delta(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    recovery_head=recovery_head,
+                    reason="protected_scope_blocked",
+                    untracked_cleanup_paths=recovered_untracked_cleanup_paths,
+                )
+                raise _MonitorPolicyBlockedError(
+                    quality_gate_violation_message(recovered_violations),
+                    reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                )
+            if compose_project is not None and compose_file is not None:
+                recovered_status_stdout = "".join(f" M {path}\n" for path in recovered_paths)
+                repaired_status = await self._repair_protected_scope_changes_before_commit(
+                    workspace_id=workspace_id,
+                    status_stdout=recovered_status_stdout,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    state=state,
+                    protected_scope_revert_remote_branch=(protected_scope_revert_remote_branch),
+                    remote_push_url=remote_push_url,
+                )
+                if repaired_status is None:
+                    return False
+                post_repair_status = await self._deps.runner.run(
+                    git_worktree_command(
+                        worktree_path,
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=all",
+                    ),
+                    env=git_env_without_object_lookup_overrides(),
+                )
+                if not post_repair_status.ok:
+                    _log.warning(
+                        "monitor.dirty_stage_status_failed",
+                        workspace_id=workspace_id,
+                        stderr=post_repair_status.stderr[:400],
+                    )
+                    return False
+                post_repair_untracked = set(
+                    _untracked_paths_from_porcelain(post_repair_status.stdout)
+                )
+                post_repair_paths = tuple(
+                    path
+                    for path in _changed_paths_from_porcelain(post_repair_status.stdout)
+                    if not (path in post_repair_untracked and is_under_agent_runtime_root(path))
+                )
+                if post_repair_paths:
+                    repair_residue_committed = await self._commit_dirty_worktree(
+                        workspace_id=workspace_id,
+                        message=message,
+                        command_evidence=command_evidence,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        state=state,
+                        protected_scope_revert_remote_branch=(protected_scope_revert_remote_branch),
+                        remote_push_url=remote_push_url,
+                        operation_start_head=recovered,
+                        task_tag=task_tag,
+                    )
+                    return bool(repair_residue_committed)
+            return True
     # Decide dirtiness with the SAME untracked AWF-agent-runtime exclusion the
     # pre-existing-dirty guard and the staging filter below apply. A worktree
     # dirtied only by reviewer subagent memory (untracked ``.claude/agent-memory/...``)
@@ -276,7 +1130,8 @@ async def _commit_dirty_worktree(
     # escape the agent-runtime filter, letting memory-only dirt fall through into the
     # side-effecting path. Enumerating leaf paths lets the filter drop the memory files.
     status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all"),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not status.ok:
         _log.warning(
@@ -338,7 +1193,8 @@ async def _commit_dirty_worktree(
     # leaf paths lets the filter drop the memory files. If nothing else remains to
     # stage, there is no PR-worthy change — return False like the clean path above.
     stage_status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all"),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not stage_status.ok:
         _log.warning(
@@ -357,7 +1213,8 @@ async def _commit_dirty_worktree(
         return False
 
     add = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "--literal-pathspecs", "add", "-A", "--", *stage_paths)
+        git_worktree_command(worktree_path, "--literal-pathspecs", "add", "-A", "--", *stage_paths),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not add.ok:
         _log.warning(
@@ -368,7 +1225,8 @@ async def _commit_dirty_worktree(
         return False
 
     cached = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "diff", "--cached", "--quiet")
+        git_worktree_command(worktree_path, "diff", "--cached", "--quiet"),
+        env=git_env_without_object_lookup_overrides(),
     )
     if cached.returncode == 0:
         return False
@@ -388,7 +1246,8 @@ async def _commit_dirty_worktree(
     message = commit_message_with_task_tag(message, resolved_task_tag)[:72]
 
     commit = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "commit", "-m", message)
+        git_worktree_command(worktree_path, "commit", "-m", message),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not commit.ok:
         if not await repair_agent_runtime_ownership(
@@ -466,965 +1325,3 @@ async def _commit_dirty_worktree(
             AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
         )
     return True
-
-
-async def _repair_protected_scope_commits_before_push(
-    self: Any,
-    *,
-    workspace_id: str,
-    pr_number: int,
-    protected_scope_block: _ProtectedScopePushBlock,
-    compose_project: str,
-    compose_file: Path,
-    remote_branch: str,
-    remote_push_url: str | None = None,
-    status: PRStatus | None = None,
-    state: MonitorState | None = None,
-    base_branch: str = "",
-    operation_id: str | None = None,
-    operation_type: str | None = None,
-    monitor_log: WorkspaceLogSink | None = None,
-    operation_start_head: str | None = None,
-    source_head_sha: str | None = None,
-) -> _GitPushResult:
-    """Roll back a protected-scope repair delta before any push occurs."""
-
-    del compose_project, compose_file, state
-
-    if (
-        protected_scope_block.reason_code != _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
-        or not protected_scope_block.violations
-    ):
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=protected_scope_block.message,
-            reason_code=protected_scope_block.reason_code,
-        )
-
-    violations = list(protected_scope_block.violations)
-    paths = _quality_gate_violation_paths(violations)
-    worktree_path = self._worktrees_root / workspace_id
-    attempted_head = await self._rev_parse_head(worktree_path)
-    await self._record_pr_monitor_audit_event(
-        workspace_id=workspace_id,
-        event_type=_AUDIT_GIT_PUSH_EVENT,
-        action="protected_scope_transactional_rollback",
-        outcome="requested",
-        reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
-        pr_number=pr_number,
-        status=status,
-        base_branch=base_branch,
-        remote_branch=remote_branch,
-        operation_id=operation_id,
-        operation_type=operation_type,
-        monitor_log=monitor_log,
-        source_head_sha=source_head_sha or operation_start_head,
-        evidence={
-            "phase": "pre_push_committed_diff",
-            "paths": paths,
-            "protected_patterns": [violation.protected_pattern for violation in violations],
-            "violations": quality_gate_violation_details(violations),
-            "message": protected_scope_block.message,
-            "operation_start_head_sha": operation_start_head,
-            "attempted_head_sha": attempted_head,
-            "rollback_strategy": "git_reset_hard_to_operation_start",
-            "pushed": False,
-        },
-    )
-    _log.warning(
-        "monitor.protected_scope_transactional_rollback_requested",
-        workspace_id=workspace_id,
-        paths=paths,
-        operation_start_head=operation_start_head,
-        attempted_head=attempted_head,
-    )
-    if not operation_start_head:
-        details: dict[str, object] = {
-            "phase": "pre_push_committed_diff",
-            "paths": paths,
-            "protected_patterns": [violation.protected_pattern for violation in violations],
-            "violations": quality_gate_violation_details(violations),
-            "operation_start_head_sha": operation_start_head,
-            "attempted_head_sha": attempted_head,
-            "rollback_strategy": "git_reset_hard_to_operation_start",
-            "rollback_status": "skipped_missing_operation_start_head",
-            "branch_restored": False,
-            "pushed": False,
-        }
-        await self._record_protected_scope_rollback_result(
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            status=status,
-            base_branch=base_branch,
-            remote_branch=remote_branch,
-            operation_id=operation_id,
-            operation_type=operation_type,
-            monitor_log=monitor_log,
-            outcome="failed",
-            reason_code=protected_scope_block.reason_code,
-            source_head_sha=source_head_sha or operation_start_head,
-            details=details,
-        )
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=(
-                f"{protected_scope_block.message}\n"
-                "AWF could not roll back the protected-scope repair because "
-                "the operation start commit was unavailable; no push was attempted."
-            ),
-            reason_code=protected_scope_block.reason_code,
-            details=details,
-        )
-
-    return cast(
-        _GitPushResult,
-        await self._rollback_protected_scope_repair_delta_before_push(
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            worktree_path=worktree_path,
-            protected_scope_block=protected_scope_block,
-            operation_start_head=operation_start_head,
-            attempted_head=attempted_head,
-            remote_branch=remote_branch,
-            remote_push_url=remote_push_url,
-            status=status,
-            base_branch=base_branch,
-            operation_id=operation_id,
-            operation_type=operation_type,
-            monitor_log=monitor_log,
-            source_head_sha=source_head_sha or operation_start_head,
-        ),
-    )
-
-
-async def _rollback_protected_scope_repair_delta_before_push(
-    self: Any,
-    *,
-    workspace_id: str,
-    pr_number: int,
-    worktree_path: Path,
-    protected_scope_block: _ProtectedScopePushBlock,
-    operation_start_head: str,
-    attempted_head: str,
-    remote_branch: str,
-    remote_push_url: str | None = None,
-    status: PRStatus | None = None,
-    base_branch: str = "",
-    operation_id: str | None = None,
-    operation_type: str | None = None,
-    monitor_log: WorkspaceLogSink | None = None,
-    source_head_sha: str | None = None,
-) -> _GitPushResult:
-    del remote_push_url
-
-    violations = list(protected_scope_block.violations)
-    paths = _quality_gate_violation_paths(violations)
-    delta_evidence = await self._protected_scope_repair_delta_paths(
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        operation_start_head=operation_start_head,
-    )
-    reverted_paths = list(delta_evidence.reverted_paths)
-    cleanup_paths = list(delta_evidence.cleanup_paths)
-    reset_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", operation_start_head)
-    )
-    clean_result: CommandResult | None = None
-    if reset_result.ok and cleanup_paths:
-        clean_result = await self._deps.runner.run(
-            git_worktree_command(
-                worktree_path,
-                "--literal-pathspecs",
-                "clean",
-                "-fd",
-                "--",
-                *cleanup_paths,
-            )
-        )
-    untracked_evidence_complete = not any(
-        error.get("phase") == "worktree_status_command"
-        for error in delta_evidence.collection_errors
-    )
-    branch_reset = reset_result.ok
-    cleanup_succeeded = clean_result is None or clean_result.ok
-    branch_restored = branch_reset and untracked_evidence_complete and cleanup_succeeded
-    if branch_restored:
-        rollback_status = "succeeded"
-    elif branch_reset and not untracked_evidence_complete:
-        rollback_status = "reset_succeeded_cleanup_uncertain"
-    elif branch_reset:
-        rollback_status = "reset_succeeded_cleanup_failed"
-    else:
-        rollback_status = "failed"
-    details: dict[str, object] = {
-        "phase": "pre_push_committed_diff",
-        "paths": paths,
-        "protected_patterns": [violation.protected_pattern for violation in violations],
-        "violations": quality_gate_violation_details(violations),
-        "message": protected_scope_block.message,
-        "operation_start_head_sha": operation_start_head,
-        "attempted_head_sha": attempted_head,
-        "rollback_strategy": "git_reset_hard_to_operation_start",
-        "rollback_status": rollback_status,
-        "branch_reset": branch_reset,
-        "branch_restored": branch_restored,
-        "untracked_evidence_complete": untracked_evidence_complete,
-        "reverted_paths": reverted_paths,
-        "cleanup_paths": cleanup_paths,
-        "pushed": False,
-        "reset_returncode": reset_result.returncode,
-    }
-    if reset_result.stderr:
-        details["reset_stderr"] = reset_result.stderr[:400]
-    if clean_result is not None:
-        details["clean_attempted"] = True
-        details["clean_returncode"] = clean_result.returncode
-    if clean_result is not None and clean_result.stderr:
-        details["clean_stderr"] = clean_result.stderr[:400]
-    if delta_evidence.collection_errors:
-        details["reverted_path_collection_errors"] = list(delta_evidence.collection_errors)
-
-    await self._record_protected_scope_rollback_result(
-        workspace_id=workspace_id,
-        pr_number=pr_number,
-        status=status,
-        base_branch=base_branch,
-        remote_branch=remote_branch,
-        operation_id=operation_id,
-        operation_type=operation_type,
-        monitor_log=monitor_log,
-        outcome="succeeded" if branch_restored else "failed",
-        reason_code=protected_scope_block.reason_code,
-        source_head_sha=source_head_sha or operation_start_head,
-        details=details,
-    )
-    _log.warning(
-        "monitor.protected_scope_transactional_rollback_completed",
-        workspace_id=workspace_id,
-        paths=paths,
-        reverted_paths=reverted_paths,
-        cleanup_paths=cleanup_paths,
-        operation_start_head=operation_start_head,
-        attempted_head=attempted_head,
-        branch_reset=branch_reset,
-        branch_restored=branch_restored,
-        untracked_evidence_complete=untracked_evidence_complete,
-        reverted_path_collection_errors=delta_evidence.collection_errors,
-    )
-
-    if branch_restored:
-        stderr = (
-            f"{protected_scope_block.message}\n"
-            f"AWF rolled back the local repair delta to {operation_start_head}; "
-            "no partial protected-scope repair was pushed."
-        )
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=stderr,
-            reason_code=protected_scope_block.reason_code,
-            details=details,
-        )
-
-    if branch_reset and not untracked_evidence_complete:
-        stderr = (
-            f"{protected_scope_block.message}\n"
-            f"AWF reset the local repair delta to {operation_start_head} "
-            "but could not collect untracked cleanup paths; "
-            "untracked repair leftovers may remain. No push was attempted."
-        )
-    else:
-        stderr = (
-            f"{protected_scope_block.message}\n"
-            "AWF attempted to roll back the protected-scope repair before push, "
-            "but local rollback failed; no push was attempted."
-        )
-    return _GitPushResult(
-        pushed=False,
-        failed=True,
-        returncode=(
-            reset_result.returncode
-            if not reset_result.ok
-            else clean_result.returncode
-            if clean_result is not None
-            else 1
-        ),
-        stderr=stderr,
-        reason_code=protected_scope_block.reason_code,
-        details=details,
-    )
-
-
-async def _protected_scope_repair_delta_paths(
-    self: Any,
-    *,
-    workspace_id: str,
-    worktree_path: Path,
-    operation_start_head: str,
-) -> _ProtectedScopeRollbackDeltaEvidence:
-    paths: set[str] = set()
-    cleanup_paths: set[str] = set()
-    collection_errors: list[dict[str, object]] = []
-    committed = await self._deps.runner.run(
-        git_worktree_command(
-            worktree_path,
-            "diff",
-            "--name-status",
-            "-z",
-            f"{operation_start_head}..HEAD",
-        )
-    )
-    if committed.ok:
-        try:
-            paths.update(_changed_paths_from_name_status_z(committed.stdout))
-        except ProtectedScopeDiffError as exc:
-            _log.warning(
-                "monitor.protected_scope_transactional_rollback_diff_parse_failed",
-                workspace_id=workspace_id,
-                error=str(exc),
-            )
-            fallback = await self._deps.runner.run(
-                git_worktree_command(
-                    worktree_path,
-                    "diff",
-                    "--name-only",
-                    "-z",
-                    f"{operation_start_head}..HEAD",
-                )
-            )
-            if fallback.ok:
-                try:
-                    paths.update(_changed_paths_from_name_only_z(fallback.stdout))
-                except ProtectedScopeDiffError as fallback_exc:
-                    collection_errors.extend(
-                        [
-                            {
-                                "phase": "committed_diff_parse",
-                                "message": str(exc),
-                            },
-                            {
-                                "phase": "committed_diff_name_only_fallback_parse",
-                                "message": str(fallback_exc),
-                            },
-                        ]
-                    )
-            else:
-                collection_errors.extend(
-                    [
-                        {
-                            "phase": "committed_diff_parse",
-                            "message": str(exc),
-                        },
-                        {
-                            "phase": "committed_diff_name_only_fallback_command",
-                            "returncode": fallback.returncode,
-                            "stderr": fallback.stderr[:400],
-                        },
-                    ]
-                )
-    else:
-        _log.warning(
-            "monitor.protected_scope_transactional_rollback_diff_failed",
-            workspace_id=workspace_id,
-            returncode=committed.returncode,
-            stderr=committed.stderr[:400],
-        )
-        collection_errors.append(
-            {
-                "phase": "committed_diff_command",
-                "returncode": committed.returncode,
-                "stderr": committed.stderr[:400],
-            }
-        )
-    status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain", "-z")
-    )
-    if status.ok:
-        paths.update(_changed_paths_from_porcelain_z(status.stdout))
-        cleanup_paths.update(_untracked_paths_from_porcelain_z(status.stdout))
-    else:
-        _log.warning(
-            "monitor.protected_scope_transactional_rollback_status_failed",
-            workspace_id=workspace_id,
-            returncode=status.returncode,
-            stderr=status.stderr[:400],
-        )
-        collection_errors.append(
-            {
-                "phase": "worktree_status_command",
-                "returncode": status.returncode,
-                "stderr": status.stderr[:400],
-            }
-        )
-    return _ProtectedScopeRollbackDeltaEvidence(
-        reverted_paths=tuple(sorted(paths)),
-        cleanup_paths=tuple(sorted(cleanup_paths)),
-        collection_errors=tuple(collection_errors),
-    )
-
-
-async def _record_protected_scope_rollback_result(
-    self: Any,
-    *,
-    workspace_id: str,
-    pr_number: int,
-    status: PRStatus | None,
-    base_branch: str,
-    remote_branch: str | None,
-    operation_id: str | None,
-    operation_type: str | None,
-    monitor_log: WorkspaceLogSink | None,
-    outcome: str,
-    reason_code: str,
-    source_head_sha: str | None,
-    details: Mapping[str, object],
-) -> None:
-    await self._write_monitor_log(
-        monitor_log,
-        {
-            "event": "monitor.protected_scope_transactional_rollback",
-            "workspace_id": workspace_id,
-            "outcome": outcome,
-            "reason_code": reason_code,
-            **dict(details),
-        },
-    )
-    await self._record_pr_monitor_audit_event(
-        workspace_id=workspace_id,
-        event_type=_AUDIT_GIT_PUSH_EVENT,
-        action="protected_scope_transactional_rollback",
-        outcome=outcome,
-        reason_code=reason_code,
-        pr_number=pr_number,
-        status=status,
-        base_branch=base_branch,
-        remote_branch=remote_branch,
-        operation_id=operation_id,
-        operation_type=operation_type,
-        monitor_log=monitor_log,
-        source_head_sha=source_head_sha,
-        evidence=details,
-    )
-
-
-async def _repair_protected_scope_changes_before_commit(
-    self: Any,
-    *,
-    workspace_id: str,
-    status_stdout: str,
-    compose_project: str,
-    compose_file: Path,
-    state: MonitorState | None = None,
-    protected_scope_revert_remote_branch: str | None = None,
-    remote_push_url: str | None = None,
-) -> CommandResult | None:
-    """Give the agent one chance to remove protected out-of-scope edits.
-
-    The check runs before commit/push so protected files such as GitHub
-    workflow definitions never enter the PR branch history unless the task
-    explicitly owns them. That matters for OAuth tokens that cannot push
-    workflow changes at all, and for merge safety more generally.
-    """
-
-    violations = await self._protected_scope_violations_for_status(
-        workspace_id=workspace_id,
-        status_stdout=status_stdout,
-    )
-    if violations and protected_scope_revert_remote_branch is not None:
-        filtered_violations = await self._protected_scope_violations_not_restored_to_remote_branch(
-            workspace_id=workspace_id,
-            status_stdout=status_stdout,
-            violations=violations,
-            remote_branch=protected_scope_revert_remote_branch,
-            remote_push_url=remote_push_url,
-        )
-        violations = filtered_violations
-    if not violations:
-        return CommandResult(returncode=0, stdout=status_stdout, stderr="")
-
-    prompt = await self._protected_scope_repair_prompt(
-        workspace_id=workspace_id,
-        violations=violations,
-    )
-    _log.warning(
-        "monitor.protected_scope_repair_requested",
-        workspace_id=workspace_id,
-        paths=_quality_gate_violation_paths(violations),
-    )
-    if await self._provider_recovery_suppresses_cli(workspace_id):
-        raise ProviderRecoveryRetryError()
-    agent_run_err = None
-    try:
-        await self._deps.adapter.run(
-            compose_project=compose_project,
-            compose_file=compose_file,
-            prompt=prompt,
-            workspace_id=workspace_id,
-            log_source="recovery",
-        )
-    except AgentRunError as exc:
-        agent_run_err = exc
-        await self._handle_provider_agent_run_error(workspace_id, exc, state=state)
-
-    worktree_path = self._worktrees_root / workspace_id
-    repaired_status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain")
-    )
-    if not repaired_status.ok:
-        return None
-    remaining = await self._protected_scope_violations_for_status(
-        workspace_id=workspace_id,
-        status_stdout=repaired_status.stdout,
-    )
-    if remaining and protected_scope_revert_remote_branch is not None:
-        filtered_remaining = await self._protected_scope_violations_not_restored_to_remote_branch(
-            workspace_id=workspace_id,
-            status_stdout=repaired_status.stdout,
-            violations=remaining,
-            remote_branch=protected_scope_revert_remote_branch,
-            remote_push_url=remote_push_url,
-        )
-        remaining = filtered_remaining
-    if remaining:
-        _log.warning(
-            "monitor.protected_scope_repair_failed",
-            workspace_id=workspace_id,
-            paths=_quality_gate_violation_paths(remaining),
-            cli_failed=agent_run_err is not None,
-        )
-        await self._append_workspace_events(
-            workspace_id=workspace_id,
-            events=[
-                WorkspaceEventCreate(
-                    event_type="workspace.monitor_protected_scope_repair_failed",
-                    reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
-                    payload={
-                        "paths": _quality_gate_violation_paths(remaining),
-                        "protected_patterns": [
-                            violation.protected_pattern for violation in remaining
-                        ],
-                        "violations": quality_gate_violation_details(remaining),
-                        "message": quality_gate_violation_message(remaining),
-                    },
-                )
-            ],
-        )
-        return None
-    _log.info(
-        "monitor.protected_scope_repair_succeeded",
-        workspace_id=workspace_id,
-        paths=_quality_gate_violation_paths(violations),
-    )
-    return cast(CommandResult | None, repaired_status)
-
-
-async def _protected_scope_violations_not_restored_to_remote_branch(
-    self: Any,
-    *,
-    workspace_id: str,
-    status_stdout: str,
-    violations: list[QualityGateViolation],
-    remote_branch: str,
-    remote_push_url: str | None = None,
-) -> list[QualityGateViolation]:
-    """Filter out protected dirty paths that restore the remote PR branch tree."""
-
-    if not violations:
-        return []
-    untracked_paths = set(_untracked_paths_from_porcelain(status_stdout))
-    worktree_path = self._worktrees_root / workspace_id
-    remote = remote_push_url or "origin"
-    fetch_result = await self._deps.runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "fetch",
-            remote,
-            f"refs/heads/{remote_branch}",
-        ]
-    )
-    if not fetch_result.ok:
-        message = (
-            "Could not verify protected-scope restore against the remote PR branch: "
-            f"fetch refs/heads/{remote_branch} exit={fetch_result.returncode} "
-            f"stdout={fetch_result.stdout.strip() or '<empty>'} "
-            f"stderr={fetch_result.stderr.strip() or '<empty>'}"
-        )
-        _log.warning(
-            "monitor.protected_scope_revert_baseline_fetch_failed",
-            workspace_id=workspace_id,
-            stderr=fetch_result.stderr[:400],
-        )
-        raise ProtectedScopeDiffError(message)
-
-    remaining: list[QualityGateViolation] = []
-    restored_paths: list[str] = []
-    for violation in violations:
-        if violation.path in untracked_paths:
-            remote_blob_result = await self._deps.runner.run(
-                [
-                    "git",
-                    *git_safe_directory_config_args(worktree_path),
-                    "-C",
-                    str(worktree_path),
-                    "rev-parse",
-                    "--verify",
-                    f"FETCH_HEAD:{violation.path}^{{blob}}",
-                ]
-            )
-            if not remote_blob_result.ok:
-                remaining.append(violation)
-                continue
-            worktree_blob_result = await self._deps.runner.run(
-                [
-                    "git",
-                    *git_safe_directory_config_args(worktree_path),
-                    "-C",
-                    str(worktree_path),
-                    "hash-object",
-                    "--path",
-                    violation.path,
-                    "--",
-                    violation.path,
-                ]
-            )
-            if not worktree_blob_result.ok:
-                message = (
-                    "Could not verify protected-scope restore against the remote PR branch: "
-                    f"hash-object --path {violation.path} exit={worktree_blob_result.returncode} "
-                    f"stdout={worktree_blob_result.stdout.strip() or '<empty>'} "
-                    f"stderr={worktree_blob_result.stderr.strip() or '<empty>'}"
-                )
-                _log.warning(
-                    "monitor.protected_scope_revert_diff_failed",
-                    workspace_id=workspace_id,
-                    path=violation.path,
-                    stderr=worktree_blob_result.stderr[:400],
-                )
-                raise ProtectedScopeDiffError(message)
-            if remote_blob_result.stdout.strip() == worktree_blob_result.stdout.strip():
-                restored_paths.append(violation.path)
-                continue
-            remaining.append(violation)
-            continue
-
-        diff_result = await self._deps.runner.run(
-            [
-                "git",
-                *git_safe_directory_config_args(worktree_path),
-                "-C",
-                str(worktree_path),
-                "diff",
-                "--quiet",
-                "FETCH_HEAD",
-                "--",
-                violation.path,
-            ]
-        )
-        if diff_result.returncode == 0:
-            restored_paths.append(violation.path)
-            continue
-        if diff_result.returncode == 1:
-            remaining.append(violation)
-            continue
-        message = (
-            "Could not verify protected-scope restore against the remote PR branch: "
-            f"diff FETCH_HEAD -- {violation.path} exit={diff_result.returncode} "
-            f"stdout={diff_result.stdout.strip() or '<empty>'} "
-            f"stderr={diff_result.stderr.strip() or '<empty>'}"
-        )
-        _log.warning(
-            "monitor.protected_scope_revert_diff_failed",
-            workspace_id=workspace_id,
-            path=violation.path,
-            stderr=diff_result.stderr[:400],
-        )
-        raise ProtectedScopeDiffError(message)
-
-    if restored_paths:
-        _log.info(
-            "monitor.protected_scope_revert_verified",
-            workspace_id=workspace_id,
-            paths=restored_paths,
-        )
-    return remaining
-
-
-async def _protected_scope_violations_for_status(
-    self: Any,
-    *,
-    workspace_id: str,
-    status_stdout: str,
-) -> list[QualityGateViolation]:
-    changed_paths = _changed_paths_from_porcelain(status_stdout)
-    if not changed_paths:
-        return []
-    async with self._deps.session_factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        if workspace is None:
-            return []
-        owned_paths = list(workspace.owned_paths)
-    try:
-        protected_file_diffs = await self._protected_file_diffs_for_status_paths(
-            worktree_path=self._worktrees_root / workspace_id,
-            changed_paths=changed_paths,
-            owned_paths=owned_paths,
-        )
-    except RuntimeError as exc:
-        raise ProtectedScopeDiffError(
-            "Could not read dirty protected-scope file contents "
-            "for validation before commit: "
-            f"{exc}"
-        ) from exc
-    return find_protected_quality_gate_changes(
-        changed_paths=changed_paths,
-        owned_paths=owned_paths,
-        protected_file_diffs=protected_file_diffs,
-    )
-
-
-async def _protected_scope_violations_for_unpushed_commits(
-    self: Any,
-    *,
-    workspace_id: str,
-    worktree_path: Path,
-    remote_branch: str,
-    remote_push_url: str | None = None,
-) -> list[QualityGateViolation]:
-    async with self._deps.session_factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        if workspace is None:
-            raise ProtectedScopeDiffError(
-                f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
-                "for protected-scope validation."
-            )
-        owned_paths = list(workspace.owned_paths)
-
-    local_base, changed_paths = await self._remote_branch_diff_base_and_changed_paths(
-        worktree_path=worktree_path,
-        remote_branch=remote_branch,
-        remote_push_url=remote_push_url,
-    )
-    if not changed_paths:
-        return []
-    try:
-        protected_file_diffs = await protected_file_diffs_for_committed_paths(
-            self._deps.runner,
-            worktree_path=worktree_path,
-            base_ref=local_base,
-            changed_paths=changed_paths,
-            owned_paths=owned_paths,
-        )
-    except RuntimeError as exc:
-        raise ProtectedScopeDiffError(
-            "Could not read committed protected-scope file contents "
-            "against the remote PR branch for validation: "
-            f"{exc}"
-        ) from exc
-    return find_protected_quality_gate_changes(
-        changed_paths=changed_paths,
-        owned_paths=owned_paths,
-        protected_file_diffs=protected_file_diffs,
-    )
-
-
-async def _protected_scope_violations_for_sync_base_push(
-    self: Any,
-    *,
-    workspace_id: str,
-    worktree_path: Path,
-    remote_branch: str,
-    base_branch: str,
-    remote_push_url: str | None = None,
-) -> list[QualityGateViolation]:
-    async with self._deps.session_factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        if workspace is None:
-            raise ProtectedScopeDiffError(
-                f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
-                "for protected-scope validation."
-            )
-        owned_paths = list(workspace.owned_paths)
-
-    (
-        remote_branch_base,
-        changed_from_remote,
-    ) = await self._remote_branch_diff_base_and_changed_paths(
-        worktree_path=worktree_path,
-        remote_branch=remote_branch,
-        remote_push_url=remote_push_url,
-    )
-    if not changed_from_remote:
-        return []
-
-    try:
-        await self._fetch_base(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_branch=base_branch,
-        )
-    except BaseFetchError as exc:
-        raise ProtectedScopeDiffError(
-            f"Could not refresh the base branch for protected-scope validation: {exc}"
-        ) from exc
-
-    merged_base = await self._merge_base_with_head(
-        worktree_path=worktree_path,
-        ref=f"origin/{base_branch}",
-        error_context="against the merged base branch",
-    )
-    changed_from_base = await self._changed_paths_between_ref_and_head(
-        worktree_path=worktree_path,
-        ref=merged_base,
-        error_context="against the merged base commit",
-    )
-    if not changed_from_base:
-        return []
-
-    changed_from_base_set = set(changed_from_base)
-    sync_base_authored_paths = tuple(
-        path for path in changed_from_remote if path in changed_from_base_set
-    )
-    if not sync_base_authored_paths:
-        return []
-    try:
-        protected_file_diffs = await protected_file_diffs_for_committed_paths(
-            self._deps.runner,
-            worktree_path=worktree_path,
-            base_ref=remote_branch_base,
-            changed_paths=sync_base_authored_paths,
-            owned_paths=owned_paths,
-        )
-    except RuntimeError as exc:
-        raise ProtectedScopeDiffError(
-            "Could not read sync-base protected-scope file contents "
-            "against the remote PR branch for validation: "
-            f"{exc}"
-        ) from exc
-    return find_protected_quality_gate_changes(
-        changed_paths=sync_base_authored_paths,
-        owned_paths=owned_paths,
-        protected_file_diffs=protected_file_diffs,
-    )
-
-
-async def _protected_scope_diff_unavailable_block(
-    self: Any,
-    *,
-    workspace_id: str,
-    remote_branch: str,
-    exc: ProtectedScopeDiffError,
-) -> _ProtectedScopePushBlock:
-    redacted_error = redact_audit_text(str(exc), limit=1000)
-    message = (
-        "AWF could not verify protected-scope changes before push; "
-        "refusing to push this repair until the PR branch diff baseline "
-        f"is available. {redacted_error}"
-    )
-    await self._append_workspace_events(
-        workspace_id=workspace_id,
-        events=[
-            WorkspaceEventCreate(
-                event_type="workspace.monitor_protected_scope_push_blocked",
-                reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
-                payload={
-                    "reason": "diff_baseline_unavailable",
-                    "remote_branch": remote_branch,
-                    "error": redacted_error,
-                },
-            )
-        ],
-    )
-    return _ProtectedScopePushBlock(
-        message=message,
-        reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
-    )
-
-
-async def _protected_scope_diff_unavailable_push_result(
-    self: Any,
-    *,
-    workspace_id: str,
-    remote_branch: str,
-    exc: ProtectedScopeDiffError,
-) -> _GitPushResult:
-    block = await self._protected_scope_diff_unavailable_block(
-        workspace_id=workspace_id,
-        remote_branch=remote_branch,
-        exc=exc,
-    )
-    return _GitPushResult(
-        pushed=False,
-        failed=True,
-        returncode=1,
-        stderr=block.message,
-        reason_code=block.reason_code,
-    )
-
-
-async def _protected_scope_push_block(
-    self: Any,
-    *,
-    workspace_id: str,
-    worktree_path: Path,
-    remote_branch: str,
-    remote_push_url: str | None = None,
-    base_branch: str | None = None,
-) -> _ProtectedScopePushBlock | None:
-    if not worktree_path.exists():
-        return None
-    try:
-        if base_branch is None:
-            violations = await self._protected_scope_violations_for_unpushed_commits(
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                remote_branch=remote_branch,
-                remote_push_url=remote_push_url,
-            )
-        else:
-            violations = await self._protected_scope_violations_for_sync_base_push(
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                remote_branch=remote_branch,
-                base_branch=base_branch,
-                remote_push_url=remote_push_url,
-            )
-    except ProtectedScopeDiffError as exc:
-        return cast(
-            _ProtectedScopePushBlock | None,
-            await self._protected_scope_diff_unavailable_block(
-                workspace_id=workspace_id,
-                remote_branch=remote_branch,
-                exc=exc,
-            ),
-        )
-    if not violations:
-        return None
-    message = quality_gate_violation_message(violations)
-    await self._append_workspace_events(
-        workspace_id=workspace_id,
-        events=[
-            WorkspaceEventCreate(
-                event_type="workspace.monitor_protected_scope_push_blocked",
-                reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
-                payload={
-                    "paths": _quality_gate_violation_paths(violations),
-                    "protected_patterns": [violation.protected_pattern for violation in violations],
-                    "violations": quality_gate_violation_details(violations),
-                    "message": message,
-                },
-            )
-        ],
-    )
-    return _ProtectedScopePushBlock(
-        message=message,
-        reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
-        violations=tuple(violations),
-    )

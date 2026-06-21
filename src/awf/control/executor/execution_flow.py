@@ -1,12 +1,10 @@
-"""WorkspaceExecutor execution flow.
-
-Mechanically extracted from the original orchestrator; behavior is unchanged.
-"""
+"""WorkspaceExecutor execution flow."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,9 +14,7 @@ from awf.adapters.base import (
     AgentRunError,
     get_adapter,
 )
-from awf.common.command_evidence import (
-    append_command_evidence,
-)
+from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
@@ -36,11 +32,8 @@ from awf.common.task_tag import (
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor import pr_open_step as _pr_open_step
-from awf.control.executor.constants import (
-    _AUDIT_GIT_PUSH_EVENT,
-    _AUDIT_PR_CREATED_EVENT,
-    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
-)
+from awf.control.executor.constants import GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
+from awf.control.executor.execution_pr_handoff import persist_pr_and_handoff
 from awf.control.executor.forge_gate import (
     unsupported_forge_error,
 )
@@ -53,7 +46,6 @@ from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _agent_run_model_for_workspace,
     _call_pr_monitor_factory,
-    _extract_pr_number,
     _failure_reason_for_phase,
     _profile_for_workspace,
     _provider_recovery_default_model_for_monitor_handoff,
@@ -61,6 +53,14 @@ from awf.control.executor.helpers import (
 from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     _setup_dependency_network_failure_details,
+)
+from awf.control.executor.mirror_hooks_repair import (
+    MirrorHooksPathRepairAbortedError,
+    repair_mirror_hooks_path_after_agent_cleanup_failure,
+    repair_mirror_hooks_path_or_mark_failed,
+)
+from awf.control.executor.missing_head_recovery import (
+    recover_missing_head_after_cleanup_failure,
 )
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
@@ -71,20 +71,21 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
+    _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
     _recovery_needs_existing_pr_push,
     _validate_only_recovery_target_head_sha,
 )
-from awf.control.executor.state_ops import _sync_resolved_profile
+from awf.control.executor.state_ops import ProviderFailureDivert, _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import (
+    PauseResumeReason,
     _MonitorRebaseRecoveryError,
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
 )
 from awf.control.quality_gates import (
     find_protected_quality_gate_changes,
-    quality_gate_violation_message,
 )
 from awf.db.enums import (
     AgentRuntime,
@@ -93,6 +94,11 @@ from awf.db.enums import (
     WorkspaceStatus,
 )
 from awf.db.repositories import WorkspaceRepository
+from awf.node.git_manager import (
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+    verify_head_object_exists,
+)
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
 from awf.runtime.ownership import (
@@ -101,7 +107,6 @@ from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.validation import (
-    ValidationCoverageResult,
     ValidationResult,
 )
 
@@ -112,26 +117,43 @@ async def execute(
     *,
     execution_owner_id: str | None = None,
     execution_lease_expires_at: datetime | None = None,
+    resume_reason: PauseResumeReason | None = None,
 ) -> None:
     """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
 
     The function is idempotent in the sense that it refuses to run on a
     workspace that is not currently in ``ready`` — useful when a poll
     loop races with a manual invocation.
+
+    ``resume_reason == "blocked"`` re-enters a workspace the worker already moved
+    ``blocked -> running`` after an operator resolved a protected quality-gate
+    violation; ``_begin_execution`` decides whether to re-run the agent (a
+    revert/redo directive) or skip it (an approve-and-keep grant). Active
+    operator grants are honored by every gate and consumed once the gate passes;
+    if a protected violation still stands the gate re-blocks (bumping
+    ``block_epoch``, invalidating the now-stale grants).
+
+    ``resume_reason == "recovering"`` re-enters a workspace the worker moved
+    ``recovering -> running`` after the provider cooldown elapsed (#612): a fresh
+    agent re-run on the worker-reset worktree with no operator-grant/baseline
+    replay. Only the ``blocked`` resume consumes grants and reuses the persisted
+    baseline, so those are gated on ``resume_from_blocked`` below.
     """
-    ws = await self._claim_ready(
+    # ``blocked`` is the only resume that reuses the persisted baseline
+    # (``skip_measure``) and consumes operator grants after the push CAS; the
+    # ``recovering`` resume re-measures and has no grants to consume.
+    resume_from_blocked = resume_reason == "blocked"
+    begin = await self._begin_execution(
         workspace_id,
+        resume_reason=resume_reason,
         execution_owner_id=execution_owner_id,
         execution_lease_expires_at=execution_lease_expires_at,
     )
-    if ws is None:
+    if begin is None:
         return
-    if not await self._recheck_status(
-        workspace_id,
-        expected=WorkspaceStatus.running,
-        action="execute",
-    ):
-        return
+    # ``baseline_coverage`` is reused on blocked-resume; the resume flags
+    # independently gate the main agent and secondary fix passes.
+    ws, resume_skip_agent, resume_disable_fix_passes, baseline_coverage = begin
 
     compose_file = (
         Path(ws.compose_file_path)
@@ -142,11 +164,7 @@ async def execute(
     worktree_path = self._config.worktrees_root / workspace_id
 
     def _deposit_planning_artifacts() -> None:
-        # Best-effort, idempotent deposit of the plan + conformance report the
-        # agent may have written into the (preserved-FAILED) worktree, for the
-        # many handlers that mark the workspace FAILED and return before the
-        # post-validation deposit block. ``profile`` is bound by the time any of
-        # those handlers run, matching the inline call sites this replaces.
+        # Best-effort deposit before handlers return with a preserved FAILED worktree.
         _planning_artifacts._deposit_planning_artifacts_best_effort(
             self,
             profile=profile,
@@ -220,7 +238,6 @@ async def execute(
             if salvage_result.prompt_override is not None:
                 ws.task_prompt = salvage_result.prompt_override
     rebase_recovery_result: _RebaseRecoveryResult | None = None
-    baseline_coverage: ValidationCoverageResult | None = None
     profile: WorkspaceProfile | None = None
     agent_exit_note: str | None = None
     agent_run_reason_code: str | None = None
@@ -238,6 +255,58 @@ async def execute(
     defaults: AgentDefaults | None = None
     run_model: str | None = None
     agent_command_evidence: list[str] = []
+    post_agent_mirror_repair_done = False
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    recovery_active = recovery is not None
+
+    async def _repair_mirror_hooks_path_or_mark_failed(
+        *,
+        failure_stage: str,
+        failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
+        before_mark_failed: Any = None,
+    ) -> bool:
+        return await repair_mirror_hooks_path_or_mark_failed(
+            executor=self,
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+            recovery_active=recovery_active,
+            failure_stage=failure_stage,
+            failure_from_status=failure_from_status,
+            before_mark_failed=before_mark_failed,
+        )
+
+    async def _repair_mirror_hooks_path_after_cleanup_failure(
+        *, failure_stage: str = "after agent cleanup failure"
+    ) -> bool:
+        return await repair_mirror_hooks_path_after_agent_cleanup_failure(
+            executor=self,
+            workspace_id=workspace_id,
+            mirror_path=mirror_path,
+            repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+            recovery_active=recovery_active,
+            failure_stage=failure_stage,
+            before_mark_failed=_deposit_planning_artifacts,
+        )
+
+    async def _repair_hooks_after_agent_cleanup_failure() -> bool:
+        return await _repair_mirror_hooks_path_after_cleanup_failure()
+
+    # Bind the worktree-scoped recovery args once; each cleanup-failure path
+    # supplies only its ``stage`` (plus the post-agent commit re-verify for the
+    # agent-run path). ``verify_head_object_exists`` is captured here so test
+    # monkeypatches on this module's name still apply.
+    _recover_missing_head_after_cleanup_failure = partial(
+        recover_missing_head_after_cleanup_failure,
+        executor=self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        base_commit=ws.base_commit,
+        branch_name=expected_branch,
+        task_tag=ws.task_tag,
+        verify_head_object_exists_fn=verify_head_object_exists,
+    )
+
     try:
         agent = AgentRuntime(ws.agent)
         defaults = self._defaults_for(agent)
@@ -326,14 +395,27 @@ async def execute(
                 reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
             )
             return
-        setup_result = await self._validation.run_profile_phases(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-            phase_names=("setup", "pre_agent"),
-            worktree_path=worktree_path,
-        )
+        if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
+            return
+        try:
+            setup_result = await self._validation.run_profile_phases(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+                phase_names=("setup", "pre_agent"),
+                worktree_path=worktree_path,
+            )
+        except ComposeExecCleanupError as exc:
+            if not await _repair_mirror_hooks_path_after_cleanup_failure(
+                failure_stage="after profile setup cleanup failure"
+            ):
+                return
+            if not await _recover_missing_head_after_cleanup_failure(
+                exc, stage="profile_setup_cleanup_failure"
+            ):
+                raise
+            raise
         try:
             await self._record_setup_dependency_network_events(
                 workspace_id=workspace_id,
@@ -346,6 +428,10 @@ async def execute(
                 setup_all_passed=setup_result.all_passed,
             )
         if not setup_result.all_passed:
+            if not await _repair_mirror_hooks_path_or_mark_failed(
+                failure_stage="after profile setup failure"
+            ):
+                return
             first_fail = setup_result.first_failure
             setup_dependency_details = _setup_dependency_network_failure_details(first_fail)
             setup_failure_reason_code = (
@@ -377,6 +463,10 @@ async def execute(
                 reason_code=setup_failure_reason_code,
                 details=setup_dependency_details,
             )
+            return
+        if not await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="after successful profile setup"
+        ):
             return
         await self._record_runtime_toolchain_findings_safe(
             workspace_id=workspace_id,
@@ -414,7 +504,7 @@ async def execute(
                 )[:2000],
             )
             return
-        if recovery is None:
+        if recovery is None and not resume_skip_agent:
             if not await self._run_agent_git_writability_preflight(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -444,28 +534,72 @@ async def execute(
                 action="baseline_coverage_preflight",
             ):
                 return
-            baseline_coverage = await self._run_baseline_coverage_preflight(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                profile=profile,
-            )
+            try:
+                baseline_coverage = await self._measure_and_persist_baseline_coverage(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    profile=profile,
+                    reuse=baseline_coverage,
+                    skip_measure=resume_from_blocked,
+                )
+            except ComposeExecCleanupError as exc:
+                if not await _repair_mirror_hooks_path_after_cleanup_failure():
+                    return
+                if not await _recover_missing_head_after_cleanup_failure(
+                    exc, stage="baseline_coverage_cleanup_failure"
+                ):
+                    raise
+                raise
             if not await self._recheck_status(
                 workspace_id,
                 expected=WorkspaceStatus.running,
                 action="agent_run",
             ):
                 return
-            planning_failure = await self._run_agent_task_with_optional_planning(
-                adapter=adapter,
-                workspace=ws,
-                profile=profile,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                worktree_path=worktree_path,
-                model=run_model,
-                command_evidence=agent_command_evidence,
-            )
+            if not await _repair_mirror_hooks_path_or_mark_failed(
+                failure_stage="before agent launch"
+            ):
+                return
+            try:
+                planning_failure = await self._run_agent_task_with_optional_planning(
+                    adapter=adapter,
+                    workspace=ws,
+                    profile=profile,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    worktree_path=worktree_path,
+                    model=run_model,
+                    command_evidence=agent_command_evidence,
+                )
+                if not await _repair_mirror_hooks_path_or_mark_failed(
+                    failure_stage="after agent run",
+                    before_mark_failed=_deposit_planning_artifacts,
+                ):
+                    return
+                post_agent_mirror_repair_done = True
+            except ComposeExecCleanupError as exc:
+                if not await _repair_hooks_after_agent_cleanup_failure():
+                    return
+                if not await _recover_missing_head_after_cleanup_failure(
+                    exc,
+                    stage="agent_run_cleanup_failure",
+                    owned_paths=list(ws.owned_paths),
+                    execution_owner_id=execution_owner_id,
+                    verify_post_agent_commit=True,
+                ):
+                    raise
+                raise
+            except AgentRunError:
+                raise
+            except Exception:
+                if not await _repair_mirror_hooks_path_or_mark_failed(
+                    failure_stage="after agent run",
+                    before_mark_failed=_deposit_planning_artifacts,
+                ):
+                    return
+                post_agent_mirror_repair_done = True
+                raise
             (
                 planning_validation_handoff,
                 planning_should_return,
@@ -479,12 +613,14 @@ async def execute(
             )
             if planning_should_return:
                 return
-        else:
-            # Recovery dispatch created the validate Operation in ``pending``;
-            # flush it to ``running`` before validation so observability
-            # tooling sees a real ``started_at`` (otherwise the row jumps
-            # straight from pending → succeeded/failed when the validate
-            # finalizer fires, with started_at == finished_at).
+            # Persist even ``None`` so approve-and-keep resumes preserve the
+            # original post-validation conformance behavior.
+            await self._persist_block_planning_conformance_handoff(
+                workspace_id,
+                handoff=planning_validation_handoff,
+            )
+        elif recovery is not None:
+            # Move the recovery validate operation from pending to running before validation.
             await self._start_pending_recovery_operations(
                 workspace_id=workspace_id,
             )
@@ -500,6 +636,11 @@ async def execute(
                 profile=profile,
                 recovery_payload=recovery,
             )
+        elif resume_skip_agent:
+            # Reconstruct the blocked run's persisted conformance handoff.
+            planning_validation_handoff = _planning_validation_handoff_from_metadata(
+                ws.block_planning_conformance_handoff
+            )
     except ComposeExecCleanupError as exc:
         _log.error(
             "executor.exec_process_cleanup_failed",
@@ -509,13 +650,7 @@ async def execute(
             invocation_id=exc.invocation_id,
             reason_code=exc.reason_code,
         )
-        # A cleanup failure during the agent/planning run leaves the worktree
-        # (preserved on the FAILED workspace) potentially holding the plan +
-        # conformance report the agent already wrote. This handler marks the
-        # workspace FAILED and returns before the post-validation deposit
-        # block, so deposit them now — otherwise the artifacts are stranded in
-        # the worktree and the console can never surface them. Best-effort and
-        # idempotent, mirroring the generic agent-phase failure paths.
+        # Deposit possible plan artifacts before returning with a FAILED workspace.
         _deposit_planning_artifacts()
         await self._mark_failed(
             workspace_id=workspace_id,
@@ -531,21 +666,8 @@ async def execute(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
-        # Do NOT bail out yet. A CLI that exits non-zero — typically
-        # ``claude_code`` hitting a 1-hour internal session cap and
-        # returning 137 (SIGKILL), or a timeout against a flaky
-        # dependency — may have left valuable uncommitted work in the
-        # worktree. Coding CLIs in general don't commit on their own;
-        # AWF's post-agent auto-commit is the only thing that captures
-        # their edits. Log the exit code, remember it for the final
-        # failure message, but let the commit + validate pipeline run.
-        # If there's nothing to commit, the existing no-work check
-        # fails the workspace with ``agent_failure`` below. If there
-        # IS work, validation decides whether it's pushable.
-        # Structured provider-failure metadata is preserved in
-        # ``agent_run_details``. If salvage finds no commits, the
-        # no-work failure path below persists that metadata before
-        # preparing the authorized provider retry/fallback workspace.
+        # Salvage uncommitted work after non-zero CLI exits; the later no-work
+        # path preserves structured provider-failure metadata if salvage is empty.
         agent_exit_note = (
             f"agent CLI exited {exc.result.returncode} ({exc.reason_code}); "
             f"continuing to salvage any uncommitted work"
@@ -567,7 +689,8 @@ async def execute(
         )
     except Exception as exc:  # unexpected — surface with generic reason
         if _git_error_indicates_missing_head_object(str(exc)):
-            if await self._recover_missing_git_head_or_mark_failed(
+            recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
+            if recover_missing_head is not None and await recover_missing_head(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 base_commit=ws.base_commit,
@@ -584,21 +707,12 @@ async def execute(
                 agent_run_reason_code = GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
                 agent_run_details = {"recovered_stage": "agent_run"}
             else:
-                # Missing-HEAD recovery failed and already marked the workspace
-                # FAILED with its worktree preserved. The agent may have written
-                # the plan + conformance report before the HEAD object went
-                # missing, so deposit them now — this returns before the post-
-                # validation deposit block, mirroring the ComposeExecCleanupError
-                # handler above. Best-effort and idempotent.
+                # Recovery already marked FAILED; deposit possible plan artifacts now.
                 _deposit_planning_artifacts()
                 return
         else:
             _log.exception("executor.unexpected_in_agent", workspace_id=workspace_id)
-            # An unexpected agent-run error marks the workspace FAILED and returns
-            # before the post-validation deposit block, stranding any plan +
-            # conformance report the agent already wrote into the preserved-FAILED
-            # worktree. Deposit them first, mirroring the ComposeExecCleanupError
-            # handler. Best-effort and idempotent.
+            # Avoid stranding plan artifacts before returning with a FAILED workspace.
             _deposit_planning_artifacts()
             await self._mark_failed(
                 workspace_id=workspace_id,
@@ -607,6 +721,16 @@ async def execute(
                 message=f"unexpected error during agent run: {exc!r}"[:2000],
             )
             return
+    if (
+        recovery is None
+        and not resume_skip_agent
+        and not post_agent_mirror_repair_done
+        and not await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="after agent run",
+            before_mark_failed=_deposit_planning_artifacts,
+        )
+    ):
+        return
     if adapter is None:
         await self._mark_failed(
             workspace_id=workspace_id,
@@ -778,26 +902,23 @@ async def execute(
                     changed_paths=staged_paths,
                     owned_paths=list(ws.owned_paths),
                     protected_file_diffs=protected_file_diffs,
+                    operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
                 )
                 if violations:
-                    # Planning ran before this gate, so the preserved FAILED
-                    # worktree can already hold the plan + conformance report.
-                    # Deposit them BEFORE ``_mark_failed`` publishes the
-                    # terminal status: the console keys its artifact refetch on
-                    # the workspace ``updated_at`` (TaskArtifactsSection
-                    # ``refreshKey``), and marking FAILED first would bump
-                    # ``updated_at`` and let a poll observe it in the window
-                    # before the deposit, record an empty artifact list, then
-                    # never refetch — hiding the Plan/Validation controls. This
-                    # branch returns before the post-validation deposit block.
+                    # A protected quality-gate edit outside owned_paths pauses
+                    # the workspace for an operator decision instead of throwing
+                    # away the spent work. Deposit the plan + conformance report
+                    # BEFORE the block transition for the same artifact-ordering
+                    # reason as the FAILED paths (the transition bumps
+                    # ``updated_at``, which the console keys its refetch on).
                     # Best-effort and idempotent.
                     _deposit_planning_artifacts()
-                    await self._mark_failed(
+                    await self.enter_blocked_for_protected_violation(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
-                        failure_reason=FailureReason.policy_failure,
-                        reason_code="QUALITY_GATE_POLICY_CHANGED",
-                        message=quality_gate_violation_message(violations)[:2000],
+                        violations=violations,
+                        resume_phase="post_agent_commit",
+                        execution_owner_id=execution_owner_id,
                     )
                     return
                 commit_msg = commit_message_with_task_tag(
@@ -807,6 +928,11 @@ async def execute(
 
                 async def _run_commit() -> CommandResult:
                     """Execute the post-agent ``git commit`` with AWF's identity."""
+                    if not await _repair_mirror_hooks_path_or_mark_failed(
+                        failure_stage="before post-agent commit",
+                        before_mark_failed=_deposit_planning_artifacts,
+                    ):
+                        raise MirrorHooksPathRepairAbortedError
                     return cast(
                         CommandResult,
                         await self._runner.run(
@@ -856,7 +982,17 @@ async def execute(
                                 compose_project=compose_project,
                                 compose_file=compose_file,
                                 model=run_model,
-                                allow_agent_repair=agent_run_failure_reason is None,
+                                # An active grant keeps the approved protected
+                                # change verbatim. Semantic pre-commit repair would
+                                # re-invoke the agent and could rewrite that approved
+                                # change, so gate it off whenever grants are active
+                                # (``resume_disable_fix_passes`` — covers both the
+                                # grant-only resume and a combined directive+grant
+                                # resume), not just on upstream agent failures.
+                                allow_agent_repair=(
+                                    agent_run_failure_reason is None
+                                    and not resume_disable_fix_passes
+                                ),
                                 ws=ws,
                                 command_evidence=agent_command_evidence,
                             )
@@ -896,6 +1032,31 @@ async def execute(
                 # Plan/Validation controls. This branch returns before the
                 # post-validation deposit block. Best-effort and idempotent.
                 _deposit_planning_artifacts()
+                # A retryable provider failure with retry budget remaining diverts
+                # into the auto-healing ``recovering`` pause INSTEAD of going
+                # terminal: the warm stack + worktree + execution claim survive the
+                # provider cooldown and the agent is re-run in place (#612). The
+                # decision (classify + budget) is the SAME one the fail-and-relaunch
+                # path runs downstream, hoisted here so the divert lands before the
+                # terminal teardown (T7). Gated on
+                # ``agent_run_failure_reason == agent_failure`` — the same gate as
+                # the provider-recovery call below — so the recovered missing-HEAD
+                # path (which also sets ``agent_run_reason_code``) never diverts.
+                if agent_run_failure_reason == FailureReason.agent_failure:
+                    divert = await self.enter_recovering_for_provider_failure(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        message=message,
+                        reason_code=agent_run_reason_code,
+                        details=agent_run_details,
+                        execution_owner_id=execution_owner_id,
+                    )
+                    # ``paused`` (entered ``recovering`` for in-place retry) or
+                    # ``fenced`` (a newer claimant holds the running row — a stale
+                    # executor must not drive it to ``failed`` via the non-owner-gated
+                    # ``_mark_failed`` below) both skip the terminal teardown.
+                    if divert is not ProviderFailureDivert.terminal:
+                        return
                 # Provider recovery reads the failed state event, so
                 # persist the structured reason/details first. The
                 # recovery service creates an authorized delayed retry
@@ -922,104 +1083,19 @@ async def execute(
                     await self._prepare_provider_recovery(workspace_id)
                 return
 
-            # Some agents sever git history (e.g. by accidentally running
-            # ``git checkout --orphan`` or by re-initialising the repo).
-            # rev-list counts HIGH in that case (every HEAD commit is "new"
-            # w.r.t. base because there's no shared ancestor), so the
-            # previous check wouldn't notice. Without this guard, the push
-            # succeeds but ``gh pr create`` dies with a cryptic
-            # ``branch has no history in common with <base>`` error.
-            #
-            # Recovery: ``git reset --soft <base>`` moves HEAD to the base
-            # commit while leaving the index untouched — the index still
-            # reflects the orphan's tree. A fresh ``git commit`` then
-            # produces a single commit on top of base that contains the
-            # cumulative diff, and the branch is reattached to a valid
-            # ancestry so the PR can be opened normally.
-            #
-            # Invariant: ``base_commit`` is always populated by
-            # ``_claim_ready`` before this block runs. The ``assert`` both
-            # documents and satisfies mypy.
-            ancestor = await _git_in_worktree(["merge-base", "--is-ancestor", base_commit, "HEAD"])
-            if not ancestor.ok:
-                _log.warning(
-                    "executor.orphan_history_detected",
-                    workspace_id=workspace_id,
-                    base_commit=base_commit,
-                )
-                reset = await _git_in_worktree(["reset", "--soft", base_commit])
-                await self._repair_agent_git_ownership(
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    reason="orphan_history_reset",
-                )
-                if reset.ok:
-                    recovery_msg = commit_message_with_task_tag(
-                        f"awf: {strip_leading_task_tag(ws.task_title, ws.task_tag)} "
-                        "(recovered from orphan)",
-                        ws.task_tag,
-                    )[:72]
-                    recovery_body = (
-                        f"AWF detected orphan history on workspace {workspace_id} "
-                        f"(agent: {ws.agent}) and squashed the cumulative diff "
-                        f"onto base commit {base_commit[:10]}.\n"
-                    )
-                    recover_commit = await self._runner.run(
-                        [
-                            "git",
-                            *git_safe_directory_config_args(worktree_path),
-                            "-C",
-                            str(worktree_path),
-                            *git_identity_config_args(),
-                            "commit",
-                            "-m",
-                            recovery_msg,
-                            "-m",
-                            recovery_body,
-                        ],
-                    )
-                    await self._repair_agent_git_ownership(
-                        workspace_id=workspace_id,
-                        worktree_path=worktree_path,
-                        reason="orphan_history_recovery_commit",
-                    )
-                    if recover_commit.ok:
-                        ancestor = await _git_in_worktree(
-                            ["merge-base", "--is-ancestor", base_commit, "HEAD"]
-                        )
-                if not ancestor.ok:
-                    # Planning ran before this commit step, so the preserved
-                    # FAILED worktree can already hold the plan + conformance
-                    # report. Deposit them BEFORE ``_mark_failed`` publishes the
-                    # terminal status: the console keys its artifact refetch on
-                    # the workspace ``updated_at`` (TaskArtifactsSection
-                    # ``refreshKey``), and marking FAILED first would bump
-                    # ``updated_at`` and let a poll observe it in the window
-                    # before the deposit, record an empty artifact list, then
-                    # never refetch — hiding the Plan/Validation controls. This
-                    # branch returns from inside the ``try`` before the
-                    # post-validation deposit block, and a plain ``return``
-                    # bypasses the ``except`` deposit handlers below.
-                    # Best-effort and idempotent.
-                    _deposit_planning_artifacts()
-                    await self._mark_failed(
-                        workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.running,
-                        failure_reason=FailureReason.agent_failure,
-                        message=(
-                            "agent severed git history — HEAD does not descend from "
-                            f"base commit {base_commit[:10] if base_commit else 'unknown'}, "
-                            "and automatic recovery (reset --soft + fresh commit) also failed. "
-                            "The coding CLI likely ran `git checkout --orphan` or reinitialised "
-                            "the repo; inspect the worktree manually."
-                        ),
-                    )
-                    return
-                _log.info(
-                    "executor.orphan_history_recovered",
-                    workspace_id=workspace_id,
-                    base_commit=base_commit,
-                )
+            # Reattach a severed feature branch to base before push/PR. A plain
+            # ``return`` here (orphan recovery failed) bypasses the ``except``
+            # deposit handlers below, so the helper deposits planning artifacts
+            # before marking FAILED. See ``_recover_orphan_history``.
+            if not await self._recover_orphan_history(
+                workspace_id=workspace_id,
+                ws=ws,
+                base_commit=base_commit,
+                worktree_path=worktree_path,
+                git_in_worktree=_git_in_worktree,
+                deposit_planning_artifacts=_deposit_planning_artifacts,
+            ):
+                return
         elif recovery.get("recovery_mode") == "rebase_only":
             try:
                 rebase_recovery_result = await self._run_monitor_rebase_recovery(
@@ -1061,6 +1137,8 @@ async def execute(
                     reason_code="MONITOR_RECOVERY_REBASE_FAILED",
                 )
                 return
+    except MirrorHooksPathRepairAbortedError:
+        return
     except _PostAgentCommitStepError as exc:
         # Planning ran before the commit step, so the worktree (preserved on
         # the FAILED workspace) can already hold the plan + conformance report.
@@ -1081,6 +1159,7 @@ async def execute(
             agent_run_details=agent_run_details,
             agent_exit_note=agent_exit_note,
             upstream_failure_reason=agent_run_failure_reason,
+            execution_owner_id=execution_owner_id,
         )
         return
     except Exception as exc:  # unexpected — mark infrastructure
@@ -1094,16 +1173,19 @@ async def execute(
         # recovery fall-through redeposits at the post-validation block.
         _deposit_planning_artifacts()
         if _git_error_indicates_missing_head_object(str(exc)):
-            if await self._recover_missing_git_head_or_mark_failed(
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                base_commit=base_commit,
-                branch_name=expected_branch,
-                from_status=WorkspaceStatus.running,
-                stage="post_agent_commit",
-                error=exc,
-                task_tag=ws.task_tag,
-            ):
+            recover_missing_head = getattr(self, "_recover_missing_git_head_or_mark_failed", None)
+            if recover_missing_head is not None:
+                if not await recover_missing_head(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    base_commit=base_commit,
+                    branch_name=expected_branch,
+                    from_status=WorkspaceStatus.running,
+                    stage="post_agent_commit",
+                    error=exc,
+                    task_tag=ws.task_tag,
+                ):
+                    return
                 _log.warning(
                     "executor.commit_step_missing_head_recovered",
                     workspace_id=workspace_id,
@@ -1114,9 +1196,17 @@ async def execute(
                     base_commit=base_commit,
                     owned_paths=list(ws.owned_paths),
                     expected_status=WorkspaceStatus.running,
+                    execution_owner_id=execution_owner_id,
                 ):
                     return
             else:
+                _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=f"post-agent commit step failed: {exc!r}"[:2000],
+                )
                 return
         else:
             _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
@@ -1144,13 +1234,14 @@ async def execute(
         recovery=recovery,
         rebase_recovery_result=rebase_recovery_result,
         git_in_worktree=_git_in_worktree,
+        execution_owner_id=execution_owner_id,
+        resume_disable_fix_passes=resume_disable_fix_passes,
     )
-    # Deposit the worktree plan + conformance report into the served artifact
-    # dir before teardown so the console can surface them (best-effort; see the
-    # helper). Runs on the success path and the validation/conformance stop
-    # paths (preserved FAILED workspaces) while the worktree still exists.
-    _deposit_planning_artifacts()
     if validation_result.stop:
+        await _repair_mirror_hooks_path_or_mark_failed(
+            failure_stage="after validation stop",
+            failure_from_status=WorkspaceStatus.validating,
+        )
         return
     assert profile is not None
     successful_validation_run_id = validation_result.successful_validation_run_id
@@ -1209,6 +1300,11 @@ async def execute(
                     target_head_sha=validate_only_target_head_sha,
                 )
         if not recovery_requires_pr_update:
+            if not await _repair_mirror_hooks_path_or_mark_failed(
+                failure_stage="before recovery skip-push handoff",
+                failure_from_status=WorkspaceStatus.validating,
+            ):
+                return
             if not await self._recheck_status(
                 workspace_id,
                 expected=WorkspaceStatus.validating,
@@ -1297,6 +1393,11 @@ async def execute(
         action="pre_push_policy_check",
     ):
         return
+    if not await _repair_mirror_hooks_path_or_mark_failed(
+        failure_stage="before post-validation policy checks",
+        failure_from_status=WorkspaceStatus.validating,
+    ):
+        return
     try:
         if await self._fail_if_plan_only_committed_output(
             workspace_id=workspace_id,
@@ -1311,6 +1412,7 @@ async def execute(
             base_commit=base_commit,
             owned_paths=list(ws.owned_paths),
             expected_status=WorkspaceStatus.validating,
+            execution_owner_id=execution_owner_id,
         ):
             return
     except Exception as exc:
@@ -1321,6 +1423,12 @@ async def execute(
             failure_reason=FailureReason.infrastructure_failure,
             message=f"pre-push policy check failed: {exc!r}"[:2000],
         )
+        return
+
+    if not await _repair_mirror_hooks_path_or_mark_failed(
+        failure_stage="before PR push",
+        failure_from_status=WorkspaceStatus.validating,
+    ):
         return
 
     # PR creation is forge-neutral: ``push_and_open`` does a plain ``git push``
@@ -1338,6 +1446,17 @@ async def execute(
         action="start_push",
     ):
         return
+
+    if resume_from_blocked:
+        # The protected gate passed with the operator's grants applied, so the
+        # grants are now single-use spent: consume them so a later DIFFERENT
+        # change to the same file must be granted again. This MUST run only
+        # after the validating→pushing CAS above commits this validated change
+        # to push. Consuming before the transition would mark the grants spent
+        # even when the CAS loses (cancel, version race, stale status) and the
+        # workspace never enters ``pushing`` — a later protected check on the
+        # same resume would then re-block with no usable grant.
+        await self._consume_active_operator_grants(workspace_id)
     if not await self._ensure_worktree_available(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -1358,129 +1477,14 @@ async def execute(
         return
 
     # ── Step 4: persist PR URL + (optionally) hand off to monitor ──────
-    async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
-        persisted = await repo.get(workspace_id)
-        if persisted is None:  # pragma: no cover - destroyed mid-flight
-            return
-        if persisted.status != WorkspaceStatus.pushing.value:
-            await self._record_stale_action_skip(
-                repo,
-                persisted,
-                action="persist_pr",
-                expected=WorkspaceStatus.pushing,
-                reason_code="EXECUTOR_STALE_STATUS",
-            )
-            await session.commit()
-            return
-        had_existing_pr_url = bool(persisted.pr_url)
-        persisted.pr_url = pr.url
-        persisted.pr_number = _extract_pr_number(pr.url)
-        if pr.head_sha:
-            persisted.monitor_last_commit_sha = pr.head_sha
-        if persisted.task_kind == "feature_branch_pr" and not persisted.remote_push_branch:
-            persisted.remote_push_branch = (
-                pr.branch or persisted.branch_name or f"awf/{workspace_id}"
-            )
-        pr_reason_code = "PR_UPDATED" if had_existing_pr_url else "PR_OPENED"
-        await self._add_executor_pr_audit_event(
-            repo,
-            persisted,
-            event_type=_AUDIT_GIT_PUSH_EVENT,
-            action="git_push",
-            outcome="succeeded",
-            reason_code=pr_reason_code,
-            branch_name=persisted.branch_name or pr.branch,
-            remote_branch=persisted.remote_push_branch or pr.branch,
-            pr_number=persisted.pr_number,
-            pr_url=persisted.pr_url,
-            source_head_sha=pr.head_sha,
-        )
-        await self._add_executor_pr_audit_event(
-            repo,
-            persisted,
-            event_type=_AUDIT_PR_CREATED_EVENT,
-            action="pr_create",
-            outcome="reused" if had_existing_pr_url else "succeeded",
-            reason_code=pr_reason_code,
-            branch_name=persisted.branch_name or pr.branch,
-            remote_branch=persisted.remote_push_branch or pr.branch,
-            pr_number=persisted.pr_number,
-            pr_url=persisted.pr_url,
-            source_head_sha=pr.head_sha,
-        )
-        # Resolve which monitor (if any) to hand off to. Pre-constructed
-        # ``pr_monitor`` wins (tests); otherwise the factory builds one
-        # from the per-task adapter now that we have it.
-        monitor: _MonitorRunnerProto | None = self._pr_monitor
-        if monitor is None and self._pr_monitor_factory is not None:
-            monitor = _call_pr_monitor_factory(
-                self._pr_monitor_factory,
-                adapter=adapter,
-                profile=profile,
-                workspace=persisted,
-                provider_recovery_default_model=(
-                    _provider_recovery_default_model_for_monitor_handoff(
-                        adapter=adapter,
-                        defaults=defaults,
-                    )
-                ),
-            )
-
-        if monitor is not None:
-            # Hand off to the monitor — it will transition to completed
-            # (on merge) or failed (on abort / cap / close).
-            await repo.transition(
-                persisted,
-                to=WorkspaceStatus.monitoring_pr,
-                reason_code=pr_reason_code,
-            )
-            await session.commit()
-        else:
-            # No monitor wired (legacy executor path / unit-test shim) —
-            # preserve the original ``pushing → completed`` contract.
-            await repo.transition(
-                persisted,
-                to=WorkspaceStatus.completed,
-                reason_code=pr_reason_code,
-            )
-            await session.commit()
-
-    if successful_validation_run_id is not None and pr.head_sha:
-        try:
-            await self._set_validation_run_target_head_sha(
-                validation_run_id=successful_validation_run_id,
-                target_head_sha=pr.head_sha,
-            )
-        except Exception:
-            _log.exception(
-                "executor.validation_run_target_head_sha_update_failed",
-                workspace_id=workspace_id,
-                validation_run_id=successful_validation_run_id,
-                target_head_sha=pr.head_sha,
-            )
-
-    if monitor is not None:
-        _log.info(
-            "executor.handoff_to_pr_monitor",
-            workspace_id=workspace_id,
-            pr_url=pr.url,
-        )
-        if not await self._recheck_status(
-            workspace_id,
-            expected=WorkspaceStatus.monitoring_pr,
-            action="run_pr_monitor",
-        ):
-            return
-        await monitor.run(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-        )
-        return
-
-    _log.info(
-        "executor.completed",
+    await persist_pr_and_handoff(
+        self,
         workspace_id=workspace_id,
-        pr_url=pr.url,
+        pr=pr,
+        adapter=adapter,
+        profile=profile,
+        defaults=defaults,
+        successful_validation_run_id=successful_validation_run_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
     )

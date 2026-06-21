@@ -119,6 +119,46 @@ async def _create_cancelled_workspace(client: AsyncClient, engine: AsyncEngine) 
     return workspace_id
 
 
+async def _create_recovering_workspace(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    *,
+    not_before: str = "2026-06-21T12:30:00+00:00",
+) -> str:
+    created = await client.post(
+        "/v1/workspaces",
+        json={
+            **_V2_RETRY_BODY,
+            "task": {
+                **_V2_RETRY_BODY["task"],
+                "external_id": "TICKET-API-RETRY-RECOVERING",
+                "owned_paths": ["src/awf/api/retry-recovering.py"],
+            },
+        },
+    )
+    assert created.status_code == 202
+    workspace_id = str(created.json()["workspace_id"])
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        for status in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.recovering,
+        ):
+            await repo.transition(workspace, to=status, reason_code="TEST")
+        workspace.task_policy = {
+            **workspace.task_policy,
+            "provider_recovery_state": {"not_before": not_before},
+        }
+        await session.commit()
+    return workspace_id
+
+
 async def _create_conformance_failed_workspace(
     client: AsyncClient,
     engine: AsyncEngine,
@@ -329,6 +369,37 @@ async def test_retry_endpoint_rejects_non_terminal_workspace(
     assert body["error_code"] == "WORKSPACE_NOT_RETRYABLE"
     assert body["detail"]["status"] == "requested"
     assert body["detail"]["retryable_statuses"] == ["failed", "cancelled"]
+
+
+@pytest.mark.unit
+async def test_retry_endpoint_dedupes_recovering_workspace(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    api_auth_headers: dict[str, str],
+) -> None:
+    not_before = "2026-06-21T12:30:00+00:00"
+    original_id = await _create_recovering_workspace(client, engine, not_before=not_before)
+
+    response = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+        headers=api_auth_headers,
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "WORKSPACE_AUTO_RETRY_IN_FLIGHT"
+    assert "cooldown" in body["message"]
+    assert body["detail"] == {
+        "status": "recovering",
+        "provider_cooldown_not_before": not_before,
+        "reason": "auto_retry_in_flight",
+    }
+
+    # The colliding manual retry must not spawn a duplicate workspace.
+    overview = await client.get("/v1/workspaces/overview", headers=api_auth_headers)
+    assert overview.status_code == 200
+    assert [item["workspace_id"] for item in overview.json()["items"]] == [original_id]
 
 
 @pytest.mark.unit

@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
-from awf.common.commands import CommandResult
-from awf.runtime.pr_monitor_runner import pre_push_validation
+from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.runtime.pr_monitor_runner import pre_push_validation, remote_ops
+from awf.runtime.pr_monitor_runner.constants import (
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _MONITOR_POLICY_BLOCKED_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     VALIDATION_WORKTREE_CLEANUP_FAILED as REMOTE_OPS_VALIDATION_WORKTREE_CLEANUP_FAILED,
 )
@@ -21,6 +34,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
     _GitPushResult,
 )
+from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
@@ -36,6 +50,21 @@ def _make_push_result(reason_code: str) -> _GitPushResult:
         returncode=1,
         reason_code=reason_code,
     )
+
+
+def _write_worktree_with_mirror(tmp_path: Path, workspace_id: str) -> tuple[Path, Path]:
+    """Create a linked worktree shape backed by a bare mirror path."""
+    worktree = tmp_path / "worktrees" / workspace_id
+    mirror = tmp_path / "mirrors" / "repo.git"
+    linked_git_dir = mirror / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+    (worktree / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    return worktree, mirror
 
 
 @pytest.mark.parametrize(
@@ -69,11 +98,145 @@ def test_git_push_terminal_monitor_failure_maps_rollback_failed_as_terminal() ->
 
 
 @pytest.mark.unit
+def test_git_push_terminal_monitor_failure_does_not_treat_blocked_pause_as_terminal() -> None:
+    """A protected-scope pause preserves the workspace for operator action."""
+    result = _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+        paused_into_blocked=True,
+    )
+
+    assert result.protected_scope_blocked is True
+    assert result.terminal_monitor_failure is False
+
+
+@pytest.mark.unit
 def test_git_push_terminal_monitor_failure_maps_reparent_failed_as_terminal() -> None:
     """Re-parent failure leaves HEAD on a non-descendant commit with no rollback, so it
     must end monitor recovery rather than let a later iteration push the orphaning HEAD
     and mask the error as a non-fast-forward (PR #422 thread)."""
     assert _make_push_result("PRE_PUSH_VALIDATION_REPARENT_FAILED").terminal_monitor_failure is True
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    [
+        _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        _MIRROR_HOOKS_PATH_POISONED_REASON,
+    ],
+)
+@pytest.mark.unit
+def test_git_push_terminal_monitor_failure_maps_unrecoverable_git_repairs_as_terminal(
+    reason_code: str,
+) -> None:
+    """Unrecoverable local git repairs should fail the monitor instead of retrying."""
+    assert _make_push_result(reason_code).terminal_monitor_failure is True
+
+
+@pytest.mark.unit
+async def test_git_push_result_fails_closed_when_mirror_hooks_repair_fails_before_push(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-validation mirror hooks-path poison must block the actual publish."""
+    worktree, mirror = _write_worktree_with_mirror(tmp_path, "ws_push_hooks")
+    cmd = FakeCommandRunner()
+
+    class _Runner:
+        def __init__(self) -> None:
+            self._deps = SimpleNamespace(runner=cmd)
+
+        async def _active_policy_block_message(self, _workspace_id: str) -> str | None:
+            return None
+
+    async def _repair_mirror_hooks_path(mirror_path: Path) -> bool:
+        assert mirror_path == mirror
+        raise OSError("poisoned hooks path")
+
+    monkeypatch.setattr(remote_ops, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    result = await remote_ops._git_push_result(
+        _Runner(),
+        worktree_path=worktree,
+        remote_branch="awf/ws_push_hooks",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == _MIRROR_HOOKS_PATH_POISONED_REASON
+    assert "before git push" in (result.stderr or "")
+    assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_git_push_result_strips_git_object_lookup_env_from_push_and_resync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Push and rejection resync must not inherit private Git object stores."""
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/alternate-objects")
+    monkeypatch.setenv("AWF_PUSH_ENV_SENTINEL", "kept")
+    worktree = tmp_path / "worktrees" / "ws_push_env"
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stderr="[rejected] non-fast-forward")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+
+    class _Runner:
+        def __init__(self) -> None:
+            self._deps = SimpleNamespace(runner=cmd)
+
+        async def _active_policy_block_message(self, _workspace_id: str) -> str | None:
+            return None
+
+    result = await remote_ops._git_push_result(
+        _Runner(),
+        worktree_path=worktree,
+        remote_branch="awf/ws_push_env",
+    )
+
+    assert result.recovered_by_resync is True
+    assert [call.args for call in cmd.calls] == [
+        [
+            "git",
+            "-c",
+            f"safe.directory={worktree}",
+            "-C",
+            str(worktree),
+            "push",
+            "origin",
+            "HEAD:refs/heads/awf/ws_push_env",
+        ],
+        [
+            "git",
+            "-c",
+            f"safe.directory={worktree}",
+            "-C",
+            str(worktree),
+            "fetch",
+            "origin",
+            "awf/ws_push_env",
+        ],
+        [
+            "git",
+            "-c",
+            f"safe.directory={worktree}",
+            "-C",
+            str(worktree),
+            "reset",
+            "--hard",
+            "origin/awf/ws_push_env",
+        ],
+    ]
+    for call in cmd.calls:
+        assert call.env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in call.env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+        assert call.env["AWF_PUSH_ENV_SENTINEL"] == "kept"
 
 
 @pytest.mark.unit
@@ -100,6 +263,41 @@ def test_remote_ops_worktree_constants_match_validation_worktree() -> None:
     assert (
         pre_push_validation.VALIDATION_WORKTREE_STATUS_FAILED == VALIDATION_WORKTREE_STATUS_FAILED
     )
+
+
+@pytest.mark.unit
+async def test_rev_parse_head_strips_git_object_lookup_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HEAD anchors must not resolve through inherited private git object stores."""
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/alternate-objects")
+    monkeypatch.setenv("AWF_REV_PARSE_ENV_SENTINEL", "kept")
+
+    class _FakeCommandRunner:
+        def __init__(self) -> None:
+            self.env: Mapping[str, str] | None = None
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            self.env = env
+            return CommandResult(returncode=0, stdout=f"{'a' * 40}\n", stderr="")
+
+    command_runner = _FakeCommandRunner()
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=command_runner))
+
+    result = await remote_ops._rev_parse_head(runner, tmp_path)
+
+    assert result == "a" * 40
+    assert command_runner.env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in command_runner.env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in command_runner.env
+    assert command_runner.env["AWF_REV_PARSE_ENV_SENTINEL"] == "kept"
 
 
 @pytest.mark.unit
@@ -130,6 +328,38 @@ def test_git_push_failure_outcome_maps_repair_and_protected_scope_reasons() -> N
     assert _git_push_failure_outcome(_make_push_result("REPAIR_WORKTREE_STATUS_FAILED")) == (
         "repair_start_blocked"
     )
+
+
+@pytest.mark.unit
+def test_monitor_policy_blocked_error_preserves_specific_reason_code() -> None:
+    """Policy exceptions default to monitor-policy but can carry protected-scope reasons."""
+    default_error = _MonitorPolicyBlockedError("supply-chain blocked")
+    protected_error = _MonitorPolicyBlockedError(
+        "protected scope blocked",
+        reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+    )
+    protected_result = _make_push_result(protected_error.reason_code)
+
+    assert default_error.reason_code == _MONITOR_POLICY_BLOCKED_REASON
+    assert protected_result.protected_scope_blocked is True
+    assert protected_result.terminal_monitor_failure is True
+    assert _git_push_failure_outcome(protected_result) == "protected_scope_push_blocked"
+
+
+@pytest.mark.unit
+def test_git_push_terminal_monitor_failure_maps_recovered_protected_scope_repair_failure() -> None:
+    """Recovered protected-scope repair failures must stop monitor retry.
+
+    Missing-HEAD recovery can leave HEAD on a recovered commit that still
+    contains protected-scope changes. That pre-push validation failure must stay
+    on the protected-scope terminal path instead of retrying against the same
+    recovered commit.
+    """
+    result = _make_push_result(_PROTECTED_SCOPE_REPAIR_FAILED_REASON)
+
+    assert result.protected_scope_blocked is True
+    assert result.terminal_monitor_failure is True
+    assert _git_push_failure_outcome(result) == "protected_scope_push_blocked"
 
 
 @pytest.mark.unit
@@ -177,4 +407,37 @@ def test_append_git_recovery_failure_includes_available_context() -> None:
             operation="reset",
         )
         == "AWF worktree recovery failed during git push failure resync (reset failed)"
+    )
+
+
+@pytest.mark.unit
+def test_git_push_terminal_monitor_failure_maps_dirty_finalize_unowned_delta_as_terminal() -> None:
+    """Pre-push dirty finalize that commits an unowned path must end monitor recovery.
+
+    The pre-push dirty finalize re-validates the operation delta after the
+    commit sink's side effects and fails closed with
+    ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` when a path outside the owned
+    delta was committed (review thread ``PRRT_kwDOSJAM6s6KZP8f``). A bad local
+    commit may already exist at that point, so the monitor loop must stop
+    iterating instead of retrying and risk pushing the unowned commit on a
+    later iteration (regression for review thread ``PRRT_kwDOSJAM6s6KZ33M``).
+    """
+    assert (
+        _make_push_result(_PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON).terminal_monitor_failure
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_git_push_failure_outcome_maps_dirty_finalize_unowned_delta() -> None:
+    """The dirty finalize unowned-delta reason should classify as a pre-push validation failure.
+
+    It is a pre-push validation reason code (returned by
+    ``_run_pre_push_validation`` via ``_pre_push_dirty_result``), so it must map
+    to ``pre_push_validation_failed`` like the other finalize dirty reasons
+    (regression for review thread ``PRRT_kwDOSJAM6s6KZ33M``).
+    """
+    assert (
+        _git_push_failure_outcome(_make_push_result(_PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON))
+        == "pre_push_validation_failed"
     )

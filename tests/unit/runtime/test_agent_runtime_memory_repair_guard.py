@@ -160,6 +160,31 @@ async def test_status_requests_all_untracked_files(
 
 
 @pytest.mark.unit
+async def test_status_strips_git_object_lookup_overrides(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inherited object-store overrides must not affect the dirty probe."""
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/poisoned-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/alternate-objects")
+    cmd = FakeCommandRunner()
+
+    await _run_guard(
+        factory,
+        tmp_path,
+        status_stdout="",
+        cmd=cmd,
+    )
+
+    assert cmd.calls, "guard never ran git status"
+    status_env = cmd.calls[0].env
+    assert status_env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in status_env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in status_env
+
+
+@pytest.mark.unit
 async def test_empty_status_returns_none(
     factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:

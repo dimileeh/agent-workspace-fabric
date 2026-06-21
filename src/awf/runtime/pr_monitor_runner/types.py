@@ -14,6 +14,10 @@ from awf.common.forge import ForgeClient
 from awf.runtime.logs import LogStore
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.pr_monitor_runner.config import PostMergeTargetReconciler
+from awf.runtime.pr_monitor_runner.constants import (
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _MONITOR_POLICY_BLOCKED_REASON,
+)
 from awf.runtime.validation import ValidationRunner
 
 
@@ -72,6 +76,16 @@ class ProviderRecoveryAuthError(Exception):
 class _MonitorPolicyBlockedError(Exception):
     """Raised when monitor-authored changes violate blocking workspace policy."""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason_code: str = _MONITOR_POLICY_BLOCKED_REASON,
+    ) -> None:
+        """Store the monitor policy reason code with the exception message."""
+        super().__init__(message)
+        self.reason_code = reason_code
+
 
 class _MonitorAgentRuntimeOwnershipRepairFailedError(RuntimeError):
     """Raised when monitor cannot repair agent worktree ownership."""
@@ -80,3 +94,28 @@ class _MonitorAgentRuntimeOwnershipRepairFailedError(RuntimeError):
     def reason_code(self: Any) -> str:
         """Return the fixed reason code for ownership repair failures."""
         return AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+class _MonitorMirrorHooksPathRepairFailedError(RuntimeError):
+    """Raised when monitor cannot repair a poisoned ``core.hooksPath`` on the shared mirror."""
+
+    def __init__(
+        self,
+        message: str = "could not repair poisoned mirror hooks path",
+    ) -> None:
+        """Store a diagnostic message for terminal push evidence."""
+        super().__init__(message)
+
+    @property
+    def reason_code(self: Any) -> str:
+        """Return the fixed reason code for poisoned mirror hook-path failures."""
+        return _MIRROR_HOOKS_PATH_POISONED_REASON
+
+
+class _MonitorHeadObjectMissingError(Exception):
+    """HEAD ref exists but commit object is missing from canonical mirror."""
+
+    def __init__(self, reason_code: str, message: str = "") -> None:
+        """Store the terminal monitor reason code with the exception message."""
+        super().__init__(message)
+        self.reason_code = reason_code

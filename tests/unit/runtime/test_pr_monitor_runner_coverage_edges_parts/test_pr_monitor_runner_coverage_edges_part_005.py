@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.base import AgentRunError
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import RepoRef
@@ -38,17 +39,21 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
+from awf.runtime.pr_monitor_runner.constants import _MONITOR_POLICY_BLOCKED_REASON
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
     _ProtectedScopePushBlock,
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 from awf.service.merge_queue import MergeQueueBlocker
 from awf.service.supply_chain_policy import SupplyChainPolicyRefreshService
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -87,6 +92,19 @@ def _status_for_helpers(
         merge_state_status=MergeStateStatus.CLEAN,
         checks=checks,
     )
+
+
+def _queue_ci_repair_start(
+    cmd: FakeCommandRunner,
+    tmp_path: Path,
+    workspace_id: str,
+    *,
+    head_sha: str = "abc1234567890def",
+) -> None:
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True, exist_ok=True)
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # operation start HEAD
+    cmd.queue_result(returncode=0)  # operation start HEAD exists
 
 
 _PROTECTED_WORKFLOW_OLD = """
@@ -556,24 +574,25 @@ async def test_ci_fix_protected_scope_repair_ownership_repair_failure_returns_fa
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="attempted ci fix")
+    cmd = FakeCommandRunner()
+    _queue_ci_repair_start(cmd, tmp_path, workspace_id)
     runner = make_runner(
         factory=factory,
-        cmd=FakeCommandRunner(),
+        cmd=cmd,
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
 
     async def _protected_scope_push_block(**_kwargs: object) -> _ProtectedScopePushBlock:
+        # A diff-unavailable block (NO violations) still routes through
+        # ``_repair_protected_scope_commits_before_push`` — only a block WITH
+        # violations takes the WS-2 protected-pause path — so this exercises an
+        # ownership-repair failure surfacing from the diff-unavailable repair branch.
         return _ProtectedScopePushBlock(
-            message="protected scope blocked",
-            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
-            violations=(
-                QualityGateViolation(
-                    path=".github/workflows/ci.yml",
-                    protected_pattern=".github/**",
-                ),
-            ),
+            message="protected scope diff unavailable",
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+            violations=(),
         )
 
     async def _repair_ownership_failed(**_kwargs: object) -> _GitPushResult:
@@ -613,9 +632,11 @@ async def test_ci_fix_ownership_repair_failure_blocks_push(
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="attempted ci fix")
+    cmd = FakeCommandRunner()
+    _queue_ci_repair_start(cmd, tmp_path, workspace_id)
     runner = make_runner(
         factory=factory,
-        cmd=FakeCommandRunner(),
+        cmd=cmd,
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
@@ -643,6 +664,230 @@ async def test_ci_fix_ownership_repair_failure_blocks_push(
     assert push_result.returncode == 1
     assert push_result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
     assert push_result.stderr == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "commit_sink_exc",
+    [
+        ProtectedScopeDiffError("diff baseline unavailable"),
+        _MonitorAgentRuntimeOwnershipRepairFailedError(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        ),
+        _MonitorPolicyBlockedError("Supply-chain policy blocked CI fix."),
+    ],
+    ids=["protected_scope_diff", "ownership_repair_failed", "policy_blocked"],
+)
+async def test_ci_fix_records_provider_agent_run_error_before_commit_sink_early_return(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    commit_sink_exc: Exception,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6KUiEG.
+
+    When the agent run fails with an ``AgentRunError`` AND ``_commit_dirty_worktree``
+    raises one of the three early-return exceptions, the stored agent run error
+    must still be passed to ``_handle_provider_agent_run_error`` before the early
+    return so provider retry/cooldown state is recorded.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    expected_stderr = "Gemini MODEL_CAPACITY_EXHAUSTED"
+    adapter = FakeAdapter()
+    adapter.queue(
+        stdout="",
+        stderr=expected_stderr,
+        returncode=1,
+    )
+    cmd = FakeCommandRunner()
+    _queue_ci_repair_start(cmd, tmp_path, workspace_id)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    handle_calls: list[tuple[str, AgentRunError]] = []
+
+    async def _spy_handle_provider_agent_run_error(
+        workspace_id_arg: str,
+        exc: AgentRunError,
+        *,
+        state: MonitorState | None = None,
+    ) -> str:
+        # Record the call but do NOT raise; that lets the early-return path
+        # proceed so we can assert the spy was invoked with the stored error.
+        handle_calls.append((workspace_id_arg, exc))
+        return "deterministic"
+
+    async def _raise_commit_sink_exc(**_kwargs: object) -> bool:
+        raise commit_sink_exc
+
+    async def _protected_scope_diff_block(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="protected scope diff unavailable",
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_handle_provider_agent_run_error",
+        _spy_handle_provider_agent_run_error,
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _raise_commit_sink_exc)
+    monkeypatch.setattr(
+        runner,
+        "_protected_scope_diff_unavailable_push_result",
+        _protected_scope_diff_block,
+    )
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    # The early-return path must still produce a failed push result.
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    # The provider agent run error handler must have been invoked exactly once
+    # with the workspace_id and the stored AgentRunError, before the early
+    # return — this is the regression for the reported bug. The stored error is
+    # the one the adapter raised (identified by its distinctive stderr), not a
+    # re-constructed one.
+    assert len(handle_calls) == 1
+    assert handle_calls[0][0] == workspace_id
+    assert handle_calls[0][1].result.stderr == expected_stderr
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "commit_sink_exc,expected_reason_code",
+    [
+        (
+            ProtectedScopeDiffError("diff baseline unavailable"),
+            "PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        ),
+        (
+            _MonitorAgentRuntimeOwnershipRepairFailedError(
+                AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+            ),
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        ),
+        (
+            _MonitorPolicyBlockedError("Supply-chain policy blocked CI fix."),
+            _MONITOR_POLICY_BLOCKED_REASON,
+        ),
+    ],
+    ids=["protected_scope_diff", "ownership_repair_failed", "policy_blocked"],
+)
+async def test_ci_fix_preserves_commit_sink_failure_when_provider_recovers(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    commit_sink_exc: Exception,
+    expected_reason_code: str,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6KXLaI (discussion r3431603601).
+
+    When the agent run fails with a recoverable ``AgentRunError`` AND
+    ``_commit_dirty_worktree`` raises one of the three early-return
+    exceptions, ``_handle_provider_agent_run_error`` records the provider
+    recovery state and then raises a recovery control-flow exception
+    (``ProviderRecoveryRetryError`` / ``ProviderRecoveryFallbackError`` /
+    ``ProviderRecoveryAuthError``). That raise must NOT clobber the
+    commit-sink failure result: the operator must see the specific
+    commit-sink reason (protected-scope diff unavailable / ownership
+    repair failed / policy blocked), not ``PROVIDER_OUTAGE``. Otherwise
+    the dirty tree is left behind and the next attempt trips the
+    pre-existing dirty guard instead of surfacing the commit-sink
+    failure.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    expected_stderr = "Gemini MODEL_CAPACITY_EXHAUSTED"
+    adapter = FakeAdapter()
+    adapter.queue(
+        stdout="",
+        stderr=expected_stderr,
+        returncode=1,
+    )
+    cmd = FakeCommandRunner()
+    _queue_ci_repair_start(cmd, tmp_path, workspace_id)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    handle_calls: list[tuple[str, AgentRunError]] = []
+
+    async def _raising_handle_provider_agent_run_error(
+        workspace_id_arg: str,
+        exc: AgentRunError,
+        *,
+        state: MonitorState | None = None,
+    ) -> str:
+        # Record the call (so we can prove the provider state was
+        # recorded) and then raise the retry control-flow exception, as
+        # the real handler does for recoverable provider errors.
+        handle_calls.append((workspace_id_arg, exc))
+        raise ProviderRecoveryRetryError()
+
+    async def _raise_commit_sink_exc(**_kwargs: object) -> bool:
+        raise commit_sink_exc
+
+    async def _protected_scope_diff_block(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="protected scope diff unavailable",
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_handle_provider_agent_run_error",
+        _raising_handle_provider_agent_run_error,
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _raise_commit_sink_exc)
+    monkeypatch.setattr(
+        runner,
+        "_protected_scope_diff_unavailable_push_result",
+        _protected_scope_diff_block,
+    )
+
+    # The recovery control-flow exception must NOT propagate: the
+    # commit-sink failure result must be returned to the loop so the
+    # operator sees the specific reason code, not PROVIDER_OUTAGE.
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.reason_code == expected_reason_code
+    # The provider recovery state was still recorded (handler invoked).
+    assert len(handle_calls) == 1
+    assert handle_calls[0][0] == workspace_id
+    assert handle_calls[0][1].result.stderr == expected_stderr
 
 
 @pytest.mark.unit
@@ -729,10 +974,15 @@ async def test_git_push_result_blocks_existing_supply_chain_finding_before_git_p
 
 
 @pytest.mark.unit
-async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
+async def test_ci_fix_pauses_into_blocked_when_committed_protected_quality_gate_edits(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """WS-2: a protected-scope violation in an unpushed CI-repair commit PAUSES the
+    workspace into ``blocked`` for an operator decision (preserving the offending
+    commit) instead of the old silent ``git reset --hard`` rollback that failed the
+    workspace. Wires the CI-repair push site into the protected-pause flow the
+    comment-addressing path already uses (PRRT_kwDOSJAM6s6KFDHT)."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -748,11 +998,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
-    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
-    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
-    cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0, stdout="HEAD is now at abc1234\n")
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # preserved HEAD (no reset)
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
     runner = make_runner(
@@ -778,37 +1024,35 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
 
     assert push_result.failed is True
     assert push_result.pushed is False
-    assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert push_result.paused_into_blocked is True
+    assert push_result.reason_code == "PROTECTED_SCOPE_PAUSED_BLOCKED"
     assert ".github/workflows/ci.yml" in push_result.stderr
     assert len(adapter.calls) == 1
     assert push_result.details is not None
-    assert push_result.details["branch_restored"] is True
-    assert push_result.details["reverted_paths"] == [".github/workflows/ci.yml", "src/fix.py"]
+    assert push_result.details["preserved_head_sha"] == "blocked-head-sha"
+    assert push_result.details["paused_into_blocked"] is True
     call_args = [call.args for call in cmd.calls]
-    assert any(
-        args[:1] == ["git"] and "status" in args and args[-1:] == ["--untracked-files=all"]
-        for args in call_args
+    # The offending commit is PRESERVED — no reset/clean before the operator decides.
+    assert not any(
+        args[:1] == ["git"] and "reset" in args and "--hard" in args for args in call_args
     )
-    assert any(
-        args[:1] == ["git"]
-        and "diff" in args
-        and "--name-status" in args
-        and "-z" in args
-        and "merge-base-sha..HEAD" in args
-        for args in call_args
-    )
-    assert _git_worktree_command(worktree, "reset", "--hard", "abc1234567890def") in call_args
     assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
     async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == "blocked"
+        assert workspace.block_epoch == 1
+        assert workspace.block_resume_phase == "monitor_protected_scope_push"
         events = await WorkspaceEventRepository(s).list(
             workspace_id=workspace_id,
-            event_type="workspace.monitor_protected_scope_push_blocked",
+            event_type="workspace.monitor_protected_scope_paused",
             limit=10,
         )
     assert len(events) == 1
-    assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert events[0].reason_code == "PROTECTED_SCOPE_PAUSED_BLOCKED"
     assert events[0].payload is not None
     assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+    assert events[0].payload["preserved_head_sha"] == "blocked-head-sha"
 
 
 @pytest.mark.unit
@@ -862,11 +1106,27 @@ async def test_unpushed_commit_protected_scope_detects_rename_source(
     ) in [call.args for call in cmd.calls]
 
 
+class _CiPauseRecordingGh(DefaultMergeMethodGitHubClient):
+    """gh double that records protected-pause notification ``post_comment`` calls."""
+
+    def __init__(self, cmd: FakeCommandRunner) -> None:
+        super().__init__(cmd)
+        self.posts: list[dict[str, object]] = []
+
+    async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
+        self.posts.append({"repo": repo, "pr_number": pr_number, "body": body})
+
+
 @pytest.mark.unit
-async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_protected_scope(
+async def test_execute_ci_fix_pauses_into_blocked_when_local_commit_touches_protected_scope(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """WS-2: the loop's ``ReportCiFailure`` path pauses the workspace into ``blocked``
+    for an operator decision (preserving the offending commit) when a CI-repair commit
+    touches an unowned protected file, ending the monitor cycle cleanly with a
+    succeeded ``protected_scope_paused`` operation instead of the old rollback that
+    failed the workspace (PRRT_kwDOSJAM6s6KFDHT)."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -882,27 +1142,17 @@ async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_p
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
-    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
-    cmd.queue_result(
-        returncode=0,
-        stdout=_name_status_z(
-            ".github/workflows/ci.yml",
-            "src/fix.py",
-            "tests/unit/control/test_ci_workflow_toolchain.py",
-            "plans/PR282_CI_SETUP_UV_PLAN.md",
-        ),
-    )
-    cmd.queue_result(returncode=0, stdout="")  # status before rollback
-    cmd.queue_result(returncode=0, stdout="HEAD is now at abc1234\n")  # reset
-    cmd.queue_result(returncode=0, stdout="")  # clean
+    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # preserved HEAD (no reset)
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
+    gh = _CiPauseRecordingGh(cmd)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+        gh=gh,
     )
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
@@ -932,56 +1182,35 @@ async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_p
         call.args for call in cmd.calls if call.args[:1] == ["git"] and "push" in call.args
     ]
     assert push_calls == []
+    # The offending commit is PRESERVED — no reset/clean before the operator decides.
+    assert not any(
+        call.args[:1] == ["git"] and "reset" in call.args and "--hard" in call.args
+        for call in cmd.calls
+    )
+    # An operator notification comment was posted to the PR.
+    assert len(gh.posts) == 1
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
-        push_events = await WorkspaceEventRepository(s).list(
+        paused_events = await WorkspaceEventRepository(s).list(
             workspace_id=workspace_id,
-            event_type="workspace.audit.git_push",
+            event_type="workspace.monitor_protected_scope_paused",
             limit=10,
         )
 
     assert workspace is not None
-    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.status == WorkspaceStatus.blocked.value
+    assert workspace.block_epoch == 1
+    assert workspace.block_resume_phase == "monitor_protected_scope_push"
     ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
-    assert ci_operation.status == OperationStatus.failed.value
-    assert ci_operation.result["outcome"] == "protected_scope_push_blocked"
-    assert ci_operation.result["failure_evidence"]["branch_restored"] is True
-    assert ci_operation.result["failure_evidence"]["reverted_paths"] == [
-        ".github/workflows/ci.yml",
-        "plans/PR282_CI_SETUP_UV_PLAN.md",
-        "src/fix.py",
-        "tests/unit/control/test_ci_workflow_toolchain.py",
-    ]
-    requested_event = next(
-        event for event in push_events if event.payload and event.payload["outcome"] == "requested"
-    )
-    rollback_event = next(
-        event
-        for event in push_events
-        if event.payload
-        and event.payload["action"] == "protected_scope_transactional_rollback"
-        and event.payload["outcome"] == "succeeded"
-    )
-    failed_event = next(
-        event
-        for event in push_events
-        if event.payload and event.payload["action"] == "ci_repair_push"
-    )
-    assert requested_event.payload is not None
-    assert requested_event.payload["action"] == "protected_scope_transactional_rollback"
-    assert requested_event.payload["outcome"] == "requested"
-    assert rollback_event.payload is not None
-    assert rollback_event.payload["evidence"]["branch_restored"] is True
-    assert failed_event.payload is not None
-    assert failed_event.payload["outcome"] == "failed"
-    assert failed_event.payload["evidence"]["branch_restored"] is True
-    assert _git_worktree_command(worktree, "reset", "--hard", "abc1234567890def") in [
-        call.args for call in cmd.calls
-    ]
-    assert not any(
-        call.args == _git_worktree_command(worktree, "clean", "-fd") for call in cmd.calls
-    )
+    assert ci_operation.status == OperationStatus.succeeded.value
+    assert ci_operation.result["outcome"] == "protected_scope_paused"
+    assert ci_operation.result["reason_code"] == "PROTECTED_SCOPE_PAUSED_BLOCKED"
+    assert ci_operation.result["pushed"] is False
+    assert len(paused_events) == 1
+    assert paused_events[0].payload is not None
+    assert paused_events[0].payload["paths"] == [".github/workflows/ci.yml"]
+    assert paused_events[0].payload["preserved_head_sha"] == "blocked-head-sha"
 
 
 @pytest.mark.unit
@@ -1188,219 +1417,3 @@ async def test_protected_scope_rollback_distinguishes_reset_from_incomplete_clea
         }
     ]
     assert not any("clean" in call.args for call in cmd.calls)
-
-
-@pytest.mark.unit
-async def test_protected_scope_commit_repair_missing_start_head_does_not_push_or_repair(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True)
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")
-    adapter = FakeAdapter()
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    push_result = await runner._repair_protected_scope_commits_before_push(
-        workspace_id=workspace_id,
-        pr_number=42,
-        protected_scope_block=_ProtectedScopePushBlock(
-            message="protected scope blocked",
-            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
-            violations=(
-                QualityGateViolation(
-                    path=".github/workflows/ci.yml",
-                    protected_pattern=".github/**",
-                ),
-            ),
-        ),
-        compose_project=f"awf_{workspace_id}",
-        compose_file=tmp_path / "compose.yml",
-        remote_branch=f"awf/{workspace_id}",
-    )
-
-    assert push_result.failed is True
-    assert push_result.pushed is False
-    assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
-    assert "operation start commit was unavailable" in push_result.stderr
-    assert push_result.details is not None
-    assert push_result.details["rollback_status"] == "skipped_missing_operation_start_head"
-    assert push_result.details["branch_restored"] is False
-    assert adapter.calls == []
-    assert not any(call.args[:1] == ["git"] and "push" in call.args for call in cmd.calls)
-    assert _git_worktree_command(worktree, "reset", "--hard", "start-sha") not in [
-        call.args for call in cmd.calls
-    ]
-
-
-@pytest.mark.unit
-async def test_protected_scope_revert_verifies_tracked_restore_against_fetch_head(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True)
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch
-    cmd.queue_result(returncode=0)  # tracked path matches FETCH_HEAD
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    remaining = await runner._protected_scope_violations_not_restored_to_remote_branch(
-        workspace_id=workspace_id,
-        status_stdout=" M .github/workflows/ci.yml\n",
-        violations=[
-            QualityGateViolation(
-                path=".github/workflows/ci.yml",
-                protected_pattern=".github/**",
-            )
-        ],
-        remote_branch=f"awf/{workspace_id}",
-    )
-
-    assert remaining == []
-    assert [call.args for call in cmd.calls] == [
-        _git_worktree_command(
-            worktree,
-            "fetch",
-            "origin",
-            f"refs/heads/awf/{workspace_id}",
-        ),
-        _git_worktree_command(
-            worktree,
-            "diff",
-            "--quiet",
-            "FETCH_HEAD",
-            "--",
-            ".github/workflows/ci.yml",
-        ),
-    ]
-
-
-@pytest.mark.unit
-async def test_protected_scope_revert_skips_empty_violation_list(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    cmd = FakeCommandRunner()
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    remaining = await runner._protected_scope_violations_not_restored_to_remote_branch(
-        workspace_id=workspace_id,
-        status_stdout="",
-        violations=[],
-        remote_branch=f"awf/{workspace_id}",
-    )
-
-    assert remaining == []
-    assert cmd.calls == []
-
-
-@pytest.mark.unit
-async def test_protected_scope_revert_raises_when_remote_fetch_fails(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True)
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=128, stdout="", stderr="no such ref")
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    with pytest.raises(ProtectedScopeDiffError, match="fetch refs/heads"):
-        await runner._protected_scope_violations_not_restored_to_remote_branch(
-            workspace_id=workspace_id,
-            status_stdout=" M .github/workflows/ci.yml\n",
-            violations=[
-                QualityGateViolation(
-                    path=".github/workflows/ci.yml",
-                    protected_pattern=".github/**",
-                )
-            ],
-            remote_branch=f"awf/{workspace_id}",
-        )
-
-
-@pytest.mark.unit
-async def test_protected_scope_revert_verifies_untracked_restore_against_fetch_head(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True)
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch
-    cmd.queue_result(returncode=0, stdout="remote-blob\n")
-    cmd.queue_result(returncode=0, stdout="remote-blob\n")
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    remaining = await runner._protected_scope_violations_not_restored_to_remote_branch(
-        workspace_id=workspace_id,
-        status_stdout="?? .github/workflows/ci.yml\n",
-        violations=[
-            QualityGateViolation(
-                path=".github/workflows/ci.yml",
-                protected_pattern=".github/**",
-            )
-        ],
-        remote_branch=f"awf/{workspace_id}",
-    )
-
-    assert remaining == []
-    assert [call.args for call in cmd.calls] == [
-        _git_worktree_command(
-            worktree,
-            "fetch",
-            "origin",
-            f"refs/heads/awf/{workspace_id}",
-        ),
-        _git_worktree_command(
-            worktree,
-            "rev-parse",
-            "--verify",
-            "FETCH_HEAD:.github/workflows/ci.yml^{blob}",
-        ),
-        _git_worktree_command(
-            worktree,
-            "hash-object",
-            "--path",
-            ".github/workflows/ci.yml",
-            "--",
-            ".github/workflows/ci.yml",
-        ),
-    ]

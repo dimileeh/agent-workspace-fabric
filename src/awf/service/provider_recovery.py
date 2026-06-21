@@ -115,6 +115,23 @@ class ProviderRecoveryAttemptResult:
     in_place: bool = False
 
 
+@dataclass(frozen=True)
+class ProviderInPlaceRecoveryDecision:
+    """A retryable provider failure that should pause the SAME workspace into
+    ``recovering`` and re-run the agent in place after the cooldown (#612),
+    rather than fail-and-relaunch a fresh workspace.
+
+    ``not_before`` is the provider cooldown deadline; ``retry_attempt_number`` is
+    the budget-consuming count to persist so a second failure on the resumed run
+    correctly sees the budget spent; ``metadata`` is the classified provider
+    failure metadata to persist for observability / loop detection."""
+
+    not_before: datetime
+    reason_code: str
+    retry_attempt_number: int
+    metadata: dict[str, Any]
+
+
 def provider_recovery_metadata_from_failure(
     *,
     reason_code: str | None,
@@ -301,6 +318,143 @@ def _is_capacity_failure_metadata(metadata: Mapping[str, Any]) -> bool:
     }
 
 
+def should_recover_in_place(
+    *,
+    reason_code: str | None,
+    message: str | None,
+    details: Mapping[str, Any] | None,
+    task_policy: Mapping[str, Any] | None,
+    agent: str,
+    current_model: str | None,
+    now: datetime,
+    effective_default_model: str | None = None,
+) -> ProviderInPlaceRecoveryDecision | None:
+    """Decide whether an agent-run failure should divert into in-place ``recovering``.
+
+    Single-sources the classify + budget logic the fail-and-relaunch path uses:
+    reconstructs the SAME provider-failure metadata
+    (``provider_recovery_metadata_from_failure``) and runs the SAME decision
+    (``decide_provider_recovery``). Returns a decision ONLY when the result is an
+    in-place retry — ``action == "retry"`` AND the target stays the current agent
+    (a fallback to a different agent/model is not an in-place resume and keeps
+    today's fresh-relaunch path). Returns ``None`` for a non-provider failure
+    (no metadata), a terminal/budget-exhausted decision, an auth failure, a loop
+    fingerprint, or a fallback — the caller then falls through to ``_mark_failed``
+    (and the existing downstream ``_prepare_provider_recovery`` policy is
+    unchanged for those branches). T7: lifting this UP to the executor fork lets
+    the divert land in ``recovering`` BEFORE the terminal teardown fires, with no
+    duplicated classification."""
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code=reason_code,
+        message=message,
+        details=details,
+        task_policy=task_policy,
+    )
+    if metadata is None:
+        return None
+    resolved_model = current_model or _metadata_str(metadata, "model")
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy=task_policy,
+        current_agent=agent,
+        current_model=resolved_model,
+        effective_default_model=effective_default_model,
+        now=now,
+    )
+    # ``decide_provider_recovery`` returns ``action == "retry"`` ONLY with
+    # ``target_agent == current_agent`` and a non-None cooldown ``not_before``
+    # (a same-agent delayed retry); a ``fallback`` (different agent/model) or a
+    # ``terminal`` (budget exhausted / non-retryable / auth / loop) decision is
+    # NOT an in-place resume, so the caller keeps today's fresh-relaunch path.
+    if decision.action != "retry":
+        return None
+    if decision.not_before is None:  # pragma: no cover - a retry decision always sets a cooldown
+        return None
+    return ProviderInPlaceRecoveryDecision(
+        not_before=decision.not_before,
+        reason_code=decision.reason_code,
+        retry_attempt_number=decision.retry_attempt_number,
+        metadata=dict(metadata),
+    )
+
+
+def in_place_recovery_task_policy(
+    task_policy: Mapping[str, Any] | None,
+    *,
+    decision: ProviderInPlaceRecoveryDecision,
+) -> dict[str, Any]:
+    """Build the task_policy for an in-place ``recovering`` pause (#612).
+
+    Persists ``provider_recovery_state`` with the cooldown ``not_before`` (read
+    back by ``provider_cooldown_not_before`` to gate the resume) and the bumped
+    ``retry_attempt_number`` so a second failure on the resumed run sees the budget
+    consumed (``decide_provider_recovery`` will then go terminal). The failure
+    fingerprint is appended so an identical re-failure is caught as a loop. Unlike
+    ``_recovery_task_policy`` this writes NO retry-lineage / source-workspace
+    fields: an in-place retry keeps a single CLEAN attempt id (same workspace, same
+    attempt), which is the whole point of #612."""
+    policy = deepcopy(dict(task_policy or {}))
+    state = parse_provider_recovery_state(policy)
+    fingerprint = _metadata_str(decision.metadata, "failure_fingerprint")
+    fingerprints = list(state.failure_fingerprints)
+    if fingerprint is not None and fingerprint not in fingerprints:
+        fingerprints.append(fingerprint)
+    recovery_state: dict[str, Any] = {
+        "action": "retry",
+        "recovery_scope": "agent_run_in_place",
+        "decision_reason_code": decision.reason_code,
+        "source_reason_code": _metadata_str(decision.metadata, "reason_code"),
+        "source_provider": _metadata_str(decision.metadata, "provider"),
+        "source_model": _metadata_str(decision.metadata, "model"),
+        "failure_fingerprints": fingerprints,
+        # An in-place retry keeps the SAME workspace, so any already-spent fallback
+        # budget must carry forward: a same-agent retry never changes the fallback
+        # counter (``decide_provider_recovery`` preserves ``state.fallback_attempt_number``
+        # for ``action == "retry"``). Dropping it here would let a later provider
+        # failure parse the count as 0 and re-select ``fallbacks[0]`` — repeating an
+        # already-exhausted fallback attempt.
+        "fallback_attempt_number": state.fallback_attempt_number,
+        "retry_attempt_number": decision.retry_attempt_number,
+        "not_before": decision.not_before.isoformat(),
+        "recommended_action": _metadata_str(decision.metadata, "recommended_action"),
+    }
+    policy[PROVIDER_RECOVERY_STATE_KEY] = {
+        key: value for key, value in recovery_state.items() if value is not None
+    }
+    return policy
+
+
+def rearm_recovering_cooldown_task_policy(
+    task_policy: Mapping[str, Any] | None,
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Re-arm the in-place ``recovering`` cooldown after a failed pre-resume worktree reset (#612, #647).
+
+    When the worker reclaims a cooled-down ``recovering`` row but the pre-run
+    worktree reset (``git status``/``stash``/``reset --hard``) fails, the row is
+    restored to ``recovering`` for a later safe resume. Without moving
+    ``not_before`` forward the cooldown stays in the past, so
+    ``list_resumable_recovering_ids`` re-selects the same row every poll and a
+    persistent git failure busy-loops the executor slot (consuming slots + log
+    volume) instead of waiting for a later safe retry. Advance ``not_before`` to
+    ``now + cooldown_seconds`` so the next attempt waits a full provider cooldown.
+
+    Returns ``None`` when there is no ``provider_recovery_state`` mapping to re-arm
+    (a legacy/partial row with no cooldown to gate on), leaving the policy untouched
+    so the caller writes nothing."""
+    raw = task_policy.get(PROVIDER_RECOVERY_STATE_KEY) if task_policy else None
+    if not isinstance(raw, Mapping):
+        return None
+    policy = parse_provider_recovery_policy(task_policy)
+    next_not_before = now + timedelta(seconds=policy.cooldown_seconds)
+    updated = deepcopy(dict(task_policy or {}))
+    state = dict(raw)
+    state["not_before"] = next_not_before.isoformat()
+    updated[PROVIDER_RECOVERY_STATE_KEY] = state
+    return updated
+
+
 async def create_provider_recovery_attempt_row(
     session: AsyncSession,
     source_workspace_id: str,
@@ -395,20 +549,30 @@ async def create_provider_recovery_attempt_row(
         await session.flush()
         return None
     source_workspace_mutated = False
+    # This ``elif`` is reached only when ``source_not_before is None`` and the
+    # decision is non-terminal, which happens solely for a monitor-in-place
+    # fallback (the override above forces ``source_not_before = None`` for that
+    # case alone). In that single reachable state the guard, ``decision.action ==
+    # "fallback"``, and ``decision.target_model is not None`` are all always True
+    # (a fallback decision always carries a concrete target model), so their False
+    # arcs are unreachable defensive code — hence ``# pragma: no branch``.
     if source_not_before is not None or decision.action == "terminal":
         source.task_policy = source_policy
         source_workspace_mutated = True
-    elif monitor_in_place_recovery and decision.action in {"retry", "fallback"}:
+    elif monitor_in_place_recovery and decision.action in {  # pragma: no branch
+        "retry",
+        "fallback",
+    }:
         source.task_policy = source_policy
         source_workspace_mutated = True
-        if decision.action == "fallback":
+        if decision.action == "fallback":  # pragma: no branch
             source.agent = decision.target_agent or source.agent
-            if decision.target_model is not None:
+            if decision.target_model is not None:  # pragma: no branch
                 source.task_policy = {
                     **source.task_policy,
                     "agent_model": decision.target_model,
                 }
-    if source_workspace_mutated:
+    if source_workspace_mutated:  # pragma: no branch
         await repo.advance_workspace_version(source)
     if source_not_before is not None:
         await repo.add_event(

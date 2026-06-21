@@ -768,6 +768,40 @@ class ProviderReadinessPreflightResponse(BaseModel):
     source_workspace_id: str | None = None
 
 
+class WorkspaceBlockViolationResponse(BaseModel):
+    """A single protected-file violation recorded when a workspace blocked.
+
+    Mirrors ``quality_gate_violation_details`` so operators can see which paths
+    triggered the pause and decide which ``guide --grant``/directive to issue.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    path: str | None = None
+    protected_pattern: str | None = None
+    section: str | None = None
+    line: int | None = None
+    reason: str | None = None
+
+
+class WorkspaceBlockStateResponse(BaseModel):
+    """Operator-facing block details surfaced while a workspace is ``blocked``.
+
+    Projects the persisted ``block_*`` columns so ``GET /v1/workspaces/{id}``
+    exposes the violating paths and the ``blocked_at`` timestamp, not just
+    ``status=blocked``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    block_type: str | None = None
+    block_reason_code: str | None = None
+    block_resume_phase: str | None = None
+    block_epoch: int = 0
+    blocked_at: datetime | None = None
+    violations: list[WorkspaceBlockViolationResponse] = Field(default_factory=list)
+
+
 class WorkspaceResponse(BaseModel):
     """Representation of a workspace in API responses."""
 
@@ -838,6 +872,7 @@ class WorkspaceResponse(BaseModel):
         default_factory=lambda: ValidationFreshnessSummaryResponse()
     )
     runtime_health: WorkspaceRuntimeHealthResponse | None = None
+    block_state: WorkspaceBlockStateResponse | None = None
     secret_leases: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
     app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
     provider_recovery_state: ProviderRecoveryStateResponse | None = None
@@ -1052,6 +1087,11 @@ class WorkspaceOverviewResponse(BaseModel):
     pr_number: int | None = None
     failure_reason: str | None
     failure_message: str | None
+    # Authoritative pause start while ``status == "blocked"`` (the persisted
+    # ``blocked_at`` column). Surfaced so list cards can show an accurate
+    # "Blocked for N" without falling back to the lossy last-event/``updated_at``
+    # heuristic. ``None`` when the workspace is not blocked.
+    blocked_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

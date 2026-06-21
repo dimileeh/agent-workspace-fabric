@@ -218,10 +218,56 @@ async def _set_resolved_profile(
         await session.commit()
 
 
+def _name_status_z(*records: str) -> str:
+    """Render ``git diff --name-status -z``-shaped stdout from raw NUL records.
+
+    Each record is expected to already include its own NUL terminators (e.g.
+    ``"M\\0src/fix.py\\0"`` or a rename ``"R100\\0old.txt\\0new.txt\\0"``), so
+    callers can build arbitrarily shaped ``--name-status -z`` output without a
+    bespoke builder per status letter.
+    """
+    return "".join(records)
+
+
 def _mark_git_worktree(worktree: Path) -> None:
-    """Make a lightweight temp directory look like a git worktree to guards."""
+    """Make a temp directory look like a git worktree with a real gitdir.
+
+    The PR monitor pre-push guard now passes ``remove_empty_untracked_dirs=True``,
+    which calls ``_gitlink_paths`` and runs ``git -C <worktree> ls-tree -z -r -d HEAD``.
+    A fake gitdir pointer causes git to exit 128, which the guard correctly
+    interprets as ``VALIDATION_WORKTREE_STATUS_FAILED``. Real tests therefore need
+    a real temp repo with at least one commit so HEAD resolves.
+    """
+    import subprocess
+
     worktree.mkdir(parents=True, exist_ok=True)
-    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    repo_dir = worktree.with_name(f"{worktree.name}-repo")
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", str(repo_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.email", "agent@example.com"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.name", "AWF Agent"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "commit", "--allow-empty", "-m", "init"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (worktree / ".git").write_text(f"gitdir: {repo_dir / '.git'}\n", encoding="utf-8")
 
 
 async def _seed_monitoring_workspace_without_attempt(

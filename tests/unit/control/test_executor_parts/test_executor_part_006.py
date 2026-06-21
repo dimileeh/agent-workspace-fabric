@@ -10,6 +10,7 @@ target-head helper.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -26,10 +27,12 @@ from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
-from awf.runtime.pr_creator import PullRequestCreator
+from awf.profiles.models import WorkspaceProfile
+from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import ValidationRunner
 from tests.postgres import postgres_test_engine
 from tests.unit.control.test_executor_parts.test_executor_part_001 import (
+    _insert_validate_handoff_recovery_operation,
     _queue_pre_push_diagnostics,
     _queue_validation_head,
     _seed_ready_workspace,
@@ -120,6 +123,518 @@ class TestValidateOnlyRecoveryTargetHeadSha:
             )
             is None
         )
+
+
+@pytest.mark.unit
+async def test_execute_fails_fast_for_unsupported_resolved_forge(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The ready->running executor path must reject an unsupported resolved
+    forge before profile setup, agent execution, validation, or push."""
+    ws_id = await _seed_ready_workspace(
+        factory,
+        resolved_profile={"name": "unsupported-forge", "forge": "gitlab"},
+    )
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert ws.events[-1].reason_code == "FORGE_NOT_SUPPORTED"
+        assert "gitlab" in (ws.failure_message or "")
+
+
+@pytest.mark.unit
+async def test_ollama_ensure_failure_stops_before_baseline_and_agent(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If OpenCode/Ollama model setup fails, execution stops immediately rather
+    than running baseline coverage or invoking the agent."""
+    ws_id = await _seed_ready_workspace(
+        factory,
+        agent="opencode",
+        resolved_profile={"name": "ollama-missing", "phases": {"validate": ["pytest -q"]}},
+    )
+
+    async def _fail_ollama_setup(*, workspace_id: str, ws: object) -> bool:
+        del ws
+        await executor._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="Ollama model setup failed",
+            reason_code="OLLAMA_MODEL_UNAVAILABLE",
+        )
+        return False
+
+    baseline_calls: list[str] = []
+    agent_calls: list[str] = []
+
+    async def _spy_baseline(**kwargs: object) -> None:
+        baseline_calls.append(str(kwargs["workspace_id"]))
+
+    async def _spy_agent(**kwargs: object) -> None:
+        agent_calls.append(str(kwargs["workspace_id"]))
+
+    monkeypatch.setattr(executor, "_ensure_ollama_model_or_mark_failed", _fail_ollama_setup)
+    monkeypatch.setattr(executor, "_run_baseline_coverage_preflight", _spy_baseline)
+    monkeypatch.setattr(executor, "_run_agent_task_with_optional_planning", _spy_agent)
+
+    await executor.execute(ws_id)
+
+    assert baseline_calls == []
+    assert agent_calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.events[-1].reason_code == "OLLAMA_MODEL_UNAVAILABLE"
+
+
+@pytest.mark.unit
+async def test_profile_resolution_unsupported_forge_fails_before_setup(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If resolving a missing profile snapshot reveals an unsupported forge,
+    execution must fail before profile setup or the agent run."""
+    ws_id = await _seed_ready_workspace(factory, resolved_profile=None)
+    setup_calls: list[str] = []
+    agent_calls: list[str] = []
+
+    async def _sync_profile_with_unsupported_forge(
+        *_args: object,
+        **kwargs: object,
+    ) -> WorkspaceProfile:
+        ws = kwargs["ws"]
+        ws.resolved_profile = {"name": "resolved-gitlab", "forge": "gitlab"}
+        profile = kwargs["profile"]
+        assert isinstance(profile, WorkspaceProfile)
+        return profile
+
+    async def _spy_profile_setup(**kwargs: object) -> object:
+        setup_calls.append(str(kwargs["workspace_id"]))
+        raise AssertionError("profile setup must not run after unsupported forge resolution")
+
+    async def _spy_agent(**kwargs: object) -> None:
+        agent_calls.append(str(kwargs["workspace_id"]))
+
+    monkeypatch.setattr(
+        execution_flow_module,
+        "_sync_resolved_profile",
+        _sync_profile_with_unsupported_forge,
+    )
+    monkeypatch.setattr(executor._validation, "run_profile_phases", _spy_profile_setup)
+    monkeypatch.setattr(executor, "_run_agent_task_with_optional_planning", _spy_agent)
+
+    await executor.execute(ws_id)
+
+    assert setup_calls == []
+    assert agent_calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.events[-1].reason_code == "FORGE_NOT_SUPPORTED"
+
+
+@pytest.mark.unit
+async def test_missing_worktree_before_pr_push_stops_after_pushing_transition(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After validation succeeds and the workspace enters pushing, a missing
+    worktree guard must stop before git push/PR creation."""
+    ws_id = await _seed_ready_workspace(factory)
+    push_attempts: list[str] = []
+
+    async def _ensure_worktree_available(**kwargs: object) -> bool:
+        if kwargs["action"] == "pr_push_open":
+            await executor._mark_failed(
+                workspace_id=str(kwargs["workspace_id"]),
+                from_status=WorkspaceStatus.pushing,
+                failure_reason=FailureReason.infrastructure_failure,
+                message="worktree missing before PR push",
+                reason_code="WORKTREE_MISSING",
+            )
+            return False
+        return True
+
+    original_push_and_open = execution_flow_module._pr_open_step.push_and_open_pr
+
+    async def _unexpected_push_and_open(*args: object, **kwargs: object) -> object:
+        push_attempts.append(str(kwargs.get("workspace_id")))
+        return await original_push_and_open(*args, **kwargs)
+
+    monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_worktree_available)
+    monkeypatch.setattr(
+        execution_flow_module._pr_open_step,
+        "push_and_open_pr",
+        _unexpected_push_and_open,
+    )
+
+    fake.queue_result(returncode=0)  # adapter
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base is-ancestor ok
+    _queue_validation_head(fake)
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation command
+    _queue_pre_push_diagnostics(fake)
+
+    await executor.execute(ws_id)
+
+    assert push_attempts == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.events[-1].reason_code == "WORKTREE_MISSING"
+
+
+@pytest.mark.unit
+async def test_start_push_transition_race_stops_before_push(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If validation succeeds but the validating->pushing CAS loses, the
+    executor must return before opening or updating a PR."""
+    ws_id = await _seed_ready_workspace(factory)
+    real_transition = executor._transition_if_current
+    push_attempts: list[str] = []
+
+    async def _transition(
+        workspace_id: str,
+        *,
+        from_status: WorkspaceStatus,
+        to: WorkspaceStatus,
+        reason: str,
+        action: str,
+    ) -> bool:
+        if action == "start_push":
+            return False
+        return await real_transition(
+            workspace_id,
+            from_status=from_status,
+            to=to,
+            reason=reason,
+            action=action,
+        )
+
+    async def _unexpected_push_and_open(*_args: object, **kwargs: object) -> PullRequestResult:
+        push_attempts.append(str(kwargs.get("workspace_id")))
+        return PullRequestResult(
+            url="https://github.com/dimileeh/aira-agent/pull/777",
+            branch=f"awf/{ws_id}",
+            head_sha="f" * 40,
+        )
+
+    monkeypatch.setattr(executor, "_transition_if_current", _transition)
+    monkeypatch.setattr(
+        execution_flow_module._pr_open_step,
+        "push_and_open_pr",
+        _unexpected_push_and_open,
+    )
+
+    fake.queue_result(returncode=0)  # adapter
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base is-ancestor ok
+    _queue_validation_head(fake)
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation command
+    _queue_pre_push_diagnostics(fake)
+
+    await executor.execute(ws_id)
+
+    assert push_attempts == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.validating.value
+
+
+@pytest.mark.unit
+async def test_pr_target_head_update_failure_is_non_fatal_after_open(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validation-run target-head metadata write failure after PR open should
+    be logged but must not undo the completed workspace transition."""
+    ws_id = await _seed_ready_workspace(factory)
+    update_calls: list[tuple[str, str]] = []
+
+    async def _push_and_open_pr(*_args: object, **_kwargs: object) -> PullRequestResult:
+        return PullRequestResult(
+            url="https://github.com/dimileeh/aira-agent/pull/778",
+            branch=f"awf/{ws_id}",
+            head_sha="f" * 40,
+            open_metadata={"number": 778},
+        )
+
+    async def _raise_target_head_update(**kwargs: object) -> None:
+        update_calls.append((str(kwargs["validation_run_id"]), str(kwargs["target_head_sha"])))
+        raise RuntimeError("target-head metadata store unavailable")
+
+    monkeypatch.setattr(
+        execution_flow_module._pr_open_step,
+        "push_and_open_pr",
+        _push_and_open_pr,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_set_validation_run_target_head_sha",
+        _raise_target_head_update,
+    )
+
+    fake.queue_result(returncode=0)  # adapter
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base is-ancestor ok
+    _queue_validation_head(fake)
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation command
+    _queue_pre_push_diagnostics(fake)
+
+    await executor.execute(ws_id)
+
+    assert len(update_calls) == 1
+    assert update_calls[0][0].startswith("vr_")
+    assert update_calls[0][1] == "f" * 40
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+        assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/778"
+        assert ws.monitor_last_commit_sha == "f" * 40
+
+
+@pytest.mark.unit
+async def test_pr_open_without_head_sha_skips_target_head_update(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forge PR result without a head SHA should still complete the workspace
+    but must not write monitor-last-commit or validation target-head metadata."""
+    ws_id = await _seed_ready_workspace(factory)
+    update_calls: list[str] = []
+
+    async def _push_and_open_pr(*_args: object, **_kwargs: object) -> PullRequestResult:
+        return PullRequestResult(
+            url="https://github.com/dimileeh/aira-agent/pull/779",
+            branch=f"awf/{ws_id}",
+            head_sha=None,
+            open_metadata={"number": 779},
+        )
+
+    async def _unexpected_target_head_update(**kwargs: object) -> None:
+        update_calls.append(str(kwargs["validation_run_id"]))
+
+    monkeypatch.setattr(
+        execution_flow_module._pr_open_step,
+        "push_and_open_pr",
+        _push_and_open_pr,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_set_validation_run_target_head_sha",
+        _unexpected_target_head_update,
+    )
+
+    fake.queue_result(returncode=0)  # adapter
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base is-ancestor ok
+    _queue_validation_head(fake)
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation command
+    _queue_pre_push_diagnostics(fake)
+
+    await executor.execute(ws_id)
+
+    assert update_calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+        assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/779"
+        assert ws.monitor_last_commit_sha is None
+
+
+@pytest.mark.unit
+async def test_validate_only_recovery_target_head_update_failure_is_non_fatal(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate-only recovery records successful validation even if updating
+    target-head metadata fails before the skip-push completion."""
+    ws_id = await _seed_ready_workspace(
+        factory,
+        resolved_profile={
+            "name": "planned-recovery",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                "max_iterations": 2,
+            },
+            "phases": {"validate": ["pytest -q"]},
+        },
+    )
+    await _insert_validate_handoff_recovery_operation(
+        factory,
+        workspace_id=ws_id,
+        operation_id="op_validate_only_target_head_failed",
+    )
+    update_calls: list[tuple[str, str, str | None]] = []
+
+    async def _raise_target_head_update(**kwargs: object) -> None:
+        update_calls.append(
+            (
+                str(kwargs["validation_run_id"]),
+                str(kwargs["target_head_sha"]),
+                (
+                    str(kwargs["workspace_head_sha"])
+                    if kwargs.get("workspace_head_sha") is not None
+                    else None
+                ),
+            )
+        )
+        raise RuntimeError("target-head metadata store unavailable")
+
+    monkeypatch.setattr(
+        executor,
+        "_set_validation_run_target_head_sha",
+        _raise_target_head_update,
+    )
+
+    report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+    satisfied_report = json.dumps(
+        {
+            "status": "satisfied",
+            "summary": "implementation and validation evidence satisfy the plan",
+            "gaps": [],
+        }
+    )
+
+    _queue_validation_head(fake, head="deadbeef01")
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation
+    fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+    fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
+    fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
+    fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+    fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+
+    await executor.execute(ws_id)
+
+    assert len(update_calls) == 1
+    assert update_calls[0][0].startswith("vr_")
+    assert update_calls[0][1:] == ("deadbeef01", "deadbeef01")
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+        assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/225"
+
+
+@pytest.mark.unit
+async def test_validate_only_recovery_records_stale_skip_after_successful_recheck(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate-only recovery re-reads the row after the recovery-skip-push
+    recheck and records a stale skip if another actor changed the status."""
+    ws_id = await _seed_ready_workspace(
+        factory,
+        resolved_profile={
+            "name": "planned-recovery",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                "max_iterations": 2,
+            },
+            "phases": {"validate": ["pytest -q"]},
+        },
+    )
+    await _insert_validate_handoff_recovery_operation(
+        factory,
+        workspace_id=ws_id,
+        operation_id="op_validate_only_stale_skip",
+    )
+    real_recheck = executor._recheck_status
+
+    async def _recheck_status(
+        workspace_id: str,
+        *,
+        expected: WorkspaceStatus,
+        action: str,
+    ) -> bool:
+        if action == "recovery_skip_push":
+            async with factory() as s:
+                row = await WorkspaceRepository(s).get(workspace_id)
+                assert row is not None
+                row.status = WorkspaceStatus.cancelled.value
+                await s.commit()
+            return True
+        return await real_recheck(workspace_id, expected=expected, action=action)
+
+    monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+
+    report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+    satisfied_report = json.dumps(
+        {
+            "status": "satisfied",
+            "summary": "implementation and validation evidence satisfy the plan",
+            "gaps": [],
+        }
+    )
+
+    _queue_validation_head(fake, head="deadbeef01")
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation
+    fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+    fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
+    fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
+    fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+    fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.cancelled.value
+        assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+        assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
+        assert ws.events[-1].payload["action"] == "recovery_skip_push"
+        assert ws.events[-1].payload["actual_status"] == WorkspaceStatus.cancelled.value
 
 
 class TestOrphanHistoryRecoveryCommitFailure:

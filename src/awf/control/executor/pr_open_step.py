@@ -168,6 +168,13 @@ async def push_and_open_pr(
                 pr_url=ws.pr_url,
                 source_head_sha=exc.head_sha,
             )
+        evidence = {
+            "operation": exc.operation,
+            "returncode": exc.returncode,
+            "error_message": exc.stderr.strip() or "<no output>",
+        }
+        if exc.details is not None:
+            evidence["details"] = exc.details
         await self._record_executor_pr_audit_event(
             workspace_id,
             event_type=(
@@ -185,11 +192,7 @@ async def push_and_open_pr(
             pr_number=_extract_pr_number(ws.pr_url) if ws.pr_url else None,
             pr_url=ws.pr_url,
             source_head_sha=exc.head_sha,
-            evidence={
-                "operation": exc.operation,
-                "returncode": exc.returncode,
-                "error_message": exc.stderr.strip() or "<no output>",
-            },
+            evidence=evidence,
         )
         await self._mark_failed(
             workspace_id=workspace_id,

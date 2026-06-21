@@ -431,7 +431,7 @@ class TestPromptTerminalRuntimeReleaseHookWiring:
         async def _execute(workspace_id: str) -> None:
             sequence.append(f"execute:{workspace_id}")
 
-        async def _release_claim(workspace_id: str) -> None:
+        async def _release_claim(workspace_id: str, *, skip_if_blocked: bool = False) -> None:
             sequence.append(f"release_claim:{workspace_id}")
 
         async def _prompt_release(workspace_id: str) -> None:

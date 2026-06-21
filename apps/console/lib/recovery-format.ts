@@ -62,6 +62,21 @@ export function isReverseWorkspaceTransition(
   if (event.event_type !== "workspace.state_changed") {
     return false;
   }
+  // `blocked` is a non-linear operator pause: it is entered from any execution
+  // stage (incl. monitoring_pr, a higher lifecycle index) and resumes back to an
+  // earlier one. Those entries/exits are expected, not regressions, so a
+  // lifecycle-index comparison would mislabel them as backward "step-back" moves.
+  // Never flag a transition into or out of `blocked` as reverse. `recovering` is
+  // the same shape — a mid-run pause that resumes back to `running` (a lower
+  // lifecycle index) — so its entries/exits must not be flagged reverse either.
+  if (
+    event.old_state === "blocked" ||
+    event.new_state === "blocked" ||
+    event.old_state === "recovering" ||
+    event.new_state === "recovering"
+  ) {
+    return false;
+  }
   const oldIndex = lifecycleStageIndex(event.old_state);
   const newIndex = lifecycleStageIndex(event.new_state);
   return oldIndex >= 0 && newIndex >= 0 && oldIndex > newIndex;

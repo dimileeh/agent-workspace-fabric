@@ -9,38 +9,28 @@ specific merge-gate branch without running the full monitor integration loop.
 
 from __future__ import annotations
 
-import time
 from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import pytest_mock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.base import AgentRunError
-from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
+import awf.runtime.pr_monitor_runner.remote_repair as remote_repair
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
-    AgentRuntime,
-    OperationStatus,
-    OperationType,
     TaskClass,
     WorkspaceStatus,
 )
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import (
-    OperationRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
-from awf.runtime.planning import CONFORMANCE_REQUIRES_AWF_VALIDATION
 from awf.runtime.pr_monitor import (
-    AddressComments,
     CheckFailure,
     CheckState,
     Merge,
@@ -48,35 +38,26 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorState,
     PRStatus,
-    ReviewComment,
 )
 from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
-from awf.runtime.pr_monitor_runner.gates import _MergeGateResult
 from awf.runtime.pr_monitor_runner.helpers import (
     _infer_service_work_dir,
-    _initial_review_grace_done_key,
-    _initial_review_grace_started_key,
-    _initial_review_grace_state_for_persistence,
-    _initial_review_grace_state_for_runtime,
-    _initial_review_grace_wait_seconds,
-    _initial_review_grace_wall_seconds,
-    _initial_review_grace_wall_started_value_from_datetime,
     _merge_rejection_reason,
-    _notify_human_reason,
     _target_reconcile_payload,
     _with_ci_failures,
 )
 from awf.runtime.pr_monitor_runner.types import (
-    ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
-    pr_payload,
     seed_monitoring_workspace,
 )
 from tests.unit.runtime.test_pr_monitor import _status
@@ -86,6 +67,49 @@ from tests.unit.runtime.test_pr_monitor import _status
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
+
+
+@pytest.fixture(autouse=True)
+def _mock_verify_head_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+
+
+@pytest.mark.unit
+async def test_resolve_worktree_branch_ref_strips_git_object_lookup_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    calls: list[dict[str, object]] = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"refs/heads/agent-work\n", b""
+
+    async def _create_subprocess_exec(*args: object, **kwargs: object) -> _Proc:
+        calls.append({"args": args, "env": kwargs.get("env")})
+        return _Proc()
+
+    monkeypatch.setattr(remote_repair.asyncio, "create_subprocess_exec", _create_subprocess_exec)
+
+    branch_ref = await remote_repair._resolve_worktree_branch_ref(tmp_path)
+
+    assert branch_ref == "refs/heads/agent-work"
+    assert calls
+    assert calls[0]["args"][-2:] == ("symbolic-ref", "HEAD")
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert "GIT_OBJECT_DIRECTORY" not in env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in env
 
 
 class PersistCheckingSleep(RecordedSleep):
@@ -158,6 +182,67 @@ def _monitor_runner(
         worktrees_root=tmp_path / "work" / "git" / "worktrees",
         workspace_runtime_context=workspace_runtime_context,
     )
+
+
+@pytest.mark.unit
+async def test_repair_operation_start_head_mirror_commit_object_exists_rejects_repository_alternates(
+    tmp_path: Path,
+) -> None:
+    mirror_path = tmp_path / "repo.git"
+    alternates_path = mirror_path / "objects" / "info" / "alternates"
+    alternates_path.parent.mkdir(parents=True)
+    alternates_path.write_text("/tmp/private-objects\n")
+    fake = FakeCommandRunner()
+    fake.queue_result(returncode=0)
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=fake))
+
+    exists = await remote_repair._mirror_commit_object_exists(runner, mirror_path, "a" * 40)
+
+    assert exists is False
+    assert fake.calls == []
+
+
+@pytest.mark.unit
+async def test_repair_operation_start_head_rejects_dangling_no_mirror_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+    fallback_head = "f" * 40
+    fake = FakeCommandRunner()
+    fake.queue_result(returncode=1, stderr="HEAD is unreadable")
+    fake.queue_result(returncode=1, stderr="fallback is missing")
+    runner = _monitor_runner(tmp_path, fake)
+    worktree_path = tmp_path / "repair-worktree"
+    worktree_path.mkdir()
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(remote_repair, "mirror_path_for_worktree", lambda _worktree_path: None)
+    monkeypatch.setattr(
+        remote_repair,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+
+    operation_start_head, result = await runner._repair_operation_start_head_result(
+        workspace_id="ws_dangling_fallback",
+        worktree_path=worktree_path,
+        operation_type="comment_repair",
+        fallback_head_sha=fallback_head,
+    )
+
+    assert operation_start_head == ""
+    assert result is not None
+    assert result.failed is True
+    assert result.details["fallback_head_sha"] == fallback_head
+    assert result.details["fallback_source"] == "status"
+    assert fake.calls[1].args[-3:] == ["cat-file", "-e", f"{fallback_head}^{{commit}}"]
+    assert fake.calls[1].env is not None
+    assert "GIT_OBJECT_DIRECTORY" not in fake.calls[1].env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[1].env
 
 
 def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") -> PRStatus:
@@ -348,140 +433,6 @@ async def _dispatch_merge_recovery(
         compose_file=tmp_path / "compose.yml",
         monitor_log=None,
     )
-
-
-class TestNotificationAndGraceHelpers:
-    @pytest.mark.unit
-    def test_notify_human_reason_prioritizes_blocking_conditions(self) -> None:
-        blocking_review = ReviewComment(
-            comment_id="C-block",
-            body_excerpt="external policy gate",
-            author="review-bot",
-            blocks_merge=True,
-        )
-        deferred_review = ReviewComment(
-            comment_id="C-human",
-            body_excerpt="please inspect",
-            author="human",
-        )
-        deferred_state = MonitorState(threads_addressed_ids={"C-human": "defer"})
-
-        assert "merge-blocking changes-requested review" in (
-            _notify_human_reason(_status(reviews=(blocking_review,)), MonitorState()) or ""
-        )
-        assert "required protection" in (
-            _notify_human_reason(
-                _status(merge_state_status=MergeStateStatus.BLOCKED),
-                MonitorState(),
-            )
-            or ""
-        )
-        assert (
-            _notify_human_reason(
-                _status(
-                    reviews=(deferred_review,),
-                    merge_state_status=MergeStateStatus.BLOCKED,
-                ),
-                deferred_state,
-            )
-            == "human review feedback was deferred by the agent and remains unresolved"
-        )
-        assert (
-            _notify_human_reason(
-                _status(reviews=(deferred_review,)),
-                deferred_state,
-            )
-            == "human review feedback was deferred by the agent and remains unresolved"
-        )
-        assert _notify_human_reason(_status(), MonitorState()) is None
-
-    @pytest.mark.unit
-    def test_initial_review_grace_state_converts_between_wall_and_monotonic_time(self) -> None:
-        pr_number = 42
-        started_key = _initial_review_grace_started_key(pr_number)
-        done_key = _initial_review_grace_done_key(pr_number)
-        wall_started = datetime(2026, 4, 27, 12, 0, tzinfo=UTC).timestamp()
-        runtime_state = {started_key: f"{wall_started:.6f}"}
-        persisted_state = {started_key: "900.000000"}
-
-        assert _initial_review_grace_wall_seconds(object()) is None
-        assert _initial_review_grace_wall_seconds("not-a-number") is None
-        assert _initial_review_grace_wall_seconds("123.0") is None
-        assert _initial_review_grace_wall_seconds(wall_started) == wall_started
-        assert (
-            _initial_review_grace_wall_started_value_from_datetime(
-                datetime(2026, 4, 27, 12, 0),
-            )
-            == f"{wall_started:.6f}"
-        )
-
-        converted_runtime = _initial_review_grace_state_for_runtime(
-            runtime_state,
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started + 30.0,
-        )
-        legacy_runtime = _initial_review_grace_state_for_runtime(
-            {started_key: "900.0"},
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started,
-            legacy_monotonic_fallback=875.0,
-        )
-        converted_persistence = _initial_review_grace_state_for_persistence(
-            persisted_state,
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started + 100.0,
-        )
-        invalid_persistence = _initial_review_grace_state_for_persistence(
-            {started_key: "invalid"},
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started,
-        )
-        unchanged_persistence = _initial_review_grace_state_for_persistence(
-            {},
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started,
-        )
-
-        assert converted_runtime[started_key] == "970.000000"
-        assert legacy_runtime[started_key] == "875.000000"
-        assert converted_persistence[started_key] == f"{wall_started:.6f}"
-        assert invalid_persistence[started_key] == "invalid"
-        assert unchanged_persistence == {}
-
-        waiting = MonitorState(started_at=10.0)
-        assert (
-            _initial_review_grace_wait_seconds(
-                waiting,
-                pr_number=pr_number,
-                now=12.0,
-                grace_seconds=10.0,
-                poll_interval_seconds=3.0,
-            )
-            == 3.0
-        )
-        assert waiting.threads_addressed_ids[started_key] == "10.000000"
-
-        invalid_started = MonitorState(
-            started_at=20.0,
-            threads_addressed_ids={started_key: "not-float"},
-        )
-        assert (
-            _initial_review_grace_wait_seconds(
-                invalid_started,
-                pr_number=pr_number,
-                now=35.0,
-                grace_seconds=10.0,
-                poll_interval_seconds=5.0,
-            )
-            == 0.0
-        )
-        assert invalid_started.threads_addressed_ids[started_key] == "20.000000"
-        assert invalid_started.threads_addressed_ids[done_key] == "elapsed"
 
 
 class TestMiscMonitorHelpers:
@@ -711,6 +662,76 @@ class TestMiscMonitorHelpers:
         assert not any(arg.startswith(".claude/agent-memory") for arg in add_args)
 
     @pytest.mark.unit
+    async def test_commit_dirty_worktree_strips_git_object_env_from_write_path(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dirty-worktree writes never inherit alternate object stores."""
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "awf-agent@example.invalid")
+        workspace_id = "ws_object_env"
+        fake = FakeCommandRunner()
+        fixed_path = "src/awf/foo.py"
+        dirty = f" M {fixed_path}\n"
+        hook_stderr = (
+            "fix end of files................................................Failed\n"
+            "- hook id: end-of-file-fixer\n"
+            "- exit code: 1\n"
+            "- files were modified by this hook\n\n"
+            f"Fixing {fixed_path}\n"
+        )
+        for result in (
+            {"returncode": 0, "stdout": dirty},  # status --porcelain
+            {"returncode": 0, "stdout": dirty},  # status --untracked-files=all
+            {"returncode": 0},  # add -A -- <stage_paths>
+            {"returncode": 1},  # diff --cached --quiet (staged changes present)
+            {"returncode": 1, "stderr": hook_stderr},  # commit runs an autofixing hook
+            {"returncode": 0, "stdout": dirty},  # retry status
+            {"returncode": 0},  # retry add
+            {"returncode": 0},  # retry commit
+        ):
+            fake.queue_result(**result)
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+        repair_reasons: list[str] = []
+
+        async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
+            repair_reasons.append(str(kwargs["reason"]))
+            return True
+
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+        )
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+        )
+
+        assert committed is True
+        git_calls = [
+            call
+            for call in fake.calls
+            if {"status", "add", "diff", "commit"}.intersection(call.args)
+        ]
+        assert len(git_calls) == 8
+        for call in git_calls:
+            assert call.env is not None
+            assert "GIT_OBJECT_DIRECTORY" not in call.env
+            assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+            assert call.env["GIT_AUTHOR_EMAIL"] == "awf-agent@example.invalid"
+        assert repair_reasons == [
+            "dirty_worktree_pre_commit",
+            "dirty_worktree_post_commit_failed",
+            "dirty_worktree_post_commit_succeeded",
+        ]
+
+    @pytest.mark.unit
     async def test_commit_dirty_worktree_memory_only_skips_commit_side_effects(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -749,672 +770,648 @@ class TestMiscMonitorHelpers:
         assert not any("commit" in call.args for call in fake.calls)
 
     @pytest.mark.unit
-    async def test_commit_dirty_worktree_truncates_subject_to_72(
+    async def test_commit_dirty_worktree_missing_head_recovery_same_head_returns_false(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The monitor dirty-worktree commit subject is capped at 72 chars after tagging.
-
-        Parity with every other AWF-authored commit subject (executor agent/recovery
-        commits, post-validation conformance) which all apply ``[:72]`` after the tag.
-        """
-        workspace_id = await seed_monitoring_workspace(factory)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).get(workspace_id)
-            assert workspace is not None
-            workspace.task_tag = "PROJ-123"
-            await session.commit()
-
+        """No-op missing-HEAD recovery is not a committed fix."""
+        workspace_id = "ws_missing_head_noop"
+        operation_start_head = "1" * 40
         fake = FakeCommandRunner()
-        for result in (
-            {"returncode": 0, "stdout": " M file.py\n"},  # status --porcelain (dirty)
-            {"returncode": 0, "stdout": " M file.py\n"},  # status --untracked-files=all
-            {"returncode": 0},  # add -A -- <stage_paths>
-            {"returncode": 1},  # diff --cached --quiet (staged changes present)
-            {"returncode": 0},  # commit
-        ):
-            fake.queue_result(**result)
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
 
-        long_subject = "fix: address PR review comment " + "x" * 80
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            return operation_start_head
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+
         committed = await runner._commit_dirty_worktree(
             workspace_id=workspace_id,
-            message=long_subject,
+            message="awf: monitor dirty worktree",
+            operation_start_head=operation_start_head,
+        )
+
+        assert committed is False
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_missing_head_falls_back_from_stale_start_head(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A dangling operation-start SHA does not block candidate-head recovery."""
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+        workspace_id = "ws_missing_head_stale_anchor"
+        stale_operation_start_head = "1" * 40
+        candidate_head = "2" * 40
+        mirror_path = tmp_path / "mirror.git"
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="missing")
+        fake.queue_result(returncode=0)
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+        captured_recovery_heads: list[str] = []
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _repair_mirror_hooks_path(_mirror_path: Path) -> None:
+            return None
+
+        async def _open_merge_candidate_head_sha(*_args: object) -> str:
+            return candidate_head
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **kwargs: object,
+        ) -> str:
+            recovery_head = str(kwargs["operation_start_head"])
+            captured_recovery_heads.append(recovery_head)
+            return recovery_head
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "mirror_path_for_worktree",
+            lambda _worktree_path: mirror_path,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_open_merge_candidate_head_sha",
+            _open_merge_candidate_head_sha,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+            operation_start_head=stale_operation_start_head,
+            task_tag=None,
+        )
+
+        assert committed is False
+        assert captured_recovery_heads == [candidate_head]
+        assert fake.calls[0].args[-3:] == [
+            "cat-file",
+            "-e",
+            f"{stale_operation_start_head}^{{commit}}",
+        ]
+        assert fake.calls[1].args[-3:] == ["cat-file", "-e", f"{candidate_head}^{{commit}}"]
+        assert fake.calls[0].env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in fake.calls[0].env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[0].env
+        assert fake.calls[1].env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in fake.calls[1].env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[1].env
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_no_mirror_prefers_verified_operation_start_before_candidate(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No-mirror missing-HEAD recovery does not skip a valid start anchor."""
+        workspace_id = "ws_missing_head_no_mirror_prefers_start"
+        operation_start_head = "1" * 40
+        candidate_head = "2" * 40
+        fake = FakeCommandRunner()
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+        checked_anchors: list[str] = []
+        opened_candidates: list[str] = []
+        captured_recovery_heads: list[str] = []
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _open_merge_candidate_head_sha(_self: object, opened_workspace_id: str) -> str:
+            opened_candidates.append(opened_workspace_id)
+            return candidate_head
+
+        async def _worktree_commit_object_exists(
+            _self: object,
+            _worktree_path: Path,
+            commit_sha: str,
+        ) -> bool:
+            checked_anchors.append(commit_sha)
+            return commit_sha == operation_start_head
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **kwargs: object,
+        ) -> str:
+            recovery_head = str(kwargs["operation_start_head"])
+            captured_recovery_heads.append(recovery_head)
+            return recovery_head
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(remote_repair, "mirror_path_for_worktree", lambda _worktree_path: None)
+        monkeypatch.setattr(
+            remote_repair,
+            "_open_merge_candidate_head_sha",
+            _open_merge_candidate_head_sha,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_worktree_commit_object_exists",
+            _worktree_commit_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+            operation_start_head=operation_start_head,
+            task_tag=None,
+        )
+
+        assert committed is False
+        assert checked_anchors == [operation_start_head]
+        assert opened_candidates == []
+        assert captured_recovery_heads == [operation_start_head]
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_mirror_rejects_unverified_candidate_head(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A mirror-missing candidate SHA must not be used for filesystem recovery."""
+        workspace_id = "ws_missing_head_mirror_unverified"
+        stale_operation_start_head = "1" * 40
+        mirror_path = tmp_path / "mirror.git"
+        fake = FakeCommandRunner()
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+        checked_anchors: list[str] = []
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _repair_mirror_hooks_path(_mirror_path: Path) -> None:
+            return None
+
+        async def _open_merge_candidate_head_sha(*_args: object) -> str:
+            return stale_operation_start_head
+
+        async def _mirror_commit_object_exists(
+            _self: object,
+            _mirror_path: Path,
+            commit_sha: str,
+        ) -> bool:
+            checked_anchors.append(commit_sha)
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            raise AssertionError("unverified mirror candidate must not be recovered")
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "mirror_path_for_worktree",
+            lambda _worktree_path: mirror_path,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_open_merge_candidate_head_sha",
+            _open_merge_candidate_head_sha,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_mirror_commit_object_exists",
+            _mirror_commit_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+
+        with pytest.raises(_MonitorHeadObjectMissingError):
+            await runner._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message="awf: monitor dirty worktree",
+                operation_start_head=stale_operation_start_head,
+                task_tag=None,
+            )
+
+        assert checked_anchors == [stale_operation_start_head]
+        assert fake.calls == []
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_no_mirror_rejects_unverified_candidate_head(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No-mirror missing-HEAD recovery must prove the selected candidate exists."""
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+        workspace_id = "ws_missing_head_no_mirror_unverified"
+        stale_operation_start_head = "1" * 40
+        candidate_head = "2" * 40
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="stale operation start missing")
+        fake.queue_result(returncode=1, stderr="candidate missing")
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _open_merge_candidate_head_sha(*_args: object) -> str:
+            return candidate_head
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            raise AssertionError("unverified no-mirror candidate must not be recovered")
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(remote_repair, "mirror_path_for_worktree", lambda _worktree_path: None)
+        monkeypatch.setattr(
+            remote_repair,
+            "_open_merge_candidate_head_sha",
+            _open_merge_candidate_head_sha,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+
+        with pytest.raises(_MonitorHeadObjectMissingError):
+            await runner._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message="awf: monitor dirty worktree",
+                operation_start_head=stale_operation_start_head,
+                task_tag=None,
+            )
+
+        assert len(fake.calls) == 2
+        assert fake.calls[0].args[-3:] == [
+            "cat-file",
+            "-e",
+            f"{stale_operation_start_head}^{{commit}}",
+        ]
+        assert fake.calls[1].args[-3:] == ["cat-file", "-e", f"{candidate_head}^{{commit}}"]
+        for call in fake.calls:
+            assert call.env is not None
+            assert "GIT_OBJECT_DIRECTORY" not in call.env
+            assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in call.env
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_missing_head_recovery_runtime_only_returns_false(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Runtime-only recovered diffs are not PR-worthy committed fixes."""
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/private-objects")
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/private-alternates")
+        workspace_id = "ws_missing_head_runtime_only"
+        operation_start_head = "1" * 40
+        recovered_head = "2" * 40
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="M\0.claude/agent-memory/reviewer/bug.md\0")
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            return recovered_head
+
+        async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+            raise AssertionError("runtime-only recovery should skip ownership repair")
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+        )
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+            operation_start_head=operation_start_head,
+        )
+
+        assert committed is False
+        assert len(fake.calls) == 1
+        assert fake.calls[0].args[-5:] == [
+            "diff",
+            "--name-status",
+            "-z",
+            f"{operation_start_head}..{recovered_head}",
+            "--",
+        ]
+        assert fake.calls[0].env is not None
+        assert "GIT_OBJECT_DIRECTORY" not in fake.calls[0].env
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in fake.calls[0].env
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_recovered_head_ownership_failure_restores_head(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovered ownership repair failures must restore the recovery head."""
+        workspace_id = "ws_missing_head_ownership_failure"
+        operation_start_head = "1" * 40
+        recovered_head = "2" * 40
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="M\0src/awf/example.py\0")
+        fake.queue_result(returncode=0)
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            return recovered_head
+
+        async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+            return False
+
+        async def _protected_scope_violations_for_recovered_dirty_commit(
+            *_args: object,
+            **_kwargs: object,
+        ) -> list[object]:
+            raise AssertionError("protected-scope check should not run")
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_protected_scope_violations_for_recovered_dirty_commit",
+            _protected_scope_violations_for_recovered_dirty_commit,
+        )
+
+        with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError):
+            await runner._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message="awf: monitor dirty worktree",
+                operation_start_head=operation_start_head,
+            )
+
+        assert len(fake.calls) == 2
+        assert fake.calls[0].args[-5:] == [
+            "diff",
+            "--name-status",
+            "-z",
+            f"{operation_start_head}..{recovered_head}",
+            "--",
+        ]
+        assert fake.calls[1].args[-3:] == ["reset", "--hard", operation_start_head]
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_missing_head_recovery_blocks_protected_commit(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovered commits validate protected scope as committed diffs.
+
+        Regression for PRRT_kwDOSJAM6s6KzfXh: after filesystem recovery advances
+        HEAD, dirty-status diff loading compares the new HEAD to the matching
+        worktree and cannot see protected-file changes in the recovered commit.
+        This must block even when no compose context exists for a repair pass.
+        """
+        operation_start_head = "1" * 40
+        workspace_id = await seed_monitoring_workspace(factory, head_sha=operation_start_head)
+        recovered_head = "2" * 40
+        protected_path = ".github/workflows/ci.yml"
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=f"M\0{protected_path}\0")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="name: ci\npermissions: read-all\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(
+            returncode=0,
+            stdout="name: ci\npermissions: write-all\n",
+        )
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            return recovered_head
+
+        async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+        )
+
+        with pytest.raises(_MonitorPolicyBlockedError) as exc_info:
+            await runner._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message="awf: monitor dirty worktree",
+                operation_start_head=operation_start_head,
+            )
+
+        assert protected_path in str(exc_info.value)
+        assert len(fake.calls) == 6
+        assert fake.calls[0].args[-5:] == [
+            "diff",
+            "--name-status",
+            "-z",
+            f"{operation_start_head}..{recovered_head}",
+            "--",
+        ]
+        assert any(f"{operation_start_head}:{protected_path}" in call.args for call in fake.calls)
+        assert any(f"HEAD:{protected_path}" in call.args for call in fake.calls)
+        assert fake.calls[-1].args[-3:] == ["reset", "--hard", operation_start_head]
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_missing_head_recovery_includes_rename_sources(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovered missing-HEAD diffs preserve rename sources for policy gates."""
+        workspace_id = "ws_missing_head_rename_source"
+        operation_start_head = "1" * 40
+        recovered_head = "2" * 40
+        source_path = ".github/workflows/ci.yml"
+        destination_path = "docs/ci.yml"
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=f"R100\0{source_path}\0{destination_path}\0",
+        )
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+        captured_changed_paths: list[tuple[str, ...]] = []
+
+        async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+            return False
+
+        async def _recover_missing_head_object_from_filesystem(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            return recovered_head
+
+        async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+            return True
+
+        async def _protected_scope_violations_for_recovered_dirty_commit(
+            *_args: object,
+            changed_paths: tuple[str, ...],
+            **_kwargs: object,
+        ) -> list[object]:
+            captured_changed_paths.append(changed_paths)
+            return []
+
+        monkeypatch.setattr(
+            remote_repair,
+            "verify_head_object_exists",
+            _verify_head_object_exists,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_recover_missing_head_object_from_filesystem",
+            _recover_missing_head_object_from_filesystem,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+        )
+        monkeypatch.setattr(
+            remote_repair,
+            "_protected_scope_violations_for_recovered_dirty_commit",
+            _protected_scope_violations_for_recovered_dirty_commit,
+        )
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+            operation_start_head=operation_start_head,
         )
 
         assert committed is True
-        commit_calls = [call for call in fake.calls if "commit" in call.args and "-m" in call.args]
-        assert commit_calls, "expected a git commit invocation"
-        message = commit_calls[-1].args[commit_calls[-1].args.index("-m") + 1]
-        assert len(message) == 72
-        assert message == ("PROJ-123 " + long_subject)[:72]
-
-
-@pytest.mark.unit
-async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_context(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    pr_number = 77
-    head_sha = "d" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    await _mark_refactor_task(factory, workspace_id)
-
-    terminal = await _dispatch_merge_recovery(
-        factory=factory,
-        tmp_path=tmp_path,
-        workspace_id=workspace_id,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-
-    assert terminal is True
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-        recovery_events = [
-            event for event in workspace.events if event.event_type == "monitor.recovery_dispatched"
+        assert captured_changed_paths == [(source_path, destination_path)]
+        assert fake.calls[0].args[-5:] == [
+            "diff",
+            "--name-status",
+            "-z",
+            f"{operation_start_head}..{recovered_head}",
+            "--",
         ]
-        state_events = [
-            event
-            for event in workspace.events
-            if event.event_type == "workspace.state_changed"
-            and event.reason_code == "RECOVERY_DISPATCH"
-        ]
-    assert workspace.status == WorkspaceStatus.ready.value
-    assert len(operations) == 1
-    operation = operations[0]
-    assert operation.type == "validate"
-    assert operation.status == OperationStatus.pending.value
-    assert operation.idempotency_key is not None
-    assert operation.idempotency_key.startswith("pr_monitor:validate_only:")
-    assert len(operation.idempotency_key) <= 128
-    assert operation.payload == {
-        "owner": "pr_monitor",
-        "source": "pr_monitor",
-        "action": "validate_only",
-        "requested_action": "validate",
-        "reason": "Required validation tier has not passed for this merge candidate.",
-        "reason_code": "VALIDATION_INSUFFICIENT_TIER",
-        "stale_reason": "validation_insufficient_tier",
-        "recovery_mode": "validate_only",
-        "pr_number": pr_number,
-        "pr_url": f"https://github.com/dimileeh/aira-web/pull/{pr_number}",
-        "source_head_sha": head_sha,
-        "source_base_sha": "a" * 40,
-        "target_branch": "development",
-        "remote_branch": f"awf/{workspace_id}",
-    }
-    assert len(recovery_events) == 1
-    assert recovery_events[0].reason_code == "RECOVERY_DISPATCH"
-    assert recovery_events[0].payload == {
-        "pr_number": pr_number,
-        "head_sha": head_sha,
-        "reason": "validation_insufficient_tier",
-        "req_action": "validate",
-        "recovery_mode": "validate_only",
-    }
-    assert len(state_events) == 1
-    assert state_events[0].old_state == WorkspaceStatus.monitoring_pr.value
-    assert state_events[0].new_state == WorkspaceStatus.ready.value
-
-
-@pytest.mark.unit
-async def test_monitor_recovery_dispatch_preserves_planning_validation_handoff_context(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    pr_number = 78
-    head_sha = "e" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    await _mark_refactor_task(factory, workspace_id)
-    plan_path = f"docs/awf-plans/{workspace_id}.md"
-    report_path = f"docs/awf-plans/{workspace_id}.conformance.json"
-    async with factory() as session:
-        workspace_repo = WorkspaceRepository(session)
-        workspace = await workspace_repo.get(workspace_id)
-        assert workspace is not None
-        await workspace_repo.add_event(
-            workspace,
-            event_type="workspace.planning_conformance_requires_awf_validation",
-            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
-            payload={
-                "summary": "AWF validation evidence is required before conformance can pass.",
-                "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
-                "report_reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                "plan_path": plan_path,
-                "report_path": report_path,
-                "iteration": 1,
-                "max_iterations": 3,
-            },
-        )
-        await session.commit()
-
-    terminal = await _dispatch_merge_recovery(
-        factory=factory,
-        tmp_path=tmp_path,
-        workspace_id=workspace_id,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-
-    async with factory() as session:
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-
-    assert terminal is True
-    assert len(operations) == 1
-    assert operations[0].payload["conformance"] == {
-        "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-        "report_reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-        "summary": "AWF validation evidence is required before conformance can pass.",
-        "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
-        "plan_path": plan_path,
-        "report_path": report_path,
-        "iteration": 1,
-        "max_iterations": 3,
-    }
-
-
-@pytest.mark.unit
-async def test_monitor_recovery_dispatch_omits_satisfied_planning_validation_handoff(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    pr_number = 79
-    head_sha = "f" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    await _mark_refactor_task(factory, workspace_id)
-    async with factory() as session:
-        workspace_repo = WorkspaceRepository(session)
-        workspace = await workspace_repo.get(workspace_id)
-        assert workspace is not None
-        await workspace_repo.add_event(
-            workspace,
-            event_type="workspace.planning_conformance_requires_awf_validation",
-            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
-            payload={
-                "summary": "AWF validation evidence is required before conformance can pass.",
-                "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
-                "report_reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                "plan_path": f"docs/awf-plans/{workspace_id}.md",
-                "report_path": f"docs/awf-plans/{workspace_id}.conformance.json",
-                "iteration": 0,
-                "max_iterations": 3,
-            },
-        )
-        await workspace_repo.add_event(
-            workspace,
-            event_type="workspace.post_validation_conformance_satisfied",
-            reason_code="PLAN_CONFORMANCE_SATISFIED",
-            payload={
-                "summary": "validation evidence satisfied the plan",
-                "plan_path": f"docs/awf-plans/{workspace_id}.md",
-                "report_path": f"docs/awf-plans/{workspace_id}.conformance.json",
-                "validation_run_id": "val-resolved",
-            },
-        )
-        await session.commit()
-
-    terminal = await _dispatch_merge_recovery(
-        factory=factory,
-        tmp_path=tmp_path,
-        workspace_id=workspace_id,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-
-    async with factory() as session:
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-
-    assert terminal is True
-    assert len(operations) == 1
-    assert "conformance" not in operations[0].payload
-
-
-@pytest.mark.unit
-async def test_monitor_runner_loads_persisted_state_on_resume(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    pr_number = 91
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha="f" * 40,
-    )
-    monitor_started_at = datetime.now(UTC) - timedelta(minutes=12)
-    review_started_at = datetime.now(UTC) - timedelta(minutes=7)
-    grace_started_key = _initial_review_grace_started_key(pr_number)
-    persisted_threads = {
-        "thread-1": "fix_committed",
-        "thread-2": "defer",
-        grace_started_key: _initial_review_grace_wall_started_value_from_datetime(
-            review_started_at
-        ),
-    }
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        workspace.monitor_iter_count = 8
-        workspace.monitor_threads_addressed = dict(persisted_threads)
-        workspace.monitor_last_commit_sha = "e" * 40
-        workspace.monitor_started_at = monitor_started_at
-        await session.commit()
-
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    before = time.monotonic()
-    workspace = await runner._load_workspace(workspace_id)
-    state = runner._load_state(workspace)
-    after = time.monotonic()
-
-    assert state.iter_count == 8
-    assert state.last_push_sha == "e" * 40
-    assert state.threads_addressed_ids["thread-1"] == "fix_committed"
-    assert state.threads_addressed_ids["thread-2"] == "defer"
-
-    monitor_elapsed = (datetime.now(UTC) - monitor_started_at).total_seconds()
-    assert before - monitor_elapsed - 1 <= state.started_at <= after - monitor_elapsed + 1
-
-    grace_elapsed = (datetime.now(UTC) - review_started_at).total_seconds()
-    grace_runtime_started = float(state.threads_addressed_ids[grace_started_key])
-    assert before - grace_elapsed - 1 <= grace_runtime_started <= after - grace_elapsed + 1
-
-
-@pytest.mark.unit
-async def test_validation_recovery_dispatch_is_idempotent_for_duplicate_tick_replay(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    pr_number = 78
-    head_sha = "e" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    await _mark_refactor_task(factory, workspace_id)
-
-    first_terminal = await _dispatch_merge_recovery(
-        factory=factory,
-        tmp_path=tmp_path,
-        workspace_id=workspace_id,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    replay_sleep = RecordedSleep()
-    replay_terminal = await _dispatch_merge_recovery(
-        factory=factory,
-        tmp_path=tmp_path,
-        workspace_id=workspace_id,
-        pr_number=pr_number,
-        head_sha=head_sha,
-        sleep_fn=replay_sleep,
-    )
-
-    assert first_terminal is True
-    assert replay_terminal is False
-    assert replay_sleep.calls == [60]
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-        recovery_events = [
-            event for event in workspace.events if event.event_type == "monitor.recovery_dispatched"
-        ]
-    recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
-    wait_operations = [
-        op
-        for op in operations
-        if op.type == OperationType.monitor_state.value
-        and op.payload.get("reason_code") == "RECOVERY_IN_PROGRESS"
-    ]
-    assert len(recovery_operations) == 1
-    assert len(wait_operations) == 1
-    assert recovery_operations[0].idempotency_key is not None
-    assert recovery_operations[0].idempotency_key.startswith("pr_monitor:validate_only:")
-    assert len(recovery_operations[0].idempotency_key) <= 128
-    assert wait_operations[0].status == OperationStatus.succeeded.value
-    assert wait_operations[0].payload["action"] == "recovery_wait"
-    assert wait_operations[0].payload["requested_action"] == "validate"
-    assert wait_operations[0].payload["wait_seconds"] == 60
-    assert wait_operations[0].payload["recovery_mode"] == "validate_only"
-    assert wait_operations[0].payload["stale_reason"] == "validation_insufficient_tier"
-    assert wait_operations[0].result == {
-        "status": "succeeded",
-        "outcome": "wait_elapsed",
-        "slept_seconds": 60,
-    }
-    assert len(recovery_events) == 1
-
-
-@pytest.mark.unit
-async def test_late_validation_recovery_callback_records_stale_ready_workspace(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    pr_number = 79
-    head_sha = "f" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    await _mark_refactor_task(factory, workspace_id)
-    async with factory() as session:
-        workspace_repo = WorkspaceRepository(session)
-        workspace = await workspace_repo.get(workspace_id)
-        assert workspace is not None
-        await workspace_repo.transition(
-            workspace,
-            to=WorkspaceStatus.ready,
-            reason_code="TEST_READY_AFTER_RECOVERY_DISPATCH",
-        )
-        await session.commit()
-
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-        initial_review_grace_period_seconds=0,
-    )
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-
-    terminal = await runner._handle_merge_gate_blocker(
-        gate=_MergeGateResult(
-            workspace=workspace,
-            stale_reason="validation_insufficient_tier",
-            req_action="validate",
-        ),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=_green_status(pr_number=pr_number, head_sha=head_sha),
-        state=MonitorState(started_at=0.0),
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is True
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        stale_events = [
-            event
-            for event in workspace.events
-            if event.event_type == "workspace.stale_callback_ignored"
-        ]
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-
-    assert len(stale_events) == 1
-    assert stale_events[0].reason_code == "STALE_CALLBACK_IGNORED"
-    assert stale_events[0].payload["callback_action"] == "recovery_dispatch"
-    assert stale_events[0].payload["actual_status"] == WorkspaceStatus.ready.value
-    assert [op for op in operations if op.type == OperationType.validate.value] == []
-
-
-@pytest.mark.unit
-async def test_review_comment_provider_failure_records_retry_and_ignores_comment(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    mocker: pytest_mock.MockerFixture,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    await _configure_provider_monitor_workspace(
-        factory,
-        workspace_id,
-        max_same_provider_retries=1,
-    )
-
-    mocker.patch(
-        "awf.runtime.pr_monitor_runner.provider_ops.create_provider_recovery_attempt_row",
-        return_value=None,
-    )
-
-    adapter = FakeAdapter()
-    adapter.queue(
-        returncode=1,
-        stderr="Gemini RESOURCE_EXHAUSTED: provider is temporarily overloaded",
-    )
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=pr_payload())
-    cmd.queue_result(returncode=0)
-
-    sleep_fn = RecordedSleep()
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    c = ReviewComment(
-        comment_id="C_provider",
-        body_excerpt="please fix",
-        author="bot",
-    )
-    status = _status(reviews=(c,))
-    state = MonitorState(started_at=0.0)
-
-    with pytest.raises(ProviderRecoveryRetryError):
-        await runner._execute(
-            action=AddressComments(threads=(), review_comments=(c,)),
-            workspace_id=workspace_id,
-            repo_url="git@github.com:dimileeh/aira-web.git",
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            status=status,
-            state=state,
-            base_branch="development",
-            remote_branch=f"awf/{workspace_id}",
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            monitor_log=None,
-        )
-
-    assert "C_provider" not in state.threads_addressed_ids
-
-
-@pytest.mark.unit
-async def test_comment_repair_idle_timeout_uses_in_place_monitor_fallback(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    await _configure_provider_monitor_workspace(
-        factory,
-        workspace_id,
-        max_same_provider_retries=0,
-    )
-
-    adapter = FakeAdapter()
-    adapter.queue(
-        exc=AgentRunError(
-            agent=AgentRuntime.claude_code,
-            result=CommandResult(
-                returncode=1,
-                stdout="",
-                stderr="monitor idle timeout while addressing comments",
-            ),
-            reason_code=AGENT_IDLE_TIMEOUT,
-            details={"provider": "google", "model": "gemini-2.5-pro"},
-        )
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=adapter,
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    comment = ReviewComment(
-        comment_id="C_idle_timeout",
-        body_excerpt="please fix",
-        author="review-bot",
-    )
-    state = MonitorState(started_at=0.0)
-
-    with pytest.raises(ProviderRecoveryRetryError):
-        await runner._execute(
-            action=AddressComments(threads=(), review_comments=(comment,)),
-            workspace_id=workspace_id,
-            repo_url="git@github.com:dimileeh/aira-web.git",
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            status=_status(reviews=(comment,)),
-            state=state,
-            base_branch="development",
-            remote_branch=f"awf/{workspace_id}",
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            monitor_log=None,
-        )
-
-    source_policy, recovery_events, operations, requested_ids = await _provider_recovery_snapshot(
-        factory,
-        workspace_id,
-    )
-    comment_ops = [operation for operation in operations if operation.type == "comment_repair"]
-
-    assert "C_idle_timeout" not in state.threads_addressed_ids
-    assert requested_ids == []
-    assert source_policy["provider_recovery_state"]["action"] == "fallback"
-    assert source_policy["provider_recovery_state"]["target_agent"] == "codex"
-    assert len(recovery_events) == 1
-    assert "new_workspace_id" not in recovery_events[0]
-    assert recovery_events[0]["provider_recovery"]["decision_reason_code"] == (
-        "PROVIDER_FALLBACK_SELECTED"
-    )
-    assert len(comment_ops) == 1
-    assert comment_ops[0].status == OperationStatus.failed.value
-    assert comment_ops[0].result["outcome"] == "provider_retry"
-
-
-@pytest.mark.unit
-async def test_provider_failure_stale_callback_is_deterministic(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    await _configure_provider_monitor_workspace(factory, workspace_id)
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        assert workspace is not None
-        await repo.transition(
-            workspace,
-            to=WorkspaceStatus.completed,
-            reason_code="TEST_COMPLETED",
-        )
-        await session.commit()
-
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    exc = AgentRunError(
-        agent=AgentRuntime.claude_code,
-        result=CommandResult(
-            returncode=1,
-            stdout="",
-            stderr="Gemini RESOURCE_EXHAUSTED: provider is temporarily overloaded",
-        ),
-        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
-        details={"provider": "google", "model": "gemini-2.5-pro"},
-    )
-
-    action = await runner._record_provider_agent_run_error(workspace_id, exc)
-
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        event_types = [event.event_type for event in workspace.events]
-
-    assert action == "deterministic"
-    assert "workspace.stale_callback_ignored" in event_types
-    assert "workspace.provider_recovery_requested" not in event_types
-
-
-@pytest.mark.unit
-async def test_review_comment_deterministic_failure_is_marked_addressed(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    adapter = FakeAdapter()
-    adapter.queue(
-        returncode=1,
-        stderr="Syntax error: invalid character",
-    )
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=pr_payload())
-    cmd.queue_result(returncode=0)
-
-    sleep_fn = RecordedSleep()
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    c = ReviewComment(
-        comment_id="C_deterministic",
-        body_excerpt="please fix syntax",
-        author="bot",
-    )
-    status = _status(reviews=(c,))
-    state = MonitorState(started_at=0.0)
-
-    terminal = await runner._execute(
-        action=AddressComments(threads=(), review_comments=(c,)),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        status=status,
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is False
-    assert "C_deterministic" in state.threads_addressed_ids
-    assert state.threads_addressed_ids["C_deterministic"] == "agent_failed"

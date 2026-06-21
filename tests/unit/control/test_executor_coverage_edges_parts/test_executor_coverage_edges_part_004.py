@@ -440,6 +440,28 @@ async def test_missing_head_recovery_marks_failed_when_base_commit_is_unavailabl
 
 
 @pytest.mark.unit
+async def test_missing_head_recovery_can_return_false_without_marking_failed(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    ok = await executor._recover_missing_git_head_or_mark_failed(
+        workspace_id="ws_missing_base_cleanup",
+        worktree_path=tmp_path / "worktree",
+        base_commit=None,
+        branch_name="awf/ws_missing_base_cleanup",
+        from_status=WorkspaceStatus.running,
+        stage="agent_run_cleanup_failure",
+        error=RuntimeError("bad object HEAD"),
+        mark_failed_on_failure=False,
+    )
+
+    assert ok is False
+    executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
 async def test_missing_head_recovery_marks_failed_when_filesystem_recovery_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -663,6 +685,30 @@ async def test_verify_recovered_post_agent_commit_fails_when_no_paths_recovered(
 
 
 @pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_can_return_false_without_marking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    async def _changed_paths(*_args: object, **_kwargs: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr(executor_quality_methods, "committed_changed_paths_since", _changed_paths)
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_no_paths_cleanup",
+        worktree_path=tmp_path / "worktree",
+        base_commit="a" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+        mark_failed_on_failure=False,
+    )
+    executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
 async def test_verify_recovered_post_agent_commit_stops_on_plan_only_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -692,7 +738,9 @@ async def test_verify_recovered_post_agent_commit_blocks_protected_policy_change
 ) -> None:
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+    executor.enter_blocked_for_protected_violation = AsyncMock(return_value=True)  # type: ignore[method-assign]
     executor._fail_if_plan_only_paths = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    executor._active_operator_grant_specs = AsyncMock(return_value=[])  # type: ignore[method-assign]
 
     async def _changed_paths(*_args: object, **_kwargs: object) -> list[str]:
         return ["pyproject.toml"]
@@ -709,11 +757,6 @@ async def test_verify_recovered_post_agent_commit_blocks_protected_policy_change
         "find_protected_quality_gate_changes",
         lambda **_kwargs: ["policy-change"],
     )
-    monkeypatch.setattr(
-        executor_quality_methods,
-        "quality_gate_violation_message",
-        lambda _violations: "policy changed",
-    )
 
     assert not await executor._verify_recovered_post_agent_commit(
         workspace_id="ws_policy_change",
@@ -721,9 +764,19 @@ async def test_verify_recovered_post_agent_commit_blocks_protected_policy_change
         base_commit="a" * 40,
         owned_paths=[],
         expected_status=WorkspaceStatus.running,
+        execution_owner_id="owner-recovery",
     )
-    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
-    assert executor._mark_failed.await_args.kwargs["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"  # type: ignore[attr-defined]
+    # A protected violation now pauses the workspace for an operator decision
+    # instead of terminally failing.
+    executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]
+    executor.enter_blocked_for_protected_violation.assert_awaited_once()  # type: ignore[attr-defined]
+    block_kwargs = executor.enter_blocked_for_protected_violation.await_args.kwargs  # type: ignore[attr-defined]
+    assert block_kwargs["from_status"] == WorkspaceStatus.running
+    assert block_kwargs["resume_phase"] == "post_agent_commit_recovery_verify"
+    # The block transition is owner-gated so a stale executor that lost its
+    # claim cannot clobber a newer claimant (epoch-guarded CAS, mirrors the
+    # primary site in execution_flow.py).
+    assert block_kwargs["execution_owner_id"] == "owner-recovery"
 
 
 @pytest.mark.unit
@@ -736,6 +789,7 @@ async def test_verify_recovered_post_agent_commit_fails_when_head_not_descendant
     executor = _executor_with_runner(runner, tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
     executor._fail_if_plan_only_paths = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    executor._active_operator_grant_specs = AsyncMock(return_value=[])  # type: ignore[method-assign]
 
     async def _changed_paths(*_args: object, **_kwargs: object) -> list[str]:
         return ["src/app.py"]
@@ -772,6 +826,7 @@ async def test_verify_recovered_post_agent_commit_accepts_non_policy_descendant(
     runner = FakeCommandRunner()
     executor = _executor_with_runner(runner, tmp_path)
     executor._fail_if_plan_only_paths = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    executor._active_operator_grant_specs = AsyncMock(return_value=[])  # type: ignore[method-assign]
 
     async def _changed_paths(*_args: object, **_kwargs: object) -> list[str]:
         return ["src/app.py"]
@@ -818,3 +873,24 @@ async def test_verify_recovered_post_agent_commit_wrapper_marks_infra_failure(
     )
     executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
     assert "verification failed" in executor._mark_failed.await_args.kwargs["message"]  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_wrapper_can_suppress_mark_failed(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._verify_recovered_post_agent_commit = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("verification exploded")
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit_or_mark_failed(
+        workspace_id="ws_verify_wrapper_cleanup",
+        worktree_path=tmp_path / "worktree",
+        base_commit="a" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+        mark_failed_on_failure=False,
+    )
+    executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]

@@ -7318,6 +7318,132 @@
         "title": "WorkspaceArtifactResponse",
         "type": "object"
       },
+      "WorkspaceBlockStateResponse": {
+        "description": "Operator-facing block details surfaced while a workspace is ``blocked``.\n\nProjects the persisted ``block_*`` columns so ``GET /v1/workspaces/{id}``\nexposes the violating paths and the ``blocked_at`` timestamp, not just\n``status=blocked``.",
+        "properties": {
+          "block_epoch": {
+            "default": 0,
+            "title": "Block Epoch",
+            "type": "integer"
+          },
+          "block_reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Reason Code"
+          },
+          "block_resume_phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Resume Phase"
+          },
+          "block_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Type"
+          },
+          "blocked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked At"
+          },
+          "violations": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceBlockViolationResponse"
+            },
+            "title": "Violations",
+            "type": "array"
+          }
+        },
+        "title": "WorkspaceBlockStateResponse",
+        "type": "object"
+      },
+      "WorkspaceBlockViolationResponse": {
+        "description": "A single protected-file violation recorded when a workspace blocked.\n\nMirrors ``quality_gate_violation_details`` so operators can see which paths\ntriggered the pause and decide which ``guide --grant``/directive to issue.",
+        "properties": {
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "protected_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protected Pattern"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section"
+          }
+        },
+        "title": "WorkspaceBlockViolationResponse",
+        "type": "object"
+      },
       "WorkspaceCompanionRequest": {
         "additionalProperties": false,
         "description": "Managed cross-repo companion service requested for one workspace.",
@@ -8263,14 +8389,61 @@
       },
       "WorkspaceGuideRequest": {
         "additionalProperties": false,
-        "description": "Operator-guidance request (issue #447).\n\n``directive`` is the first-class agent instruction injected into a live\nmonitoring workspace; ``reason`` is an optional audit reason. Use the\n``guide`` control rather than overloading ``remonitor --reason`` as the\ndirective channel.",
+        "anyOf": [
+          {
+            "properties": {
+              "directive": {
+                "minLength": 1
+              }
+            },
+            "required": [
+              "directive"
+            ]
+          },
+          {
+            "properties": {
+              "grants": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "grants"
+            ]
+          }
+        ],
+        "description": "Operator-guidance request (issue #447).\n\n``directive`` is the first-class agent instruction injected into a live\nmonitoring workspace; ``reason`` is an optional audit reason. Use the\n``guide`` control rather than overloading ``remonitor --reason`` as the\ndirective channel.\n\nFor a pre-PR ``blocked`` workspace (protected quality-gate violation), the\nsame control carries the operator decision: ``grants`` is a list of scoped\npath globs to APPROVE-AND-KEEP, and ``approve_policy_downgrade`` acknowledges\nthat a granted edit may weaken validation. At least one of ``directive`` or\n``grants`` must be provided; the service enforces the per-status contract\n(a non-blocked workspace still requires a non-empty directive).",
         "properties": {
+          "approve_policy_downgrade": {
+            "default": false,
+            "title": "Approve Policy Downgrade",
+            "type": "boolean"
+          },
           "directive": {
+            "default": "",
             "maxLength": 1024,
-            "minLength": 1,
-            "pattern": "\\S",
             "title": "Directive",
             "type": "string"
+          },
+          "grants": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 64,
+            "title": "Grants",
+            "type": "array"
+          },
+          "operator": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator"
           },
           "reason": {
             "anyOf": [
@@ -8285,9 +8458,6 @@
             "title": "Reason"
           }
         },
-        "required": [
-          "directive"
-        ],
         "title": "WorkspaceGuideRequest",
         "type": "object"
       },
@@ -9176,6 +9346,18 @@
           "base_branch": {
             "title": "Base Branch",
             "type": "string"
+          },
+          "blocked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked At"
           },
           "branch_name": {
             "anyOf": [
@@ -10307,6 +10489,16 @@
             ],
             "title": "Base Commit"
           },
+          "block_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceBlockStateResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "branch_base": {
             "title": "Branch Base",
             "type": "string"
@@ -10933,6 +11125,10 @@
             "title": "Active Total",
             "type": "integer"
           },
+          "blocked": {
+            "title": "Blocked",
+            "type": "integer"
+          },
           "by_status": {
             "additionalProperties": {
               "type": "integer"
@@ -10976,6 +11172,10 @@
             "title": "Ready",
             "type": "integer"
           },
+          "recovering": {
+            "title": "Recovering",
+            "type": "integer"
+          },
           "requested": {
             "title": "Requested",
             "type": "integer"
@@ -10999,6 +11199,8 @@
           "validating",
           "pushing",
           "monitoring_pr",
+          "blocked",
+          "recovering",
           "destroying",
           "completed",
           "failed",
@@ -11128,6 +11330,8 @@
           "validating",
           "pushing",
           "monitoring_pr",
+          "blocked",
+          "recovering",
           "completed",
           "failed",
           "cancelled",
@@ -14267,7 +14471,7 @@
     },
     "/v1/workspaces/{workspace_id}/guide": {
       "post": {
-        "description": "Inject an operator ``directive`` into a live monitoring workspace.\n\n``directive`` is the agent instruction (acted on next monitor cycle);\n``reason`` is audit-only. This is the purpose-named affordance for operator\nguidance \u2014 prefer it over overloading ``remonitor --reason``.",
+        "description": "Carry an operator decision to a workspace (directive or blocked grants).\n\nFor a live ``monitoring_pr`` workspace, ``directive`` is the agent\ninstruction (acted on next monitor cycle) and ``reason`` is audit-only.\nThis is the purpose-named affordance for operator guidance \u2014 prefer it over\noverloading ``remonitor --reason``.\n\nFor a pre-PR ``blocked`` workspace (protected quality-gate violation), the\nsame control carries the approve-and-keep decision: ``grants`` is the list\nof scoped path globs to approve, and ``approve_policy_downgrade``\nacknowledges that a granted edit may weaken validation. At least one of\n``directive`` or ``grants`` must be provided; the service enforces the\nper-status contract (a non-blocked workspace still requires a non-empty\ndirective).",
         "operationId": "guide_workspace_v1_workspaces__workspace_id__guide_post",
         "parameters": [
           {

@@ -903,6 +903,62 @@ class TestFailurePaths:
         assert "https://[redacted]@github.com/org/repo" in repr(pr_events[0].payload)
 
     @pytest.mark.unit
+    async def test_transient_pr_create_exhaustion_records_retry_evidence(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        executor._pr_creator = PullRequestCreator(  # noqa: SLF001
+            fake,
+            pr_create_transient_max_retries=0,
+            pr_create_transient_initial_backoff_seconds=0,
+        )
+        ws_id = await _seed_ready_workspace(factory)
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="f\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0)
+        _queue_pre_push_diagnostics(fake, head="pushed-head")
+        fake.queue_result(returncode=0)
+        fake.queue_result(
+            returncode=1,
+            stderr=(
+                "pull request create failed: HTTP 400: We received a malformed request "
+                "from your client. Sorry about that. Please try resubmitting your "
+                "request and contact us if the problem persists. "
+                "(https://api.github.com/graphql)"
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="[]")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            pr_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.pr_created",
+                limit=10,
+            )
+
+        assert len(pr_events) == 1
+        evidence = pr_events[0].payload["evidence"]
+        assert evidence["operation"] == "gh pr create"
+        assert evidence["returncode"] == 1
+        assert evidence["details"]["strategy"] == "transient_retry_exhausted"
+        assert evidence["details"]["attempts"] == 1
+        assert evidence["details"]["max_retries"] == 0
+        assert evidence["details"]["reconcile_lookups"][0]["status"] == "not_found"
+
+    @pytest.mark.unit
     async def test_agent_makes_no_changes_marks_failed(
         self,
         executor: WorkspaceExecutor,

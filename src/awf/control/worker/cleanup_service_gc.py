@@ -27,6 +27,7 @@ from awf.control.worker.constants import (
 from awf.control.worker.logging import _log
 from awf.db.repositories import ServiceGCRequestRepository
 from awf.db.resilience import run_db_operation_with_retry
+from awf.service.gc import CLEANUP_EXECUTION_PARTIAL
 from awf.service.gc_worker_delegation import SERVICE_GC_WORKER_RECLAIM_FAILED
 
 
@@ -191,6 +192,41 @@ async def _run_claimed_service_gc_trigger(
     polling API does not hang on a row stuck ``running`` until ``deadline_at`` and never
     reports false success (PRRT_kwDOSJAM6s6JdSy-). Param parsing therefore lives *inside*
     the guarded block, not before it.
+
+    After the DB-row-driven terminal reaper, the same guarded run also drives the
+    classification-driven orphan reaper with ``enabled=True`` *forced* (regardless of the
+    default-off ``auto_cleanup_orphans`` flag) and ``row_less_only=True`` so this
+    operator-requested ``gc`` reclaims only no-DB-record ("row-less") orphaned
+    volumes/worktrees the DB-row-driven candidate set can never see (#637). ``row_less_only``
+    keeps the additive sweep from tearing down a terminal workspace the operator scoped out
+    via ``--status``/``--exclude-status`` (PRRT_kwDOSJAM6s6LB30p): those terminal workspaces
+    have DB rows and are already reaped by the scope-honouring ``_terminal_gc_reaper`` above,
+    whereas row-less orphans have no status to scope on. The operator's ``--limit`` is one
+    *total* batch cap shared across both passes: the sweep receives the budget left after the
+    terminal reaper's selected candidates (its ``candidate_count``) are subtracted, not the full
+    stored limit, so ``--limit N`` never deletes more than N workspaces across the terminal +
+    orphan passes combined — restoring the ``--limit`` blast-radius parity the terminal reaper
+    already honours rather than reaping every aged orphan in one pass and forwarding the full
+    limit twice (PRRT_kwDOSJAM6s6LCCJZ, PRRT_kwDOSJAM6s6LCqDd). The
+    operator's ``--min-age-hours`` is forwarded too — it is the only age guard a row-less-only
+    sweep applies, so without it the sweep would silently fall back to the worker's
+    ``orphan_reconcile_min_age_hours`` default and could reap an orphan that is too young for the
+    operator's explicit window yet old enough by that (possibly lower) default, deleting inside
+    the longer safety window the operator scoped (PRRT_kwDOSJAM6s6LCiLb). The parsed request-time
+    ``now`` anchor is forwarded too, so the row-less grace is measured against the same frozen cutoff
+    the terminal reaper uses instead of the worker's (minutes-later) claim clock — without it a
+    worktree/volume still inside the operator's ``--min-age-hours`` window at POST time could age into
+    eligibility before the worker reaches this call and be reaped (PRRT_kwDOSJAM6s6LCs9R). Its
+    ``OrphanReapResult`` is folded
+    into the combined report under ``classified_orphan_reap`` (flowing into the API's
+    ``worker_reclaim.report``), and a non-raising ``partial`` sweep (a compose-teardown /
+    worktree-delete error surfaced as a status rather than an exception) also downgrades the
+    *top-level* combined ``status`` to ``partial`` — the worker-delegation fold derives
+    ``worker_partial`` from that top-level status, so without the downgrade an orphan-sweep
+    failure would still report a successful ``service gc --execute`` (PRRT_kwDOSJAM6s6LB30q).
+    The fold sits inside the same ``try`` so an orphan-sweep raise is recorded on the row like
+    any reaper failure rather than surfacing a false success; it is skipped when no orphan
+    reaper is wired (back-compat).
     """
     try:
         reaper_kwargs: dict[str, Any] = {}
@@ -207,8 +243,9 @@ async def _run_claimed_service_gc_trigger(
         # invocation could age into eligibility and be reaped though no plan/dry-run
         # listed it (PRRT_kwDOSJAM6s6JbriQ).
         now = params.get("now")
-        if now is not None:
-            reaper_kwargs["now"] = datetime.fromisoformat(now)
+        anchor_now = datetime.fromisoformat(now) if now is not None else None
+        if anchor_now is not None:
+            reaper_kwargs["now"] = anchor_now
         statuses = params.get("statuses")
         if statuses:
             reaper_kwargs["statuses"] = statuses
@@ -217,6 +254,62 @@ async def _run_claimed_service_gc_trigger(
             reaper_kwargs["exclude_statuses"] = exclude_statuses
 
         report = await self._terminal_gc_reaper(**reaper_kwargs)
+        # Additive on-demand sweep of no-DB-record orphans (#637). ``enabled=True`` is
+        # forced for the explicit operator request; the same retention/min-age scope the
+        # closure already passes is reused. ``row_less_only=True`` restricts the sweep to
+        # row-less ("missing") orphans so it never tears down a terminal workspace the
+        # operator scoped out via ``--status``/``--exclude-status`` — those terminal rows
+        # are already handled by the scope-honouring ``_terminal_gc_reaper`` above, and the
+        # status filters are not (and need not be) threaded into a row-less-only sweep
+        # (PRRT_kwDOSJAM6s6LB30p). The operator's ``--limit`` is one *total* batch cap shared
+        # across both passes, not a per-pass cap: the terminal reaper above already spent part
+        # of it on the DB-backed candidates it selected (reported as ``candidate_count``), so
+        # the additive sweep receives only the *remaining* budget. Forwarding the full stored
+        # ``limit`` here would let ``gc --execute --limit 1`` delete one terminal workspace
+        # *and* one row-less orphan — twice the one-candidate cap (PRRT_kwDOSJAM6s6LCqDd).
+        # Subtract the terminal pass's selected candidates (floored at 0, so a fully-spent
+        # budget makes the sweep a no-op via ``limit=0``), keeping the oldest-first ``--limit``
+        # parity the terminal reaper already honours (PRRT_kwDOSJAM6s6LCCJZ); ``None`` (no
+        # ``--limit``) stays unbounded. The operator's
+        # ``--min-age-hours`` (the same ``min_age_hours`` threaded into the terminal reaper) is
+        # forwarded as well: it is the *only* age guard a row-less-only sweep applies, so without
+        # it the sweep would fall back to the worker's ``orphan_reconcile_min_age_hours`` default
+        # and could reap a too-young-by-command orphan that is merely old enough by that (possibly
+        # lower) default — deleting inside the longer safety window the operator explicitly scoped
+        # (PRRT_kwDOSJAM6s6LCiLb). The closure floors it at the configured grace so a shorter/absent
+        # request never shrinks the mid-provision guard; ``None`` keeps that default. The same parsed
+        # request-time ``now`` anchor threaded into the terminal reaper is forwarded too: a row-less
+        # orphan's grace is measured against ``now`` (the closure converts the anchor to an epoch),
+        # so without it the sweep falls back to the worker's claim-time ``time.time()`` and a
+        # worktree/volume that was still inside the operator's ``--min-age-hours`` window at POST time
+        # could age into eligibility before the worker reaches this call — exactly the request-time
+        # cutoff drift the terminal pass already avoids (PRRT_kwDOSJAM6s6LCs9R); ``None`` keeps the
+        # claim-clock default. Guarded on the dependency being wired so the DB-only gc path stays
+        # unchanged when no orphan reaper is present.
+        if self._classified_orphan_reaper is not None:
+            orphan_limit = limit
+            if orphan_limit is not None:
+                orphan_limit = max(orphan_limit - (report.get("candidate_count") or 0), 0)
+            orphan_result = await self._classified_orphan_reaper(
+                enabled=True,
+                row_less_only=True,
+                limit=orphan_limit,
+                min_age_hours=min_age_hours,
+                now=anchor_now,
+            )
+            report = {**report, "classified_orphan_reap": orphan_result.to_dict()}
+            # A non-raising ``partial`` orphan reap (a compose teardown / worktree delete
+            # error surfaced as ``PATH_DELETE_PERMISSION_DENIED`` rather than an exception)
+            # must downgrade the *top-level* combined status, not only nest under
+            # ``classified_orphan_reap``. The worker-delegation fold derives
+            # ``worker_partial`` from ``report["status"]`` (``WorkerReclaimOutcome.from_report``),
+            # so without this an orphan-sweep failure would still report a successful
+            # ``service gc --execute`` (PRRT_kwDOSJAM6s6LB30q). Mirror ``combine_terminal_gc_
+            # reports``' "partial wins" rule: only ever downgrade, never upgrade an
+            # already-partial terminal report.
+            if orphan_result.status == "partial":
+                report["status"] = "partial"
+                report["reason_code"] = CLEANUP_EXECUTION_PARTIAL
     except asyncio.CancelledError:
         raise
     except Exception as exc:

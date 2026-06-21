@@ -22,6 +22,27 @@ class WorkerDelegatesMixin:
     _claim_requested_for_provisioning = _claims._claim_requested_for_provisioning
     _claim_monitoring_pr_ids = _claims._claim_monitoring_pr_ids
     _claim_monitoring_pr = _claims._claim_monitoring_pr
+    _claim_paused_for_resume = _claims._claim_paused_for_resume
+    _claim_blocked_for_resume = _claims._claim_blocked_for_resume
+    _claim_recovering_for_resume = _claims._claim_recovering_for_resume
+    _claim_paused_resume_ids = _claims._claim_paused_resume_ids
+    _claim_blocked_resume_ids = _claims._claim_blocked_resume_ids
+    _claim_recovering_resume_ids = _claims._claim_recovering_resume_ids
+    _restore_paused_after_missing_executor = _claims._restore_paused_after_missing_executor
+    _restore_blocked_after_missing_executor = _claims._restore_blocked_after_missing_executor
+    _restore_recovering_after_missing_executor = _claims._restore_recovering_after_missing_executor
+    _restore_paused_resume_claim = _claims._restore_paused_resume_claim
+    _restore_blocked_resume_claim = _claims._restore_blocked_resume_claim
+    _restore_recovering_resume_claim = _claims._restore_recovering_resume_claim
+    _restore_paused_resume_claim_after_cancellation = (
+        _claims._restore_paused_resume_claim_after_cancellation
+    )
+    _restore_blocked_resume_claim_after_cancellation = (
+        _claims._restore_blocked_resume_claim_after_cancellation
+    )
+    _restore_recovering_resume_claim_after_cancellation = (
+        _claims._restore_recovering_resume_claim_after_cancellation
+    )
     _safely_resume_claimed_pr_monitor = _claims._safely_resume_claimed_pr_monitor
     _finish_monitor_recovery_operation = _claims._finish_monitor_recovery_operation
     _finish_monitor_recovery_operation_after_cancellation = (
@@ -116,6 +137,13 @@ class WorkerDelegatesMixin:
     _dispatchable_execution_ids = _dispatch_methods._dispatchable_execution_ids
     _dispatch_ready_executions = _dispatch_methods._dispatch_ready_executions
     _dispatch_monitor_resumes = _dispatch_methods._dispatch_monitor_resumes
+    _dispatch_paused_resumes = _dispatch_methods._dispatch_paused_resumes
+    _dispatch_blocked_resumes = _dispatch_methods._dispatch_blocked_resumes
+    _dispatch_recovering_resumes = _dispatch_methods._dispatch_recovering_resumes
+    _safely_resume_paused_claimed = _dispatch_methods._safely_resume_paused_claimed
+    _safely_resume_blocked_claimed = _dispatch_methods._safely_resume_blocked_claimed
+    _safely_resume_recovering_claimed = _dispatch_methods._safely_resume_recovering_claimed
+    _reset_recovering_worktree = _dispatch_methods._reset_recovering_worktree
     _dispatch_preserved_active_validation = _dispatch_methods._dispatch_preserved_active_validation
     _track_execution_task = _dispatch_methods._track_execution_task
     _forget_execution_task = _dispatch_methods._forget_execution_task

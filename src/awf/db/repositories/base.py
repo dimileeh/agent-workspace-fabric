@@ -57,6 +57,17 @@ ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.validating.value,
     WorkspaceStatus.pushing.value,
     WorkspaceStatus.monitoring_pr.value,
+    # A blocked workspace keeps its worktree (and the owned paths it edits)
+    # while paused for the operator, so a concurrent create/retry with
+    # overlapping owned paths must still treat those paths as occupied. It
+    # also keeps its warm compose stack and bound host ports, so this status
+    # flows into HOST_PORT_CONFLICT_STATUSES below via the splat.
+    WorkspaceStatus.blocked.value,
+    # A recovering workspace likewise keeps its worktree + warm stack + bound
+    # host ports while it auto-retries across the provider cooldown (#612), so it
+    # holds the same owned-path/host-port occupancy (and flows into
+    # HOST_PORT_CONFLICT_STATUSES below via the splat).
+    WorkspaceStatus.recovering.value,
 )
 HOST_PORT_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
     *ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
@@ -96,6 +107,11 @@ ALLOCATED_RESOURCE_RESERVATION_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.validating.value,
     WorkspaceStatus.pushing.value,
     WorkspaceStatus.monitoring_pr.value,
+    # A blocked workspace holds its reservation while paused (keep-warm).
+    WorkspaceStatus.blocked.value,
+    # A recovering workspace holds its reservation while it auto-retries across
+    # the provider cooldown (keep-warm, #612).
+    WorkspaceStatus.recovering.value,
     WorkspaceStatus.destroying.value,
 )
 DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT: Final[int] = 4096

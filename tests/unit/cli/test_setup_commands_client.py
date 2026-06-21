@@ -600,3 +600,60 @@ def test_setup_client_codex_honors_codex_home(
     assert payload["details"]["config_path"] == str(codex_home / "config.toml")
     assert (codex_home / "config.toml").exists()
     assert not (client_harness.home / ".codex" / "config.toml").exists()
+
+
+class _MissingToDictMigration:
+    pass
+
+
+class _ListMigration:
+    def to_dict(self) -> list[str]:
+        return ["not", "a", "mapping"]
+
+
+class _DictMigration:
+    def to_dict(self) -> dict[str, object]:
+        return {"imported": ["OPENAI_API_KEY"], "conflicts": []}
+
+
+def _first_run_payload() -> setup_commands.FirstRunPayload:
+    return setup_commands.FirstRunPayload(
+        status="success",
+        command="awf setup",
+        summary="setup ok",
+        details={"client": "codex"},
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "migration",
+    [
+        _MissingToDictMigration(),
+        _ListMigration(),
+    ],
+)
+def test_payload_with_env_migration_ignores_unstructured_migration_objects(
+    migration: object,
+) -> None:
+    """Invalid migration helpers must leave the original setup payload unchanged."""
+    payload = _first_run_payload()
+
+    merged = setup_commands._payload_with_env_migration(payload, migration)
+
+    assert merged is payload
+    assert merged.details == {"client": "codex"}
+
+
+@pytest.mark.unit
+def test_payload_with_env_migration_adds_structured_details() -> None:
+    """Structured migration details are attached without discarding existing details."""
+    payload = _first_run_payload()
+
+    merged = setup_commands._payload_with_env_migration(payload, _DictMigration())
+
+    assert merged is not payload
+    assert merged.details == {
+        "client": "codex",
+        "env_migration": {"imported": ["OPENAI_API_KEY"], "conflicts": []},
+    }

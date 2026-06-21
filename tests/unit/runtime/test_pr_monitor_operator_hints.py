@@ -33,17 +33,18 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorConfig,
     MonitorState,
-    NotifyHuman,
     OperatorHint,
     PRStatus,
     decide,
 )
 from awf.runtime.pr_monitor_runner import helpers as runner_helpers
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.constants import _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
@@ -437,6 +438,77 @@ async def test_operator_hint_repair_marks_runtime_ownership_failure_as_needs_hum
         requested_at=hint.requested_at,
         status="needs_human",
         status_reason="agent runtime ownership repair failed",
+    )
+
+
+@pytest.mark.unit
+async def test_operator_hint_repair_marks_head_object_missing_as_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint repair cannot resolve poisoned head",
+        operation_id="op_head_object_missing_hint",
+        requested_at="2026-06-19T08:00:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _head_object_missing(**kwargs: object) -> VerdictResult:
+        assert kwargs["operation_start_head"] == "abc1234567890def"
+        raise _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            "HEAD commit object is missing from the canonical mirror",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _head_object_missing)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_head_object_missing",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_head_object_missing",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is True
+    assert result.returncode == 1
+    assert result.stderr == "HEAD commit object is missing from the canonical mirror"
+    assert result.reason_code == _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+    assert state.pending_operator_hint == OperatorHint(
+        reason=hint.reason,
+        operation_id=hint.operation_id,
+        requested_at=hint.requested_at,
+        status="needs_human",
+        status_reason="HEAD commit object is missing from the canonical mirror",
     )
 
 
@@ -1308,160 +1380,3 @@ async def test_persist_state_preserves_concurrent_processed_operator_hint_marker
     assert monitor_state[operator_hint_processed_key("op_hint_processed_elsewhere")] == "processed"
     assert monitor_state["review-thread"] == "fix_committed"
     assert monitor_state["second-thread"] == "fix_committed"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("terminal_status", ["needs_human", "agent_failed"])
-async def test_persist_state_preserves_concurrent_terminal_operator_hint_status(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    terminal_status: Literal["needs_human", "agent_failed"],
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    pending_hint = OperatorHint(
-        reason="investigate the operator supplied remonitor hint",
-        operation_id="op_hint_terminal_elsewhere",
-        requested_at="2026-05-31T00:30:00+00:00",
-    )
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        workspace.monitor_threads_addressed = persist_operator_hint({}, pending_hint)
-        await session.commit()
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path,
-    )
-
-    stale_workspace = await runner._load_workspace(workspace_id)
-    stale_state = runner._load_state(stale_workspace)
-    assert stale_state.pending_operator_hint == pending_hint
-
-    terminal_reason = "agent already determined this hint requires human attention"
-    terminal_hint = OperatorHint(
-        reason=pending_hint.reason,
-        operation_id=pending_hint.operation_id,
-        requested_at=pending_hint.requested_at,
-        status=terminal_status,
-        status_reason=terminal_reason,
-    )
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        workspace.monitor_threads_addressed = persist_operator_hint({}, terminal_hint)
-        await session.commit()
-
-    stale_state.mark_addressed("second-thread", "fix_committed")
-    await runner._persist_state(workspace_id, stale_state)
-
-    async with factory() as session:
-        persisted = await WorkspaceRepository(session).get(workspace_id)
-
-    assert persisted is not None
-    monitor_state = dict(persisted.monitor_threads_addressed)
-    persisted_hint = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
-    assert persisted_hint["operation_id"] == "op_hint_terminal_elsewhere"
-    assert persisted_hint["status"] == terminal_status
-    assert persisted_hint["status_reason"] == terminal_reason
-    assert monitor_state["second-thread"] == "fix_committed"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("terminal_status", ["needs_human", "agent_failed"])
-async def test_refresh_operator_state_imports_concurrent_terminal_same_operation_hint(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    terminal_status: Literal["needs_human", "agent_failed"],
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    pending_hint = OperatorHint(
-        reason="investigate the operator supplied remonitor hint",
-        operation_id="op_hint_refresh_terminal_elsewhere",
-        requested_at="2026-05-31T00:45:00+00:00",
-    )
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        workspace.monitor_threads_addressed = persist_operator_hint({}, pending_hint)
-        await session.commit()
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path,
-    )
-
-    stale_workspace = await runner._load_workspace(workspace_id)
-    stale_state = runner._load_state(stale_workspace)
-    assert stale_state.pending_operator_hint == pending_hint
-    assert await runner._refresh_operator_state_from_workspace(workspace_id, stale_state) is False
-    assert stale_state.pending_operator_hint == pending_hint
-
-    terminal_reason = "another monitor pass could not safely apply the hint"
-    terminal_hint = OperatorHint(
-        reason=pending_hint.reason,
-        operation_id=pending_hint.operation_id,
-        requested_at=pending_hint.requested_at,
-        status=terminal_status,
-        status_reason=terminal_reason,
-    )
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        workspace.monitor_threads_addressed = persist_operator_hint({}, terminal_hint)
-        await session.commit()
-
-    changed = await runner._refresh_operator_state_from_workspace(workspace_id, stale_state)
-    action = decide(_ready_status(), stale_state, MonitorConfig(auto_merge=True))
-
-    assert changed is True
-    assert stale_state.pending_operator_hint == terminal_hint
-    assert isinstance(action, NotifyHuman)
-
-
-@pytest.mark.unit
-async def test_refresh_operator_state_clears_processed_operator_hint_marker(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    hint = OperatorHint(
-        reason="operator hint was processed by another monitor pass",
-        operation_id="op_hint_refresh_processed_elsewhere",
-        requested_at="2026-05-31T01:05:00+00:00",
-    )
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        workspace.monitor_threads_addressed = persist_operator_hint({}, hint)
-        await session.commit()
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path,
-    )
-
-    stale_workspace = await runner._load_workspace(workspace_id)
-    stale_state = runner._load_state(stale_workspace)
-    assert stale_state.pending_operator_hint == hint
-
-    processed_key = operator_hint_processed_key("op_hint_refresh_processed_elsewhere")
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        workspace.monitor_threads_addressed = {processed_key: "processed"}
-        await session.commit()
-
-    changed = await runner._refresh_operator_state_from_workspace(workspace_id, stale_state)
-    action = decide(_ready_status(), stale_state, MonitorConfig(auto_merge=True))
-
-    assert changed is True
-    assert stale_state.pending_operator_hint is None
-    assert stale_state.threads_addressed_ids[processed_key] == "processed"
-    assert isinstance(action, Merge)

@@ -1210,7 +1210,12 @@ class TestSyncReleasePrHandoff:
         fake.queue_result(returncode=0)  # post-setup git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # post-setup git rev-list --count
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> no existing PR
-        fake.queue_result(returncode=1, stderr="gh: API rate limit exceeded")  # gh pr create fails
+        # A *non-transient* gh pr create error (issue #PRRT retry hardening) must
+        # fail cleanly on the first attempt — no bounded retry, no reconcile lookup
+        # — so it surfaces as RELEASE_SYNC_GITHUB_ERROR before the monitor runs.
+        # A transient error (e.g. a rate limit) would instead be retried; that path
+        # is covered by test_release_pr_sync's exhaustion test.
+        fake.queue_result(returncode=1, stderr="gh: Bad credentials")  # gh pr create fails
 
         ws_id = await _seed_ready(
             factory,

@@ -99,9 +99,14 @@ query.json
 # Generated dogfood/workspace artifacts (keep the canonical files only).
 # AWF writes per-workspace plan/conformance/validation files here at runtime
 # (the awf-self profile's `plan_path: docs/awf-plans/{workspace_id}.md`); they
-# are not part of the public source tree.
-/docs/awf-plans/*
-!/docs/awf-plans/README.md
+# are not part of the public source tree. The `**/` prefix de-anchors the rule
+# so the folder is ignored at ANY depth: an agent that writes the plan from a
+# subdir CWD (e.g. `apps/console/docs/awf-plans/`) is still covered (#620). We
+# ignore the directory *contents* (trailing `/*`), not the directory itself, so
+# the `README.md` re-inclusion below keeps working — git cannot re-include a
+# file whose parent directory is excluded.
+**/docs/awf-plans/*
+!docs/awf-plans/README.md
 /TODO/
 # NOTE: `plans/` is intentionally NOT ignored — the Plan-and-Validate protocol
 # (AGENTS.md) requires committing `plans/<TOPIC>_PLAN.md` and

@@ -60,8 +60,16 @@ def _deposit_planning_artifacts_best_effort(
             error_type=type(exc).__name__,
         )
         return
+    config = getattr(self, "_config", None)
+    compose_projects_root = getattr(config, "compose_projects_root", None)
+    if compose_projects_root is None:
+        _log.warning(
+            "executor.planning_artifact_deposit_skipped_missing_artifact_root",
+            workspace_id=workspace_id,
+        )
+        return
     deposit_workspace_planning_artifacts(
-        work_dir=self._config.compose_projects_root.parent,
+        work_dir=compose_projects_root.parent,
         workspace_id=workspace_id,
         worktree_path=worktree_path,
         plan_path=plan_path,

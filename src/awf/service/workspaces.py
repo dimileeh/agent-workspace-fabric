@@ -65,6 +65,7 @@ from awf.service.disk import DiskCheck
 from awf.service.node_identity import effective_worker_node_id
 from awf.service.operations import decode_operation_list_cursor
 from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
+from awf.service.provider_recovery import provider_cooldown_not_before
 from awf.service.resource_capacity import (
     ReservedResources,
     WorkspaceResourceDefaults,
@@ -190,6 +191,43 @@ class WorkspaceRetryNotAllowedError(WorkspaceRetryError):
             detail={
                 "status": workspace.status,
                 "retryable_statuses": [status.value for status in RETRYABLE_WORKSPACE_STATUSES],
+            },
+        )
+
+
+class WorkspaceRetryRecoveringInFlightError(WorkspaceRetryError):
+    """Raised when a manual retry collides with an in-flight in-place auto-retry.
+
+    A workspace in :class:`WorkspaceStatus.recovering` is already mid auto-retry:
+    the provider failed transiently, the workspace held its warm stack + execution
+    claim, and the worker will resume it in place once the provider cooldown
+    elapses. A manual ``awf workspace retry`` here would only spawn a duplicate
+    workspace racing the auto-retry (the original #612 ``ws_d8a285`` incident), so
+    the ``recovering`` status acts as the dedup guard and this no-op rejection
+    surfaces the cooldown ETA instead of creating a new workspace.
+    """
+
+    error_code = "WORKSPACE_AUTO_RETRY_IN_FLIGHT"
+
+    def __init__(self, workspace: Workspace) -> None:
+        """Initialise with the recovering workspace and its cooldown ETA."""
+        not_before = provider_cooldown_not_before(workspace.task_policy)
+        if not_before is not None:
+            eta_iso: str | None = not_before.isoformat()
+            resume_clause = f"resumes ~{eta_iso}"
+        else:
+            eta_iso = None
+            resume_clause = "resumes after the provider cooldown"
+        super().__init__(
+            (
+                f"Auto-retry in flight; the in-place provider retry {resume_clause}. "
+                "The cooldown protects against re-hitting the stalled provider, so a "
+                "manual retry would only duplicate it."
+            ),
+            detail={
+                "status": WorkspaceStatus.recovering.value,
+                "provider_cooldown_not_before": eta_iso,
+                "reason": "auto_retry_in_flight",
             },
         )
 
@@ -796,15 +834,21 @@ class WorkspaceService:
         *,
         directive: str,
         reason: str | None = None,
+        grants: builtins.list[str] | None = None,
+        approve_policy_downgrade: bool = False,
+        operator: str | None = None,
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
-        """Inject an operator directive into a live monitoring workspace."""
+        """Inject an operator directive and/or scoped grants into a workspace."""
         async with self._factory() as s:
             result = await self._controls(s).guide_workspace(
                 workspace_id,
                 directive=directive,
                 reason=reason,
+                grants=grants,
+                approve_policy_downgrade=approve_policy_downgrade,
+                operator=operator,
                 idempotency_key=idempotency_key,
                 expected_version=expected_version,
             )
@@ -1334,6 +1378,7 @@ __all__ = [
     "WorkspaceRetryError",
     "WorkspaceRetryNotFoundError",
     "WorkspaceRetryNotAllowedError",
+    "WorkspaceRetryRecoveringInFlightError",
     "WorkspaceRetryExhaustedError",
     "WorkspaceRetrySalvageUnavailableError",
     "WorkspaceProviderReadinessBlockedError",

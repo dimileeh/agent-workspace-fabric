@@ -6,6 +6,8 @@ export type WorkspaceStatus =
   | "validating"
   | "pushing"
   | "monitoring_pr"
+  | "blocked"
+  | "recovering"
   | "completed"
   | "failed"
   | "cancelled"
@@ -206,6 +208,8 @@ export interface WorkspaceOverview {
   pr_number?: number | null;
   failure_reason: string | null;
   failure_message: string | null;
+  // Authoritative pause start, present only while `status === "blocked"`.
+  blocked_at?: string | null;
   latest_queue_decision?: QueueDecisionSummary | null;
   active_resource_reservation?: ResourceReservationSummary | null;
   created_at: string;
@@ -458,6 +462,27 @@ export interface ProfileSecurity {
   host_home_auth_mounts: HostHomeAuthMountPolicy;
 }
 
+// A single protected-file violation recorded when a workspace paused (blocked).
+// Mirrors `WorkspaceBlockViolationResponse` (api/schemas.py) exactly.
+export interface WorkspaceBlockViolation {
+  path: string | null;
+  protected_pattern: string | null;
+  section: string | null;
+  line: number | null;
+  reason: string | null;
+}
+
+// Operator-facing block details surfaced while a workspace is `blocked`. Mirrors
+// `WorkspaceBlockStateResponse` (api/schemas.py); only on the full GET response.
+export interface WorkspaceBlockState {
+  block_type: string | null;
+  block_reason_code: string | null;
+  block_resume_phase: string | null;
+  block_epoch: number;
+  blocked_at: string | null;
+  violations: WorkspaceBlockViolation[];
+}
+
 export interface Workspace {
   id: string;
   status: WorkspaceStatus;
@@ -506,6 +531,7 @@ export interface Workspace {
   pr_number?: number | null;
   failure_reason: string | null;
   failure_message: string | null;
+  block_state?: WorkspaceBlockState | null;
   secret_leases: WorkspaceSecretLease[];
   policy_findings: PolicyFinding[];
   egress_audit: WorkspaceEgressAudit | null;
@@ -650,6 +676,8 @@ export interface WorkspaceSaturationCounts {
   validating: number;
   pushing: number;
   monitoring_pr: number;
+  blocked: number;
+  recovering: number;
   destroying: number;
   completed: number;
   failed: number;

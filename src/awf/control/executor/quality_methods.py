@@ -48,6 +48,7 @@ from awf.control.executor.quality_gates import (
     _PostAgentCommitClassification,
     _PostAgentCommitStepError,
 )
+from awf.control.executor.state_ops import ProviderFailureDivert
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import _CoverageEvidenceResult
 from awf.control.protected_file_diffs import (
@@ -56,6 +57,7 @@ from awf.control.protected_file_diffs import (
 )
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
+    QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
     changed_paths_are_only_internal_plan_artifacts,
     find_protected_quality_gate_changes,
     plan_only_output_message,
@@ -99,6 +101,41 @@ async def _run_baseline_coverage_preflight(
         compose_file=compose_file,
         profile=profile,
     )
+
+
+async def _measure_and_persist_baseline_coverage(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    profile: WorkspaceProfile,
+    reuse: ValidationCoverageResult | None = None,
+    skip_measure: bool = False,
+) -> ValidationCoverageResult | None:
+    """Measure the pre-agent baseline coverage and persist it for blocked-resume.
+
+    On a fresh run the measurement reflects base coverage (the agent has not yet
+    mutated the worktree); persisting it lets a later pause into ``blocked`` hand
+    the original base back to the resume path. A directive resume passes
+    ``skip_measure=True`` to keep the already-reused base (``reuse``) instead of
+    recomputing against the mutated blocked worktree.
+    """
+    if skip_measure:
+        return reuse
+    baseline_coverage: (
+        ValidationCoverageResult | None
+    ) = await self._run_baseline_coverage_preflight(
+        workspace_id=workspace_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        profile=profile,
+    )
+    await self._persist_block_baseline_coverage(
+        workspace_id,
+        baseline_coverage=baseline_coverage,
+    )
+    return baseline_coverage
 
 
 async def _run_final_coverage_gate(
@@ -166,6 +203,8 @@ async def _verify_recovered_post_agent_commit(
     base_commit: str,
     owned_paths: list[str],
     expected_status: WorkspaceStatus,
+    execution_owner_id: str | None = None,
+    mark_failed_on_failure: bool = True,
 ) -> bool:
     changed_paths = sorted(
         await committed_changed_paths_since(
@@ -175,19 +214,20 @@ async def _verify_recovered_post_agent_commit(
         )
     )
     if not changed_paths:
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=expected_status,
-            failure_reason=FailureReason.agent_failure,
-            message=(
-                "AWF recovered a missing Git HEAD object but recovered no "
-                f"committed paths relative to base {base_commit[:10]}"
-            )[:2000],
-            reason_code=GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
-            details={"recovered_stage": "post_agent_commit"},
-        )
+        if mark_failed_on_failure:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=expected_status,
+                failure_reason=FailureReason.agent_failure,
+                message=(
+                    "AWF recovered a missing Git HEAD object but recovered no "
+                    f"committed paths relative to base {base_commit[:10]}"
+                )[:2000],
+                reason_code=GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+                details={"recovered_stage": "post_agent_commit"},
+            )
         return False
-    if await self._fail_if_plan_only_paths(
+    if mark_failed_on_failure and await self._fail_if_plan_only_paths(
         workspace_id=workspace_id,
         changed_paths=changed_paths,
         expected_status=expected_status,
@@ -204,15 +244,19 @@ async def _verify_recovered_post_agent_commit(
         changed_paths=changed_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
     )
     if violations:
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=expected_status,
-            failure_reason=FailureReason.policy_failure,
-            reason_code="QUALITY_GATE_POLICY_CHANGED",
-            message=quality_gate_violation_message(violations)[:2000],
-        )
+        # Pause for an operator decision instead of terminally failing — the
+        # recovered commit + worktree are preserved through the block.
+        if mark_failed_on_failure:
+            await self.enter_blocked_for_protected_violation(
+                workspace_id=workspace_id,
+                from_status=expected_status,
+                violations=violations,
+                resume_phase="post_agent_commit_recovery_verify",
+                execution_owner_id=execution_owner_id,
+            )
         return False
     ancestor = await self._runner.run(
         [
@@ -227,15 +271,16 @@ async def _verify_recovered_post_agent_commit(
         ]
     )
     if not ancestor.ok:
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=expected_status,
-            failure_reason=FailureReason.agent_failure,
-            message=(
-                "AWF recovered a missing Git HEAD object but recovered HEAD "
-                f"does not descend from base commit {base_commit[:10]}"
-            )[:2000],
-        )
+        if mark_failed_on_failure:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=expected_status,
+                failure_reason=FailureReason.agent_failure,
+                message=(
+                    "AWF recovered a missing Git HEAD object but recovered HEAD "
+                    f"does not descend from base commit {base_commit[:10]}"
+                )[:2000],
+            )
         return False
     return True
 
@@ -248,6 +293,8 @@ async def _verify_recovered_post_agent_commit_or_mark_failed(
     base_commit: str,
     owned_paths: list[str],
     expected_status: WorkspaceStatus,
+    execution_owner_id: str | None = None,
+    mark_failed_on_failure: bool = True,
 ) -> bool:
     try:
         return cast(
@@ -258,6 +305,8 @@ async def _verify_recovered_post_agent_commit_or_mark_failed(
                 base_commit=base_commit,
                 owned_paths=owned_paths,
                 expected_status=expected_status,
+                execution_owner_id=execution_owner_id,
+                mark_failed_on_failure=mark_failed_on_failure,
             ),
         )
     except Exception as exc:
@@ -265,13 +314,14 @@ async def _verify_recovered_post_agent_commit_or_mark_failed(
             "executor.commit_step_missing_head_recovery_verification_failed",
             workspace_id=workspace_id,
         )
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=expected_status,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=(f"post-agent missing HEAD recovery verification failed: {exc!r}")[:2000],
-            reason_code=GIT_OBJECT_MISSING_REASON_CODE,
-        )
+        if mark_failed_on_failure:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=expected_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(f"post-agent missing HEAD recovery verification failed: {exc!r}")[:2000],
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
         return False
 
 
@@ -379,6 +429,7 @@ async def _fail_if_protected_quality_gate_committed_output(
     base_commit: str,
     owned_paths: list[str],
     expected_status: WorkspaceStatus,
+    execution_owner_id: str | None = None,
 ) -> bool:
     changed_paths = sorted(
         await committed_changed_paths_since(
@@ -400,15 +451,17 @@ async def _fail_if_protected_quality_gate_committed_output(
         changed_paths=changed_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
     )
     if not violations:
         return False
-    await self._mark_failed(
+    # Pause for an operator decision instead of terminally failing.
+    await self.enter_blocked_for_protected_violation(
         workspace_id=workspace_id,
         from_status=expected_status,
-        failure_reason=FailureReason.policy_failure,
-        reason_code="QUALITY_GATE_POLICY_CHANGED",
-        message=quality_gate_violation_message(violations)[:2000],
+        violations=violations,
+        resume_phase="post_agent_commit_committed_output",
+        execution_owner_id=execution_owner_id,
     )
     return True
 
@@ -1045,6 +1098,7 @@ async def _run_post_agent_semantic_precommit_repair(
             changed_paths=repair_staged_paths,
             owned_paths=list(ws.owned_paths),
         ),
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
     )
     if violations:
         result = CommandResult(
@@ -1071,6 +1125,7 @@ async def _run_post_agent_semantic_precommit_repair(
             repair_strategy="agent",
             reason_code_override="QUALITY_GATE_POLICY_CHANGED",
             failure_reason_override=FailureReason.policy_failure,
+            protected_violations=violations,
         )
 
     retry_result = await run_commit()
@@ -1157,6 +1212,7 @@ async def _mark_post_agent_commit_failed(
     agent_run_details: Mapping[str, Any] | None,
     agent_exit_note: str | None,
     upstream_failure_reason: FailureReason | None,
+    execution_owner_id: str | None = None,
 ) -> None:
     """Route a ``_PostAgentCommitStepError`` to ``_mark_failed`` with
     structured reason codes.
@@ -1177,6 +1233,24 @@ async def _mark_post_agent_commit_failed(
     a downstream commit failure must NOT be re-classified as
     ``agent_failure`` and MUST NOT queue provider recovery.
     """
+    # A protected quality-gate violation surfaced by the semantic pre-commit
+    # repair gate pauses the workspace for an operator decision instead of
+    # terminally failing — but only when there is no genuine upstream agent
+    # failure (a real agent failure is not operator-resolvable here).
+    if (
+        error.reason_code_override == QUALITY_GATE_POLICY_CHANGED_REASON_CODE
+        and error.protected_violations
+        and upstream_failure_reason != FailureReason.agent_failure
+    ):
+        await self.enter_blocked_for_protected_violation(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            violations=error.protected_violations,
+            resume_phase="post_agent_precommit_repair",
+            execution_owner_id=execution_owner_id,
+        )
+        return
+
     classification = error.classification
     if error.reason_code_override is not None:
         commit_reason_code = error.reason_code_override
@@ -1233,6 +1307,24 @@ async def _mark_post_agent_commit_failed(
             base_message = f"{base_message}: {summary_text}"
         if agent_exit_note is not None:
             base_message = f"{base_message}; {agent_exit_note}"
+        # Same divert as the no-commits agent-failure fork: a retryable provider
+        # failure with budget remaining pauses into ``recovering`` for in-place
+        # retry BEFORE the terminal teardown, instead of fail-and-relaunch (#612).
+        divert = await self.enter_recovering_for_provider_failure(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            message=base_message[:2000],
+            reason_code=agent_run_reason_code,
+            details=details,
+            execution_owner_id=execution_owner_id,
+        )
+        # ``paused`` (entered ``recovering`` for in-place retry) or ``fenced`` (a
+        # newer claimant holds the running row) both skip the terminal teardown:
+        # the fenced skip stops a stale executor from driving a newer claimant's
+        # running row to ``failed`` through the non-owner-gated ``_mark_failed``
+        # below (the D7 terminal-CAS fence the provisioner already applies, #421).
+        if divert is not ProviderFailureDivert.terminal:
+            return
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
