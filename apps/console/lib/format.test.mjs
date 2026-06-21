@@ -176,9 +176,13 @@ test("normalizeLifecycle appends blocked when no later stage is present to ancho
   ]);
 });
 
-test("fallbackLifecycleStages does not claim execution stages completed for a recovering workspace", () => {
-  // `recovering` is a mid-run provider pause that resumes back to running; like
-  // blocked the fallback must not falsely render a later execution stage as done.
+test("fallbackLifecycleStages marks running completed for a recovering workspace", () => {
+  // `recovering` is contractually entered only from `running` (#612 state
+  // machine) and sits immediately after it, so the fallback knows `running` was
+  // reached: it marks `running` completed and only later execution stages
+  // pending — matching the real-data path (`normalizeLifecycle`). Unlike
+  // `blocked`, recovering's entry stage is not ambiguous, so no conservative
+  // guard is needed.
   const stages = Object.fromEntries(
     fallbackLifecycleStages("recovering").map((stage) => [stage.stage, stage.status]),
   );
@@ -186,7 +190,7 @@ test("fallbackLifecycleStages does not claim execution stages completed for a re
   assert.equal(stages.requested, "completed");
   assert.equal(stages.provisioning, "completed");
   assert.equal(stages.ready, "completed");
-  assert.equal(stages.running, "pending");
+  assert.equal(stages.running, "completed");
   assert.equal(stages.recovering, "active");
   assert.equal(stages.validating, "pending");
   assert.equal(stages.pushing, "pending");

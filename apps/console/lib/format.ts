@@ -53,10 +53,16 @@ export function fallbackLifecycleStages(
   // lifecycle data we can't tell which execution stage it paused at, so we must
   // NOT claim the execution stages completed (a validating-time pause would
   // otherwise falsely render `pushing` as done). Stages before execution
-  // (requested/provisioning/ready) are still safely "completed". `recovering`
-  // is the same shape — a mid-run provider pause — so it gets the same guard.
+  // (requested/provisioning/ready) are still safely "completed".
+  //
+  // `recovering` is deliberately NOT guarded: it is contractually entered only
+  // from `running` (#612 state machine) and sits immediately after `running` in
+  // this list, so its fixed position already matches its known entry stage. The
+  // plain index logic below then correctly marks `running` as completed and
+  // `recovering` as the active stage — matching the real-data path
+  // (`normalizeLifecycle`) — without falsely claiming any later stage done.
   const executionStartIndex = lifecycleStages.indexOf("running");
-  const pausesMidExecution = status === "blocked" || status === "recovering";
+  const pausesMidExecution = status === "blocked";
 
   return lifecycleStages.map((stage, index): WorkspaceLifecycleStage => {
     let stageStatus: WorkspaceLifecycleStage["status"];
