@@ -851,6 +851,18 @@ const searchParams = useSearchParams();
         stale: saturationStale,
       },
       {
+        // In-place provider retry: a `recovering` workspace auto-heals after the
+        // provider cooldown (resumes in place, no operator action) while it still
+        // holds its slot + stack. Like `blocked` it counts inside Active
+        // (active_total) but NOT inside Running — it is paused, not executing.
+        // The `info` tone (vs blocked's `warn`) signals "no action needed".
+        id: "recovering",
+        label: "Auto-retrying",
+        value: counts ? (counts.recovering ?? 0) : dash,
+        tone: counts?.recovering ? "info" : undefined,
+        stale: saturationStale,
+      },
+      {
         id: "queued",
         label: "Queued",
         value: queued ?? dash,

@@ -59,6 +59,7 @@ ALLOWLIST = {
     "UNAUTHORIZED": "Grandfathered",
     "VERSION_CONFLICT": "Grandfathered",
     "WORKSPACE_ACTIVE": "Grandfathered",
+    "WORKSPACE_AUTO_RETRY_IN_FLIGHT": "Grandfathered",
     "WORKSPACE_NOT_FOUND": "Grandfathered",
     "WORKSPACE_NOT_RETRYABLE": "Grandfathered",
     "WORKSPACE_OPERATION_CONFLICT": "Grandfathered",
