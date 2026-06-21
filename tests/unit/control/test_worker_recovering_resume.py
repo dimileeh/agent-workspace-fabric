@@ -549,6 +549,126 @@ async def test_recovering_resume_rearms_cooldown_when_worktree_reset_fails(
     assert selected == []
 
 
+class _FailingRecoveringExecutor:
+    """Executor whose recovering resume raises after the claim CAS (post-claim failure).
+
+    Mimics a persistent transient executor/setup failure: the resume CAS already
+    committed ``recovering -> running``, then ``resume_recovering_execution`` raises
+    before moving the row onward, exercising the ``except Exception`` restore path.
+    """
+
+    def __init__(self) -> None:
+        self.resume_recovering_calls: list[str] = []
+
+    async def execute(self, workspace_id: str, **_kwargs: object) -> None:  # pragma: no cover
+        del workspace_id
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:  # pragma: no cover
+        del workspace_id
+
+    async def resume_recovering_execution(self, workspace_id: str, **_kwargs: object) -> None:
+        self.resume_recovering_calls.append(workspace_id)
+        raise RuntimeError("post-claim executor failure")
+
+
+@pytest.mark.unit
+async def test_recovering_resume_rearms_cooldown_when_executor_resume_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+    tmp_path: Path,
+) -> None:
+    # Regression (#647): when the worktree reset succeeds but the executor's
+    # recovering resume raises after the claim CAS (a post-claim transient
+    # executor/setup failure), the row is restored to ``recovering`` — and its
+    # ``provider_recovery_state.not_before`` must be re-armed into the future, the
+    # same way the worktree-reset-abort path backs off. Otherwise the cooldown
+    # stays in the past and a *persistent* executor failure busy-loops the executor
+    # slot, repeatedly re-claiming and failing every poll.
+    worktree = tmp_path / "clean-worktree"
+    worktree.mkdir()
+    _git(["init", "-q", "-b", "development"], worktree)
+    _git(["config", "user.name", "T"], worktree)
+    _git(["config", "user.email", "t@t"], worktree)
+    (worktree / "tracked.py").write_text("clean\n")
+    _git(["add", "."], worktree)
+    _git(["commit", "-q", "-m", "base"], worktree)
+
+    ws_id = await _create_recovering(
+        session_factory,
+        origin_repo,
+        "executor-fails",
+        not_before=datetime.now(UTC) - timedelta(seconds=5),
+    )
+    executor = _FailingRecoveringExecutor()
+    worker = _worker(
+        session_factory,
+        executor,  # type: ignore[arg-type]
+        provisioner=_TransitioningProvisioner(worktree_path=worktree),
+    )
+    assert await worker._claim_recovering_for_resume(ws_id)  # noqa: SLF001
+
+    before = datetime.now(UTC)
+    await asyncio.wait_for(
+        worker._safely_resume_recovering_claimed(ws_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    # The executor was reached (clean reset succeeded) but raised post-claim.
+    assert executor.resume_recovering_calls == [ws_id]
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.recovering.value
+        # The claim was released so a capable worker can re-claim it later.
+        assert ws.execution_claimed_by is None
+        # The cooldown was re-armed into the future, preserving the rest of state.
+        recovery_state = ws.task_policy["provider_recovery_state"]
+        assert recovery_state["retry_attempt_number"] == 1
+        rearmed = datetime.fromisoformat(recovery_state["not_before"])
+        assert rearmed > before + timedelta(seconds=60)
+
+    # The backed-off row is no longer immediately resumable.
+    selected = await worker._list_resumable_recovering(  # noqa: SLF001
+        now=datetime.now(UTC), limit=10
+    )
+    assert selected == []
+
+
+@pytest.mark.unit
+async def test_restore_recovering_resume_claim_rearms_cooldown_on_dispatch_abort(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # Regression (#647): the dispatch-abort revert (a claimed-but-undispatched row,
+    # e.g. a failed ordered-decision write) routes through
+    # ``_restore_recovering_resume_claim``. Like the worktree-reset-abort path it
+    # must re-arm ``not_before`` into the future, else a persistent dispatch abort
+    # re-selects the row every poll and busy-loops the executor slot.
+    ws_id = await _create_recovering(
+        session_factory,
+        origin_repo,
+        "dispatch-abort",
+        not_before=datetime.now(UTC) - timedelta(seconds=5),
+    )
+    worker = _worker(session_factory, _RecordingRecoveringExecutor())
+    # The claim CAS commits ``recovering -> running`` and stamps the claim.
+    assert await worker._claim_recovering_for_resume(ws_id)  # noqa: SLF001
+
+    before = datetime.now(UTC)
+    await worker._restore_recovering_resume_claim(  # noqa: SLF001
+        ws_id, reason_code="WORKER_RECOVERING_RESUME_DISPATCH_ABORTED"
+    )
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.recovering.value
+        recovery_state = ws.task_policy["provider_recovery_state"]
+        assert recovery_state["retry_attempt_number"] == 1
+        rearmed = datetime.fromisoformat(recovery_state["not_before"])
+        assert rearmed > before + timedelta(seconds=60)
+
+
 @pytest.mark.unit
 async def test_release_execution_claim_skips_recovering_workspace(
     session_factory: async_sessionmaker[AsyncSession],

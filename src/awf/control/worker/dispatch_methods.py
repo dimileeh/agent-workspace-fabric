@@ -338,11 +338,18 @@ async def _safely_resume_paused_claimed(
         # next worker treats it as a *stale active execution* (FAILing it) rather
         # than a resumable pause. Restore the paused state first (owner-gated, and a
         # no-op once the resume has already transitioned the row past ``running``)
-        # so the next cycle resumes it cleanly.
+        # so the next cycle resumes it cleanly. Re-arm the provider cooldown (#647)
+        # for a ``recovering`` revert exactly like the worktree-reset-abort path
+        # above: a persistent executor/setup failure leaves ``not_before`` in the
+        # past, so without re-arming ``list_resumable_recovering_ids`` would
+        # re-select the row every poll and busy-loop the executor slot instead of
+        # backing off a full cooldown before the next safe retry. ``blocked`` reverts
+        # carry no cooldown, so the rearm is gated to ``recovering``.
         await self._restore_paused_resume_claim(
             workspace_id,
             reason=reason,
             reason_code=_PAUSED_RESUME_EXECUTION_FAILED_REASON_CODE[reason],
+            rearm_recovering_cooldown=reason == "recovering",
         )
     finally:
         heartbeat.cancel()

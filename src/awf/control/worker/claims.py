@@ -647,10 +647,12 @@ async def _restore_paused_resume_claim(
     the resume was abandoned (no executor vs. an aborted post-claim dispatch).
 
     ``rearm_recovering_cooldown`` (#647) re-arms ``provider_recovery_state``
-    ``not_before`` to a fresh cooldown for the worktree-reset-abort path: that path
-    leaves the cooldown in the past, so without re-arming ``list_resumable_recovering_ids``
-    would re-select the row every poll and a persistent ``git`` failure would
-    busy-loop the executor slot instead of backing off for a later safe retry."""
+    ``not_before`` to a fresh cooldown for every ``recovering`` revert that did not
+    make progress (worktree-reset abort, post-claim executor failure, and
+    dispatch abort): those paths leave the cooldown in the past, so without
+    re-arming ``list_resumable_recovering_ids`` would re-select the row every poll
+    and a persistent failure would busy-loop the executor slot instead of backing
+    off for a later safe retry."""
     try:
         async with self._session_factory() as session:
             ws = await WorkspaceRepository(session).transition_if_current(
@@ -692,9 +694,20 @@ async def _restore_blocked_resume_claim(self: Any, workspace_id: str, *, reason_
 async def _restore_recovering_resume_claim(
     self: Any, workspace_id: str, *, reason_code: str
 ) -> None:
-    """Revert a won recovering-resume to ``recovering`` — shim over ``_restore_paused_resume_claim`` (#612)."""
+    """Revert a won recovering-resume to ``recovering`` — shim over ``_restore_paused_resume_claim`` (#612).
+
+    Re-arms the provider cooldown (#647) like the worktree-reset-abort path: this
+    shim drives the post-claim dispatch-abort revert (a failed ordered-decision
+    write, etc.), which leaves ``not_before`` in the past. Without re-arming a
+    persistent dispatch abort would let ``list_resumable_recovering_ids`` re-select
+    the row every poll and busy-loop the executor slot instead of backing off a
+    full cooldown before the next safe retry."""
     await _restore_paused_resume_claim(
-        self, workspace_id, reason="recovering", reason_code=reason_code
+        self,
+        workspace_id,
+        reason="recovering",
+        reason_code=reason_code,
+        rearm_recovering_cooldown=True,
     )
 
 
