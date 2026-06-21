@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -369,6 +369,150 @@ async def test_list_resumable_blocked_ids_sqlite_validates_directive_string_type
     # must mirror that so a reason-less directive cannot be selected.
     assert "json_type(workspaces.pending_operator_hint, '$.reason') = 'text'" in sql
     assert "json_extract(workspaces.pending_operator_hint, '$.reason')" in sql
+
+
+async def _recovering_workspace(
+    session: AsyncSession,
+    *,
+    not_before: datetime | None,
+) -> Workspace:
+    workspace = await _workspace(session)
+    workspace.status = WorkspaceStatus.recovering.value
+    state: dict[str, object] = {"action": "retry", "retry_attempt_number": 1}
+    if not_before is not None:
+        state["not_before"] = not_before.isoformat()
+    workspace.task_policy = {"provider_recovery_state": state}
+    await session.flush()
+    return workspace
+
+
+@pytest.mark.unit
+async def test_list_resumable_recovering_ids_cooldown_gate(session: AsyncSession) -> None:
+    """Only ``recovering`` rows whose provider cooldown has elapsed are selected (#612)."""
+    repo = WorkspaceRepository(session)
+    now = datetime(2026, 6, 20, 12, 0, tzinfo=UTC)
+
+    cooled = await _recovering_workspace(session, not_before=now - timedelta(seconds=1))
+    # Still inside the cooldown → excluded (the worker must not resume early).
+    await _recovering_workspace(session, not_before=now + timedelta(seconds=300))
+    # No cooldown deadline at all → excluded (left to stale-active recovery).
+    await _recovering_workspace(session, not_before=None)
+    # A different non-terminal status is never a recovering-resume candidate.
+    running = await _workspace(session)
+    running.task_policy = {
+        "provider_recovery_state": {"not_before": (now - timedelta(seconds=10)).isoformat()}
+    }
+    await session.flush()
+
+    selected = await repo.list_resumable_recovering_ids(limit=10, now=now)
+    assert selected == [cooled.id]
+
+
+@pytest.mark.unit
+async def test_list_resumable_recovering_ids_scopes_to_owning_node(session: AsyncSession) -> None:
+    """A recovering workspace's warm stack lives on the node that ran it."""
+    repo = WorkspaceRepository(session)
+    now = datetime(2026, 6, 20, 12, 0, tzinfo=UTC)
+    elapsed = now - timedelta(seconds=5)
+
+    on_node_a = await _recovering_workspace(session, not_before=elapsed)
+    on_node_a.node_id = "node-a"
+    on_node_b = await _recovering_workspace(session, not_before=elapsed)
+    on_node_b.node_id = "node-b"
+    unstamped = await _recovering_workspace(session, not_before=elapsed)
+    await session.flush()
+
+    assert set(await repo.list_resumable_recovering_ids(limit=10, now=now, node_id="node-a")) == {
+        on_node_a.id,
+        unstamped.id,
+    }
+    assert set(await repo.list_resumable_recovering_ids(limit=10, now=now)) == {
+        on_node_a.id,
+        on_node_b.id,
+        unstamped.id,
+    }
+    # ``exclude_ids`` drops in-flight rows; a non-positive limit short-circuits.
+    assert unstamped.id not in await repo.list_resumable_recovering_ids(
+        limit=10, now=now, exclude_ids={unstamped.id}
+    )
+    assert await repo.list_resumable_recovering_ids(limit=0, now=now) == []
+
+
+@pytest.mark.unit
+async def test_list_resumable_recovering_ids_accepts_z_suffixed_not_before(
+    session: AsyncSession,
+) -> None:
+    """A ``Z``-suffixed UTC deadline still orders chronologically (TIMESTAMPTZ cast).
+
+    Raw ISO-string comparison would mis-rank ``...:00Z`` against the
+    ``...:00.<us>+00:00`` form of ``now`` (``'Z' > '.'`` / ``'Z' > '+'`` in ASCII)
+    and strand the elapsed row in ``recovering`` forever; the PostgreSQL cast to
+    ``TIMESTAMPTZ`` keeps the gate correct regardless of offset spelling.
+    """
+    repo = WorkspaceRepository(session)
+    now = datetime(2026, 6, 20, 12, 0, 0, 500000, tzinfo=UTC)
+
+    elapsed_z = await _workspace(session)
+    elapsed_z.status = WorkspaceStatus.recovering.value
+    # Half a second in the past, but written with a ``Z`` suffix (not isoformat()):
+    # lexically "2026-06-20T12:00:00Z" > "2026-06-20T12:00:00.500000+00:00".
+    elapsed_z.task_policy = {
+        "provider_recovery_state": {
+            "action": "retry",
+            "retry_attempt_number": 1,
+            "not_before": "2026-06-20T12:00:00Z",
+        }
+    }
+    await session.flush()
+
+    selected = await repo.list_resumable_recovering_ids(limit=10, now=now)
+    assert selected == [elapsed_z.id]
+
+
+@pytest.mark.unit
+async def test_list_resumable_recovering_ids_sqlite_extracts_not_before() -> None:
+    """The SQLite cooldown branch extracts ``not_before`` via ``json_extract``.
+
+    ``db/session.make_engine`` enforces Postgres, so the SQLite dialect branch is
+    exercised by compiling the statement rather than executing it.
+    """
+
+    class _EmptyResult:
+        def scalars(self) -> _EmptyResult:
+            return self
+
+        def all(self) -> list[str]:
+            return []
+
+    class _RecordingSession:
+        info: dict[str, str] = {}
+        bind = None
+
+        def __init__(self) -> None:
+            self.executed: list[object] = []
+
+        async def execute(self, statement: object) -> _EmptyResult:
+            self.executed.append(statement)
+            return _EmptyResult()
+
+    recording_session = _RecordingSession()
+    repo = WorkspaceRepository(recording_session, dialect_name="sqlite")  # type: ignore[arg-type]
+
+    result = await repo.list_resumable_recovering_ids(
+        limit=10, now=datetime(2026, 6, 20, 12, 0, tzinfo=UTC)
+    )
+
+    assert result == []
+    assert len(recording_session.executed) == 1
+    sql = " ".join(
+        str(
+            recording_session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=sqlite.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).split()
+    )
+    assert "json_extract(workspaces.task_policy, '$.provider_recovery_state.not_before')" in sql
 
 
 @pytest.mark.unit

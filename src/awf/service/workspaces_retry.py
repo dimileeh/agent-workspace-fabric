@@ -207,6 +207,9 @@ async def retry_workspace_row(
     if source is None:
         raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
 
+    if WorkspaceStatus(source.status) == WorkspaceStatus.recovering:
+        raise workspaces.WorkspaceRetryRecoveringInFlightError(source)
+
     if WorkspaceStatus(source.status) not in workspaces.RETRYABLE_WORKSPACE_STATUSES:
         raise workspaces.WorkspaceRetryNotAllowedError(source)
 

@@ -7,6 +7,7 @@ parent module re-exports these symbols to preserve its existing public surface.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,16 +17,46 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.git_identity import git_identity_config_args
 from awf.common.logging import get_logger
 from awf.common.task_tag import commit_message_with_task_tag
+from awf.control.protected_file_diffs import protected_file_diffs_for_committed_paths
+from awf.control.quality_gates import (
+    QualityGateViolation,
+    find_protected_quality_gate_changes,
+)
 from awf.control.validation_fix_cycle import (
     ValidationFixContext,
     build_fix_prompt,
     read_output_tail,
 )
+from awf.db.repositories import WorkspaceRepository
+from awf.node.git_manager import (
+    GitOperationError,
+    git_env_without_object_lookup_overrides,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+    verify_head_object_exists,
+)
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
+from awf.runtime.pr_monitor_runner.constants import (
+    _HEAD_OBJECT_MISSING_RECOVERED_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.path_parsing import _changed_paths_from_name_status_z
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
     _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
+)
+from awf.runtime.pr_monitor_runner.remote_repair import (
+    _mirror_commit_object_exists,
+    _open_merge_candidate_head_sha,
+    _recover_missing_head_object_from_filesystem,
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
@@ -33,6 +64,8 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_CLEANUP_FAILED
@@ -44,6 +77,43 @@ _log = get_logger(__name__)
 
 PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON = _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
 PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON = _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+
+
+async def _protected_scope_violations_for_recovered_commit(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    base_ref: str,
+    changed_paths: Sequence[str],
+) -> list[QualityGateViolation]:
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:
+            raise ProtectedScopeDiffError(
+                f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
+                "for recovered protected-scope validation."
+            )
+        owned_paths = list(workspace.owned_paths)
+    try:
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._deps.runner,
+            worktree_path=worktree_path,
+            base_ref=base_ref,
+            changed_paths=changed_paths,
+            owned_paths=owned_paths,
+        )
+    except RuntimeError as exc:
+        raise ProtectedScopeDiffError(
+            "Could not read recovered committed protected-scope file contents "
+            "for validation before push: "
+            f"{exc}"
+        ) from exc
+    return find_protected_quality_gate_changes(
+        changed_paths=tuple(changed_paths),
+        owned_paths=owned_paths,
+        protected_file_diffs=protected_file_diffs,
+    )
 
 
 async def _head_descends_from(
@@ -121,8 +191,10 @@ async def _reparent_fix_pass_commit(
             stderr=(result.stderr or "")[:400],
         )
 
+    git_env = git_env_without_object_lookup_overrides()
     current_tree_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "rev-parse", f"{current_head}^{{tree}}")
+        git_worktree_command(worktree_path, "rev-parse", f"{current_head}^{{tree}}"),
+        env=git_env,
     )
     current_tree = current_tree_result.stdout.strip() if current_tree_result.ok else ""
     if not current_tree:
@@ -130,7 +202,8 @@ async def _reparent_fix_pass_commit(
         return None, False, _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
 
     start_tree_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "rev-parse", f"{fix_start_head}^{{tree}}")
+        git_worktree_command(worktree_path, "rev-parse", f"{fix_start_head}^{{tree}}"),
+        env=git_env,
     )
     start_tree = start_tree_result.stdout.strip() if start_tree_result.ok else ""
     if not start_tree:
@@ -152,7 +225,8 @@ async def _reparent_fix_pass_commit(
         return None, True, None
 
     message_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "log", "-1", "--format=%B", current_head)
+        git_worktree_command(worktree_path, "log", "-1", "--format=%B", current_head),
+        env=git_env,
     )
     message = message_result.stdout.strip() if message_result.ok else ""
     if not message:
@@ -178,7 +252,8 @@ async def _reparent_fix_pass_commit(
             fix_start_head,
             "-m",
             message,
-        )
+        ),
+        env=git_env,
     )
     new_sha = commit_result.stdout.strip() if commit_result.ok else ""
     if not new_sha:
@@ -186,7 +261,8 @@ async def _reparent_fix_pass_commit(
         return None, False, _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
 
     reset_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "reset", "--hard", new_sha)
+        git_worktree_command(worktree_path, "reset", "--hard", new_sha),
+        env=git_env,
     )
     if not reset_result.ok:
         _warn("reset --hard reparented commit", reset_result)
@@ -326,6 +402,33 @@ async def _rollback_failed_pre_push_validation_fix_pass(
     return cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
 
 
+async def _repair_pre_push_validation_fix_mirror_hooks(
+    *,
+    workspace_id: str,
+    pass_number: int,
+    mirror_path: Path | None,
+) -> str | None:
+    if mirror_path is None:
+        return None
+    try:
+        await repair_mirror_hooks_path(mirror_path)
+    except (GitOperationError, OSError) as exc:
+        repair_details = mirror_hooks_repair_failure_details(
+            exc,
+            repair_stage="pre_push_validation_fix_pass",
+            mirror_path=mirror_path,
+            extra={"pass_number": pass_number},
+        )
+        _log.warning(
+            "monitor.mirror_hooks_path_repair_failed",
+            workspace_id=workspace_id,
+            reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            **repair_details,
+        )
+        return _MIRROR_HOOKS_PATH_POISONED_REASON
+    return None
+
+
 async def _run_pre_push_validation_fix_pass(
     self: Any,
     *,
@@ -364,6 +467,9 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
         )
         return False, None
+    # Missing-HEAD recovery may discover that the original start head is unusable.
+    # Post-recovery checks must anchor to the commit used to build the recovered head.
+    fix_pass_baseline_head = fix_start_head
     # Resolve the workspace's optional Jira issue key once; reused for the fix prompt
     # and threaded into any ``_reparent_fix_pass_commit`` call below so the reparent
     # path does not re-query the DB for the same value.
@@ -402,6 +508,22 @@ async def _run_pre_push_validation_fix_pass(
         task_tag=task_tag,
     )
     command_evidence: list[str] = []
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="monitor_agent_pre_launch",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        return False, "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    mirror_repair_failure_reason = await _repair_pre_push_validation_fix_mirror_hooks(
+        workspace_id=workspace_id,
+        pass_number=pass_number,
+        mirror_path=mirror_path,
+    )
+    if mirror_repair_failure_reason is not None:
+        return False, mirror_repair_failure_reason
     try:
         fix_result = await self._deps.adapter.run(
             compose_project=compose_project,
@@ -442,6 +564,13 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason="compose_cleanup_failed",
         )
+        mirror_repair_failure_reason = await _repair_pre_push_validation_fix_mirror_hooks(
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            mirror_path=mirror_path,
+        )
+        if mirror_repair_failure_reason is not None:
+            return False, mirror_repair_failure_reason
         if rollback_failure_reason is not None:
             return False, rollback_failure_reason
         return False, None
@@ -460,9 +589,71 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason="agent_exception",
         )
+        mirror_repair_failure_reason = await _repair_pre_push_validation_fix_mirror_hooks(
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            mirror_path=mirror_path,
+        )
+        if mirror_repair_failure_reason is not None:
+            return False, mirror_repair_failure_reason
         if rollback_failure_reason is not None:
             return False, rollback_failure_reason
         return False, None
+
+    mirror_repair_failure_reason = await _repair_pre_push_validation_fix_mirror_hooks(
+        workspace_id=workspace_id,
+        pass_number=pass_number,
+        mirror_path=mirror_path,
+    )
+    if mirror_repair_failure_reason is not None:
+        return False, mirror_repair_failure_reason
+
+    head_object_exists = await verify_head_object_exists(worktree_path)
+    recovered_head_for_protected_scope: str | None = None
+    recovered_base_for_protected_scope: str | None = None
+    if not head_object_exists:
+        _log.warning(
+            "monitor.pre_push_validation_fix_head_object_missing",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+        recovery_head = fix_start_head
+        if mirror_path is not None:
+            recovery_head_exists = await _mirror_commit_object_exists(
+                self, mirror_path, recovery_head
+            )
+            if not recovery_head_exists:
+                _log.warning(
+                    "monitor.pre_push_validation_fix_head_object_missing_recovery_anchor_missing",
+                    workspace_id=workspace_id,
+                    pass_number=pass_number,
+                    operation_start_head=recovery_head[:10],
+                )
+                recovery_head = await _open_merge_candidate_head_sha(self, workspace_id)
+        if recovery_head is None:
+            return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+        recovered = await _recover_missing_head_object_from_filesystem(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            operation_start_head=recovery_head,
+            task_tag=task_tag,
+            command_evidence=command_evidence,
+        )
+        if recovered is None:
+            return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+        fix_pass_baseline_head = recovery_head
+        _log.info(
+            "monitor.pre_push_validation_fix_head_object_missing_recovered",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            recovered_head=recovered[:10],
+            reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
+        )
+        if recovered != recovery_head:
+            recovered_base_for_protected_scope = recovery_head
+            recovered_head_for_protected_scope = recovered
 
     # The rollback anchor for the commit-sink ``except`` clauses below is
     # captured INSIDE each clause (after ``_commit_dirty_worktree`` raised),
@@ -482,6 +673,78 @@ async def _run_pre_push_validation_fix_pass(
     # inside each provider-recovery ``except`` clause for the same reason.
 
     try:
+        if recovered_head_for_protected_scope is not None:
+            assert recovered_base_for_protected_scope is not None
+            recovered_delta = await self._deps.runner.run(
+                git_worktree_command(
+                    worktree_path,
+                    "diff",
+                    "--name-status",
+                    "-z",
+                    (f"{recovered_base_for_protected_scope}..{recovered_head_for_protected_scope}"),
+                ),
+                env=git_env_without_object_lookup_overrides(),
+            )
+            if not recovered_delta.ok:
+                _log.warning(
+                    "monitor.pre_push_validation_fix_recovered_delta_failed",
+                    workspace_id=workspace_id,
+                    pass_number=pass_number,
+                    returncode=recovered_delta.returncode,
+                    stderr=recovered_delta.stderr[:400],
+                    reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                )
+                rollback_failure_reason = await _rollback_failed_fix_pass(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    restore_ref=fix_pass_baseline_head,
+                    pass_number=pass_number,
+                    reason="recovered_delta_failed",
+                )
+                if rollback_failure_reason is not None:
+                    return False, rollback_failure_reason
+                return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+            recovered_paths = _changed_paths_from_name_status_z(recovered_delta.stdout or "")
+            if recovered_paths:
+                try:
+                    violations = await _protected_scope_violations_for_recovered_commit(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        base_ref=recovered_base_for_protected_scope,
+                        changed_paths=recovered_paths,
+                    )
+                except ProtectedScopeDiffError:
+                    rollback_failure_reason = await _rollback_failed_fix_pass(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        restore_ref=fix_pass_baseline_head,
+                        pass_number=pass_number,
+                        reason="recovered_protected_scope_diff_unavailable",
+                    )
+                    if rollback_failure_reason is not None:
+                        return False, rollback_failure_reason
+                    raise
+                if violations:
+                    _log.warning(
+                        "monitor.pre_push_validation_fix_recovered_protected_scope_blocked",
+                        workspace_id=workspace_id,
+                        pass_number=pass_number,
+                        paths=[violation.path for violation in violations],
+                    )
+                    rollback_failure_reason = await _rollback_failed_fix_pass(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        restore_ref=fix_pass_baseline_head,
+                        pass_number=pass_number,
+                        reason="recovered_protected_scope_repair_failed",
+                    )
+                    if rollback_failure_reason is not None:
+                        return False, rollback_failure_reason
+                    return False, _PROTECTED_SCOPE_REPAIR_FAILED_REASON
         committed = bool(
             await self._commit_dirty_worktree(
                 workspace_id=workspace_id,
@@ -492,6 +755,8 @@ async def _run_pre_push_validation_fix_pass(
                 command_evidence=command_evidence,
                 protected_scope_revert_remote_branch=remote_branch,
                 remote_push_url=remote_url,
+                task_tag=task_tag,
+                operation_start_head=fix_pass_baseline_head,
             )
         )
     except (
@@ -602,6 +867,8 @@ async def _run_pre_push_validation_fix_pass(
     except (
         ProtectedScopeDiffError,
         _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorHeadObjectMissingError,
+        _MonitorMirrorHooksPathRepairFailedError,
     ):
         # ``_commit_dirty_worktree`` (and the protected-scope paths it invokes)
         # raises these deterministic reason-coded exceptions so the monitor loop's
@@ -652,13 +919,13 @@ async def _run_pre_push_validation_fix_pass(
         return False, None
     if not committed:
         current_head = await self._rev_parse_head(worktree_path)
-        if current_head is not None and current_head != fix_start_head:
+        if current_head is not None and current_head != fix_pass_baseline_head:
             # The fix-pass agent self-committed a valid repair (the worktree is clean,
             # so ``_commit_dirty_worktree`` had nothing to commit and returned False).
             advanced = await _head_descends_from_impl(
                 self,
                 worktree_path=worktree_path,
-                ancestor=fix_start_head,
+                ancestor=fix_pass_baseline_head,
                 descendant=current_head,
             )
             if advanced:
@@ -668,7 +935,7 @@ async def _run_pre_push_validation_fix_pass(
                     "monitor.pre_push_validation_fix_self_commit_detected",
                     workspace_id=workspace_id,
                     pass_number=pass_number,
-                    fix_start_head=fix_start_head,
+                    fix_start_head=fix_pass_baseline_head,
                     committed_head=current_head,
                     self_commit_kind="advance",
                 )
@@ -691,7 +958,7 @@ async def _run_pre_push_validation_fix_pass(
                 self,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
-                fix_start_head=fix_start_head,
+                fix_start_head=fix_pass_baseline_head,
                 current_head=current_head,
                 pass_number=pass_number,
                 task_tag=task_tag,
@@ -705,7 +972,7 @@ async def _run_pre_push_validation_fix_pass(
                     pass_number=pass_number,
                     from_sha=current_head,
                     to_sha=new_head,
-                    fix_start_head=fix_start_head,
+                    fix_start_head=fix_pass_baseline_head,
                 )
                 cleanup_failure_reason = await _cleanup_committed_fix_pass(
                     self,
@@ -721,7 +988,7 @@ async def _run_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            restore_ref=fix_start_head,
+            restore_ref=fix_pass_baseline_head,
             pass_number=pass_number,
             reason="commit_failed",
         )
@@ -748,14 +1015,14 @@ async def _run_pre_push_validation_fix_pass(
     if not await _head_descends_from_impl(
         self,
         worktree_path=worktree_path,
-        ancestor=fix_start_head,
+        ancestor=fix_pass_baseline_head,
         descendant=committed_head,
     ):
         new_head, no_net_change, reparent_failure_reason = await _reparent_fix_pass_commit_impl(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            fix_start_head=fix_start_head,
+            fix_start_head=fix_pass_baseline_head,
             current_head=committed_head,
             pass_number=pass_number,
             task_tag=task_tag,
@@ -769,7 +1036,7 @@ async def _run_pre_push_validation_fix_pass(
                 pass_number=pass_number,
                 from_sha=committed_head,
                 to_sha=new_head,
-                fix_start_head=fix_start_head,
+                fix_start_head=fix_pass_baseline_head,
             )
             committed_head = new_head
         else:
@@ -780,7 +1047,7 @@ async def _run_pre_push_validation_fix_pass(
                 self,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
-                restore_ref=fix_start_head,
+                restore_ref=fix_pass_baseline_head,
                 pass_number=pass_number,
                 reason="commit_reparent_no_net_change",
             )

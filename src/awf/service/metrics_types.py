@@ -136,6 +136,7 @@ class WorkspaceSaturationCounts:
     pushing: int
     monitoring_pr: int
     blocked: int
+    recovering: int
     destroying: int
     completed: int
     failed: int

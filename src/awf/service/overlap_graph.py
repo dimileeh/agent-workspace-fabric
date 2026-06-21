@@ -41,6 +41,11 @@ RUNNING_WORKSPACE_STATUSES: Final[tuple[str, ...]] = (
     # the workspaces they are about to grant/resume or start related work
     # against. It maps to the "running" node queue state via the splat below.
     WorkspaceStatus.blocked.value,
+    # A recovering workspace stays paused with its worktree and owned paths held
+    # (keep-warm) while it auto-retries across the provider cooldown (#612), so
+    # it must surface in the advisory graph for the same reason. It also maps to
+    # the "running" node queue state via the splat below.
+    WorkspaceStatus.recovering.value,
 )
 ACTIVE_OVERLAP_GRAPH_STATUSES: Final[tuple[str, ...]] = (
     *QUEUED_WORKSPACE_STATUSES,

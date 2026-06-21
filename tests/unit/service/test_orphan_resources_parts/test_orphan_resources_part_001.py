@@ -29,6 +29,7 @@ from awf.service.orphan_resources import (
     scan_managed_worktrees,
     summary_not_collected,
     unavailable_workspace_view,
+    workspace_id_from_managed_volume_name,
     workspace_id_from_project,
 )
 
@@ -1033,6 +1034,106 @@ def test_workspace_id_from_project_accepts_only_awf_workspace_projects() -> None
     assert workspace_id_from_project("not-awf") is None
     assert workspace_id_from_project("awf_not_workspace") is None
     assert workspace_id_from_project("compose_ws_other") is None
+
+
+@pytest.mark.unit
+def test_parse_volume_rows_recover_workspace_id_from_name_when_project_label_gone() -> None:
+    """A row-less ``awf-ws_<id>-postgres_data`` volume with an empty project label.
+
+    Once its ``Workspace`` row is pruned, ``docker volume ls`` can return the volume
+    with an *empty* ``com.docker.compose.project`` label. Without the name fallback the
+    reaper's enumeration drops it even though ``awf service status`` still flags it, so
+    the no-DB-record orphan is never reclaimed (#637, layer 2). The fallback recovers the
+    workspace id from the managed volume name and infers the compose project so the
+    reaper tears down the right ``awf-ws_<id>`` stack with ``--volumes``.
+    """
+    resources = parse_docker_resource_rows(
+        "volume",
+        json.dumps({"name": "awf-ws_abc123-postgres_data", "project": "", "driver": "local"})
+        + "\n",
+    )
+
+    assert len(resources) == 1
+    assert resources[0].kind == "volume"
+    assert resources[0].workspace_id == "ws_abc123"
+    assert resources[0].compose_project == "awf-ws_abc123"
+    assert resources[0].name == "awf-ws_abc123-postgres_data"
+
+
+@pytest.mark.unit
+def test_parse_volume_rows_name_fallback_handles_underscore_delimited_tail() -> None:
+    """The underscore-delimited managed name resolves too (parity with ``orphans.py``)."""
+    resources = parse_docker_resource_rows(
+        "volume",
+        json.dumps({"name": "awf-ws_abc123_postgres_data", "project": ""}) + "\n",
+    )
+
+    assert len(resources) == 1
+    assert resources[0].workspace_id == "ws_abc123"
+    assert resources[0].compose_project == "awf-ws_abc123"
+
+
+@pytest.mark.unit
+def test_parse_volume_rows_name_fallback_infers_underscore_project_prefix() -> None:
+    """An ``awf_``-prefixed managed volume infers an ``awf_``-prefixed compose project.
+
+    Docker-compose may name the volume with the underscore project prefix; the inferred
+    project must match so the reaper tears down the correct ``awf_ws_<id>`` stack.
+    """
+    resources = parse_docker_resource_rows(
+        "volume",
+        json.dumps({"name": "awf_ws_abc123_postgres_data", "project": ""}) + "\n",
+    )
+
+    assert len(resources) == 1
+    assert resources[0].workspace_id == "ws_abc123"
+    assert resources[0].compose_project == "awf_ws_abc123"
+
+
+@pytest.mark.unit
+def test_parse_volume_rows_name_fallback_drops_non_awf_volume() -> None:
+    """A non-AWF volume name with an empty project label is still dropped."""
+    resources = parse_docker_resource_rows(
+        "volume",
+        json.dumps({"name": "some-other-volume", "project": ""}) + "\n",
+    )
+
+    assert resources == ()
+
+
+@pytest.mark.unit
+def test_workspace_id_from_managed_volume_name_covers_legacy_name_shapes() -> None:
+    """Direct coverage of the ported row-less volume name fallback (#637, layer 2).
+
+    Mirrors ``orphans._workspace_id_from_managed_name``: a hyphen-delimited managed name,
+    an underscore-delimited one, and a bare ``ws_`` tail all resolve, while names lacking
+    an ``awf`` managed prefix or a ``ws_`` id resolve to ``None`` (so non-AWF volumes and
+    malformed names are never enumerated and thus never reaped).
+    """
+    f = workspace_id_from_managed_volume_name
+    assert f("awf-ws_abc123-postgres_data") == "ws_abc123"  # hyphen-delimited tail
+    assert f("awf_ws_abc123_postgres_data") == "ws_abc123"  # underscore walk breaks at "_"
+    assert f("awf-ws_abc123") == "ws_abc123"  # bare tail: the walk completes with no break
+    assert f("some-other-volume") is None  # no awf managed prefix -> tail is None
+    assert f("awf-notaworkspace") is None  # awf prefix but the tail is not a ws_ id
+    assert f("awf-ws_") is None  # awf prefix + ws_ but an empty id suffix
+
+
+@pytest.mark.unit
+def test_parse_name_fallback_is_volume_only_not_containers_or_networks() -> None:
+    """The name fallback is volume-only; containers/networks with empty project drop.
+
+    Containers and networks always carry the compose-project label under the
+    ``--filter label=com.docker.compose.project`` query, so an empty project on those
+    kinds is genuinely unmanaged. Only the volume class loses its label once its row is
+    pruned, so the fallback must not widen to other kinds (#637, layer 2).
+    """
+    for kind in ("container", "network"):
+        resources = parse_docker_resource_rows(
+            kind,  # type: ignore[arg-type]
+            json.dumps({"name": "awf-ws_abc123-agent-1", "project": ""}) + "\n",
+        )
+        assert resources == ()
 
 
 @pytest.mark.unit

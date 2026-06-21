@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.bitbucket_client import BITBUCKET_AUTH_NOT_CONFIGURED, BitbucketClientError
 from awf.common.commands import FakeCommandRunner
+from awf.control.executor import monitor_handoff_setup as monitor_handoff_setup_module
 from awf.control.executor.constants import (
     _PR_ADOPTION_SKIP_AGENT_REASON_CODE,
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
@@ -20,6 +21,7 @@ from awf.control.executor.monitor_handoff import _build_handoff_pr_monitor
 from awf.control.executor.monitor_handoff_audit import _record_setup_dependency_network_events
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.node.git_manager import GitOperationError
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -416,6 +418,172 @@ class TestExecutorMonitorHandoffSetup:
         await executor.execute(ws_id)
 
         assert events == ["repair", "setup", "monitor"]
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_handoff_repairs_mirror_hooks_after_setup_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events: list[str] = []
+        validation = _SetupDependencyValidation(
+            ValidationResult(
+                commands=[
+                    _setup_dependency_command_result(
+                        tmp_path,
+                        returncode=1,
+                        retry_exhausted=True,
+                    )
+                ]
+            )
+        )
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+        mirror_path = tmp_path / "repo.git"
+
+        async def _repair_agent_runtime_ownership(**_kwargs: Any) -> bool:
+            events.append("runtime_repair")
+            return True
+
+        async def _repair_mirror_hooks_path(path: Path) -> bool:
+            assert path == mirror_path
+            events.append("mirror_repair")
+            return True
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del workspace_id, compose_project, compose_file
+                events.append("monitor")
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "repair_agent_runtime_ownership",
+            _repair_agent_runtime_ownership,
+        )
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "mirror_path_for_worktree",
+            lambda _worktree_path: mirror_path,
+        )
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == [("setup", "pre_agent")]
+        assert events == ["runtime_repair", "mirror_repair", "mirror_repair"]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "service_startup_failure"
+            assert "profile setup failed: uv sync --extra dev" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_handoff_mirror_hooks_repair_failure_blocks_setup(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events: list[str] = []
+        validation = _EventRecordingValidation(events)
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+        mirror_path = tmp_path / "repo.git"
+
+        async def _repair_mirror_hooks_path(path: Path) -> bool:
+            assert path == mirror_path
+            events.append("mirror_repair")
+            raise GitOperationError(
+                operation="mirror.hooks_path_repair",
+                returncode=128,
+                stdout="",
+                stderr="could not lock config file\n",
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del workspace_id, compose_project, compose_file
+                events.append("monitor")
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "mirror_path_for_worktree",
+            lambda _worktree_path: mirror_path,
+        )
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert events == ["mirror_repair"]
+        assert validation.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert (
+                ws.failure_message
+                == "could not repair poisoned mirror hooks path before monitor handoff setup"
+            )
+            assert ws.events[-1].reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
 
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_runtime_ownership_failure_blocks_setup(

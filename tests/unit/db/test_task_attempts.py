@@ -308,6 +308,77 @@ class TestTaskAttemptRepository:
         assert second_attempt.is_canonical_for_merge is True
 
     @pytest.mark.unit
+    async def test_inplace_retry_keeps_single_canonical_candidate(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """An in-place provider retry keeps the SAME workspace + attempt id.
+
+        Because the auto-retry reuses the running workspace (recovering → running)
+        instead of forking a fresh relaunch, there is no retry-lineage to break
+        canonicalization (#609). When the single workspace later reaches
+        ``monitoring_pr`` its merge candidate is canonical and auto-merge fires —
+        the exact continuity #612's in-place retry guarantees, contrasted with
+        ``test_retry_pr_ready_attempt_supersedes_canonical_and_closes_old_candidate``
+        (fresh relaunch → superseded canonical → closed candidate).
+        """
+        from awf.db.repositories import MergeCandidateRepository, TaskAttemptRepository
+
+        task = await _task(session, external_id="TICKET-INPLACE")
+        workspace = await _workspace(session, title="in-place retry")
+        workspace.auto_merge = True
+
+        attempt_repo = TaskAttemptRepository(session)
+        attempt = await attempt_repo.create_for_workspace(
+            task=task,
+            workspace=workspace,
+        )
+
+        # Drive the SAME workspace through an in-place recovering hop: the provider
+        # stalled mid-run, the workspace paused (recovering) holding its warm stack,
+        # then resumed in place (recovering → running) — no fresh relaunch, no
+        # new attempt — before proceeding to the PR.
+        repo = WorkspaceRepository(session)
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.recovering,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+        ):
+            await repo.transition(workspace, to=target, reason_code="TEST")
+        workspace.branch_name = "awf/in-place"
+        workspace.remote_push_branch = "awf/in-place"
+        workspace.base_commit = "a" * 40
+        workspace.pr_url = "https://github.com/example/app/pull/21"
+        workspace.pr_number = 21
+        await repo.transition(workspace, to=WorkspaceStatus.monitoring_pr, reason_code="PR_OPENED")
+
+        candidate = await MergeCandidateRepository(
+            session
+        ).get_open_for_workspace_with_merge_inputs(workspace.id)
+        assert candidate is not None
+        assert candidate.status == "open"
+        assert candidate.attempt_id == attempt.id
+        assert candidate.workspace_id == workspace.id
+
+        attempts = list(
+            (
+                await session.execute(select(TaskAttempt).where(TaskAttempt.task_id == task.id))
+            ).scalars()
+        )
+        # The in-place retry did NOT fork the lineage: exactly one attempt exists.
+        assert [item.id for item in attempts] == [attempt.id]
+        assert attempt.is_canonical_for_merge is True
+        assert attempt.parent_attempt_id is None
+        assert attempt.redispatch_from_attempt_id is None
+        assert candidate.not_canonical is False
+        # Auto-merge fires: monitoring_pr + auto_merge + canonical + not blocked/stale.
+        assert candidate.ready is True
+
+    @pytest.mark.unit
     async def test_retry_pr_ready_attempt_supersedes_canonical_and_closes_old_candidate(
         self,
         session: AsyncSession,

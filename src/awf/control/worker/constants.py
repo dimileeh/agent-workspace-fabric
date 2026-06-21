@@ -39,11 +39,15 @@ _REQUESTED_ADMISSION_SLOT_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.monitoring_pr,
     # A blocked workspace keeps its warm stack, so it holds the host-port lock.
     WorkspaceStatus.blocked,
+    # A recovering workspace keeps its warm stack while it auto-retries across
+    # the provider cooldown, so it holds the host-port lock too (#612).
+    WorkspaceStatus.recovering,
 )
 """Workspace statuses where the workspace holds an admission slot (e.g. a host-port lock).
 
-Deliberately excludes ``blocked`` from ``_ACTIVE_EXECUTION_STATUSES`` and
-``_RUNTIME_HEALTH_SCAN_STATUSES`` (above): a paused ``blocked`` workspace must be
+Deliberately excludes ``blocked`` and ``recovering`` from
+``_ACTIVE_EXECUTION_STATUSES`` and ``_RUNTIME_HEALTH_SCAN_STATUSES`` (above): a
+paused ``blocked`` (operator) or ``recovering`` (auto-retry) workspace must be
 preserve-not-reap, so it stays out of the stale-execution reaping / health-scan
 sets while still holding its admission slot here."""
 
@@ -226,6 +230,8 @@ ORDERED_MONITOR_RESUME_REASON = "ORDERED_MONITOR_RESUME"
 
 ORDERED_BLOCKED_RESUME_REASON = "ORDERED_BLOCKED_RESUME"
 
+ORDERED_RECOVERING_RESUME_REASON = "ORDERED_RECOVERING_RESUME"
+
 _BLOCKED_RESUME_REASON_CODE = "OPERATOR_GRANT_RESUME"
 """Reason code for the worker's ``blocked -> running`` resume transition after
 an operator resolved a protected quality-gate violation via ``guide``."""
@@ -258,6 +264,43 @@ _BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE = "BLOCKED_RESUME_EXECUTION_CANC
 ``except Exception`` restore path, so without mirroring the restore here the row would
 be left stranded in ``running`` for stale-active recovery to FAIL. The owner-gated
 restore is a no-op once the resume has transitioned the row onward."""
+
+# ── Provider in-place recovery (``recovering``) resume reason codes (#612) ──
+# Mirror the ``blocked``-resume set above: the same epoch-fenced
+# ``<paused> -> running`` CAS + restore-on-abort contract, but the paused status
+# is ``recovering`` (auto-healing provider failure) rather than ``blocked``.
+
+_RECOVERING_RESUME_REASON_CODE = "PROVIDER_RECOVERY_IN_PLACE_RESUME"
+"""Reason code for the worker's ``recovering -> running`` resume transition once the
+provider cooldown elapsed and the agent is re-invoked in place (#612)."""
+
+_RECOVERING_RESUME_NO_EXECUTOR_REASON_CODE = "RECOVERING_RESUME_NO_EXECUTOR"
+"""Reason code for reverting ``running -> recovering`` when a recovering-resume won the
+``recovering -> running`` claim but the worker had no executor to drive it — the
+auto-retry pause is restored instead of being left stranded in ``running``."""
+
+_RECOVERING_RESUME_DISPATCH_ABORTED_REASON_CODE = "RECOVERING_RESUME_DISPATCH_ABORTED"
+"""Reason code for reverting ``running -> recovering`` when a recovering-resume won the
+``recovering -> running`` claim but the post-claim ordered-decision write (or another
+failure) aborted before a resume task was dispatched."""
+
+_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE = "RECOVERING_RESUME_WORKTREE_RESET_ABORTED"
+"""Reason code for reverting ``running -> recovering`` when a recovering-resume won the
+``recovering -> running`` claim but the pre-run worktree reset (``git status``/``stash``/
+``reset --hard``) could not complete, so the worktree may still hold partial provider edits.
+The in-place retry is aborted and the auto-retry pause is restored for a later safe resume
+rather than re-running the agent on a contaminated worktree (#612)."""
+
+_RECOVERING_RESUME_EXECUTION_FAILED_REASON_CODE = "RECOVERING_RESUME_EXECUTION_FAILED"
+"""Reason code for reverting ``running -> recovering`` when a recovering-resume won the
+``recovering -> running`` claim and dispatched, but ``resume_recovering_execution`` raised
+before moving the row out of ``running`` (e.g. a transient executor/setup failure)."""
+
+_RECOVERING_RESUME_EXECUTION_CANCELLED_REASON_CODE = "RECOVERING_RESUME_EXECUTION_CANCELLED"
+"""Reason code for reverting ``running -> recovering`` when a recovering-resume won the
+``recovering -> running`` claim and dispatched, but the resume task was *cancelled* (e.g.
+worker shutdown) while ``resume_recovering_execution`` was still in the post-claim
+``running`` state. Mirrors ``_BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE``."""
 
 PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
 

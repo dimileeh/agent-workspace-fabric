@@ -1087,6 +1087,11 @@ class WorkspaceOverviewResponse(BaseModel):
     pr_number: int | None = None
     failure_reason: str | None
     failure_message: str | None
+    # Authoritative pause start while ``status == "blocked"`` (the persisted
+    # ``blocked_at`` column). Surfaced so list cards can show an accurate
+    # "Blocked for N" without falling back to the lossy last-event/``updated_at``
+    # heuristic. ``None`` when the workspace is not blocked.
+    blocked_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

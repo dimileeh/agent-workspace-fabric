@@ -41,9 +41,15 @@ def test_builds_tracked_exec_wrapper_with_unique_invocation_id() -> None:
         "-T",
     ]
     exec_idx = args.index("exec")
-    assert args[exec_idx : exec_idx + 5] == ["exec", "-T", "-w", "/workspace", "agent"]
+    assert args[exec_idx : exec_idx + 3] == ["exec", "-T", "-w"]
+    assert not any("GIT_OBJECT_DIRECTORY=" in arg for arg in args)
+    assert not any("GIT_ALTERNATE_OBJECT_DIRECTORIES=" in arg for arg in args)
+    assert "-w" in args
+    assert "/workspace" in args
+    assert "agent" in args
     assert args[exec_idx + 5 : exec_idx + 8] == ["sh", "-lc", invocation.wrapper_script]
     assert "AWF_EXEC_INVOCATION_ID" in invocation.wrapper_script
+    assert "unset GIT_OBJECT_DIRECTORY" in invocation.wrapper_script
     assert "pkill" not in invocation.wrapper_script
     assert "killall" not in invocation.wrapper_script
     assert args[exec_idx + 8 :] == [
@@ -80,7 +86,12 @@ def test_cleanup_command_targets_only_invocation_id() -> None:
         "-T",
     ]
     exec_idx = cleanup.index("exec")
-    assert cleanup[exec_idx : exec_idx + 5] == ["exec", "-T", "-w", "/workspace", "agent"]
+    assert cleanup[exec_idx : exec_idx + 3] == ["exec", "-T", "-w"]
+    assert not any("GIT_OBJECT_DIRECTORY=" in arg for arg in cleanup)
+    assert not any("GIT_ALTERNATE_OBJECT_DIRECTORIES=" in arg for arg in cleanup)
+    assert "-w" in cleanup
+    assert "/workspace" in cleanup
+    assert "agent" in cleanup
     assert cleanup[exec_idx + 5 : exec_idx + 8] == ["sh", "-lc", invocation.cleanup_script]
     assert cleanup[exec_idx + 8 :] == ["awf-cleanup", "awf_cleanup_target"]
     assert "AWF_EXEC_INVOCATION_ID=awf_cleanup_target" in invocation.cleanup_script
@@ -330,3 +341,25 @@ def test_cleanup_failure_message_is_bounded() -> None:
 
     assert len(message) == 2000
     assert message.endswith("...")
+
+
+def test_compose_exec_prefix_unsets_dangerous_git_object_env_vars() -> None:
+    prefix = compose_exec._compose_exec_prefix(  # noqa: SLF001
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        service="agent",
+        workdir="/workspace",
+    )
+
+    assert not any("GIT_OBJECT_DIRECTORY=" in arg for arg in prefix)
+    assert not any("GIT_ALTERNATE_OBJECT_DIRECTORIES=" in arg for arg in prefix)
+    assert "-e" not in prefix
+
+    assert "GIT_ASKPASS" not in prefix
+    assert "GIT_TERMINAL_PROMPT" not in prefix
+    assert "GIT_CONFIG_COUNT" not in prefix
+    assert not any(arg.startswith("GIT_CONFIG_KEY_") for arg in prefix)
+    assert not any(arg.startswith("GIT_CONFIG_VALUE_") for arg in prefix)
+
+    wrapper = compose_exec._tracked_exec_wrapper_script()  # noqa: SLF001
+    assert "unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES" in wrapper

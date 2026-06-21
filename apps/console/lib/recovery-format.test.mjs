@@ -139,3 +139,24 @@ test("blocked entries and resumes are not flagged as reverse transitions", () =>
     true,
   );
 });
+
+test("recovering entries and resumes are not flagged as reverse transitions", () => {
+  // Mid-run pause: running stalls into the in-place provider retry.
+  assert.equal(
+    isReverseWorkspaceTransition({
+      event_type: "workspace.state_changed",
+      old_state: "running",
+      new_state: "recovering",
+    }),
+    false,
+  );
+  // Auto-heal resume: recovering steps back to running (a lower lifecycle index).
+  assert.equal(
+    isReverseWorkspaceTransition({
+      event_type: "workspace.state_changed",
+      old_state: "recovering",
+      new_state: "running",
+    }),
+    false,
+  );
+});

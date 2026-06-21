@@ -620,7 +620,7 @@ async def test_begin_execution_reuses_persisted_baseline_on_directive_resume(
 
     begin = await executor._begin_execution(
         ws_id,
-        resume_from_blocked=True,
+        resume_reason="blocked",
         execution_owner_id=None,
         execution_lease_expires_at=None,
     )
@@ -651,7 +651,7 @@ async def test_begin_execution_reuses_persisted_baseline_on_approve_and_keep(
 
     begin = await executor._begin_execution(
         ws_id,
-        resume_from_blocked=True,
+        resume_reason="blocked",
         execution_owner_id=None,
         execution_lease_expires_at=None,
     )
@@ -687,7 +687,7 @@ async def test_begin_execution_combined_directive_grant_disables_fix_passes(
 
     begin = await executor._begin_execution(
         ws_id,
-        resume_from_blocked=True,
+        resume_reason="blocked",
         execution_owner_id=None,
         execution_lease_expires_at=None,
     )
@@ -711,7 +711,7 @@ async def test_begin_execution_without_persisted_baseline_returns_none(
 
     begin = await executor._begin_execution(
         ws_id,
-        resume_from_blocked=True,
+        resume_reason="blocked",
         execution_owner_id=None,
         execution_lease_expires_at=None,
     )

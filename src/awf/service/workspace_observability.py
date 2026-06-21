@@ -385,6 +385,14 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         pr_number=ws.pr_number,
         failure_reason=ws.failure_reason,
         failure_message=ws.failure_message,
+        # Only surface the authoritative pause start while actually blocked: the
+        # ``blocked_at`` column is not cleared on resume, so gating on live status
+        # keeps a resumed workspace from reporting a stale block time.
+        blocked_at=(
+            getattr(ws, "blocked_at", None)
+            if str(ws.status) == WorkspaceStatus.blocked.value
+            else None
+        ),
         created_at=ws.created_at,
         updated_at=ws.updated_at,
     )

@@ -10,12 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.db.repositories as repositories
 from awf.api.schemas import WorkspaceCreateRequest
-from awf.db.enums import AgentRuntime
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
+from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
 from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryNotFoundError,
+    WorkspaceRetryRecoveringInFlightError,
     create_workspace_row,
     retry_workspace_row,
 )
@@ -464,3 +466,98 @@ async def test_retry_overlap_lookup_uses_source_workspace_id_for_requested_filte
             "requested_path": requested_path,
         }
     ]
+
+
+async def _recovering_source(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    not_before: str | None,
+) -> str:
+    """Persist a source workspace paused mid-run in the ``recovering`` status.
+
+    Mirrors the slice-2 in-place provider retry state: the workspace held its
+    warm stack + execution claim, recorded the cooldown ETA in ``task_policy``,
+    and is awaiting the worker's post-cooldown resume.
+    """
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        source = await repo.create(
+            repo_url="git@github.com:example/recovering.git",
+            branch_base="development",
+            task_title="Recovering flaky provider",
+            task_prompt="Continue after the provider cooldown.",
+            task_external_id="TICKET-RECOVERING",
+            task_class="test_task",
+            owned_paths=["src/awf/recovering/**"],
+            auto_merge=False,
+            initial_review_grace_period_seconds=30,
+            agent=AgentRuntime.codex.value,
+            profile_ref="python",
+            requested_profile={"source": "recovering-test-profile"},
+            resolved_profile={"source": "recovering-test-profile"},
+            test_commands=["uv run pytest tests/unit -q"],
+            task_kind="feature_branch_pr",
+        )
+        for status in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.recovering,
+        ):
+            await repo.transition(source, to=status, reason_code="TEST")
+        recovery_state: dict[str, object] = {}
+        if not_before is not None:
+            recovery_state["not_before"] = not_before
+        source.task_policy = {
+            **source.task_policy,
+            PROVIDER_RECOVERY_STATE_KEY: recovery_state,
+        }
+        await session.commit()
+        return source.id
+
+
+async def test_retry_on_recovering_workspace_is_noop_with_eta(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    not_before = "2026-06-21T12:30:00+00:00"
+    source_id = await _recovering_source(factory, not_before=not_before)
+
+    async with factory() as session:
+        before = list((await session.execute(select(Workspace))).scalars())
+
+        with pytest.raises(WorkspaceRetryRecoveringInFlightError) as exc_info:
+            await retry_workspace_row(session, source_id)
+
+        after = list((await session.execute(select(Workspace))).scalars())
+
+    error = exc_info.value
+    assert error.error_code == "WORKSPACE_AUTO_RETRY_IN_FLIGHT"
+    assert not_before in error.message
+    assert "cooldown" in error.message
+    assert error.detail == {
+        "status": "recovering",
+        "provider_cooldown_not_before": not_before,
+        "reason": "auto_retry_in_flight",
+    }
+    # No duplicate workspace was created by the colliding manual retry.
+    assert [workspace.id for workspace in after] == [workspace.id for workspace in before]
+    assert [workspace.id for workspace in after] == [source_id]
+
+
+async def test_retry_recovering_error_handles_missing_cooldown(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _recovering_source(factory, not_before=None)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetryRecoveringInFlightError) as exc_info:
+            await retry_workspace_row(session, source_id)
+
+    error = exc_info.value
+    assert error.error_code == "WORKSPACE_AUTO_RETRY_IN_FLIGHT"
+    assert "resumes after the provider cooldown" in error.message
+    assert error.detail == {
+        "status": "recovering",
+        "provider_cooldown_not_before": None,
+        "reason": "auto_retry_in_flight",
+    }

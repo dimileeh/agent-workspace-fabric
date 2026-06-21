@@ -104,6 +104,7 @@ function resourceSaturation() {
       pushing: 1,
       monitoring_pr: 0,
       blocked: 1,
+      recovering: 0,
       destroying: 0,
       completed: 0,
       failed: 0,

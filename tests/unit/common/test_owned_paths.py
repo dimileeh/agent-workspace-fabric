@@ -15,6 +15,7 @@ from awf.common.owned_paths import (
     internal_plan_artifact_owned_paths_from_profile,
     interworkspace_owned_paths,
     is_internal_plan_artifact_owned_path,
+    is_under_internal_plan_artifact_dir,
     normalize_owned_path,
 )
 
@@ -93,6 +94,66 @@ def test_internal_plan_artifact_owned_paths_are_classified(path: str) -> None:
 def test_real_docs_and_repo_plan_paths_are_not_internal_plan_artifacts(path: str) -> None:
     """Nearby repository documentation paths remain ordinary owned paths."""
     assert is_internal_plan_artifact_owned_path(path) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/awf-plans",
+        "docs/awf-plans/",
+        "docs/awf-plans/ws_x.md",
+        "apps/console/docs/awf-plans/ws_x.md",
+        "apps/console/docs/awf-plans/",
+        "deep/a/b/docs/awf-plans/x.json",
+        "./apps/console/docs/awf-plans/ws_x.md",
+        # A nested README is gitignored and not the tracked canonical file, so it
+        # is still a stray artifact that stays matched (#620).
+        "apps/console/docs/awf-plans/README.md",
+    ],
+)
+def test_is_under_internal_plan_artifact_dir_matches_dir_and_descendants_any_depth(
+    path: str,
+) -> None:
+    """The internal plan dir and anything beneath it match at ANY depth (#620)."""
+    assert is_under_internal_plan_artifact_dir(path) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/awf-plans/README.md",
+        "./docs/awf-plans/README.md",
+    ],
+)
+def test_is_under_internal_plan_artifact_dir_exempts_canonical_root_readme(
+    path: str,
+) -> None:
+    """The tracked canonical root README is exempt so a stray untracked copy is flagged.
+
+    The dirty guard suppresses matches here on untracked paths unconditionally,
+    so a genuinely untracked ``docs/awf-plans/README.md`` must stay visible
+    rather than be silently hidden.
+    """
+    assert is_under_internal_plan_artifact_dir(path) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/awf-plans-archive/keep.md",
+        "docs/awf-plansx/y.md",
+        "docs/README.md",
+        "",
+        "xdocs/awf-plans/y.md",
+        "awf-plans/y.md",
+    ],
+)
+def test_is_under_internal_plan_artifact_dir_rejects_siblings_and_unrelated(path: str) -> None:
+    """Sibling dirs (``docs/awf-plans-archive``) and unrelated paths are not matched."""
+    assert is_under_internal_plan_artifact_dir(path) is False
 
 
 @pytest.mark.unit

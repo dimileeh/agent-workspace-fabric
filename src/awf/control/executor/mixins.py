@@ -148,6 +148,7 @@ class ExecutorDelegatesMixin:
     _record_health_check_failed_event = _state_ops._record_health_check_failed_event
     _mark_failed = _state_ops._mark_failed
     enter_blocked_for_protected_violation = _state_ops.enter_blocked_for_protected_violation
+    enter_recovering_for_provider_failure = _state_ops.enter_recovering_for_provider_failure
     _persist_block_baseline_coverage = _state_ops._persist_block_baseline_coverage
     _persist_block_planning_conformance_handoff = (
         _state_ops._persist_block_planning_conformance_handoff

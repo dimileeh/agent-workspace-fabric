@@ -972,7 +972,17 @@ async def test_post_agent_commit_failure_preserves_agent_idle_timeout_reason(
 
     monkeypatch.setitem(adapter_base._REGISTRY, AgentRuntime.codex, _IdleTimeoutAdapter)
 
-    ws_id = await _seed_ready(factory)
+    # Budget-exhausted regression (#612): with the same-provider retry budget
+    # already spent (``retry_attempt_number`` at the default max of 1), a
+    # retryable idle-timeout does NOT divert into ``recovering`` — it falls
+    # through to today's terminal ``failed`` path, where the agent's original
+    # reason code still wins on the terminal event. (The retryable+budget case
+    # that DOES divert to ``recovering`` is covered by the error-paths and enter
+    # tests.)
+    ws_id = await _seed_ready(
+        factory,
+        task_policy={"provider_recovery_state": {"retry_attempt_number": 1}},
+    )
     # Agent adapter raises directly; no adapter command is consumed.
     fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
     fake.queue_result(returncode=0)  # git add -A

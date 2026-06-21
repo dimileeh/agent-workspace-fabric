@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,13 +11,19 @@ from awf.control.executor.helpers import (
     _apply_baseline_coverage_ratchet,
     _coverage_preserves_below_threshold_baseline,
     _coverage_result_from_metadata,
+    _digest_file_if_present,
     _extract_string_tokens,
+    _failure_reason_for_phase,
     _post_validation_conformance_fix_result,
+    _read_text_if_present,
+    _realign_profile_from_resolved_profile_snapshot,
+    _validation_command_count,
     _validation_failure_message,
     _validation_run_coverage_metadata,
     _validation_run_reason_code,
 )
 from awf.control.executor.types import _PlanningRunFailure
+from awf.db.enums import FailureReason
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -79,6 +86,88 @@ def test_extract_string_tokens_filters_non_string_list_items() -> None:
     ]
     assert _extract_string_tokens("FAILED test") == []
     assert _extract_string_tokens(None) == []
+
+
+@pytest.mark.unit
+def test_executor_helper_fallbacks_cover_absent_profile_and_artifact_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "coverage.txt"
+    artifact.write_text("coverage", encoding="utf-8")
+
+    assert _realign_profile_from_resolved_profile_snapshot(object(), None) is None  # type: ignore[arg-type]
+    assert (
+        _validation_command_count(
+            SimpleNamespace(resolved_profile=None, test_commands=["pytest", "ruff"])
+        )
+        == 2
+    )
+    assert (
+        _failure_reason_for_phase(
+            SimpleNamespace(phase="validate", reason_code="DATABASE_REFRESH_TIMEOUT")
+        )
+        is FailureReason.phase_timeout
+    )
+    assert (
+        _failure_reason_for_phase(SimpleNamespace(phase="setup", reason_code="OTHER"))
+        is FailureReason.service_startup_failure
+    )
+    assert _validation_run_reason_code(ValidationResult()) == "VALIDATION_OK"
+
+    original_read_text = Path.read_text
+    original_open = Path.open
+
+    def _raise_read(path: Path, *args: object, **kwargs: object) -> str:
+        if path == artifact:
+            raise OSError("unreadable")
+        return original_read_text(path, *args, **kwargs)
+
+    def _raise_open(path: Path, *args: object, **kwargs: object) -> object:
+        if path == artifact:
+            raise OSError("unreadable")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_read)
+    assert _read_text_if_present(artifact) is None
+
+    monkeypatch.setattr(Path, "open", _raise_open)
+    assert _digest_file_if_present(artifact) is None
+
+
+@pytest.mark.unit
+def test_coverage_result_from_metadata_filters_unexpected_token_types() -> None:
+    coverage = _coverage_result_from_metadata(
+        {
+            "provider": "",
+            "percent": "99.1",
+            "minimum_percent": "99",
+            "enforce": "true",
+            "status": "",
+            "reason_code": "",
+            "gaps": [{"file": "src/app.py"}, "bad"],
+            "failing_test_node_ids": ["tests/test_app.py::test_failure", 42],
+            "failing_test_evidence": [None, "FAILED tests/test_app.py"],
+            "provider_failure_evidence": ["coverage failed", object()],
+            "parallel_workers_requested": "8",
+            "parallel_workers_effective": "4",
+            "parallel_distribution": 3,
+        }
+    )
+
+    assert coverage.provider == "python"
+    assert coverage.percent is None
+    assert coverage.minimum_percent == 0.0
+    assert coverage.enforce is True
+    assert coverage.status == "passed"
+    assert coverage.reason_code == "COVERAGE_OK"
+    assert coverage.gaps == [{"file": "src/app.py"}]
+    assert coverage.failing_test_node_ids == ["tests/test_app.py::test_failure"]
+    assert coverage.failing_test_evidence == ["FAILED tests/test_app.py"]
+    assert coverage.provider_failure_evidence == ["coverage failed"]
+    assert coverage.parallel_workers_requested is None
+    assert coverage.parallel_workers_effective is None
+    assert coverage.parallel_distribution is None
 
 
 @pytest.mark.unit
@@ -540,6 +629,61 @@ def test_failure_message_reports_provider_fail_under_without_trusting_rounded_pe
     assert "displayed rounded coverage was 99.00%" in message
     assert "required coverage is 99.00%" in message
     assert "provider fail-under output as authoritative" in message
+
+
+@pytest.mark.unit
+def test_failure_message_reports_coverage_command_failure_with_baseline(
+    tmp_path: Path,
+) -> None:
+    result = ValidationResult(
+        coverage=_coverage(
+            tmp_path,
+            percent=None,
+            reason_code="COVERAGE_COMMAND_FAILED",
+            status="failed",
+        )
+    )
+    baseline = _coverage(tmp_path, percent=92, minimum=99)
+
+    message = _validation_failure_message(result, baseline_coverage=baseline)
+
+    assert "coverage command failed" in message
+    assert "pre-agent base coverage was 92.0%" in message
+    assert "fix the failing tests or add meaningful coverage" in message
+
+
+@pytest.mark.unit
+def test_failure_message_reports_healthcheck_metadata(tmp_path: Path) -> None:
+    stdout = tmp_path / "health.stdout"
+    stderr = tmp_path / "health.stderr"
+    stdout.write_text("stdout", encoding="utf-8")
+    stderr.write_text("stderr", encoding="utf-8")
+    command = ValidationCommandResult(
+        command="curl -fsS http://api:8080/healthz",
+        returncode=1,
+        duration_seconds=2.5,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        phase="healthcheck",
+        reason_code="HEALTHCHECK_TIMEOUT",
+        stream_ids={"stdout": "validation.01_healthcheck.stdout", "stderr": None},
+        metadata={
+            "healthcheck_name": "api",
+            "healthcheck_kind": "http",
+            "target": "http://api:8080/healthz",
+            "attempts": 3,
+            "timeout_seconds": 2.5,
+        },
+    )
+
+    message = _validation_failure_message(ValidationResult(commands=[command]))
+
+    assert "health check api" in message
+    assert "(http target=http://api:8080/healthz)" in message
+    assert "failed with HEALTHCHECK_TIMEOUT" in message
+    assert "after 2.5s" in message
+    assert "across 3 attempt(s)" in message
+    assert "logs: validation.01_healthcheck.stdout" in message
 
 
 @pytest.mark.unit

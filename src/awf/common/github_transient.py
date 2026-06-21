@@ -53,6 +53,19 @@ AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = (
     "requires authentication",
 )
 
+GITHUB_RESUBMIT_TRANSIENT_MARKERS = (
+    "please try resubmitting",
+    "try resubmitting",
+)
+
+GITHUB_API_CONTEXT_MARKERS = (
+    "api.github.com",
+    "github api",
+    "graphql",
+    "gh api",
+    "gh pr create",
+)
+
 
 def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
     """Return whether a GitHub CLI/API failure looks transient."""
@@ -60,6 +73,10 @@ def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
     text = f"{operation}\n{stderr}".lower()
     if any(marker in text for marker in NON_TRANSIENT_GITHUB_ERROR_MARKERS):
         return False
+    if any(marker in text for marker in GITHUB_RESUBMIT_TRANSIENT_MARKERS) and any(
+        marker in text for marker in GITHUB_API_CONTEXT_MARKERS
+    ):
+        return True
     if any(marker in text for marker in TRANSIENT_GITHUB_ERROR_MARKERS):
         return True
     return any(marker in text for marker in AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS)

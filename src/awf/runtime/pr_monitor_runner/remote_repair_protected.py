@@ -42,7 +42,18 @@ from awf.db.repositories import (
     WorkspaceEventCreate,
     WorkspaceRepository,
 )
+from awf.node.git_manager import (
+    GitOperationError,
+    git_env_without_object_lookup_overrides,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+    verify_head_object_exists,
+)
 from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     MonitorState,
@@ -50,6 +61,8 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_GIT_PUSH_EVENT,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
     _PROTECTED_SCOPE_PAUSED_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
@@ -69,6 +82,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _untracked_paths_from_porcelain_z,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
     _ProtectedScopePushBlock,
@@ -77,6 +91,9 @@ from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _ProtectedScopeRollbackDeltaEvidence,
 )
 
@@ -807,6 +824,84 @@ async def _repair_protected_scope_changes_before_commit(
     )
     if await self._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
+    worktree_path = self._worktrees_root / workspace_id
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="protected_scope_repair",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+        reason_code="AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
+    ):
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+        )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    pre_repair_head = await self._rev_parse_head(worktree_path)
+
+    async def _repair_recovery_mirror_hooks_path() -> None:
+        if mirror_path is None:
+            return
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            repair_details = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="protected_scope_repair",
+                mirror_path=mirror_path,
+            )
+            _log.warning(
+                "monitor.protected_scope_repair_mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                **repair_details,
+            )
+            raise _MonitorMirrorHooksPathRepairFailedError() from exc
+
+    async def _restore_pre_repair_head_before_missing_object_failure() -> None:
+        if pre_repair_head is None:
+            _log.warning(
+                "monitor.head_object_missing_restore_skipped",
+                workspace_id=workspace_id,
+                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            )
+            return
+        reset_result = await self._deps.runner.run(
+            git_worktree_command(worktree_path, "reset", "--hard", pre_repair_head),
+            env=git_env_without_object_lookup_overrides(),
+        )
+        if reset_result.ok:
+            _log.warning(
+                "monitor.head_object_missing_pre_repair_head_restored",
+                workspace_id=workspace_id,
+                pre_repair_head=pre_repair_head[:10],
+                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            )
+            return
+        _log.warning(
+            "monitor.head_object_missing_pre_repair_head_restore_failed",
+            workspace_id=workspace_id,
+            pre_repair_head=pre_repair_head[:10],
+            returncode=reset_result.returncode,
+            stderr=reset_result.stderr[:400],
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+
+    async def _verify_repair_head_object_exists() -> None:
+        if await verify_head_object_exists(worktree_path):
+            return
+        await _restore_pre_repair_head_before_missing_object_failure()
+        _log.warning(
+            "monitor.head_object_missing",
+            workspace_id=workspace_id,
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+        raise _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            f"HEAD object missing for workspace {workspace_id} after protected-scope repair",
+        )
+
+    await _repair_recovery_mirror_hooks_path()
     agent_run_err = None
     try:
         await self._deps.adapter.run(
@@ -818,11 +913,20 @@ async def _repair_protected_scope_changes_before_commit(
         )
     except AgentRunError as exc:
         agent_run_err = exc
-        await self._handle_provider_agent_run_error(workspace_id, exc, state=state)
+    except Exception:
+        await _repair_recovery_mirror_hooks_path()
+        await _verify_repair_head_object_exists()
+        raise
 
-    worktree_path = self._worktrees_root / workspace_id
+    await _repair_recovery_mirror_hooks_path()
+    await _verify_repair_head_object_exists()
+
+    if agent_run_err is not None:
+        await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+
     repaired_status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain")
+        git_worktree_command(worktree_path, "status", "--porcelain"),
+        env=git_env_without_object_lookup_overrides(),
     )
     if not repaired_status.ok:
         return None

@@ -11,6 +11,7 @@ from awf.control.quality_gates import (
     ProtectedFileDiff,
     diff_classified_protected_paths,
 )
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 
 
 def changed_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
@@ -62,7 +63,8 @@ async def committed_changed_paths_since(
             "-z",
             f"{base_ref}..HEAD",
             "--",
-        ]
+        ],
+        env=git_env_without_object_lookup_overrides(),
     )
     if not result.ok:
         raise RuntimeError(
@@ -92,7 +94,8 @@ async def git_show_text(
             "cat-file",
             "-e",
             refspec,
-        ]
+        ],
+        env=git_env_without_object_lookup_overrides(),
     )
     if not exists_result.ok:
         if await _git_refspec_missing_path_is_recoverable(
@@ -114,7 +117,8 @@ async def git_show_text(
             str(worktree_path),
             "show",
             refspec,
-        ]
+        ],
+        env=git_env_without_object_lookup_overrides(),
     )
     if result.ok:
         return result.stdout
@@ -144,7 +148,8 @@ async def _git_refspec_missing_path_is_recoverable(
                 "-z",
                 "--",
                 _git_literal_pathspec(path),
-            ]
+            ],
+            env=git_env_without_object_lookup_overrides(),
         )
         return result.ok and not _git_z_listing_contains_path(result.stdout, path)
 
@@ -159,7 +164,8 @@ async def _git_refspec_missing_path_is_recoverable(
             base_ref,
             "--",
             _git_literal_pathspec(path),
-        ]
+        ],
+        env=git_env_without_object_lookup_overrides(),
     )
     return result.ok and not _git_z_listing_contains_path(result.stdout, path)
 

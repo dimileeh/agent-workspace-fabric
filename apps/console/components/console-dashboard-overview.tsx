@@ -675,9 +675,9 @@ export function WorkspaceList({
       {items.map((item) => {
         const recoveryBadge = formatRecoveryBadge(item.recovery, item.status);
         const coordinationSummary = summarizeVisibleCoordinationWarnings(item.coordination_warnings, item.status);
-        // Blocked-age proxy for the list: the overview response carries no
-        // block_state, so derive "blocked for N" from the blocked transition
-        // event (or updated_at). The inspector shows the precise blocked_at.
+        // "Blocked for N" from the authoritative `blocked_at` the overview now
+        // carries while blocked; `blockedSince` falls back to the blocked
+        // transition event / `updated_at` only when it is absent.
         const blockedFor =
           item.status === "blocked" ? blockedAgeSeconds(blockedSince(item)) : null;
         return (

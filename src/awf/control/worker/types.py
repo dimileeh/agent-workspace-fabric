@@ -19,6 +19,9 @@ class _ExecutionTaskKind(StrEnum):
     PRESERVED_ACTIVE = "preserved_active"
     # A resume of a pre-PR ``blocked`` workspace after an operator decision.
     BLOCKED_RESUME = "blocked_resume"
+    # A resume of a ``recovering`` workspace after the provider cooldown elapsed
+    # (auto-healing in-place provider retry, #612).
+    RECOVERING_RESUME = "recovering_resume"
     # A monitor resume that reconcile has cancelled but whose coroutine has not
     # yet stopped. Cancellation is cooperative, so the task can keep running
     # after ``cancel()`` returns. We keep it tracked under its workspace_id so a

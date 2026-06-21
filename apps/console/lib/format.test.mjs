@@ -61,6 +61,38 @@ test("fallbackLifecycleStages marks terminal successors skipped", () => {
   assert.equal(stages.completed, "terminal_skipped");
 });
 
+test("fallbackLifecycleStages never marks a skipped optional pause completed on a terminal rail", () => {
+  // A workspace that failed from a stage past `recovering`/`blocked` (e.g.
+  // monitoring_pr) never necessarily entered those optional pauses. The terminal
+  // rail must mirror the non-terminal guard and keep an unobserved pause out of
+  // `completed`, otherwise it falsely tells the operator the workspace
+  // auto-retried (recovering) or paused for them (blocked).
+  const stages = Object.fromEntries(
+    fallbackLifecycleStages("failed", "monitoring_pr").map((stage) => [stage.stage, stage.status]),
+  );
+
+  assert.notEqual(stages.recovering, "completed");
+  assert.notEqual(stages.blocked, "completed");
+  assert.equal(stages.recovering, "pending");
+  assert.equal(stages.blocked, "pending");
+  // Non-pause stages up to the terminal source still read completed.
+  assert.equal(stages.running, "completed");
+  assert.equal(stages.validating, "completed");
+  assert.equal(stages.pushing, "completed");
+});
+
+test("fallbackLifecycleStages marks an explicitly-entered terminal pause completed", () => {
+  // When the terminal transition came *from* the pause itself, it was observed,
+  // so the rail should render it completed rather than pending.
+  const stages = Object.fromEntries(
+    fallbackLifecycleStages("failed", "blocked").map((stage) => [stage.stage, stage.status]),
+  );
+
+  assert.equal(stages.blocked, "completed");
+  // A different optional pause that was not the terminal source stays pending.
+  assert.equal(stages.recovering, "pending");
+});
+
 test("fallbackLifecycleStages skips all stages for unknown terminal source", () => {
   const stages = Object.fromEntries(
     fallbackLifecycleStages("failed", "unknown_legacy_stage").map((stage) => [
@@ -156,6 +188,46 @@ test("normalizeLifecycle injects an active blocked stage for a real blocked work
   assert.equal(result.filter((s) => s.status === "active").length, 1);
 });
 
+test("normalizeLifecycle keeps a post-PR blocked pause right of a completed monitoring_pr", () => {
+  // A `blocked` pause entered from `monitoring_pr` (the monitor-repair pause)
+  // arrives with `monitoring_pr` already `completed`. The synthetic active
+  // `blocked` must land AFTER the completed monitoring_pr, not at its canonical
+  // slot to the left of it — otherwise an active step renders left of a
+  // completed one, reversing the real transition order.
+  const backend = [
+    stage("requested", "completed"),
+    stage("provisioning", "completed"),
+    stage("ready", "completed"),
+    stage("running", "completed"),
+    stage("validating", "completed"),
+    stage("pushing", "completed"),
+    stage("monitoring_pr", "completed"),
+    stage("completed", "pending"),
+  ];
+
+  const result = normalizeLifecycle("blocked", backend);
+  const rendered = result.map((s) => [s.stage, s.status]);
+
+  assert.deepEqual(rendered, [
+    ["requested", "completed"],
+    ["provisioning", "completed"],
+    ["ready", "completed"],
+    ["running", "completed"],
+    ["validating", "completed"],
+    ["pushing", "completed"],
+    ["monitoring_pr", "completed"],
+    ["blocked", "active"],
+    ["completed", "pending"],
+  ]);
+  // No completed stage may appear to the right of the active pause.
+  const activeIndex = result.findIndex((s) => s.status === "active");
+  assert.ok(
+    result.slice(activeIndex + 1).every((s) => s.status !== "completed"),
+    "no completed stage may follow the active pause",
+  );
+  assert.equal(result.filter((s) => s.status === "active").length, 1);
+});
+
 test("normalizeLifecycle is a no-op for a non-blocked workspace", () => {
   const backend = [stage("running", "active"), stage("validating", "pending")];
   assert.equal(normalizeLifecycle("running", backend), backend);
@@ -174,6 +246,110 @@ test("normalizeLifecycle appends blocked when no later stage is present to ancho
     ["running", "completed"],
     ["blocked", "active"],
   ]);
+});
+
+test("fallbackLifecycleStages marks running completed for a recovering workspace", () => {
+  // `recovering` is contractually entered only from `running` (#612 state
+  // machine) and sits immediately after it, so the fallback knows `running` was
+  // reached: it marks `running` completed and only later execution stages
+  // pending — matching the real-data path (`normalizeLifecycle`).
+  const stages = Object.fromEntries(
+    fallbackLifecycleStages("recovering").map((stage) => [stage.stage, stage.status]),
+  );
+
+  assert.equal(stages.requested, "completed");
+  assert.equal(stages.provisioning, "completed");
+  assert.equal(stages.ready, "completed");
+  assert.equal(stages.running, "completed");
+  assert.equal(stages.recovering, "active");
+  assert.equal(stages.validating, "pending");
+  assert.equal(stages.pushing, "pending");
+  assert.equal(stages.monitoring_pr, "pending");
+});
+
+test("fallbackLifecycleStages never marks a skipped recovering pause completed", () => {
+  // `recovering` is an optional pause: a workspace that went running→validating
+  // directly never auto-retried. The fallback must NOT render `recovering` as
+  // `completed` for such a workspace (it would falsely claim a provider retry
+  // happened) — the backend omits the pause entirely, so the rail keeps it
+  // `pending`, matching the real-data path. The execution stage it actually
+  // reached (`running`) stays completed and the current stage stays active.
+  for (const status of ["validating", "pushing", "monitoring_pr"]) {
+    const stages = Object.fromEntries(
+      fallbackLifecycleStages(status).map((stage) => [stage.stage, stage.status]),
+    );
+    assert.equal(stages.running, "completed", `running completed for ${status}`);
+    assert.equal(stages.recovering, "pending", `recovering not completed for ${status}`);
+    assert.equal(stages[status], "active", `${status} active`);
+  }
+});
+
+test("fallbackLifecycleStages never marks a skipped blocked pause completed", () => {
+  // Same guard for `blocked`: a `monitoring_pr` workspace that never paused for
+  // the operator must not show `blocked` as completed on the fallback rail.
+  const stages = Object.fromEntries(
+    fallbackLifecycleStages("monitoring_pr").map((stage) => [stage.stage, stage.status]),
+  );
+  assert.equal(stages.blocked, "pending");
+  assert.equal(stages.monitoring_pr, "active");
+});
+
+test("statusTone marks a recovering workspace as info (auto-heal, no action) not warn", () => {
+  // recovering is a benign in-flight auto-retry, distinct from blocked's warn.
+  assert.equal(statusTone("recovering"), "info");
+  assert.notEqual(statusTone("recovering"), "warn");
+});
+
+test("statusGlyph renders a distinct refresh glyph for a recovering workspace", () => {
+  assert.equal(statusGlyph("recovering"), "↻");
+  // Must not reuse blocked's pause glyph — the two pauses read differently.
+  assert.notEqual(statusGlyph("recovering"), statusGlyph("blocked"));
+});
+
+test("lifecycleStages includes recovering as an in-flight stage after running, before monitoring_pr", () => {
+  assert.ok(lifecycleStages.includes("recovering"));
+  assert.ok(lifecycleStages.indexOf("recovering") > lifecycleStages.indexOf("running"));
+  assert.ok(lifecycleStages.indexOf("recovering") < lifecycleStages.indexOf("monitoring_pr"));
+  // recovering stays non-terminal, so it must not appear after completed.
+  assert.ok(lifecycleStages.indexOf("recovering") < lifecycleStages.indexOf("completed"));
+});
+
+test("normalizeLifecycle injects an active recovering stage for a real recovering workspace", () => {
+  // Mirrors the backend for a pause from running: stages it left are completed,
+  // downstream pending, and (since recovering isn't a lifecycle stage) nothing active.
+  const backend = [
+    stage("requested", "completed"),
+    stage("provisioning", "completed"),
+    stage("ready", "completed"),
+    stage("running", "completed"),
+    stage("validating", "pending"),
+    stage("pushing", "pending"),
+    stage("monitoring_pr", "pending"),
+    stage("completed", "pending"),
+  ];
+
+  const result = normalizeLifecycle("recovering", backend);
+  const rendered = result.map((s) => [s.stage, s.status]);
+
+  // recovering is inserted at its canonical position (after running, before validating)
+  // and is the single active stage; the backend stages are untouched.
+  assert.deepEqual(rendered, [
+    ["requested", "completed"],
+    ["provisioning", "completed"],
+    ["ready", "completed"],
+    ["running", "completed"],
+    ["recovering", "active"],
+    ["validating", "pending"],
+    ["pushing", "pending"],
+    ["monitoring_pr", "pending"],
+    ["completed", "pending"],
+  ]);
+  assert.equal(result.filter((s) => s.status === "active").length, 1);
+});
+
+test("normalizeLifecycle is idempotent when a recovering stage is already present", () => {
+  const backend = [stage("running", "completed"), stage("recovering", "active")];
+  assert.equal(normalizeLifecycle("recovering", backend), backend);
 });
 
 test("formatUsageProvenance maps ccusage source and reason codes to friendly labels", () => {

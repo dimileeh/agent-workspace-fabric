@@ -17,6 +17,30 @@ test("blockedSince prefers last_event.occurred_at when the workspace entered blo
   );
 });
 
+test("blockedSince prefers the authoritative blocked_at over the last event and updated_at", () => {
+  // The overview now carries blocked_at; a trailing non-blocked last_event must
+  // not skew the derived age (regression for the list "Blocked for N" age bug).
+  assert.equal(
+    blockedSince({
+      updated_at: "2026-06-18T11:00:00.000Z",
+      blocked_at: "2026-06-18T09:00:00.000Z",
+      last_event: { new_state: "monitoring_pr", occurred_at: "2026-06-18T10:30:00.000Z" },
+    }),
+    "2026-06-18T09:00:00.000Z",
+  );
+});
+
+test("blockedSince falls back to the heuristic when blocked_at is absent or null", () => {
+  assert.equal(
+    blockedSince({
+      updated_at: "2026-06-18T10:00:00.000Z",
+      blocked_at: null,
+      last_event: { new_state: "blocked", occurred_at: "2026-06-18T09:30:00.000Z" },
+    }),
+    "2026-06-18T09:30:00.000Z",
+  );
+});
+
 test("blockedSince falls back to updated_at when the last event is not the block transition", () => {
   assert.equal(
     blockedSince({

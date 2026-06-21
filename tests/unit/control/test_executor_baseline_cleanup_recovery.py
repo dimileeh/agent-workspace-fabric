@@ -1,0 +1,333 @@
+"""Regression coverage for baseline cleanup missing-HEAD recovery."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
+from awf.common.commands import FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
+from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.executor import execution_flow as execution_flow_module
+from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_session_factory
+from awf.node.compose_manager import ComposeManager
+from awf.runtime.pr_creator import PullRequestCreator
+from awf.runtime.validation import ValidationRunner
+from tests.postgres import postgres_test_engine
+from tests.unit.control.test_executor_parts.test_executor_part_001 import _seed_ready_workspace
+
+_TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
+
+
+@pytest.fixture
+async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
+        yield session_factory
+
+
+@pytest.fixture
+def fake() -> FakeCommandRunner:
+    return FakeCommandRunner()
+
+
+@pytest.fixture
+def executor(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> WorkspaceExecutor:
+    compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+    validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+    pr = PullRequestCreator(fake)
+    return WorkspaceExecutor(
+        session_factory=factory,
+        runner=fake,
+        compose=compose,
+        validation=validation,
+        pr_creator=pr,
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "work" / "worktrees",
+            compose_projects_root=tmp_path / "work" / "compose",
+            default_models={
+                AgentRuntime.codex: "gpt-5",
+                AgentRuntime.claude_code: "sonnet",
+                AgentRuntime.gemini: "gemini-2.5-pro",
+            },
+        ),
+    )
+
+
+@pytest.mark.unit
+async def test_baseline_cleanup_failure_recovers_missing_head_before_outer_failure(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed_ready_workspace(factory)
+
+    async def _baseline_cleanup_failure(**_kwargs: object) -> None:
+        raise ComposeExecCleanupError(
+            invocation_id="baseline-cleanup",
+            source="baseline_coverage",
+            label="baseline coverage",
+            message="cleanup timed out",
+        )
+
+    verify_head = AsyncMock(return_value=False)
+    recover = AsyncMock(return_value=True)
+    agent = AsyncMock()
+    monkeypatch.setattr(
+        executor,
+        "_measure_and_persist_baseline_coverage",
+        _baseline_cleanup_failure,
+    )
+    monkeypatch.setattr(execution_flow_module, "verify_head_object_exists", verify_head)
+    monkeypatch.setattr(executor, "_recover_missing_git_head_or_mark_failed", recover)
+    monkeypatch.setattr(executor, "_run_agent_task_with_optional_planning", agent)
+
+    await executor.execute(ws_id)
+
+    verify_head.assert_awaited_once()
+    recover.assert_awaited_once()
+    assert recover.await_args.kwargs["stage"] == "baseline_coverage_cleanup_failure"
+    assert recover.await_args.kwargs["mark_failed_on_failure"] is False
+    assert recover.await_args.kwargs["branch_name"] == f"awf/{ws_id}"
+    agent.assert_not_awaited()
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+
+
+@pytest.mark.unit
+async def test_baseline_cleanup_failure_skips_recovery_when_head_is_present(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed_ready_workspace(factory)
+
+    async def _baseline_cleanup_failure(**_kwargs: object) -> None:
+        raise ComposeExecCleanupError(
+            invocation_id="baseline-cleanup",
+            source="baseline_coverage",
+            label="baseline coverage",
+            message="cleanup timed out",
+        )
+
+    verify_head = AsyncMock(return_value=True)
+    recover = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        executor,
+        "_measure_and_persist_baseline_coverage",
+        _baseline_cleanup_failure,
+    )
+    monkeypatch.setattr(execution_flow_module, "verify_head_object_exists", verify_head)
+    monkeypatch.setattr(executor, "_recover_missing_git_head_or_mark_failed", recover)
+
+    await executor.execute(ws_id)
+
+    verify_head.assert_awaited_once()
+    recover.assert_not_awaited()
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+
+
+@pytest.mark.unit
+async def test_baseline_cleanup_failure_stops_when_hook_repair_fails(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed_ready_workspace(factory)
+
+    async def _baseline_cleanup_failure(**_kwargs: object) -> None:
+        raise ComposeExecCleanupError(
+            invocation_id="baseline-cleanup",
+            source="baseline_coverage",
+            label="baseline coverage",
+            message="cleanup timed out",
+        )
+
+    repair_cleanup_hooks = AsyncMock(return_value=False)
+    verify_head = AsyncMock(return_value=False)
+    recover = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        executor,
+        "_measure_and_persist_baseline_coverage",
+        _baseline_cleanup_failure,
+    )
+    monkeypatch.setattr(
+        execution_flow_module,
+        "repair_mirror_hooks_path_after_agent_cleanup_failure",
+        repair_cleanup_hooks,
+    )
+    monkeypatch.setattr(execution_flow_module, "verify_head_object_exists", verify_head)
+    monkeypatch.setattr(executor, "_recover_missing_git_head_or_mark_failed", recover)
+
+    await executor.execute(ws_id)
+
+    repair_cleanup_hooks.assert_awaited_once()
+    assert repair_cleanup_hooks.await_args.kwargs["failure_stage"] == "after agent cleanup failure"
+    verify_head.assert_not_awaited()
+    recover.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_baseline_cleanup_failure_preserves_failure_when_recovery_unavailable(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed_ready_workspace(factory)
+
+    async def _baseline_cleanup_failure(**_kwargs: object) -> None:
+        raise ComposeExecCleanupError(
+            invocation_id="baseline-cleanup",
+            source="baseline_coverage",
+            label="baseline coverage",
+            message="cleanup timed out",
+        )
+
+    verify_head = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        executor,
+        "_measure_and_persist_baseline_coverage",
+        _baseline_cleanup_failure,
+    )
+    monkeypatch.setattr(execution_flow_module, "verify_head_object_exists", verify_head)
+    monkeypatch.setattr(executor, "_recover_missing_git_head_or_mark_failed", None)
+
+    await executor.execute(ws_id)
+
+    verify_head.assert_awaited_once()
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+
+
+@pytest.mark.unit
+async def test_agent_cleanup_failure_skips_recovery_when_head_is_present(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed_ready_workspace(factory)
+
+    async def _baseline_coverage_ok(**_kwargs: object) -> None:
+        return None
+
+    async def _agent_cleanup_failure(**_kwargs: object) -> None:
+        raise ComposeExecCleanupError(
+            invocation_id="agent-cleanup",
+            source="agent",
+            label="agent",
+            message="cleanup timed out",
+        )
+
+    verify_head = AsyncMock(return_value=True)
+    recover = AsyncMock(return_value=True)
+    verify_recovered_commit = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        executor,
+        "_measure_and_persist_baseline_coverage",
+        _baseline_coverage_ok,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_run_agent_task_with_optional_planning",
+        _agent_cleanup_failure,
+    )
+    monkeypatch.setattr(execution_flow_module, "verify_head_object_exists", verify_head)
+    monkeypatch.setattr(executor, "_recover_missing_git_head_or_mark_failed", recover)
+    monkeypatch.setattr(
+        executor,
+        "_verify_recovered_post_agent_commit_or_mark_failed",
+        verify_recovered_commit,
+    )
+
+    await executor.execute(ws_id)
+
+    verify_head.assert_awaited_once()
+    recover.assert_not_awaited()
+    verify_recovered_commit.assert_not_awaited()
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+
+
+@pytest.mark.unit
+async def test_agent_cleanup_failure_preserves_failure_when_recovery_unavailable(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed_ready_workspace(factory)
+
+    async def _baseline_coverage_ok(**_kwargs: object) -> None:
+        return None
+
+    async def _agent_cleanup_failure(**_kwargs: object) -> None:
+        raise ComposeExecCleanupError(
+            invocation_id="agent-cleanup",
+            source="agent",
+            label="agent",
+            message="cleanup timed out",
+        )
+
+    verify_head = AsyncMock(return_value=False)
+    verify_recovered_commit = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        executor,
+        "_measure_and_persist_baseline_coverage",
+        _baseline_coverage_ok,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_run_agent_task_with_optional_planning",
+        _agent_cleanup_failure,
+    )
+    monkeypatch.setattr(execution_flow_module, "verify_head_object_exists", verify_head)
+    monkeypatch.setattr(executor, "_recover_missing_git_head_or_mark_failed", None)
+    monkeypatch.setattr(
+        executor,
+        "_verify_recovered_post_agent_commit_or_mark_failed",
+        verify_recovered_commit,
+    )
+
+    await executor.execute(ws_id)
+
+    verify_head.assert_awaited_once()
+    verify_recovered_commit.assert_not_awaited()
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
