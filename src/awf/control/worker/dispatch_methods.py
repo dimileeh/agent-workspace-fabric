@@ -11,6 +11,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any, cast
 
+from awf.common.redaction import redact_secrets
 from awf.control.executor.types import PauseResumeReason
 from awf.control.worker.constants import (
     _BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE,
@@ -198,7 +199,8 @@ async def _reset_recovering_worktree(self: Any, workspace_id: str) -> bool:
         _log.warning(
             "worker.recovering_resume_status_failed",
             workspace_id=workspace_id,
-            error=status_err[:240],
+            reason_code=_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
+            error=redact_secrets(status_err)[:240],
         )
         return False
     if status_out.strip():
@@ -214,7 +216,8 @@ async def _reset_recovering_worktree(self: Any, workspace_id: str) -> bool:
             _log.warning(
                 "worker.recovering_resume_stash_failed",
                 workspace_id=workspace_id,
-                error=stash_err[:240],
+                reason_code=_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
+                error=redact_secrets(stash_err)[:240],
             )
             return False
     reset_ok, _reset_out, reset_err = await self._run_preserved_active_git(
@@ -224,7 +227,8 @@ async def _reset_recovering_worktree(self: Any, workspace_id: str) -> bool:
         _log.warning(
             "worker.recovering_resume_reset_failed",
             workspace_id=workspace_id,
-            error=reset_err[:240],
+            reason_code=_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
+            error=redact_secrets(reset_err)[:240],
         )
         return False
     return True

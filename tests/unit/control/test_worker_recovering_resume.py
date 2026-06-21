@@ -18,8 +18,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import structlog.testing
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.redaction import REDACTION_MARKER
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
@@ -339,6 +341,75 @@ async def test_reset_recovering_worktree_skips_when_status_fails(
     # The file is untouched — no destructive reset ran — and the reset is unsafe.
     assert safe is False
     assert (not_a_repo / "scratch.py").read_text() == "DIRTY\n"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("event", "responses"),
+    [
+        # ``git status`` fails outright.
+        (
+            "worker.recovering_resume_status_failed",
+            [(False, "", "fatal: clone https://x-access-token:ghp_SECRETTOKEN@github.com failed")],
+        ),
+        # ``git status`` reports dirt, then the stash push fails.
+        (
+            "worker.recovering_resume_stash_failed",
+            [
+                (True, "M tracked.py\n", ""),
+                (
+                    False,
+                    "",
+                    "fatal: stash https://x-access-token:ghp_SECRETTOKEN@github.com failed",
+                ),
+            ],
+        ),
+        # Clean worktree (no stash), then ``git reset --hard`` fails.
+        (
+            "worker.recovering_resume_reset_failed",
+            [
+                (True, "", ""),
+                (
+                    False,
+                    "",
+                    "fatal: reset https://x-access-token:ghp_SECRETTOKEN@github.com failed",
+                ),
+            ],
+        ),
+    ],
+)
+async def test_reset_recovering_worktree_failure_logs_carry_reason_code_and_redact(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    event: str,
+    responses: list[tuple[bool, str, str]],
+) -> None:
+    # Each git-failure branch must log the abort reason_code (so logs match the
+    # persisted restore event) and redact the raw git stderr (it can embed a
+    # tokenized remote URL).
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    worker = _worker(
+        session_factory,
+        _RecordingRecoveringExecutor(),
+        provisioner=_TransitioningProvisioner(worktree_path=worktree),
+    )
+
+    calls = iter(responses)
+
+    async def _fake_git(*_args: object, **_kwargs: object) -> tuple[bool, str, str]:
+        return next(calls)
+
+    worker._run_preserved_active_git = _fake_git  # type: ignore[method-assign]  # noqa: SLF001
+
+    with structlog.testing.capture_logs() as logs:
+        safe = await worker._reset_recovering_worktree("ws_fail")  # noqa: SLF001
+
+    assert safe is False
+    entry = next(item for item in logs if item["event"] == event)
+    assert entry["reason_code"] == "RECOVERING_RESUME_WORKTREE_RESET_ABORTED"
+    assert "ghp_SECRETTOKEN" not in entry["error"]
+    assert REDACTION_MARKER in entry["error"]
 
 
 @pytest.mark.unit
