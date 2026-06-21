@@ -807,11 +807,12 @@ async def test_recovering_resume_missing_executor_releases_claim(
     # reverts the row to ``recovering`` and the ``finally`` MUST still release the
     # claim so a capable worker can re-claim it — the ``skip_if_blocked`` gate only
     # applies to a clean executor-driven re-pause, not a worker revert.
+    seeded_not_before = datetime.now(UTC) - timedelta(seconds=5)
     ws_id = await _create_recovering(
         session_factory,
         origin_repo,
         "no-executor",
-        not_before=datetime.now(UTC) - timedelta(seconds=5),
+        not_before=seeded_not_before,
     )
     worker = _worker(session_factory, _RecordingRecoveringExecutor())
     assert await worker._claim_recovering_for_resume(ws_id)  # noqa: SLF001
@@ -829,6 +830,14 @@ async def test_recovering_resume_missing_executor_releases_claim(
         assert ws.status == WorkspaceStatus.recovering.value
         assert ws.execution_claimed_by is None
         assert ws.execution_claim_expires_at is None
+        # The cooldown is re-armed into the future (#647) — without it the
+        # restored row would still carry the past ``not_before`` and
+        # ``list_resumable_recovering_ids`` would busy-loop re-selecting it.
+        restored_not_before = datetime.fromisoformat(
+            ws.task_policy["provider_recovery_state"]["not_before"]
+        )
+        assert restored_not_before > seeded_not_before
+        assert restored_not_before > datetime.now(UTC)
 
 
 @pytest.mark.unit

@@ -723,12 +723,20 @@ async def _restore_paused_after_missing_executor(
     """Revert a won paused-resume back to its paused status when no executor can drive it.
 
     Used inside the dispatched resume task (the claim is released by the caller's
-    ``finally``); ``reason`` selects the paused status + no-executor reason code."""
+    ``finally``); ``reason`` selects the paused status + no-executor reason code.
+
+    Like the other ``recovering`` revert paths (worktree-reset abort, post-claim
+    dispatch abort), re-arm the provider cooldown (#647) for ``recovering``: this
+    revert also leaves ``not_before`` in the past, so without re-arming
+    ``list_resumable_recovering_ids`` would re-select the row every poll and a
+    worker that persistently has no executor would busy-loop the executor slot
+    instead of backing off a full cooldown before the next safe retry."""
     await _restore_paused_resume_claim(
         self,
         workspace_id,
         reason=reason,
         reason_code=_PAUSED_RESUME_NO_EXECUTOR_REASON_CODE[reason],
+        rearm_recovering_cooldown=(reason == "recovering"),
     )
 
 
@@ -738,7 +746,11 @@ async def _restore_blocked_after_missing_executor(self: Any, workspace_id: str) 
 
 
 async def _restore_recovering_after_missing_executor(self: Any, workspace_id: str) -> None:
-    """Revert a won recovering-resume to ``recovering`` — shim over ``_restore_paused_after_missing_executor`` (#612)."""
+    """Revert a won recovering-resume to ``recovering`` — shim over ``_restore_paused_after_missing_executor`` (#612).
+
+    Re-arms the provider cooldown (#647) via the ``reason == "recovering"`` gate so
+    a worker that persistently lacks an executor backs off a full cooldown instead
+    of re-selecting the row every poll and busy-looping the slot."""
     await _restore_paused_after_missing_executor(self, workspace_id, reason="recovering")
 
 
