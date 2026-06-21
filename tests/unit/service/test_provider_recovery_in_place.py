@@ -10,7 +10,7 @@ same-agent ``retry``.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -22,6 +22,7 @@ from awf.service.provider_recovery import (
     PROVIDER_RETRY_DELAYED_REASON,
     ProviderInPlaceRecoveryDecision,
     in_place_recovery_task_policy,
+    rearm_recovering_cooldown_task_policy,
     should_recover_in_place,
 )
 
@@ -226,3 +227,58 @@ def test_in_place_recovery_task_policy_preserves_spent_fallback_budget() -> None
     policy = in_place_recovery_task_policy(task_policy, decision=decision)
 
     assert policy["provider_recovery_state"]["fallback_attempt_number"] == 1
+
+
+@pytest.mark.unit
+def test_rearm_recovering_cooldown_advances_not_before_and_preserves_state() -> None:
+    # #647: a failed pre-resume worktree reset re-arms the cooldown so the row backs
+    # off a full provider cooldown instead of being re-selected every poll. The rest
+    # of ``provider_recovery_state`` is preserved untouched, and the source policy is
+    # not mutated in place.
+    task_policy = {
+        "agent_model": "gpt-5",
+        "provider_recovery_state": {
+            "action": "retry",
+            "retry_attempt_number": 1,
+            "not_before": (_NOW - timedelta(seconds=5)).isoformat(),
+        },
+    }
+
+    rearmed = rearm_recovering_cooldown_task_policy(task_policy, now=_NOW)
+
+    assert rearmed is not None
+    state = rearmed["provider_recovery_state"]
+    # Default provider cooldown is 300s; ``not_before`` is advanced to ``now + 300s``.
+    assert datetime.fromisoformat(state["not_before"]) == _NOW + timedelta(seconds=300)
+    assert state["retry_attempt_number"] == 1
+    assert state["action"] == "retry"
+    # The source policy is left untouched (cooldown still in the past).
+    assert datetime.fromisoformat(
+        task_policy["provider_recovery_state"]["not_before"]
+    ) == _NOW - timedelta(seconds=5)
+
+
+@pytest.mark.unit
+def test_rearm_recovering_cooldown_honors_policy_cooldown_seconds() -> None:
+    # A task-supplied ``provider_recovery.cooldown_seconds`` overrides the default.
+    task_policy = {
+        "provider_recovery": {"cooldown_seconds": 30},
+        "provider_recovery_state": {"not_before": _NOW.isoformat()},
+    }
+
+    rearmed = rearm_recovering_cooldown_task_policy(task_policy, now=_NOW)
+
+    assert rearmed is not None
+    assert datetime.fromisoformat(
+        rearmed["provider_recovery_state"]["not_before"]
+    ) == _NOW + timedelta(seconds=30)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("task_policy", [None, {}, {"provider_recovery_state": "not-a-mapping"}])
+def test_rearm_recovering_cooldown_returns_none_without_state(
+    task_policy: dict[str, object] | None,
+) -> None:
+    # A legacy/partial row with no ``provider_recovery_state`` mapping has no cooldown
+    # to re-arm, so the helper returns ``None`` and the caller writes nothing.
+    assert rearm_recovering_cooldown_task_policy(task_policy, now=_NOW) is None

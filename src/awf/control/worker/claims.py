@@ -87,6 +87,7 @@ from awf.db.repositories import (
 )
 from awf.db.repositories._scheduler import _scheduler_node_scope_condition
 from awf.db.resilience import run_db_operation_with_retry
+from awf.service.provider_recovery import rearm_recovering_cooldown_task_policy
 from awf.service.scheduler import SchedulerOrderCursor
 
 
@@ -625,7 +626,12 @@ async def _claim_recovering_for_resume(self: Any, workspace_id: str) -> bool:
 
 
 async def _restore_paused_resume_claim(
-    self: Any, workspace_id: str, *, reason: PauseResumeReason, reason_code: str
+    self: Any,
+    workspace_id: str,
+    *,
+    reason: PauseResumeReason,
+    reason_code: str,
+    rearm_recovering_cooldown: bool = False,
 ) -> None:
     """Revert a won paused-resume back to its paused status when it cannot be driven.
 
@@ -638,7 +644,13 @@ async def _restore_paused_resume_claim(
     ``blocked``; ``provider_recovery_state``/cooldown for ``recovering``), so the
     next cycle resumes it cleanly once it can run. Owner-gated so a newer claimant
     that already fenced us is never clobbered. The ``reason_code`` records *why*
-    the resume was abandoned (no executor vs. an aborted post-claim dispatch)."""
+    the resume was abandoned (no executor vs. an aborted post-claim dispatch).
+
+    ``rearm_recovering_cooldown`` (#647) re-arms ``provider_recovery_state``
+    ``not_before`` to a fresh cooldown for the worktree-reset-abort path: that path
+    leaves the cooldown in the past, so without re-arming ``list_resumable_recovering_ids``
+    would re-select the row every poll and a persistent ``git`` failure would
+    busy-loop the executor slot instead of backing off for a later safe retry."""
     try:
         async with self._session_factory() as session:
             ws = await WorkspaceRepository(session).transition_if_current(
@@ -649,6 +661,17 @@ async def _restore_paused_resume_claim(
                 extra_conditions=(Workspace.execution_claimed_by == self._worker_id,),
             )
             if ws is not None:
+                if rearm_recovering_cooldown:
+                    rearmed = rearm_recovering_cooldown_task_policy(
+                        ws.task_policy, now=datetime.now(UTC)
+                    )
+                    # A ``recovering`` row reverted on the reset-abort path always
+                    # carries ``provider_recovery_state`` (the divert into recovering
+                    # writes it), so ``rearmed`` is never ``None`` here; the ``None``
+                    # arc is unreachable defensive code for a malformed row — hence
+                    # ``# pragma: no branch``.
+                    if rearmed is not None:  # pragma: no branch
+                        ws.task_policy = rearmed
                 await session.commit()
     except Exception:
         _log.exception(

@@ -275,11 +275,17 @@ async def _safely_resume_paused_claimed(
             # safe resume rather than re-running the agent on a contaminated tree.
             # ``executor_drove_resume`` stays ``False`` so the ``finally`` releases
             # the claim, letting a capable worker re-claim the cooled-down row.
+            # Re-arm the provider cooldown (#647) so the restored row backs off a
+            # full cooldown before it is resumable again: leaving ``not_before`` in
+            # the past would let ``list_resumable_recovering_ids`` re-select it every
+            # poll, busy-looping a persistent ``git`` status/stash/reset failure
+            # through the executor slot instead of waiting for a later safe retry.
             if not await self._reset_recovering_worktree(workspace_id):
                 await self._restore_paused_resume_claim(
                     workspace_id,
                     reason=reason,
                     reason_code=_RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
+                    rearm_recovering_cooldown=True,
                 )
                 return
             await self._executor.resume_recovering_execution(

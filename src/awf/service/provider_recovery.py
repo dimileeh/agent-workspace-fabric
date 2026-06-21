@@ -424,6 +424,37 @@ def in_place_recovery_task_policy(
     return policy
 
 
+def rearm_recovering_cooldown_task_policy(
+    task_policy: Mapping[str, Any] | None,
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Re-arm the in-place ``recovering`` cooldown after a failed pre-resume worktree reset (#612, #647).
+
+    When the worker reclaims a cooled-down ``recovering`` row but the pre-run
+    worktree reset (``git status``/``stash``/``reset --hard``) fails, the row is
+    restored to ``recovering`` for a later safe resume. Without moving
+    ``not_before`` forward the cooldown stays in the past, so
+    ``list_resumable_recovering_ids`` re-selects the same row every poll and a
+    persistent git failure busy-loops the executor slot (consuming slots + log
+    volume) instead of waiting for a later safe retry. Advance ``not_before`` to
+    ``now + cooldown_seconds`` so the next attempt waits a full provider cooldown.
+
+    Returns ``None`` when there is no ``provider_recovery_state`` mapping to re-arm
+    (a legacy/partial row with no cooldown to gate on), leaving the policy untouched
+    so the caller writes nothing."""
+    raw = task_policy.get(PROVIDER_RECOVERY_STATE_KEY) if task_policy else None
+    if not isinstance(raw, Mapping):
+        return None
+    policy = parse_provider_recovery_policy(task_policy)
+    next_not_before = now + timedelta(seconds=policy.cooldown_seconds)
+    updated = deepcopy(dict(task_policy or {}))
+    state = dict(raw)
+    state["not_before"] = next_not_before.isoformat()
+    updated[PROVIDER_RECOVERY_STATE_KEY] = state
+    return updated
+
+
 async def create_provider_recovery_attempt_row(
     session: AsyncSession,
     source_workspace_id: str,

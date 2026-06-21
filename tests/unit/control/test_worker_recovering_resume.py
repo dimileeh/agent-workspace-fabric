@@ -422,6 +422,63 @@ async def test_recovering_resume_aborts_when_worktree_reset_fails(
 
 
 @pytest.mark.unit
+async def test_recovering_resume_rearms_cooldown_when_worktree_reset_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+    tmp_path: Path,
+) -> None:
+    # Regression (#647): when the pre-run worktree reset cannot complete the row is
+    # restored to ``recovering`` — but its ``provider_recovery_state.not_before`` must
+    # be re-armed into the future. Otherwise the cooldown stays in the past,
+    # ``list_resumable_recovering_ids`` re-selects the same row every poll, and a
+    # persistent ``git`` status/stash/reset failure busy-loops the executor slot
+    # (consuming slots + log volume) instead of backing off for a later safe retry.
+    not_a_repo = tmp_path / "dirty-worktree"
+    not_a_repo.mkdir()
+    (not_a_repo / "partial.py").write_text("PARTIAL PROVIDER EDIT\n")
+
+    ws_id = await _create_recovering(
+        session_factory,
+        origin_repo,
+        "rearm-cooldown",
+        not_before=datetime.now(UTC) - timedelta(seconds=5),
+    )
+    executor = _RecordingRecoveringExecutor()
+    worker = _worker(
+        session_factory,
+        executor,
+        provisioner=_TransitioningProvisioner(worktree_path=not_a_repo),
+    )
+    assert await worker._claim_recovering_for_resume(ws_id)  # noqa: SLF001
+
+    before = datetime.now(UTC)
+    await asyncio.wait_for(
+        worker._safely_resume_recovering_claimed(ws_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    assert executor.resume_recovering_calls == []
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.recovering.value
+        # The cooldown was re-armed into the future (default 300s provider cooldown),
+        # while the rest of the recovery state is preserved.
+        recovery_state = ws.task_policy["provider_recovery_state"]
+        assert recovery_state["retry_attempt_number"] == 1
+        rearmed = datetime.fromisoformat(recovery_state["not_before"])
+        assert rearmed > before + timedelta(seconds=60)
+
+    # The backed-off row is no longer immediately resumable: the cooldown gate now
+    # excludes it until the re-armed deadline elapses, so it cannot be re-claimed
+    # on the very next poll.
+    selected = await worker._list_resumable_recovering(  # noqa: SLF001
+        now=datetime.now(UTC), limit=10
+    )
+    assert selected == []
+
+
+@pytest.mark.unit
 async def test_release_execution_claim_skips_recovering_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,
