@@ -697,6 +697,50 @@ async def test_restore_recovering_resume_claim_rearms_cooldown_on_dispatch_abort
 
 
 @pytest.mark.unit
+async def test_restore_recovering_resume_claim_after_cancellation_rearms_cooldown(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # Regression (PRRT_kwDOSJAM6s6LFFUt): when a recovering resume is cancelled
+    # after the claim CAS moved the row to ``running`` but before the executor
+    # advanced it (e.g. worker shutdown cancelling outstanding tasks), the shielded
+    # cancellation restore must re-arm ``not_before`` into the future like the
+    # post-claim executor-failure path. Otherwise the cooldown stays in the past and
+    # ``list_resumable_recovering_ids`` re-selects the same row every poll, churning
+    # the executor slot during shutdown/cancellation loops.
+    ws_id = await _create_recovering(
+        session_factory,
+        origin_repo,
+        "cancel-rearm",
+        not_before=datetime.now(UTC) - timedelta(seconds=5),
+    )
+    worker = _worker(session_factory, _RecordingRecoveringExecutor())
+    # The claim CAS commits ``recovering -> running`` and stamps the claim.
+    assert await worker._claim_recovering_for_resume(ws_id)  # noqa: SLF001
+
+    before = datetime.now(UTC)
+    await worker._restore_recovering_resume_claim_after_cancellation(  # noqa: SLF001
+        ws_id, reason_code="WORKER_RECOVERING_RESUME_EXECUTION_CANCELLED"
+    )
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.recovering.value
+        recovery_state = ws.task_policy["provider_recovery_state"]
+        assert recovery_state["retry_attempt_number"] == 1
+        rearmed = datetime.fromisoformat(recovery_state["not_before"])
+        assert rearmed > before + timedelta(seconds=60)
+
+    # The backed-off row is excluded from the cooldown gate, so a repeated
+    # cancellation loop cannot re-select it on the very next poll.
+    selected = await worker._list_resumable_recovering(  # noqa: SLF001
+        now=datetime.now(UTC), limit=10
+    )
+    assert selected == []
+
+
+@pytest.mark.unit
 async def test_release_execution_claim_skips_recovering_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,

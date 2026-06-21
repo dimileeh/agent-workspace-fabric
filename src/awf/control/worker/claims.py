@@ -768,9 +768,22 @@ async def _restore_paused_resume_claim_after_cancellation(
     ``running`` for stale-active recovery to FAIL. Shield the restore and re-await
     across repeated cancellations so it always runs to completion, mirroring
     ``_release_execution_claim_after_cancellation``.
+
+    Re-arm the provider cooldown (#647) for a ``recovering`` revert exactly like the
+    post-claim executor-failure path: the claim CAS already moved the row to
+    ``running`` while leaving ``not_before`` in the past, so without re-arming
+    ``list_resumable_recovering_ids`` would re-select the row every poll and a
+    repeated cancellation loop (e.g. worker shutdown) would busy-loop the executor
+    slot instead of backing off a full cooldown. ``blocked`` reverts carry no
+    cooldown, so the rearm is gated to ``recovering``.
     """
     restore_task = asyncio.create_task(
-        self._restore_paused_resume_claim(workspace_id, reason=reason, reason_code=reason_code),
+        self._restore_paused_resume_claim(
+            workspace_id,
+            reason=reason,
+            reason_code=reason_code,
+            rearm_recovering_cooldown=reason == "recovering",
+        ),
         name=f"awf-{reason}-resume-restore-{workspace_id}",
     )
     while not restore_task.done():
