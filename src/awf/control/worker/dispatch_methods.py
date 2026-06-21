@@ -323,7 +323,14 @@ async def _safely_resume_paused_claimed(
         )
         raise
     except Exception:
-        _log.exception(f"worker.resume_{reason}_failed", workspace_id=workspace_id)
+        # Carry the same reason code persisted by the restore below (line 338) so the
+        # structured failure log keeps the reason-code trail end-to-end rather than
+        # dropping it on the swallowed exception.
+        _log.exception(
+            f"worker.resume_{reason}_failed",
+            workspace_id=workspace_id,
+            reason_code=_PAUSED_RESUME_EXECUTION_FAILED_REASON_CODE[reason],
+        )
         # The resume CAS already committed ``<paused> -> running`` before dispatch.
         # If the resume raised before moving the row onward (e.g. a transient
         # executor/setup failure), the row is still ``running`` with its pause

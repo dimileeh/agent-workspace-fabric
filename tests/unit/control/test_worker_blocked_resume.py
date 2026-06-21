@@ -477,10 +477,19 @@ async def test_safely_resume_blocked_claimed_swallows_executor_error(
     assert await worker._claim_blocked_for_resume(blocked_id)  # noqa: SLF001
 
     # Must not raise despite the executor blowing up.
-    await asyncio.wait_for(
-        worker._safely_resume_blocked_claimed(blocked_id),  # noqa: SLF001
-        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    with structlog.testing.capture_logs() as logs:
+        await asyncio.wait_for(
+            worker._safely_resume_blocked_claimed(blocked_id),  # noqa: SLF001
+            timeout=WORKER_TEST_TIMEOUT_SECONDS,
+        )
+
+    # The swallowed-failure log carries the same reason code persisted by the
+    # restore, so the reason-code trail survives end to end (not dropped on the
+    # logged-and-swallowed exception).
+    resume_failed = next(
+        entry for entry in logs if entry["event"] == "worker.resume_blocked_failed"
     )
+    assert resume_failed["reason_code"] == "BLOCKED_RESUME_EXECUTION_FAILED"
 
     async with session_factory() as s:
         ws = await WorkspaceRepository(s).get(blocked_id)
