@@ -518,20 +518,30 @@ async def create_provider_recovery_attempt_row(
         await session.flush()
         return None
     source_workspace_mutated = False
+    # This ``elif`` is reached only when ``source_not_before is None`` and the
+    # decision is non-terminal, which happens solely for a monitor-in-place
+    # fallback (the override above forces ``source_not_before = None`` for that
+    # case alone). In that single reachable state the guard, ``decision.action ==
+    # "fallback"``, and ``decision.target_model is not None`` are all always True
+    # (a fallback decision always carries a concrete target model), so their False
+    # arcs are unreachable defensive code — hence ``# pragma: no branch``.
     if source_not_before is not None or decision.action == "terminal":
         source.task_policy = source_policy
         source_workspace_mutated = True
-    elif monitor_in_place_recovery and decision.action in {"retry", "fallback"}:
+    elif monitor_in_place_recovery and decision.action in {  # pragma: no branch
+        "retry",
+        "fallback",
+    }:
         source.task_policy = source_policy
         source_workspace_mutated = True
-        if decision.action == "fallback":
+        if decision.action == "fallback":  # pragma: no branch
             source.agent = decision.target_agent or source.agent
-            if decision.target_model is not None:
+            if decision.target_model is not None:  # pragma: no branch
                 source.task_policy = {
                     **source.task_policy,
                     "agent_model": decision.target_model,
                 }
-    if source_workspace_mutated:
+    if source_workspace_mutated:  # pragma: no branch
         await repo.advance_workspace_version(source)
     if source_not_before is not None:
         await repo.add_event(
