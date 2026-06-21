@@ -53,9 +53,16 @@ AWF-provided Postgres sidecar (`$AWF_TEST_DATABASE_URL`). The full `.awf/workspa
 validation suite, the aggregate **99% coverage gate**, and OpenAPI/reason-catalog drift are
 owned and run by AWF + GitHub CI after agent completion.
 
+All recorded commands use the repo-standard `uv run --python 3.12 --extra dev` wrapper (the
+canonical invocation per `CLAUDE.md` / `AGENTS.md`). Scope is intentionally focused on the
+changed modules per the AWF workspace contract — the full `.awf/workspace.yml` bundle, the
+aggregate 99% coverage gate, and OpenAPI/reason-catalog drift run under AWF + GitHub CI after
+agent completion (see the note above), not inside the agent phase.
+
 **Run #1 — blocked regression guard + state machine + slice-1 membership (CRITICAL):**
-```
-pytest tests/unit/control/test_worker_blocked_resume.py \
+```bash
+uv run --python 3.12 --extra dev pytest \
+       tests/unit/control/test_worker_blocked_resume.py \
        tests/unit/control/test_worker_execution_claim_fencing.py \
        tests/unit/control/test_state_machine.py \
        tests/unit/control/test_recovering_status_membership.py -q
@@ -63,8 +70,9 @@ pytest tests/unit/control/test_worker_blocked_resume.py \
 ```
 
 **Run #2 — new recovering enter/resume/teardown + provider helper + modified fork suites:**
-```
-pytest tests/unit/control/test_executor_recovering.py \
+```bash
+uv run --python 3.12 --extra dev pytest \
+       tests/unit/control/test_executor_recovering.py \
        tests/unit/control/test_worker_recovering_resume.py \
        tests/unit/service/test_provider_recovery_in_place.py \
        tests/unit/control/test_executor_error_paths_parts/test_executor_error_paths_part_001.py \
@@ -75,18 +83,20 @@ pytest tests/unit/control/test_executor_recovering.py \
 ```
 
 **Static checks (changed files):**
-```
-ruff check src/awf/control src/awf/service/provider_recovery.py \
+```bash
+uv run --python 3.12 --extra dev ruff check \
+           src/awf/control src/awf/service/provider_recovery.py \
            src/awf/db/repositories/workspace_repo_resumable.py \
            src/awf/db/repositories/workspace_repo.py        → All checks passed!
-ruff format --check src/awf/control src/awf/service/provider_recovery.py → 77 files already formatted
-mypy (pyproject files = ["src/"])                            → Success: no issues found in 397 source files
+uv run --python 3.12 --extra dev ruff format --check \
+           src/awf/control src/awf/service/provider_recovery.py → 77 files already formatted
+uv run --python 3.12 --extra dev mypy                            → Success: no issues found in 397 source files (mypy pins files = ["src/"])
 ```
 
 **Protected-file & drift checks:**
-```
+```bash
 git diff --name-only cda077704 HEAD | grep -E '<protected globs>'  → NONE (no pyproject/.github/.awf/.coveragerc/setup.cfg/apps/console)
-python scripts/generate_reason_catalog.py --check                  → no drift (docs/REASON_CATALOG.md unchanged)
+uv run --python 3.12 --extra dev python scripts/generate_reason_catalog.py --check  → no drift (docs/REASON_CATALOG.md unchanged)
 ```
 
 The new `recovering` resume reason codes are worker-internal constants
