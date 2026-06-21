@@ -180,9 +180,7 @@ test("fallbackLifecycleStages marks running completed for a recovering workspace
   // `recovering` is contractually entered only from `running` (#612 state
   // machine) and sits immediately after it, so the fallback knows `running` was
   // reached: it marks `running` completed and only later execution stages
-  // pending — matching the real-data path (`normalizeLifecycle`). Unlike
-  // `blocked`, recovering's entry stage is not ambiguous, so no conservative
-  // guard is needed.
+  // pending — matching the real-data path (`normalizeLifecycle`).
   const stages = Object.fromEntries(
     fallbackLifecycleStages("recovering").map((stage) => [stage.stage, stage.status]),
   );
@@ -195,6 +193,33 @@ test("fallbackLifecycleStages marks running completed for a recovering workspace
   assert.equal(stages.validating, "pending");
   assert.equal(stages.pushing, "pending");
   assert.equal(stages.monitoring_pr, "pending");
+});
+
+test("fallbackLifecycleStages never marks a skipped recovering pause completed", () => {
+  // `recovering` is an optional pause: a workspace that went running→validating
+  // directly never auto-retried. The fallback must NOT render `recovering` as
+  // `completed` for such a workspace (it would falsely claim a provider retry
+  // happened) — the backend omits the pause entirely, so the rail keeps it
+  // `pending`, matching the real-data path. The execution stage it actually
+  // reached (`running`) stays completed and the current stage stays active.
+  for (const status of ["validating", "pushing", "monitoring_pr"]) {
+    const stages = Object.fromEntries(
+      fallbackLifecycleStages(status).map((stage) => [stage.stage, stage.status]),
+    );
+    assert.equal(stages.running, "completed", `running completed for ${status}`);
+    assert.equal(stages.recovering, "pending", `recovering not completed for ${status}`);
+    assert.equal(stages[status], "active", `${status} active`);
+  }
+});
+
+test("fallbackLifecycleStages never marks a skipped blocked pause completed", () => {
+  // Same guard for `blocked`: a `monitoring_pr` workspace that never paused for
+  // the operator must not show `blocked` as completed on the fallback rail.
+  const stages = Object.fromEntries(
+    fallbackLifecycleStages("monitoring_pr").map((stage) => [stage.stage, stage.status]),
+  );
+  assert.equal(stages.blocked, "pending");
+  assert.equal(stages.monitoring_pr, "active");
 });
 
 test("statusTone marks a recovering workspace as info (auto-heal, no action) not warn", () => {

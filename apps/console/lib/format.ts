@@ -55,14 +55,18 @@ export function fallbackLifecycleStages(
   // otherwise falsely render `pushing` as done). Stages before execution
   // (requested/provisioning/ready) are still safely "completed".
   //
-  // `recovering` is deliberately NOT guarded: it is contractually entered only
-  // from `running` (#612 state machine) and sits immediately after `running` in
-  // this list, so its fixed position already matches its known entry stage. The
-  // plain index logic below then correctly marks `running` as completed and
-  // `recovering` as the active stage — matching the real-data path
-  // (`normalizeLifecycle`) — without falsely claiming any later stage done.
+  // `recovering` and `blocked` are *optional* non-terminal pauses: most
+  // workspaces never enter them. So even when the active status sits past a
+  // pause's fixed position (e.g. validating/pushing/monitoring_pr is past
+  // `recovering`), the fallback must NOT mark the pause stage `completed` —
+  // doing so falsely tells the operator the workspace auto-retried (recovering)
+  // or paused for them (blocked) when it never did. The backend lifecycle omits
+  // these pauses entirely for a workspace that skipped them, so the real-data
+  // path (`normalizeLifecycle`) never renders them completed; the fallback
+  // mirrors that by leaving a skipped pause `pending`, never `completed`.
   const executionStartIndex = lifecycleStages.indexOf("running");
   const pausesMidExecution = status === "blocked";
+  const pauseStages = new Set<WorkspaceStatus>(["recovering", "blocked"]);
 
   return lifecycleStages.map((stage, index): WorkspaceLifecycleStage => {
     let stageStatus: WorkspaceLifecycleStage["status"];
@@ -71,6 +75,9 @@ export function fallbackLifecycleStages(
     } else if (stage === status) {
       stageStatus = "active";
     } else if (pausesMidExecution && index >= executionStartIndex) {
+      stageStatus = "pending";
+    } else if (pauseStages.has(stage)) {
+      // A non-active optional pause never reads as completed (see above).
       stageStatus = "pending";
     } else if (index < activeIndex) {
       stageStatus = "completed";
