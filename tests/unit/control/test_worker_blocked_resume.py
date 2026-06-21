@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+import structlog.testing
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
@@ -619,7 +620,14 @@ async def test_restore_blocked_resume_claim_swallows_session_failure(
 
     worker._session_factory = _boom  # type: ignore[method-assign]  # noqa: SLF001
 
-    # Must return without raising.
-    await worker._restore_blocked_resume_claim(  # noqa: SLF001
-        "ws_missing", reason_code="EXECUTOR_BLOCKED_RESUME_ABORTED"
+    # Must return without raising, and the failure log must preserve the
+    # ``reason_code`` so the stranded-row signal keeps its reason-code trail.
+    with structlog.testing.capture_logs() as logs:
+        await worker._restore_blocked_resume_claim(  # noqa: SLF001
+            "ws_missing", reason_code="EXECUTOR_BLOCKED_RESUME_ABORTED"
+        )
+
+    restore_failed = next(
+        entry for entry in logs if entry["event"] == "worker.blocked_resume_restore_failed"
     )
+    assert restore_failed["reason_code"] == "EXECUTOR_BLOCKED_RESUME_ABORTED"

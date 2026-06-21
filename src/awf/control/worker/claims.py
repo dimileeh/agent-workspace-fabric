@@ -678,6 +678,7 @@ async def _restore_paused_resume_claim(
             f"worker.{reason}_resume_restore_failed",
             workspace_id=workspace_id,
             worker_id=self._worker_id,
+            reason_code=reason_code,
         )
 
 
