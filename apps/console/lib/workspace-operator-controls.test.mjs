@@ -40,6 +40,17 @@ test("control eligibility cancel stays available for a blocked (operator-paused)
   });
 });
 
+test("control eligibility cancel stays available for a recovering (auto-retry) workspace", () => {
+  // A recovering workspace holds its slot + warm stack during the provider
+  // cooldown; cancel is the manual capacity-reclaim lever (state machine allows
+  // recovering → cancelled), so the operator can reclaim capacity instead of
+  // waiting out a long auto-retry pause.
+  assertControl({ overview: overview({ status: "recovering" }) }, "cancel", {
+    enabled: true,
+    reason: null,
+  });
+});
+
 test("control eligibility refresh targets merge candidate or stale context", () => {
   assertControl(
     {
