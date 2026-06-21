@@ -640,7 +640,14 @@ async def enter_recovering_for_provider_failure(
             extra_conditions=extra_conditions,
         )
         if transitioned is None:
-            current = await repo.get(workspace_id)
+            # Force a fresh DB read: the failed owner-gated CAS may have lost to a
+            # newer claimant that took the execution claim AFTER our initial
+            # ``repo.get()`` above. A plain (identity-mapped) read would return the
+            # stale row still showing ``execution_owner_id`` as the owner, so the
+            # fence check below would miss the takeover and wrongly report
+            # ``terminal`` — letting the non-owner-gated ``_mark_failed`` clobber the
+            # newer claimant's running row (PRRT_kwDOSJAM6s6LENo3).
+            current = await repo.get(workspace_id, populate_existing=True)
             if current is not None:
                 await self._record_stale_action_skip(
                     repo,

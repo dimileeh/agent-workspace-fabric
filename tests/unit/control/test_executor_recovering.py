@@ -267,6 +267,57 @@ async def test_enter_recovering_owner_mismatch_does_not_clobber(
 
 
 @pytest.mark.unit
+async def test_enter_recovering_owner_flips_after_initial_load_is_fenced(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PRRT_kwDOSJAM6s6LENo3: the row is STILL owned by this executor at the initial
+    # ``repo.get()``, then a newer claimant takes the execution claim in the window
+    # BEFORE the owner-gated CAS. The CAS matches 0 rows, and the post-CAS recheck
+    # MUST read the row fresh from the DB. A stale identity-mapped ``session.get``
+    # would still show ``worker-stale`` (the value loaded before the flip), mis-report
+    # ``terminal``, and let the non-owner-gated ``_mark_failed`` fall-through clobber
+    # the new claimant's still-running row.
+    ws_id = await _seed_running(factory, execution_claimed_by="worker-stale")
+    executor = _make_executor(fake, factory, tmp_path)
+
+    orig_cas = WorkspaceRepository.transition_if_current
+    flipped = {"done": False}
+
+    async def _flip_owner_then_cas(self: WorkspaceRepository, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        # Commit the ownership flip in a SEPARATE transaction right before the
+        # owner-gated CAS runs, reproducing the reviewer's race deterministically.
+        if not flipped["done"]:
+            flipped["done"] = True
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.execution_claimed_by = "worker-new"
+                await s.commit()
+        return await orig_cas(self, *args, **kwargs)
+
+    monkeypatch.setattr(WorkspaceRepository, "transition_if_current", _flip_owner_then_cas)
+
+    diverted = await executor.enter_recovering_for_provider_failure(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        message="idle timeout exceeded after 600s",
+        reason_code="AGENT_IDLE_TIMEOUT",
+        details=_IDLE_DETAILS,
+        execution_owner_id="worker-stale",
+    )
+
+    assert diverted is ProviderFailureDivert.fenced
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.execution_claimed_by == "worker-new"
+
+
+@pytest.mark.unit
 async def test_enter_recovering_callback_terminal_race_does_not_clobber(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
