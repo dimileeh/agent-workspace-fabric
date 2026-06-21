@@ -188,6 +188,46 @@ test("normalizeLifecycle injects an active blocked stage for a real blocked work
   assert.equal(result.filter((s) => s.status === "active").length, 1);
 });
 
+test("normalizeLifecycle keeps a post-PR blocked pause right of a completed monitoring_pr", () => {
+  // A `blocked` pause entered from `monitoring_pr` (the monitor-repair pause)
+  // arrives with `monitoring_pr` already `completed`. The synthetic active
+  // `blocked` must land AFTER the completed monitoring_pr, not at its canonical
+  // slot to the left of it — otherwise an active step renders left of a
+  // completed one, reversing the real transition order.
+  const backend = [
+    stage("requested", "completed"),
+    stage("provisioning", "completed"),
+    stage("ready", "completed"),
+    stage("running", "completed"),
+    stage("validating", "completed"),
+    stage("pushing", "completed"),
+    stage("monitoring_pr", "completed"),
+    stage("completed", "pending"),
+  ];
+
+  const result = normalizeLifecycle("blocked", backend);
+  const rendered = result.map((s) => [s.stage, s.status]);
+
+  assert.deepEqual(rendered, [
+    ["requested", "completed"],
+    ["provisioning", "completed"],
+    ["ready", "completed"],
+    ["running", "completed"],
+    ["validating", "completed"],
+    ["pushing", "completed"],
+    ["monitoring_pr", "completed"],
+    ["blocked", "active"],
+    ["completed", "pending"],
+  ]);
+  // No completed stage may appear to the right of the active pause.
+  const activeIndex = result.findIndex((s) => s.status === "active");
+  assert.ok(
+    result.slice(activeIndex + 1).every((s) => s.status !== "completed"),
+    "no completed stage may follow the active pause",
+  );
+  assert.equal(result.filter((s) => s.status === "active").length, 1);
+});
+
 test("normalizeLifecycle is a no-op for a non-blocked workspace", () => {
   const backend = [stage("running", "active"), stage("validating", "pending")];
   assert.equal(normalizeLifecycle("running", backend), backend);

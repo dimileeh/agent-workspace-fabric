@@ -133,12 +133,23 @@ export function normalizeLifecycle(
     status: "active",
   };
   const pauseOrder = lifecycleStages.indexOf(status);
-  const insertAt = lifecycle.findIndex(
+  const canonicalAt = lifecycle.findIndex(
     (stage) => lifecycleStages.indexOf(stage.stage as WorkspaceStatus) > pauseOrder,
   );
-  return insertAt === -1
-    ? [...lifecycle, pauseStage]
-    : [...lifecycle.slice(0, insertAt), pauseStage, ...lifecycle.slice(insertAt)];
+  // The active pause must never render to the LEFT of a `completed` stage — that
+  // reverses the real transition order. A `blocked` pause entered from
+  // `monitoring_pr` (the post-PR monitor-repair pause) arrives with
+  // `monitoring_pr` already `completed`, yet `blocked`'s canonical slot sits
+  // before `monitoring_pr`. Clamp the insertion to just after the last completed
+  // stage so the active pause stays right of everything already finished while
+  // keeping its canonical slot for the common pre-PR case.
+  const lastCompletedIndex = lifecycle.reduce(
+    (latest, stage, index) => (stage.status === "completed" ? index : latest),
+    -1,
+  );
+  const insertAt =
+    canonicalAt === -1 ? lifecycle.length : Math.max(canonicalAt, lastCompletedIndex + 1);
+  return [...lifecycle.slice(0, insertAt), pauseStage, ...lifecycle.slice(insertAt)];
 }
 
 export function fallbackLlmUsage(
