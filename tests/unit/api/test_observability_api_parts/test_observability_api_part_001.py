@@ -110,6 +110,26 @@ async def _mutate_workspace(engine: AsyncEngine, workspace_id: str) -> None:
         await session.commit()
 
 
+async def _block_workspace(engine: AsyncEngine, workspace_id: str, *, blocked_at: datetime) -> None:
+    """Drive a workspace into ``blocked`` with a known ``blocked_at``, then append a
+    later non-``blocked`` event so the overview age must come from ``blocked_at``
+    rather than the trailing ``last_event``/``updated_at`` heuristic."""
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.blocked.value
+        workspace.blocked_at = blocked_at
+        await repo.add_event(
+            workspace,
+            event_type="workspace.note",
+            reason_code="TEST",
+            payload={"note": "trailing event while blocked"},
+        )
+        await session.commit()
+
+
 async def _dispatch_monitor_recovery(engine: AsyncEngine, workspace_id: str) -> None:
     factory = make_session_factory(engine)
     async with factory() as session:
@@ -374,6 +394,29 @@ class TestConsoleViews:
         assert item["active_operation"] == "validate"
         assert item["last_event"]["event_type"] == "workspace.phase_started"
         assert item["recovery"] is None
+        # Not blocked: the authoritative pause start is omitted.
+        assert item["blocked_at"] is None
+
+    @pytest.mark.unit
+    async def test_workspace_overview_surfaces_blocked_at_over_trailing_event(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        blocked_at = datetime(2026, 6, 18, 9, 0, tzinfo=UTC)
+        await _block_workspace(engine, workspace_id, blocked_at=blocked_at)
+
+        response = await client.get("/v1/workspaces/overview")
+
+        assert response.status_code == 200
+        item = response.json()["items"][0]
+        assert item["workspace_id"] == workspace_id
+        assert item["status"] == "blocked"
+        # The list now carries the authoritative pause start, so the "Blocked for"
+        # age is derived from it rather than the trailing non-blocked last_event.
+        assert item["last_event"]["event_type"] == "workspace.note"
+        assert datetime.fromisoformat(item["blocked_at"]) == blocked_at
 
     @pytest.mark.unit
     async def test_workspace_detail_and_overview_expose_monitor_recovery_summary(

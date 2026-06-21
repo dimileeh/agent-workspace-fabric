@@ -19,16 +19,21 @@ export interface BlockedResolutionCommands {
   revertCommand: string;
 }
 
-// Best-effort "blocked since" timestamp for the overview/list surface, which does
-// NOT carry the precise `block_state.blocked_at` (only the full GET does). Prefer
-// the recorded `blocked` state-transition event; otherwise fall back to
-// `updated_at`. The inspector uses the authoritative `block_state.blocked_at`.
+// "Blocked since" timestamp for the overview/list surface. The overview now
+// carries the authoritative `blocked_at` (the same column the inspector reads),
+// so prefer it. Fall back to the recorded `blocked` state-transition event, then
+// `updated_at`, only when it is absent — older payloads, or the edge case where a
+// trailing non-`blocked` `last_event` would otherwise skew the derived age.
 export function blockedSince(
   overview: {
     updated_at: string | null;
+    blocked_at?: string | null;
     last_event: { new_state: string | null; occurred_at: string | null } | null;
   },
 ): string | null {
+  if (overview.blocked_at) {
+    return overview.blocked_at;
+  }
   const event = overview.last_event;
   if (event && event.new_state === "blocked" && event.occurred_at) {
     return event.occurred_at;

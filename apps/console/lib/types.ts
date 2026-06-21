@@ -208,6 +208,8 @@ export interface WorkspaceOverview {
   pr_number?: number | null;
   failure_reason: string | null;
   failure_message: string | null;
+  // Authoritative pause start, present only while `status === "blocked"`.
+  blocked_at?: string | null;
   latest_queue_decision?: QueueDecisionSummary | null;
   active_resource_reservation?: ResourceReservationSummary | null;
   created_at: string;

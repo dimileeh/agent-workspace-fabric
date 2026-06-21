@@ -9347,6 +9347,18 @@
             "title": "Base Branch",
             "type": "string"
           },
+          "blocked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked At"
+          },
           "branch_name": {
             "anyOf": [
               {
