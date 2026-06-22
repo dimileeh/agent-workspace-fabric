@@ -468,7 +468,12 @@ async def test_fix_cycle_fetches_prompt_owned_paths_once_for_comment_batch(
 
     assert load_count == 1
     assert len(adapter.calls) == 4
-    assert all(".github/workflows/publish.yml" in prompt for prompt in adapter.calls)
+    # #652: owned paths are still prefetched once for the whole batch (load_count
+    # above), but they are no longer rendered into the repair prompt — protected-
+    # file gating is deterministic in AWF. Each per-item prompt now carries the
+    # static deterministic-gate policy instead of a "Declared owned_paths" block.
+    assert all("Declared owned_paths" not in prompt for prompt in adapter.calls)
+    assert all("governed by AWF" in prompt for prompt in adapter.calls)
 
 
 @pytest.mark.unit
