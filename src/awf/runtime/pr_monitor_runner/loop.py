@@ -167,7 +167,22 @@ async def _execute(
     # between the ``NotifyHuman`` set and this clear would otherwise strand a stale
     # attention signal. The round-trip is negligible beside the operation/state/
     # audit writes each poll already performs.
-    if not isinstance(action, (NotifyHuman, Merge)):
+    #
+    # ``AddressComments`` is the one resuming action that can itself be a human
+    # wait: a comment-repair push rejected for a missing ``workflow`` token scope
+    # requeues ``AddressComments`` and keeps the row in ``monitoring_pr`` (it does
+    # NOT terminally fail like the sync-base / CI-repair workflow-scope arms),
+    # waiting on an operator to grant the scope. That arm persists
+    # ``awaiting_workflow_scope`` so this poll knows the previous one ended on that
+    # wait; honor it by skipping the clear (the attention set by the prior poll
+    # survives — ``set_workspace_attention`` COALESCEs the episode start, so it
+    # stays stable across the requeued polls). Reset the marker first so the moment
+    # a poll is no longer workflow-scope-blocked (push succeeds, or ``decide``
+    # returns a different action) we fall back to the normal resume clear next
+    # cycle — at most one extra poll of "awaiting human" after the block resolves.
+    awaiting_workflow_scope = state.awaiting_workflow_scope
+    state.clear_awaiting_workflow_scope()
+    if not isinstance(action, (NotifyHuman, Merge)) and not awaiting_workflow_scope:
         await self._clear_workspace_attention(workspace_id)
 
     if isinstance(action, ShortCircuitCompleted):
@@ -1046,6 +1061,20 @@ async def _execute(
                 error_message=push_result.error_message,
             )
             if push_result.workflow_scope_required:
+                # Unlike sync-base / CI-repair, this arm does NOT terminally fail
+                # on a missing ``workflow`` token scope — it requeues
+                # ``AddressComments`` and stays in ``monitoring_pr`` while an
+                # operator grants the scope, so the direct PR comment below is the
+                # only human escalation. Surface that wait as a first-class
+                # attention signal, in parity with the ``NotifyHuman`` touch-point
+                # and the merge-loop direct notifications, and persist
+                # ``awaiting_workflow_scope`` so the top-of-poll resume clear keeps
+                # the flag set across the requeued polls.
+                state.mark_awaiting_workflow_scope()
+                await self._set_workspace_attention(
+                    workspace_id,
+                    reason=push_result.error_message or push_result.reason_code,
+                )
                 await _post_workflow_scope_notification_best_effort(
                     self,
                     workspace_id=workspace_id,

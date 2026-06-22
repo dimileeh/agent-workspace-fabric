@@ -284,6 +284,18 @@ still-preserved protected commit; the runner re-exports it from
 ``remote_repair``."""
 
 
+_AWAITING_WORKFLOW_SCOPE_STATE_KEY = "__awf_awaiting_workflow_scope__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that the previous
+poll's comment repair left the workspace waiting on an operator to grant the
+GitHub ``workflow`` token scope. That arm requeues ``AddressComments`` and keeps
+the row in ``monitoring_pr`` (it does NOT terminally fail like the sync-base /
+CI-repair workflow-scope arms), so the human wait spans polls. ``decide`` never
+reads it (it only ever looks up real thread/comment IDs), so — like the preserved
+protected-block key — it is inert to the decision core; it exists only to let the
+runner keep the awaiting-human attention flag set across those requeued polls
+instead of nulling it at the top-of-poll resume clear."""
+
+
 @dataclass
 class MonitorState:
     """Mutable state the runner keeps across iterations.
@@ -321,6 +333,25 @@ class MonitorState:
         the offending protected commit is still sitting on the workspace HEAD.
         """
         return bool(self.threads_addressed_ids.get(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY))
+
+    @property
+    def awaiting_workflow_scope(self) -> bool:
+        """Whether the previous poll's comment repair is waiting on workflow scope.
+
+        Set when a comment-repair push was rejected for a missing GitHub
+        ``workflow`` token scope (the requeue arm that stays in
+        ``monitoring_pr``). The runner honors it to keep the awaiting-human
+        attention flag set across the requeued polls.
+        """
+        return bool(self.threads_addressed_ids.get(_AWAITING_WORKFLOW_SCOPE_STATE_KEY))
+
+    def mark_awaiting_workflow_scope(self) -> None:
+        """Flag that this poll's comment repair is blocked on workflow scope."""
+        self.threads_addressed_ids[_AWAITING_WORKFLOW_SCOPE_STATE_KEY] = "1"
+
+    def clear_awaiting_workflow_scope(self) -> None:
+        """Drop the workflow-scope wait marker (idempotent)."""
+        self.threads_addressed_ids.pop(_AWAITING_WORKFLOW_SCOPE_STATE_KEY, None)
 
     def changed_thread_ids(self) -> set[str]:
         return set(self._changed_thread_ids)
