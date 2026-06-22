@@ -1206,6 +1206,13 @@ async def handle_merge_action(
                 notification_reason,
             )
             await self._persist_state(workspace_id, state)
+            # Surface the escalation as a first-class attention signal now, in
+            # parity with the ``NotifyHuman`` touch-point in ``loop._execute``.
+            # This path notifies a human directly without re-entering
+            # ``NotifyHuman``, so without this set ``awaiting_human_since`` stays
+            # NULL until a later poll's ``decide()`` returns ``NotifyHuman`` off
+            # the sticky merge-method blocker just marked above.
+            await self._set_workspace_attention(workspace_id, reason=notification_reason)
             try:
                 await self._post_human_notification_once(
                     repo=repo,
@@ -1330,6 +1337,13 @@ async def handle_merge_action(
                 workspace_id=workspace_id,
                 stderr=blocker_detail,
             )
+            # Surface the escalation as a first-class attention signal now, in
+            # parity with the ``NotifyHuman`` touch-point in ``loop._execute``.
+            # Unlike the merge-method preflight arm, this fallback records no
+            # sticky blocker, so ``decide()`` keeps returning ``Merge`` and never
+            # re-enters ``NotifyHuman``; without this set ``awaiting_human_since``
+            # would stay NULL for the whole branch-protection wait.
+            await self._set_workspace_attention(workspace_id, reason=blocker_reason)
             try:
                 await self._post_human_notification_once(
                     repo=repo,

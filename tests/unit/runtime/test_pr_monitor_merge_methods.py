@@ -360,6 +360,41 @@ async def test_non_transient_merge_method_preflight_error_notifies_human(
 
 
 @pytest.mark.unit
+async def test_non_transient_merge_method_preflight_rejection_sets_attention_flag(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A deterministic merge-method preflight rejection notifies a human directly
+    from the merge loop, so it must also stamp the awaiting-human attention flag
+    (#659). Otherwise the escalation is invisible to the CLI/console/KPI signal
+    until a later poll re-enters ``NotifyHuman``."""
+    gh = _MergeMethodClient(
+        branch_error=GitHubClientError(
+            operation=(
+                f"gh api repos/{{owner}}/{{repo}}/rules/branches/{_TEST_DEFAULT_BASE_BRANCH}"
+            ),
+            returncode=1,
+            stderr="HTTP 403 Resource not accessible by integration",
+        )
+    )
+
+    terminal, _state, _sleep, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert len(gh.comments) == 1
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.awaiting_human_since is not None
+        assert ws.awaiting_human_reason is not None
+        assert "merge-method preflight" in ws.awaiting_human_reason
+
+
+@pytest.mark.unit
 async def test_exhausted_transient_merge_method_preflight_keeps_polling_without_blocker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -938,6 +973,43 @@ async def test_unclassified_first_merge_failure_notifies_without_method_mismatch
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_merge_blocker_fallback_sets_attention_flag(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A deterministic merge blocker (e.g. branch protection) notifies a human
+    directly from the merge loop, so it must also stamp the awaiting-human
+    attention flag (#659). ``decide()`` keeps returning ``Merge`` for this PR, so
+    without a set here the escalation signal would never be surfaced at all."""
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            ),
+        ],
+    )
+
+    terminal, _state, _sleep, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert len(gh.comments) == 1
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.awaiting_human_since is not None
+        assert ws.awaiting_human_reason is not None
+        assert "GitHub rejected the merge attempt" in ws.awaiting_human_reason
 
 
 @pytest.mark.unit
