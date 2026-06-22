@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,8 +25,11 @@ from awf.db.repositories import OperationRepository, WorkspaceEventRepository, W
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     Merge,
+    MonitorConfig,
     MonitorState,
 )
+from awf.runtime.pr_monitor_runner.config import MonitorRunnerConfig
+from awf.runtime.pr_monitor_runner.runner import PullRequestMonitorRunner
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._merge_methods_fixtures import (
     _TEST_DEFAULT_BASE_BRANCH,
@@ -988,3 +993,244 @@ async def test_resolved_human_wait_clears_attention_on_fast_path_into_merge(
         # The flag was cleared at critical-section entry before the merge attempt.
         assert ws.awaiting_human_since is None
         assert ws.awaiting_human_reason is None
+
+
+class _LongWaitMergeCoordinator:
+    """A merge coordinator that actually sleeps before yielding, advancing the
+    wall-clock past a tiny TTL so a marker stamped fresh at entry ages out
+    during the serialized wait.
+
+    Models the real Postgres/InProcess coordinators blocking behind another
+    merge in the same repo/base lane: no branch-protection fallback fires
+    during that wait (no poll runs), so the marker is NOT re-stamped. Used to
+    reproduce the flicker described in PRRT_kwDOSJAM6s6La_SZ.
+    """
+
+    def __init__(self, wait_seconds: float) -> None:
+        self._wait_seconds = wait_seconds
+        self.entries: list[tuple[str, str]] = []
+
+    @asynccontextmanager
+    async def serialized_merge(
+        self,
+        *,
+        repo_url: str,
+        base_branch: str,
+    ) -> AsyncIterator[None]:
+        self.entries.append((repo_url, base_branch))
+        # Real sleep so datetime.now(UTC) advances past the TTL inside the wait.
+        await asyncio.sleep(self._wait_seconds)
+        yield
+
+
+@pytest.mark.unit
+async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6La_SZ: a serialized-merge wait longer than the merge-block
+    TTL must NOT clear a ``merge_block_attention`` marker that was FRESH at
+    coordinator entry.
+
+    The branch-protection fallback re-stamps the marker every poll while
+    blocked, but the merge coordinator can block behind another merge for
+    longer than the TTL without any poll firing (no fallback runs during the
+    wait). Before the fix, ``_clear_stale_merge_attention`` measured the
+    marker's age against the post-wait wall-clock, so a marker fresh at entry
+    aged past the TTL during the wait and was misclassified as RESOLVED —
+    clearing ``awaiting_human_since`` and then letting the deterministic
+    rejection re-stamp it, flickering/restarting the human-wait timer though
+    the operator block never resolved.
+
+    The fix measures marker age against the coordinator-ENTRY timestamp, so a
+    marker fresh when the wait started is preserved across the wait; a marker
+    already stale at entry is still cleared (block resolved before the wait).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        # Deterministic branch-protection rejection: decide() stays on Merge and
+        # the fallback re-sets attention + re-stamps the marker this poll.
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            ),
+        ],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    # TTL large enough that the marker stays fresh through the (sub-second) test
+    # setup between stamping it and entering the coordinator, but smaller than
+    # the coordinator wait (1.5s) so the marker ages past the TTL *during* the
+    # wait — reproducing the flicker (PRRT_kwDOSJAM6s6La_SZ).
+    monitor_config = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        pre_merge_settle_seconds=0,
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=0,
+        non_check_reviewer_logins=(),
+        merge_block_attention_ttl_seconds=1.0,
+    )
+    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5)
+    runner = PullRequestMonitorRunner(
+        session_factory=factory,
+        runner=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        gh=gh,
+        monitor_config=monitor_config,
+        runner_config=MonitorRunnerConfig(
+            max_outer_iterations=20,
+            max_fix_cycle_passes=3,
+            pre_push_validation_fix_passes=1,
+        ),
+        sleep=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        merge_coordinator=coordinator,
+    )
+
+    # Seed a stable episode start from an earlier poll (COALESCE'd start). The
+    # prior poll's branch-protection fallback stamped attention + a fresh
+    # marker; this poll re-enters the merge loop still blocked.
+    episode_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            workspace_id, reason="prior escalation", now=episode_start
+        )
+        await session.commit()
+    state = MonitorState()
+    # Stamp the marker FRESH at this poll's entry — still-blocked. The
+    # coordinator wait (0.4s > 0.1s TTL) will age it past the TTL *during* the
+    # wait; without the entry-time fix the critical-section-entry clear would
+    # see it as stale (post-wait clock) and wipe the signal.
+    state.mark_merge_block_attention()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert coordinator.entries == [
+        (f"git@github.com:{_TEST_REPO.slug()}.git", _TEST_DEFAULT_BASE_BRANCH)
+    ]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    # The still-active branch-protection signal is PRESERVED across the long
+    # coordinator wait: the episode start is NOT reset (no flicker/restart).
+    assert ws.awaiting_human_since == episode_start
+    assert ws.awaiting_human_reason is not None
+    assert "GitHub rejected the merge attempt" in ws.awaiting_human_reason
+
+
+@pytest.mark.unit
+async def test_stale_at_coordinator_entry_marker_still_cleared_after_long_wait(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6La_SZ parity: a marker that was ALREADY stale at
+    coordinator entry (the block resolved BEFORE the wait) is still cleared
+    after a long merge-coordinator wait.
+
+    The entry-time reference only preserves a marker that was FRESH at entry;
+    a marker already stale at entry means no fallback has fired recently (the
+    block resolved before this poll), so the clear must still proceed after
+    the wait so "awaiting human" does not stay up while only non-human gates
+    remain (#663 contract intact).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=["MERGESHA123"],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    monitor_config = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        pre_merge_settle_seconds=0,
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=0,
+        non_check_reviewer_logins=(),
+        merge_block_attention_ttl_seconds=1.0,
+    )
+    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5)
+    runner = PullRequestMonitorRunner(
+        session_factory=factory,
+        runner=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        gh=gh,
+        monitor_config=monitor_config,
+        runner_config=MonitorRunnerConfig(
+            max_outer_iterations=20,
+            max_fix_cycle_passes=3,
+            pre_push_validation_fix_passes=1,
+        ),
+        sleep=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        merge_coordinator=coordinator,
+    )
+
+    # Seed the surfaced attention from a prior, now-resolved poll. The marker is
+    # STALE at entry (no fallback has fired since well before the TTL).
+    episode_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            workspace_id, reason="prior escalation", now=episode_start
+        )
+        await session.commit()
+    state = MonitorState()
+    # Stamp the marker well outside the TTL → stale (resolved) at entry.
+    state.mark_merge_block_attention(now=datetime(2025, 12, 31, 0, 0, tzinfo=UTC))
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert coordinator.entries == [
+        (f"git@github.com:{_TEST_REPO.slug()}.git", _TEST_DEFAULT_BASE_BRANCH)
+    ]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    # The stale-at-entry marker was cleared after the wait: the resolved
+    # episode does not stay "awaiting human" once the monitor is merging.
+    assert ws.awaiting_human_since is None
+    assert ws.awaiting_human_reason is None

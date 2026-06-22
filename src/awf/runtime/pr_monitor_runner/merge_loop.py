@@ -631,6 +631,18 @@ async def handle_merge_action(
             pr_number=pr_number,
             status=status,
         )
+        # Capture the wall-clock at coordinator ENTRY. The serialized merge
+        # coordinator can block behind another merge for longer than the
+        # merge-block TTL without any branch-protection fallback firing (no poll
+        # runs during that wait), so measuring the marker's age against the
+        # post-wait clock would reclassify a FRESH-at-entry marker as STALE and
+        # clear ``awaiting_human_since`` — then the deterministic rejection re-
+        # stamps it, flickering/restarting the human-wait timer though the
+        # operator block never resolved (PRRT_kwDOSJAM6s6La_SZ). Judge freshness
+        # against this entry timestamp so a marker fresh when we started waiting
+        # is preserved across the wait; a marker already stale at entry is still
+        # cleared (the block resolved before the wait).
+        merge_critical_section_entered_at = datetime.now(UTC)
         fresh_action: MonitorAction | None = None
         fresh_status: PRStatus | None = None
         merge_sha: str | None = None
@@ -723,8 +735,16 @@ async def handle_merge_action(
             # both the settle-sleep path (clear before the sleep) and the fast
             # path (clear before the merge attempt); the existing
             # merge-queue/settle/grace clears earlier in the function are
-            # unchanged.
-            await self._clear_stale_merge_attention(workspace_id, state)
+            # unchanged. The marker age is measured against the coordinator-ENTRY
+            # timestamp captured above so a serialized-merge wait longer than the
+            # TTL (no fallback fires during the wait) does not reclassify a
+            # fresh-at-entry marker as stale and flicker the human-wait timer
+            # (PRRT_kwDOSJAM6s6La_SZ).
+            await self._clear_stale_merge_attention(
+                workspace_id,
+                state,
+                now=merge_critical_section_entered_at,
+            )
             if self._config.pre_merge_settle_seconds > 0:
                 wait_seconds = self._config.pre_merge_settle_seconds
                 await self._record_pre_merge_settle_event(

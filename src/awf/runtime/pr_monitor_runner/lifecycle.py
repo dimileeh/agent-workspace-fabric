@@ -408,7 +408,13 @@ async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str)
         await s.commit()
 
 
-async def _clear_stale_merge_attention(self: Any, workspace_id: str, state: MonitorState) -> None:
+async def _clear_stale_merge_attention(
+    self: Any,
+    workspace_id: str,
+    state: MonitorState,
+    *,
+    now: datetime | None = None,
+) -> None:
     """Clear a resolved ``NotifyHuman`` attention flag before a non-human gate wait,
     unless the merge loop itself set attention for an *still-active* branch-protection
     block.
@@ -434,10 +440,24 @@ async def _clear_stale_merge_attention(self: Any, workspace_id: str, state: Moni
     The merge-method preflight arm needs no such guard: it records a sticky
     ``_merge_method_blocked_key`` so ``decide()`` returns ``NotifyHuman`` and these
     ``Merge``-arm gate waits are never reached for it.
+
+    ``now`` (default ``datetime.now(UTC)``) lets the merge critical-section entry
+    call measure the marker's age against the wall-clock at coordinator ENTRY,
+    before the merge-coordinator wait. The branch-protection fallback re-stamps
+    the marker every poll while blocked, but the serialized merge coordinator can
+    block behind another merge for longer than the TTL without any fallback
+    firing (no poll happens during that wait). Measuring age against the
+    post-wait clock would reclassify a marker that was FRESH at entry as STALE
+    after the wait, clearing ``awaiting_human_since`` and then letting the
+    deterministic rejection re-stamp it — flickering/restarting the human-wait
+    timer though the operator block never resolved
+    (PRRT_kwDOSJAM6s6La_SZ). Measuring against entry time preserves a marker
+    that was fresh when the wait started; a marker already stale at entry is
+    still cleared (the block resolved before the wait).
     """
     ttl_seconds = self._config.merge_block_attention_ttl_seconds
     if state.merge_block_attention_active(
-        now=datetime.now(UTC),
+        now=now,
         ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
     ):
         return
