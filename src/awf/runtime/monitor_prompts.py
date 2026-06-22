@@ -18,7 +18,6 @@ AWF and the coding CLI for post-agent work, so keep them:
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -96,38 +95,22 @@ _COVERAGE_FAILURE_GUIDANCE = (
 
 
 def _protected_file_policy(owned_paths: Sequence[str] = ()) -> str:
-    declared = [
-        _render_owned_path_for_prompt(path.strip()) for path in owned_paths if path and path.strip()
-    ]
-    if declared:
-        owned_block = "\n".join(f"  - {path}" for path in declared)
-        return (
-            "Protected-file policy:\n"
-            "  - Protected workflow, quality-gate, or configuration files are "
-            "editable only when they are inside this workspace's declared owned "
-            "paths (`owned_paths`) or this prompt says operator approval was granted.\n"
-            "Declared owned_paths:\n"
-            f"{owned_block}\n"
-            "  - These owned protected paths are editable by this repair agent "
-            "and must not be treated as protected-file approval blockers.\n"
-            "  - If the only correct fix requires an unowned protected file, "
-            "leave the branch unchanged and print `AWF-VERDICT: NEEDS_HUMAN: "
-            "protected file approval required: <path/reason>`.\n"
-        )
+    # ``owned_paths`` is retained for call-site symmetry only; protected-file
+    # gating is fully deterministic in AWF, so this guidance asks the agent to
+    # make no protected-file judgment of its own (issue #652).
+    del owned_paths
     return (
         "Protected-file policy:\n"
-        "  - Do not edit protected workflow, quality-gate, or configuration files "
-        "unless those files are explicitly inside this workspace's declared owned "
-        "paths (`owned_paths`) or this prompt says operator approval was granted. "
-        "If the only correct fix requires an unowned protected file, leave the "
-        "branch unchanged and print `AWF-VERDICT: NEEDS_HUMAN: protected file "
-        "approval required: <path/reason>`.\n"
+        "  - Make whatever change the review correctly requires. Do not refuse "
+        "or escalate a fix merely because a file falls outside some path list.\n"
+        "  - A fixed set of protected quality-gate files — CI and release "
+        "workflows, build and dependency configuration (for example "
+        "`pyproject.toml` and lock files), and test and coverage configuration — "
+        "is governed by AWF directly. If your fix edits one of them, AWF "
+        "automatically pauses the PR for operator approval on push, with the "
+        "concrete paths attached. You do not need to detect this or print any "
+        "protected-file verdict.\n"
     )
-
-
-def _render_owned_path_for_prompt(path: str) -> str:
-    """Render operator-provided path data without allowing prompt line breaks."""
-    return json.dumps(path, ensure_ascii=True)
 
 
 def address_thread_prompt(
