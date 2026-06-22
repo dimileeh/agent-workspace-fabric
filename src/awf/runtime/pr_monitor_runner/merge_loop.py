@@ -643,6 +643,27 @@ async def handle_merge_action(
         # is preserved across the wait; a marker already stale at entry is still
         # cleared (the block resolved before the wait).
         merge_critical_section_entered_at = datetime.now(UTC)
+        # #661: clear a resolved ``NotifyHuman`` attention flag BEFORE entering
+        # the serialized merge coordinator. ``decide()`` returned ``Merge``, so
+        # a prior ``NotifyHuman`` block is gone and the operator signal must not
+        # stay "awaiting human" while the monitor only waits on the non-human
+        # merge lock. The in-process coordinator waits on its asyncio lock and
+        # the Postgres coordinator polls ``pg_try_advisory_lock`` until it
+        # acquires (src/awf/runtime/merge_coordinator.py), so performing the
+        # clear only after acquisition leaves ``awaiting_human_since`` surfaced
+        # for the entire non-human merge-lock wait even though ``decide()`` has
+        # already resumed to ``Merge``. Clearing before the wait (using the same
+        # entry timestamp for the TTL) closes that visibility window; the
+        # branch-protection fallback re-stamps ``merge_block_attention`` every
+        # poll while blocked, so a FRESH marker (still-blocked) is preserved by
+        # the TTL and a STALE marker (resolved externally between polls) is
+        # cleared (#663). The merge-queue/settle/grace clears earlier in the
+        # function are unchanged.
+        await self._clear_stale_merge_attention(
+            workspace_id,
+            state,
+            now=merge_critical_section_entered_at,
+        )
         fresh_action: MonitorAction | None = None
         fresh_status: PRStatus | None = None
         merge_sha: str | None = None
@@ -722,28 +743,6 @@ async def handle_merge_action(
                 base_branch=base_branch,
                 pr_number=pr_number,
                 status=merge_status,
-            )
-            # #661: clear a resolved ``NotifyHuman`` attention flag before the
-            # pre-merge settle sleep and the fast path into the merge attempt.
-            # ``decide()`` returned ``Merge``, so a prior ``NotifyHuman`` block is
-            # gone and the operator signal must not stay "awaiting human" while the
-            # monitor is actively merging or settling. The branch-protection
-            # fallback re-stamps ``merge_block_attention`` every poll while still
-            # blocked, so a FRESH marker (still-blocked) is preserved by the TTL
-            # and a STALE marker (resolved externally between polls) is cleared
-            # (#663). Placed at critical-section entry so a single call covers
-            # both the settle-sleep path (clear before the sleep) and the fast
-            # path (clear before the merge attempt); the existing
-            # merge-queue/settle/grace clears earlier in the function are
-            # unchanged. The marker age is measured against the coordinator-ENTRY
-            # timestamp captured above so a serialized-merge wait longer than the
-            # TTL (no fallback fires during the wait) does not reclassify a
-            # fresh-at-entry marker as stale and flicker the human-wait timer
-            # (PRRT_kwDOSJAM6s6La_SZ).
-            await self._clear_stale_merge_attention(
-                workspace_id,
-                state,
-                now=merge_critical_section_entered_at,
             )
             if self._config.pre_merge_settle_seconds > 0:
                 wait_seconds = self._config.pre_merge_settle_seconds
