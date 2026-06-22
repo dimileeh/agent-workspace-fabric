@@ -89,20 +89,51 @@ def test_merge_block_attention_active_legacy_boolean_marker_treated_as_fresh() -
     """A legacy boolean ``"1"`` marker (pre-TTL persisted state) is treated as
     fresh on first read so an in-flight monitor is not cleared on age alone.
 
-    The next ``mark_merge_block_attention`` re-stamps it to a timestamp.
+    The first read *re-stamps* the legacy value to a timestamp (now) so the
+    marker becomes age-trackable. If the branch-protection block later
+    resolves and no fallback fires to re-stamp via ``mark_merge_block_attention``,
+    the TTL can still age the marker out and ``_clear_stale_merge_attention``
+    can drop the stale ``awaiting_human_since`` (PRRT_kwDOSJAM6s6LapQB).
     """
     state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: "1"})
 
     # Legacy marker: unknown age ⇒ preserved (fresh), regardless of TTL.
     now = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
     assert state.merge_block_attention_active(now=now, ttl_seconds=1.0) is True
-    # The legacy value is left in place until a re-stamp.
-    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == "1"
+    # The legacy value is re-stamped to a timestamp on first read so it becomes
+    # age-trackable for later TTL expiry.
+    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] != "1"
+    assert _parse_marker_timestamp(state) == now
 
-    # Re-stamp upgrades the legacy value to a timestamp.
+    # An explicit re-stamp upgrades the value to a timestamp (unchanged contract).
     state.mark_merge_block_attention(now=now)
     assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] != "1"
     assert _parse_marker_timestamp(state) == now
+
+
+@pytest.mark.unit
+def test_merge_block_attention_active_legacy_marker_expires_after_ttl_once_resolved() -> None:
+    """A legacy ``"1"`` marker that is never re-stamped by a still-blocked
+    fallback still ages out via the TTL once the block resolves, because the
+    first read re-stamped it to a trackable timestamp (PRRT_kwDOSJAM6s6LapQB).
+
+    Regression for the pre-fix bug where the legacy ``"1"`` branch returned
+    ``True`` on every call and never re-stamped, so a resolved block kept
+    ``awaiting_human_since`` surfaced forever while only non-human gates
+    remained.
+    """
+    state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: "1"})
+
+    # First poll: legacy marker re-stamped to "now" (12:00), preserved as fresh.
+    first_poll = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
+    assert state.merge_block_attention_active(now=first_poll, ttl_seconds=120.0) is True
+    assert _parse_marker_timestamp(state) == first_poll
+
+    # Block resolves; no fallback fires to re-stamp. 300s later (>120s TTL) the
+    # now-timestamped marker is stale and dropped, so the clear proceeds.
+    later = first_poll + timedelta(seconds=300)
+    assert state.merge_block_attention_active(now=later, ttl_seconds=120.0) is False
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
