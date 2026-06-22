@@ -1423,7 +1423,16 @@ async def _execute(
                     )
                     return False
 
-        human_wait_reason = action.message or _notify_human_reason(status, state)
+        # ``NotifyHuman.message`` is optional and ``_notify_human_reason`` returns
+        # ``None`` for a clean manual-ready handoff (green PR, ``auto_merge`` off),
+        # so fall back to a sensible default. A ``None`` reason would otherwise be
+        # subscripted by ``set_workspace_attention``'s length clamp and raise
+        # ``TypeError`` mid-poll, and persist a null ``awaiting_human_reason`` (#659).
+        human_wait_reason = (
+            action.message
+            or _notify_human_reason(status, state)
+            or "PR monitor is waiting for human attention."
+        )
         operation = await self._begin_monitor_operation(
             workspace_id=workspace_id,
             operation_type=OperationType.human_wait,

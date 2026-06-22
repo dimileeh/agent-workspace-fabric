@@ -241,6 +241,57 @@ async def test_manual_merge_green_open_pr_notifies_and_stays_monitoring(
 
 
 @pytest.mark.unit
+async def test_manual_ready_handoff_persists_fallback_attention_reason(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """A clean manual-ready handoff must persist a non-null attention reason (#659).
+
+    ``decide()`` returns a message-less ``NotifyHuman()`` for a green PR with
+    ``auto_merge`` off (the "ready for a human to merge" handoff), and
+    ``_notify_human_reason`` returns ``None`` when nothing blocks. Without a
+    fallback the ``None`` reason is subscripted by ``set_workspace_attention``'s
+    length clamp and raises ``TypeError`` mid-poll (and would otherwise persist a
+    null ``awaiting_human_reason``). The fallback keeps the operator-visible reason
+    a sensible non-empty string.
+    """
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+    )
+
+    cmd.queue_result(returncode=0)  # gh pr comment
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    since, reason, status = await _read_attention(factory, ws_id)
+    assert status == WorkspaceStatus.monitoring_pr.value
+    assert since is not None
+    assert reason == "PR monitor is waiting for human attention."
+
+
+@pytest.mark.unit
 async def test_manual_merge_green_pr_dispatches_validation_before_handoff(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
