@@ -950,6 +950,9 @@ class WorkspaceProfile(BaseModel):
         )
 
 
+_MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT = 600.0
+
+
 def normalize_inline_profile_snapshot(
     profile: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -963,13 +966,29 @@ def normalize_inline_profile_snapshot(
     an otherwise-identical replay now dumps ``"forge": "auto"`` (the unresolved
     input default). Default a missing ``forge`` to ``"auto"`` so replays of
     pre-forge inline profiles stay idempotent instead of raising a spurious
-    conflict. Returns a shallow copy; the input is never mutated.
+    conflict.
+
+    Likewise ``monitor.awaiting_required_checks_grace_seconds`` (#655 / #662) was
+    added after some inline-profile workspaces were persisted, so their stored
+    ``monitor`` sub-dict lacks the key while an otherwise-identical replay now
+    dumps the ``600.0`` default. Backfill a missing value there too so legacy
+    inline-profile replays stay idempotent. Returns a shallow copy; the input is
+    never mutated (the ``monitor`` sub-dict is copied only when backfilled).
     """
     if profile is None:
         return None
-    if "forge" in profile:
-        return dict(profile)
-    return {**profile, "forge": "auto"}
+    result = dict(profile)
+    if "forge" not in result:
+        result["forge"] = "auto"
+    monitor = result.get("monitor")
+    if isinstance(monitor, dict) and "awaiting_required_checks_grace_seconds" not in monitor:
+        result["monitor"] = {
+            **monitor,
+            "awaiting_required_checks_grace_seconds": (
+                _MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT
+            ),
+        }
+    return result
 
 
 def _normalized_endpoint_env_name(name: str) -> str:
