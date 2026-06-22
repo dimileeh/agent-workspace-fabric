@@ -159,11 +159,12 @@ async def _execute(
     # poll. Clearing here first would null the persisted episode start before the
     # merge loop re-sets it, defeating the repo-side COALESCE and resetting
     # ``awaiting_human_since`` to ``now`` each cycle — the operator's "awaiting
-    # human for N" timer would never age (#659). ``handle_merge_action`` instead
-    # clears any stale flag itself right before each of its non-human gate waits
+    # human for N" timer would never age (#659). ``handle_merge_action`` (for
+    # ``Merge``) and the manual-ready ``NotifyHuman`` handoff below instead clear
+    # any stale flag themselves right before each of their non-human gate waits
     # (merge queue, reviewer settle, initial review grace) so a *resolved*
     # ``NotifyHuman`` episode does not keep surfacing "awaiting human" while the
-    # monitor merely waits on a non-human gate; its deterministic-rejection arms
+    # monitor merely waits on a non-human gate; their deterministic-rejection arms
     # re-set attention directly, and the pre-merge settle is deliberately left
     # untouched so a branch-protection rejection that re-sets attention every poll
     # does not flicker the signal. The ``IS NOT NULL`` guard makes
@@ -1280,6 +1281,14 @@ async def _execute(
             else:
                 queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
                 if queue_blockers:
+                    # Resolve any stale awaiting-human flag before this non-human gate
+                    # wait: this resolved manual-ready handoff (auto_merge=false) is
+                    # only queued behind another candidate, so the operator signal must
+                    # not stay "awaiting human" while the monitor waits on the merge
+                    # queue. ``loop._execute`` excludes ``NotifyHuman`` from its general
+                    # clear, so — like ``handle_merge_action``'s ``Merge`` arm — clear
+                    # it here before parking (#659).
+                    await self._clear_workspace_attention(workspace_id)
                     await self._wait_for_merge_queue(
                         blockers=queue_blockers,
                         workspace_id=workspace_id,
@@ -1316,6 +1325,12 @@ async def _execute(
                         monitor_log=monitor_log,
                     )
                     if notify_settle_decision.wait_seconds > 0:
+                        # Resolve any stale awaiting-human flag before this non-human
+                        # settle wait so a resolved ``NotifyHuman`` episode does not
+                        # keep surfacing "awaiting human" while this manual-ready
+                        # handoff merely waits on reviewer settle before validation
+                        # (#659).
+                        await self._clear_workspace_attention(workspace_id)
                         settle_operation_context = (
                             _non_check_reviewer_settle_wait_operation_context(
                                 settle_config,
@@ -1379,6 +1394,11 @@ async def _execute(
                     monitor_log=monitor_log,
                 )
                 if notify_settle_decision.wait_seconds > 0:
+                    # Resolve any stale awaiting-human flag before this non-human
+                    # settle wait so a resolved ``NotifyHuman`` episode does not keep
+                    # surfacing "awaiting human" while this manual-ready handoff merely
+                    # waits on reviewer settle (#659).
+                    await self._clear_workspace_attention(workspace_id)
                     settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                         settle_config,
                         notify_settle_decision,
