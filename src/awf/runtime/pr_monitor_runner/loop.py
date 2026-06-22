@@ -243,6 +243,8 @@ async def _execute(
             reason=(
                 "CI checks are still pending."
                 if action.reason == "pending_checks"
+                else "Required CI has not started on the new head yet."
+                if action.reason == "awaiting_required_checks"
                 else "GitHub has not reported a stable mergeable state."
             ),
             reason_code="CHECK_WAIT",
