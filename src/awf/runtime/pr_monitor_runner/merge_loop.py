@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
@@ -39,6 +40,7 @@ from awf.runtime.pr_monitor_runner.gates import (
     _NonCheckReviewerSettleDecision,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
+    _awaiting_required_checks_grace,
     _bitbucket_merge_rejection_reason,
     _clear_transient_base_fetch_retry_state,
     _clear_transient_forge_retry_state,
@@ -861,6 +863,29 @@ async def handle_merge_action(
                         state=state,
                     ):
                         pre_merge_state_changed = True
+                    # #656: decorate the freshly fetched status with the same
+                    # per-head required-CI-start grace the outer loop applies
+                    # before ``decide`` (runner.py). This recheck fetches a NEW
+                    # status that can show the transient empty-checks + BLOCKED
+                    # CI-start gap (the head changed during the settle window, or
+                    # GitHub recomputed mergeability); without the decoration
+                    # ``decide`` sees the default
+                    # ``awaiting_required_checks_grace_active=False``, gate 8b is
+                    # skipped, and the monitor pages a human prematurely before
+                    # the next outer poll can recover. Persisting the first-seen
+                    # marker is mandatory for the same reason as in the outer
+                    # loop: the runner reloads ``state`` from the DB every poll,
+                    # so an unpersisted marker would re-read as absent forever and
+                    # a genuine never-CI head would never escalate past the grace.
+                    grace_active, grace_state_changed = _awaiting_required_checks_grace(
+                        checked_status, state, self._config, now=datetime.now(UTC)
+                    )
+                    if grace_state_changed:
+                        pre_merge_state_changed = True
+                    checked_status = replace(
+                        checked_status,
+                        awaiting_required_checks_grace_active=grace_active,
+                    )
                     if pre_merge_state_changed:
                         await self._persist_state(workspace_id, state)
                     checked_action = decide(checked_status, state, self._config)

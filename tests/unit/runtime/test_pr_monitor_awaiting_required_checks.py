@@ -388,3 +388,63 @@ class TestAwaitingRequiredChecksRunner:
         markers = ws.monitor_threads_addressed or {}
         assert _awaiting_required_checks_first_seen_key("abc1234567890def") in markers
         assert _awaiting_required_checks_first_seen_key("def4567890abcdef0") in markers
+
+    @pytest.mark.unit
+    async def test_pre_merge_recheck_applies_grace_instead_of_paging_human(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        # #656 (PRRT_kwDOSJAM6s6LPoZx): the outer poll observed an all-green head
+        # and chose Merge, but during the pre-merge settle window the freshly
+        # fetched status shows the transient empty-checks + BLOCKED CI-start gap
+        # (the head changed, or GitHub recomputed mergeability). The recheck
+        # ``decide`` must apply the same per-head required-CI grace as the outer
+        # loop; otherwise ``awaiting_required_checks_grace_active`` stays its
+        # default False, gate 8b is skipped, and the monitor pages a human
+        # prematurely before the next outer poll can recover.
+        ws_id = await seed_monitoring_workspace(factory)
+        # Outer poll: all green -> Merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        # Pre-merge settle recheck: transient required-CI-absent + BLOCKED gap.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_absent_ci_blocked_payload())
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            pre_merge_settle_seconds=90,
+            max_outer_iterations=1,
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        actions = [r["action"] for r in captured if r.get("event") == "monitor.action"]
+        # The recheck defers to the bounded grace wait, NOT a premature human ping.
+        assert actions == ["Merge", "WaitForCI"]
+        assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+        assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+        # 90s pre-merge settle, then the 60s poll-interval grace wait.
+        assert sleep_fn.calls == [90, 60]
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+        # The recheck persisted the first-seen marker so the grace window can
+        # actually expire on a head that genuinely never gets CI.
+        assert _awaiting_required_checks_first_seen_key("abc1234567890def") in (
+            ws.monitor_threads_addressed or {}
+        )
