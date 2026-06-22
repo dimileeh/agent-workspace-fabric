@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -1008,6 +1009,81 @@ async def test_merge_blocker_fallback_sets_attention_flag(
         ws = await WorkspaceRepository(session).get(workspace_id)
         assert ws is not None
         assert ws.awaiting_human_since is not None
+        assert ws.awaiting_human_reason is not None
+        assert "GitHub rejected the merge attempt" in ws.awaiting_human_reason
+
+
+@pytest.mark.unit
+async def test_merge_blocker_fallback_keeps_attention_since_stable_across_polls(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A branch-protection merge blocker leaves ``decide()`` returning ``Merge``
+    every poll, so the merge loop re-sets the attention flag each cycle. The
+    top-of-``_execute`` attention clear must NOT wipe the persisted episode start
+    on a ``Merge`` action — otherwise ``awaiting_human_since`` is reset to ``now``
+    on every poll and the operator-facing "awaiting human for N" timer never ages
+    while the operator is still blocked (#659)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            ),
+        ],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    # Seed a STABLE episode start from an earlier poll: the operator has already
+    # been blocked since well before this poll runs.
+    episode_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            workspace_id, reason="prior escalation", now=episode_start
+        )
+        await session.commit()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=MonitorState(),
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        # The episode start must be PRESERVED (COALESCE), not reset to this poll's
+        # ``now`` by the top-of-_execute clear running before the merge re-set.
+        assert ws.awaiting_human_since == episode_start
+        # The reason still refreshes to the latest escalation.
         assert ws.awaiting_human_reason is not None
         assert "GitHub rejected the merge attempt" in ws.awaiting_human_reason
 

@@ -32,6 +32,7 @@ from awf.runtime.pr_monitor import (
     Abort,
     AddressComments,
     AddressOperatorHint,
+    Merge,
     MonitorAction,
     MonitorState,
     NotifyHuman,
@@ -148,18 +149,25 @@ async def _execute(
     )
 
     # Clear the awaiting-human attention flag the moment the monitor resumes with
-    # a non-``NotifyHuman`` action: ``decide()`` returns exactly one action per
-    # poll and ``NotifyHuman`` is the only human-block action, so every other arm
-    # (WaitForCI / AddressComments / SyncBase / Merge / terminal completes+aborts)
-    # means the external blocker is gone. The ``IS NOT NULL`` guard makes the repo
-    # update a no-op when the flag is already clear, so this per-poll clear never
-    # churns the row — but the guarded ``UPDATE`` still round-trips once per poll.
-    # We keep it unconditional rather than inferring "already clear" from in-process
-    # state: ``awaiting_human_since`` is persisted, so a monitor restart between the
-    # ``NotifyHuman`` set and this clear would otherwise strand a stale attention
-    # signal. The round-trip is negligible beside the operation/state/audit writes
-    # each poll already performs.
-    if not isinstance(action, NotifyHuman):
+    # a resuming action: ``decide()`` returns exactly one action per poll, so
+    # WaitForCI / AddressComments / SyncBase / terminal completes+aborts each mean
+    # the external blocker is gone. ``NotifyHuman`` is excluded because it IS the
+    # human-block action. ``Merge`` is excluded too: ``handle_merge_action`` owns
+    # the attention flag for that arm because a deterministic merge rejection
+    # (branch protection / restrictions) falls back to notifying a human *without*
+    # recording a sticky blocker, so ``decide()`` keeps returning ``Merge`` every
+    # poll. Clearing here first would null the persisted episode start before the
+    # merge loop re-sets it, defeating the repo-side COALESCE and resetting
+    # ``awaiting_human_since`` to ``now`` each cycle — the operator's "awaiting
+    # human for N" timer would never age (#659). The ``IS NOT NULL`` guard makes
+    # the repo update a no-op when the flag is already clear, so this per-poll clear
+    # never churns the row — but the guarded ``UPDATE`` still round-trips once per
+    # poll. We keep it unconditional rather than inferring "already clear" from
+    # in-process state: ``awaiting_human_since`` is persisted, so a monitor restart
+    # between the ``NotifyHuman`` set and this clear would otherwise strand a stale
+    # attention signal. The round-trip is negligible beside the operation/state/
+    # audit writes each poll already performs.
+    if not isinstance(action, (NotifyHuman, Merge)):
         await self._clear_workspace_attention(workspace_id)
 
     if isinstance(action, ShortCircuitCompleted):
