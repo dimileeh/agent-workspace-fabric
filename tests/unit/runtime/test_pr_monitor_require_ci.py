@@ -265,7 +265,7 @@ def test_absent_pending_grace_expired_routes_to_notify_human() -> None:
             awaiting_required_checks_grace_active=False,
         ),
         state=MonitorState(),
-        config=MonitorConfig(),
+        config=MonitorConfig(require_ci=True),
     )
     assert isinstance(action, NotifyHuman)
 
@@ -282,7 +282,7 @@ def test_absent_pending_within_grace_routes_to_awaiting_required_checks() -> Non
             awaiting_required_checks_grace_active=True,
         ),
         state=MonitorState(),
-        config=MonitorConfig(),
+        config=MonitorConfig(require_ci=True),
     )
     assert isinstance(action, WaitForCI)
     assert action.reason == "awaiting_required_checks"
@@ -301,7 +301,7 @@ def test_absent_pending_has_hooks_grace_expired_routes_to_notify_human() -> None
             awaiting_required_checks_grace_active=False,
         ),
         state=MonitorState(),
-        config=MonitorConfig(),
+        config=MonitorConfig(require_ci=True),
     )
     assert isinstance(action, NotifyHuman)
 
@@ -319,7 +319,7 @@ def test_absent_pending_clean_state_still_waits_at_gate_6() -> None:
             awaiting_required_checks_grace_active=True,
         ),
         state=MonitorState(),
-        config=MonitorConfig(),
+        config=MonitorConfig(require_ci=True),
     )
     assert isinstance(action, WaitForCI)
     assert action.reason == "pending_checks"
