@@ -11,10 +11,8 @@ from typing import Any, cast
 from sqlalchemy import (
     and_,
     case,
-    func,
     or_,
     select,
-    text,
     update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,9 +44,7 @@ from awf.db.repositories.base import (
     OwnedPathOverlap,
     WorkspaceEventCreate,
     _candidate_terminal_close_reason,
-    _matches_pr_adoption_identity,
     _releases_resource_reservation,
-    _workspace_idempotency_advisory_lock_key,
     _workspace_status_value,
     resolve_session_dialect_name,
 )
@@ -59,6 +55,11 @@ from awf.db.repositories.quality_repo import (
 from awf.db.repositories.task_repo import (
     TaskAttemptRepository,
     TaskRepository,
+)
+from awf.db.repositories.workspace_repo_attention import (
+    clear_workspace_attention,
+    set_workspace_attention,
+    update_activity,
 )
 from awf.db.repositories.workspace_repo_claims import (
     claim_monitoring_pr,
@@ -76,6 +77,14 @@ from awf.db.repositories.workspace_repo_host_ports import (
     find_active_owned_path_conflicts,
     find_active_owned_path_overlaps,
     find_host_port_conflicts,
+)
+from awf.db.repositories.workspace_repo_idempotency import (
+    acquire_idempotency_key_lock,
+    get_by_idempotency_key,
+    has_idempotency_key,
+    list_idempotency_key_family,
+    list_idempotency_replay_keys,
+    list_pr_adoption_history,
 )
 from awf.db.repositories.workspace_repo_resumable import (
     list_resumable_blocked_ids,
@@ -250,17 +259,7 @@ class WorkspaceRepository:
 
     async def update_activity(self, workspace_id: str, *, subphase: str | None = None) -> None:
         """Stamp recent workspace activity and optionally update its subphase."""
-        stmt = (
-            update(Workspace)
-            .where(Workspace.id == workspace_id)
-            .values(
-                last_activity_at=datetime.now(UTC),
-            )
-        )
-        if subphase is not None:
-            stmt = stmt.values(subphase=subphase)
-        await self._session.execute(stmt)
-        await self._session.flush()
+        return await update_activity(self._session, workspace_id, subphase=subphase)
 
     async def set_workspace_attention(
         self,
@@ -269,43 +268,17 @@ class WorkspaceRepository:
         reason: str,
         now: datetime,
     ) -> None:
-        """Flag a workspace as awaiting human attention (a HUMAN_WAIT escalation).
-
-        ``COALESCE`` keeps the episode start (``awaiting_human_since``) stable
-        across repeated ``NotifyHuman`` for the same ongoing block, while the
-        reason is always refreshed to the latest escalation message. This is an
-        out-of-band metadata flag on a still-polling ``monitoring_pr`` row — it
-        deliberately does NOT bump ``version`` (it is not a state transition).
-        """
-        await self._session.execute(
-            update(Workspace)
-            .where(Workspace.id == workspace_id)
-            .values(
-                awaiting_human_since=func.coalesce(Workspace.awaiting_human_since, now),
-                awaiting_human_reason=reason,
-            )
+        """Flag a workspace as awaiting human attention (a HUMAN_WAIT escalation)."""
+        return await set_workspace_attention(
+            self._session,
+            workspace_id,
+            reason=reason,
+            now=now,
         )
-        await self._session.flush()
 
     async def clear_workspace_attention(self, workspace_id: str) -> None:
-        """Clear the awaiting-human attention flag once the monitor resumes.
-
-        Guarded by ``awaiting_human_since IS NOT NULL`` so the per-poll clear is
-        a DB-level no-op (no row churn, no spurious ``updated_at`` bump) when the
-        flag is already clear. ``COALESCE`` works on both SQLite and Postgres.
-        """
-        await self._session.execute(
-            update(Workspace)
-            .where(
-                Workspace.id == workspace_id,
-                Workspace.awaiting_human_since.is_not(None),
-            )
-            .values(
-                awaiting_human_since=None,
-                awaiting_human_reason=None,
-            )
-        )
-        await self._session.flush()
+        """Clear the awaiting-human attention flag once the monitor resumes."""
+        return await clear_workspace_attention(self._session, workspace_id)
 
     async def get(self, workspace_id: str, *, populate_existing: bool = False) -> Workspace | None:
         """Return a workspace by primary key, if it exists.
@@ -377,55 +350,23 @@ class WorkspaceRepository:
 
     async def get_by_idempotency_key(self, key: str) -> Workspace | None:
         """Return a workspace created for an idempotency key."""
-        stmt = (
-            select(Workspace)
-            .where(Workspace.idempotency_key == key)
-            .options(selectinload(Workspace.task_attempt))
-        )
-        return (await self._session.execute(stmt)).scalar_one_or_none()
+        return await get_by_idempotency_key(self._session, key)
 
     async def has_idempotency_key(self, key: str) -> bool:
         """Return whether an idempotency key already has a workspace."""
-        stmt = select(Workspace.id).where(Workspace.idempotency_key == key).limit(1)
-        return (await self._session.execute(stmt)).scalar_one_or_none() is not None
+        return await has_idempotency_key(self._session, key)
 
     async def list_idempotency_replay_keys(
         self,
         *,
         limit: int = DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
     ) -> builtins.list[str]:
-        """Return a bounded replay-key sample for non-request-path cache support.
-
-        Fresh request admission paths use exact-key probes instead of this helper
-        so over-limit requests cannot trigger broad replay-key warmups.
-        """
-        if limit <= 0:
-            return []
-        stmt = (
-            select(Workspace.idempotency_key)
-            .where(Workspace.idempotency_key.is_not(None))
-            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
-            .limit(limit)
-        )
-        return [key for key in (await self._session.execute(stmt)).scalars().all() if key]
+        """Return a bounded replay-key sample for non-request-path cache support."""
+        return await list_idempotency_replay_keys(self._session, limit=limit)
 
     async def list_idempotency_key_family(self, logical_key: str) -> builtins.list[str]:
         """Return the logical idempotency key and any generation-suffixed keys."""
-        from awf.db.utils import escape_like_pattern as _escape_like_pattern
-
-        generation_pattern = f"{_escape_like_pattern(logical_key)}:g%"
-        stmt = (
-            select(Workspace.idempotency_key)
-            .where(
-                or_(
-                    Workspace.idempotency_key == logical_key,
-                    Workspace.idempotency_key.like(generation_pattern, escape="\\"),
-                )
-            )
-            .order_by(Workspace.idempotency_key.asc())
-        )
-        keys = (await self._session.execute(stmt)).scalars().all()
-        return [key for key in keys if key is not None]
+        return await list_idempotency_key_family(self._session, logical_key)
 
     async def list_pr_adoption_history(
         self,
@@ -437,44 +378,18 @@ class WorkspaceRepository:
         pr_number: int,
     ) -> builtins.list[Workspace]:
         """List workspaces that represent adoption history for one repo/PR."""
-        adoption_repo_slug = Workspace.task_policy["pr_adoption"]["repo_slug"].as_string()
-        stmt = (
-            select(Workspace)
-            .options(selectinload(Workspace.task_attempt))
-            .where(
-                or_(
-                    Workspace.task_external_id == task_external_id,
-                    Workspace.idempotency_key == idempotency_key,
-                    and_(
-                        Workspace.task_kind == task_kind,
-                        Workspace.pr_number == pr_number,
-                        func.lower(adoption_repo_slug) == repo_slug.lower(),
-                    ),
-                )
-            )
-            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+        return await list_pr_adoption_history(
+            self._session,
+            task_external_id=task_external_id,
+            idempotency_key=idempotency_key,
+            task_kind=task_kind,
+            repo_slug=repo_slug,
+            pr_number=pr_number,
         )
-        candidates = list((await self._session.execute(stmt)).scalars())
-        return [
-            workspace
-            for workspace in candidates
-            if _matches_pr_adoption_identity(
-                workspace,
-                task_external_id=task_external_id,
-                idempotency_key=idempotency_key,
-                task_kind=task_kind,
-                repo_slug=repo_slug,
-                pr_number=pr_number,
-            )
-        ]
 
     async def acquire_idempotency_key_lock(self, key: str) -> None:
         """Serialize workspace idempotency decisions with a PostgreSQL advisory lock."""
-        lock_key = _workspace_idempotency_advisory_lock_key(key)
-        await self._session.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_key)"),
-            {"lock_key": lock_key},
-        )
+        return await acquire_idempotency_key_lock(self._session, key)
 
     async def acquire_owned_path_conflict_lock(
         self,
