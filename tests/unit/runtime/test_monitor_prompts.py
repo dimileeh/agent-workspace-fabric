@@ -135,6 +135,11 @@ class TestAddressThread:
         assert "protected-file call" not in prompt
         assert "protected-file approval" not in prompt
         assert "python" not in prompt.lower()
+        # PR #653 review (PRRT_kwDOSJAM6s6LLqoC): lock files are NOT in
+        # PROTECTED_QUALITY_GATE_PATHS and the lockfile supply-chain guardrail
+        # defaults to warn, so the protected-pause claim must not name lock files
+        # or it promises an operator pause AWF does not deliver by default.
+        assert "lock file" not in prompt.lower()
 
     @pytest.mark.unit
     def test_handles_missing_file_anchor_gracefully(self) -> None:

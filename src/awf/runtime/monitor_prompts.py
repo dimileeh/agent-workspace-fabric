@@ -105,7 +105,7 @@ def _protected_file_policy(owned_paths: Sequence[str] = ()) -> str:
         "or escalate a fix merely because a file falls outside some path list.\n"
         "  - A fixed set of protected quality-gate files — CI and release "
         "workflows, build and dependency configuration (for example "
-        "`pyproject.toml` and lock files), and test and coverage configuration — "
+        "`pyproject.toml`), and test and coverage configuration — "
         "is governed by AWF directly. If your fix edits one of them, AWF "
         "automatically pauses the PR for operator approval on push, with the "
         "concrete paths attached. You do not need to detect this or print any "
