@@ -59,7 +59,8 @@ async def handle_notify_human_action(
     The caller dispatches on ``isinstance(action, NotifyHuman)`` before invoking
     this helper, so ``action`` is always a :class:`NotifyHuman` here.
     """
-    if _is_manual_ready_handoff(action, status, state, self._config):
+    manual_ready_handoff = _is_manual_ready_handoff(action, status, state, self._config)
+    if manual_ready_handoff:
         policy_blocked = await self._refresh_scope_policy_for_merge(
             workspace_id=workspace_id,
             changed_paths=status.changed_paths,
@@ -217,10 +218,23 @@ async def handle_notify_human_action(
     # so fall back to a sensible default. A ``None`` reason would otherwise be
     # subscripted by ``set_workspace_attention``'s length clamp and raise
     # ``TypeError`` mid-poll, and persist a null ``awaiting_human_reason`` (#659).
+    #
+    # The fallback is case-aware so the console/CLI attention reason matches the
+    # PR comment ``_post_human_notification_once`` posts for the same reasonless
+    # ``NotifyHuman`` (#659). For a genuine manual-ready handoff that comment uses
+    # the "ready to merge — human action required" template (``blocker_reason``
+    # ``None``), so describe exactly that rather than a vague "waiting for human"
+    # the operator can't reconcile with the PR. Any other reasonless ``NotifyHuman``
+    # reaching here (e.g. an outdated thread that still blocks merge) is NOT ready,
+    # so it keeps the generic wait reason instead of falsely claiming readiness.
     human_wait_reason = (
         action.message
         or _notify_human_reason(status, state)
-        or "PR monitor is waiting for human attention."
+        or (
+            "PR is ready to merge — AWF will not merge automatically; human action required."
+            if manual_ready_handoff
+            else "PR monitor is waiting for human attention."
+        )
     )
     operation = await self._begin_monitor_operation(
         workspace_id=workspace_id,

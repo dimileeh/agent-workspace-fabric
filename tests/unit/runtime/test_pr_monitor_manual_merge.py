@@ -32,6 +32,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     NotifyHuman,
     PRStatus,
+    ReviewThread,
     decide,
 )
 from awf.runtime.release_pr_monitor import build_release_pr_monitor
@@ -248,7 +249,7 @@ async def test_manual_ready_handoff_persists_fallback_attention_reason(
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
-    """A clean manual-ready handoff must persist a non-null attention reason (#659).
+    """A clean manual-ready handoff persists a "ready to merge" attention reason (#659).
 
     ``decide()`` returns a message-less ``NotifyHuman()`` for a green PR with
     ``auto_merge`` off (the "ready for a human to merge" handoff), and
@@ -256,7 +257,10 @@ async def test_manual_ready_handoff_persists_fallback_attention_reason(
     fallback the ``None`` reason is subscripted by ``set_workspace_attention``'s
     length clamp and raises ``TypeError`` mid-poll (and would otherwise persist a
     null ``awaiting_human_reason``). The fallback keeps the operator-visible reason
-    a sensible non-empty string.
+    a sensible non-empty string AND, for this genuine manual-ready handoff, makes
+    it match the "ready to merge — human action required" PR comment that
+    ``_post_human_notification_once`` posts, instead of a vague "waiting for
+    human" reason the operator can't reconcile with the PR (#659).
     """
     ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
     runner = make_runner(
@@ -288,6 +292,86 @@ async def test_manual_ready_handoff_persists_fallback_attention_reason(
     since, reason, status = await _read_attention(factory, ws_id)
     assert status == WorkspaceStatus.monitoring_pr.value
     assert since is not None
+    assert (
+        reason == "PR is ready to merge — AWF will not merge automatically; human action required."
+    )
+    # The console reason now matches what was posted on the PR: the clean
+    # manual-ready handoff comment uses the "ready to merge" template (#659).
+    comment_calls = _calls(cmd, _is_pr_comment)
+    assert len(comment_calls) == 1
+    body = comment_calls[0][comment_calls[0].index("--body") + 1]
+    assert "ready to merge" in body
+    assert "human action required" in body
+
+
+@pytest.mark.unit
+async def test_manual_ready_fallback_does_not_claim_ready_for_blocking_outdated_thread(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """A reasonless ``NotifyHuman`` that is NOT ready keeps the generic reason (#659).
+
+    An outdated inline thread downgraded to ``needs_human`` still blocks the merge
+    (``decide`` gate 7) so ``decide()`` returns a message-less ``NotifyHuman()``,
+    but ``_notify_human_reason`` returns ``None`` (it consults the non-outdated
+    feeds only) and this is not a manual-ready handoff. The fallback must keep the
+    safe generic wait reason here rather than falsely advertising "ready to merge"
+    — the console reason must not over-claim readiness for a still-blocked PR.
+    """
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+    )
+
+    outdated_thread = ReviewThread(
+        thread_id="THREAD_outdated",
+        path="src/app.py",
+        line=10,
+        body_excerpt="please rework this",
+        is_resolved=False,
+        is_outdated=True,
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=(outdated_thread,),
+    )
+    state = MonitorState()
+    state.mark_addressed(outdated_thread.thread_id, "needs_human")
+
+    cmd.queue_result(returncode=0)  # gh pr comment
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    _, reason, ws_status = await _read_attention(factory, ws_id)
+    assert ws_status == WorkspaceStatus.monitoring_pr.value
     assert reason == "PR monitor is waiting for human attention."
 
 
