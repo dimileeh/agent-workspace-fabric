@@ -498,6 +498,57 @@ def _stale_pending_check_warning_key(
     )
 
 
+def _awaiting_required_checks_first_seen_key(head_sha: str) -> str:
+    """Reserved ``MonitorState.threads_addressed_ids`` key carrying the first
+    poll time (epoch float string) the given head showed "required CI expected
+    but absent" (#655). One key per ``head_sha`` so each monitor push gets its
+    own grace window; stale keys for old heads linger harmlessly, like the
+    stale-pending and reviewer-settle markers."""
+    return f"__awf_awaiting_required_checks_first_seen__:{head_sha}"
+
+
+def _awaiting_required_checks_grace(
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+    *,
+    now: datetime,
+) -> tuple[bool, bool]:
+    """Return ``(grace_active, state_changed)`` for the transient required-CI gap.
+
+    Tracks, per ``head_sha``, the first poll time the head showed required CI
+    expected-but-absent (``config.require_ci`` and ``status.no_checks_observed``)
+    and reports whether that first observation is still within
+    ``config.awaiting_required_checks_grace_seconds``. A new ``head_sha`` starts a
+    fresh window (its key is absent → first observation again).
+
+    ``state_changed`` is ``True`` only when this call recorded a new first-seen
+    marker, signalling the caller to persist ``state`` — mandatory, because the
+    runner reloads ``state`` from the DB every poll, so an unpersisted marker
+    would re-read as absent forever and the window would never expire.
+
+    Returns ``(False, False)`` and records nothing when the condition does not
+    apply (``require_ci`` off, checks present, or the grace disabled with
+    ``grace_seconds <= 0``)."""
+    if not (config.require_ci and status.no_checks_observed):
+        return (False, False)
+    grace_seconds = config.awaiting_required_checks_grace_seconds
+    if grace_seconds <= 0:
+        return (False, False)
+    key = _awaiting_required_checks_first_seen_key(status.head_sha)
+    raw = state.threads_addressed_ids.get(key)
+    now_ts = _as_utc(now).timestamp()
+    if raw is None:
+        state.mark_addressed(key, f"{now_ts:.6f}")
+        return (True, True)  # first observation → within grace
+    try:
+        first_seen = float(raw)
+    except (TypeError, ValueError):
+        state.mark_addressed(key, f"{now_ts:.6f}")
+        return (True, True)
+    return (now_ts - first_seen < grace_seconds, False)
+
+
 def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
     if status.blocking_reviews:
         return "a merge-blocking changes-requested review remains unresolved"

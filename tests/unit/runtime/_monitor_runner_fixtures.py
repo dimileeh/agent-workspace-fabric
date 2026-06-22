@@ -153,11 +153,22 @@ def pr_payload(
     merge_state_status: str = "CLEAN",
     check_state: str = "SUCCESS",
     check_contexts: list[dict] | None = None,
+    check_contexts_total_count: int | None = None,
     threads: list[dict] | None = None,
     reviews: list[dict] | None = None,
     comments: list[dict] | None = None,
 ) -> str:
-    """Build a GraphQL-like PR payload for monitor status helpers."""
+    """Build a GraphQL-like PR payload for monitor status helpers.
+
+    ``check_contexts_total_count`` sets the rollup ``contexts.totalCount`` that
+    drives ``PRStatus.no_checks_observed`` (a present-but-empty rollup reports
+    ``totalCount == 0`` — the transient post-push CI-start window). When left
+    ``None`` the key is omitted, preserving the legacy ``no_checks_observed=False``
+    shape for existing callers.
+    """
+    contexts: dict[str, object] = {"nodes": check_contexts or []}
+    if check_contexts_total_count is not None:
+        contexts["totalCount"] = check_contexts_total_count
     return json.dumps(
         {
             "data": {
@@ -179,7 +190,7 @@ def pr_payload(
                                     "commit": {
                                         "statusCheckRollup": {
                                             "state": check_state,
-                                            "contexts": {"nodes": check_contexts or []},
+                                            "contexts": contexts,
                                         },
                                         "committedDate": committed_date,
                                     }
