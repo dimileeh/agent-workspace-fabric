@@ -48,6 +48,28 @@ async def test_set_workspace_attention_sets_since_and_reason(session: AsyncSessi
 
 
 @pytest.mark.unit
+async def test_set_workspace_attention_clamps_overlong_reason(session: AsyncSession) -> None:
+    """A reason longer than the ``String(2048)`` column is clamped at the write
+    boundary instead of raising ``StringDataRightTruncation`` on Postgres.
+
+    Operator-hint escalations can surface raw push stderr (unbounded) as the
+    ``NotifyHuman`` reason, so the helper must clamp it — otherwise this update
+    would abort the monitor before the human-notification path completes.
+    """
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
+    overlong = "x" * 5000
+
+    await repo.set_workspace_attention(workspace.id, reason=overlong, now=now)
+
+    refreshed = await repo.get(workspace.id, populate_existing=True)
+    assert refreshed is not None
+    assert refreshed.awaiting_human_since == now
+    assert refreshed.awaiting_human_reason == "x" * 2048
+
+
+@pytest.mark.unit
 async def test_set_workspace_attention_keeps_since_stable_refreshes_reason(
     session: AsyncSession,
 ) -> None:

@@ -15,6 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.models import Workspace
 
+# ``Workspace.awaiting_human_reason`` is a ``String(2048)`` column. Escalation
+# reasons can carry unbounded text (an operator-hint repair surfaces raw push
+# stderr/``str(exc)`` as the ``NotifyHuman`` reason), and on Postgres a value
+# longer than the column raises ``StringDataRightTruncation`` — which would abort
+# the monitor before the human-notification path completes. Clamp at this write
+# boundary, mirroring the other ``[:limit]`` clamps in the repository layer.
+_AWAITING_HUMAN_REASON_MAX_LENGTH = 2048
+
 
 async def update_activity(
     session: AsyncSession,
@@ -47,16 +55,17 @@ async def set_workspace_attention(
 
     ``COALESCE`` keeps the episode start (``awaiting_human_since``) stable
     across repeated ``NotifyHuman`` for the same ongoing block, while the
-    reason is always refreshed to the latest escalation message. This is an
-    out-of-band metadata flag on a still-polling ``monitoring_pr`` row — it
-    deliberately does NOT bump ``version`` (it is not a state transition).
+    reason is always refreshed to the latest escalation message (clamped to the
+    column length so an unbounded operator-hint reason cannot abort the write).
+    This is an out-of-band metadata flag on a still-polling ``monitoring_pr``
+    row — it deliberately does NOT bump ``version`` (it is not a state transition).
     """
     await session.execute(
         update(Workspace)
         .where(Workspace.id == workspace_id)
         .values(
             awaiting_human_since=func.coalesce(Workspace.awaiting_human_since, now),
-            awaiting_human_reason=reason,
+            awaiting_human_reason=reason[:_AWAITING_HUMAN_REASON_MAX_LENGTH],
         )
     )
     await session.flush()
