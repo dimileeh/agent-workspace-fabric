@@ -240,13 +240,10 @@ async def _execute(
             workspace_id=workspace_id,
             action="check_wait",
             requested_action="wait_for_ci",
-            reason=(
-                "CI checks are still pending."
-                if action.reason == "pending_checks"
-                else "Required CI has not started on the new head yet."
-                if action.reason == "awaiting_required_checks"
-                else "GitHub has not reported a stable mergeable state."
-            ),
+            reason={
+                "pending_checks": "CI checks are still pending.",
+                "awaiting_required_checks": "Required CI has not started on the new head yet.",
+            }.get(action.reason, "GitHub has not reported a stable mergeable state."),
             reason_code="CHECK_WAIT",
             pr_number=pr_number,
             status=status,
