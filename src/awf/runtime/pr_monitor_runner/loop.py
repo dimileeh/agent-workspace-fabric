@@ -182,6 +182,16 @@ async def _execute(
     # cycle — at most one extra poll of "awaiting human" after the block resolves.
     awaiting_workflow_scope = state.awaiting_workflow_scope
     state.clear_awaiting_workflow_scope()
+    # The merge-block attention marker only makes sense while ``decide()`` stays on
+    # the ``Merge`` arm (the branch-protection fallback that sets it keeps
+    # ``decide()`` returning ``Merge``). The moment ``decide()`` returns any other
+    # action the branch-protection retry context is over, so drop the marker — a
+    # later ``Merge`` poll's non-human gate wait must then clear a now-stale
+    # ``NotifyHuman`` episode normally instead of preserving it
+    # (PRRT_kwDOSJAM6s6LXscz). ``handle_merge_action`` re-sets it each poll the
+    # branch-protection block persists.
+    if not isinstance(action, Merge):
+        state.clear_merge_block_attention()
     if not isinstance(action, (NotifyHuman, Merge)) and not awaiting_workflow_scope:
         await self._clear_workspace_attention(workspace_id)
 

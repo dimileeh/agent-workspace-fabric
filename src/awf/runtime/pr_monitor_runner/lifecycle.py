@@ -408,6 +408,27 @@ async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str)
         await s.commit()
 
 
+async def _clear_stale_merge_attention(self: Any, workspace_id: str, state: MonitorState) -> None:
+    """Clear a resolved ``NotifyHuman`` attention flag before a non-human gate wait,
+    unless the merge loop itself set attention for an active branch-protection block.
+
+    The merge loop's non-human gate waits (merge queue, reviewer settle, initial
+    review grace) clear ``awaiting_human_since`` so a *resolved* ``NotifyHuman``
+    episode does not keep surfacing "awaiting human" while the monitor only waits on
+    a non-human gate (#659). But the branch-protection fallback escalates to a human
+    *without* a sticky blocker, so ``decide()`` keeps returning ``Merge``; that
+    attention is still active. Skipping the clear when
+    ``merge_block_attention_active`` is set keeps that signal up across a queue/settle/
+    grace wait instead of wrongly nulling it (PRRT_kwDOSJAM6s6LXscz). The
+    merge-method preflight arm needs no such guard: it records a sticky
+    ``_merge_method_blocked_key`` so ``decide()`` returns ``NotifyHuman`` and these
+    ``Merge``-arm gate waits are never reached for it.
+    """
+    if state.merge_block_attention_active:
+        return
+    await self._clear_workspace_attention(workspace_id)
+
+
 async def _clear_workspace_attention(self: Any, workspace_id: str) -> None:
     """Clear the awaiting-human attention flag once the monitor resumes.
 

@@ -525,8 +525,11 @@ async def handle_merge_action(
             # Resolve any stale awaiting-human flag before this non-human gate wait:
             # ``decide()`` returned ``Merge``, so a prior ``NotifyHuman`` block is
             # gone and the operator signal must not stay "awaiting human" while the
-            # monitor only waits on the merge queue (#659).
-            await self._clear_workspace_attention(workspace_id)
+            # monitor only waits on the merge queue (#659). The branch-protection
+            # fallback also keeps ``decide()`` on ``Merge`` while genuinely awaiting a
+            # human, so the helper preserves *that* still-active signal across the
+            # queue wait (PRRT_kwDOSJAM6s6LXscz).
+            await self._clear_stale_merge_attention(workspace_id, state)
             await self._wait_for_merge_queue(
                 blockers=queue_blockers,
                 workspace_id=workspace_id,
@@ -557,7 +560,9 @@ async def handle_merge_action(
             # Resolve any stale awaiting-human flag before this non-human settle
             # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
             # "awaiting human" while the monitor only waits on reviewer settle (#659).
-            await self._clear_workspace_attention(workspace_id)
+            # An active branch-protection escalation is preserved by the helper
+            # (PRRT_kwDOSJAM6s6LXscz).
+            await self._clear_stale_merge_attention(workspace_id, state)
             requested_action = "validate" if pending_validation_gate is not None else "merge"
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
@@ -1003,7 +1008,9 @@ async def handle_merge_action(
             # Resolve any stale awaiting-human flag before this non-human grace
             # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
             # "awaiting human" while the monitor only waits out the grace period (#659).
-            await self._clear_workspace_attention(workspace_id)
+            # An active branch-protection escalation is preserved by the helper
+            # (PRRT_kwDOSJAM6s6LXscz).
+            await self._clear_stale_merge_attention(workspace_id, state)
             _log.info(
                 "monitor.initial_review_grace_waiting",
                 workspace_id=workspace_id,
@@ -1037,7 +1044,9 @@ async def handle_merge_action(
             # Resolve any stale awaiting-human flag before this non-human settle
             # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
             # "awaiting human" while the monitor only waits on reviewer settle (#659).
-            await self._clear_workspace_attention(workspace_id)
+            # An active branch-protection escalation is preserved by the helper
+            # (PRRT_kwDOSJAM6s6LXscz).
+            await self._clear_stale_merge_attention(workspace_id, state)
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
                 settle_recheck_decision,
@@ -1063,8 +1072,9 @@ async def handle_merge_action(
             # Resolve any stale awaiting-human flag before this non-human gate wait:
             # ``decide()`` returned ``Merge``, so a prior ``NotifyHuman`` block is
             # gone and the operator signal must not stay "awaiting human" while the
-            # monitor only waits on the merge queue (#659).
-            await self._clear_workspace_attention(workspace_id)
+            # monitor only waits on the merge queue (#659). An active branch-protection
+            # escalation is preserved by the helper (PRRT_kwDOSJAM6s6LXscz).
+            await self._clear_stale_merge_attention(workspace_id, state)
             await self._wait_for_merge_queue(
                 blockers=queue_blockers_after_lock,
                 workspace_id=workspace_id,
@@ -1233,7 +1243,11 @@ async def handle_merge_action(
             # This path notifies a human directly without re-entering
             # ``NotifyHuman``, so without this set ``awaiting_human_since`` stays
             # NULL until a later poll's ``decide()`` returns ``NotifyHuman`` off
-            # the sticky merge-method blocker just marked above.
+            # the sticky merge-method blocker just marked above. No
+            # ``mark_merge_block_attention`` here (unlike the branch-protection
+            # fallback below): the sticky blocker flips ``decide()`` to
+            # ``NotifyHuman`` next poll, so the ``Merge``-arm non-human gate waits
+            # are never reached for this head and cannot clear the flag prematurely.
             await self._set_workspace_attention(workspace_id, reason=notification_reason)
             try:
                 await self._post_human_notification_once(
@@ -1366,6 +1380,13 @@ async def handle_merge_action(
             # re-enters ``NotifyHuman``; without this set ``awaiting_human_since``
             # would stay NULL for the whole branch-protection wait.
             await self._set_workspace_attention(workspace_id, reason=blocker_reason)
+            # Mark this attention as merge-loop-owned and still active so the
+            # non-human gate waits (merge queue, reviewer settle, initial review
+            # grace) on a later ``Merge`` poll do NOT clear it as a resolved
+            # ``NotifyHuman`` episode while the operator is still blocked
+            # (PRRT_kwDOSJAM6s6LXscz). ``decide()`` returning a non-``Merge`` action
+            # drops the marker via ``loop._execute``.
+            state.mark_merge_block_attention()
             try:
                 await self._post_human_notification_once(
                     repo=repo,

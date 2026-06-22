@@ -66,6 +66,7 @@ class RunnerDelegatesMixin:
     _persist_state = _lifecycle._persist_state
     _set_workspace_attention = _lifecycle._set_workspace_attention
     _clear_workspace_attention = _lifecycle._clear_workspace_attention
+    _clear_stale_merge_attention = _lifecycle._clear_stale_merge_attention
     _persist_forge_transient_retry_count = _lifecycle._persist_forge_transient_retry_count
     _remove_forge_transient_retry_count = _lifecycle._remove_forge_transient_retry_count
     _clear_preserved_head_marker_durably = _lifecycle._clear_preserved_head_marker_durably

@@ -296,6 +296,19 @@ runner keep the awaiting-human attention flag set across those requeued polls
 instead of nulling it at the top-of-poll resume clear."""
 
 
+_MERGE_BLOCK_ATTENTION_STATE_KEY = "__awf_merge_block_attention__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that the merge
+loop's branch-protection fallback set the awaiting-human attention flag for an
+active deterministic merge rejection. That arm records NO sticky blocker (branch
+protection can clear externally without a code change), so ``decide`` keeps
+returning ``Merge`` every poll. ``decide`` never reads this key (it only looks up
+real thread/comment IDs) — like the workflow-scope key, it is inert to the
+decision core; it exists only so ``handle_merge_action``'s non-human gate waits
+(merge queue, reviewer settle, initial review grace) preserve that still-active
+human signal across polls instead of clearing it as a resolved ``NotifyHuman``
+episode (PRRT_kwDOSJAM6s6LXscz)."""
+
+
 @dataclass
 class MonitorState:
     """Mutable state the runner keeps across iterations.
@@ -352,6 +365,26 @@ class MonitorState:
     def clear_awaiting_workflow_scope(self) -> None:
         """Drop the workflow-scope wait marker (idempotent)."""
         self.threads_addressed_ids.pop(_AWAITING_WORKFLOW_SCOPE_STATE_KEY, None)
+
+    @property
+    def merge_block_attention_active(self) -> bool:
+        """Whether the merge loop set attention for an active branch-protection block.
+
+        Set when ``handle_merge_action``'s branch-protection fallback escalates to
+        a human directly without recording a sticky blocker, so ``decide()`` keeps
+        returning ``Merge``. The non-human gate waits honor it to preserve the
+        still-active awaiting-human signal across polls instead of clearing it as a
+        resolved ``NotifyHuman`` episode.
+        """
+        return bool(self.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY))
+
+    def mark_merge_block_attention(self) -> None:
+        """Flag that the merge loop set attention for an active branch-protection block."""
+        self.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] = "1"
+
+    def clear_merge_block_attention(self) -> None:
+        """Drop the merge-block attention marker (idempotent)."""
+        self.threads_addressed_ids.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None)
 
     def changed_thread_ids(self) -> set[str]:
         return set(self._changed_thread_ids)

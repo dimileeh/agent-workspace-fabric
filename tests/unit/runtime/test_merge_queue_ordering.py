@@ -669,3 +669,87 @@ async def test_merge_queue_wait_clears_stale_awaiting_human_attention(
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
     assert workspace.awaiting_human_since is None
     assert workspace.awaiting_human_reason is None
+
+
+@pytest.mark.unit
+async def test_merge_queue_wait_preserves_active_branch_protection_attention(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """A merge-queue wait must NOT clear attention the branch-protection fallback
+    set while it is still active (PRRT_kwDOSJAM6s6LXscz).
+
+    The branch-protection fallback escalates to a human *without* a sticky blocker,
+    so ``decide()`` keeps returning ``Merge`` while the operator is still blocked.
+    When such a poll then parks behind an older merge-queue candidate, the
+    non-human gate clear must preserve that still-active ``awaiting_human_since``
+    (flagged via ``merge_block_attention_active``) instead of wiping it as a
+    resolved ``NotifyHuman`` episode — otherwise console KPIs and CLI attention go
+    false even though the PR genuinely needs a human.
+    """
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    _older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Older candidate",
+        pr_number=311,
+        created_at=now,
+    )
+    later_workspace_id, _later_attempt_id, _later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later candidate",
+        pr_number=312,
+        created_at=now + timedelta(minutes=5),
+    )
+
+    # The branch-protection fallback stamped attention on an earlier poll and is
+    # still blocked: ``decide()`` keeps returning ``Merge`` and the merge loop owns
+    # the flag for that arm (``merge_block_attention_active``).
+    episode_start = datetime(2026, 4, 26, 11, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            later_workspace_id, reason="GitHub rejected the merge attempt", now=episode_start
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    active_block_state = MonitorState()
+    active_block_state.mark_merge_block_attention()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=later_workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=312,
+        status=_status(),
+        state=active_block_state,
+        base_branch="development",
+        remote_branch=f"awf/{later_workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(later_workspace_id)
+        assert workspace is not None
+
+    # The monitor parked on the merge-queue wait (non-human gate), not a merge.
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    # Still polling, and the active branch-protection signal is PRESERVED.
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.awaiting_human_since == episode_start
+    assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
