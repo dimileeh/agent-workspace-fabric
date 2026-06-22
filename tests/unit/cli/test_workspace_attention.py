@@ -191,3 +191,45 @@ def test_workspace_list_pretty_emits_row_markers(
     out = capsys.readouterr().out
     assert "⚠ ws_flagged awaiting human: needs a human" in out
     assert "ws_clean awaiting human" not in out
+
+
+@pytest.mark.unit
+def test_workspace_list_pretty_emits_row_markers_for_bare_list_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # ``GET /v1/workspaces`` returns a bare ``list[WorkspaceResponse]`` (rows carry
+    # ``id``, not ``workspace_id``), not an ``{"items": [...]}`` envelope. The markers
+    # must still render against that real-API shape, not only the mocked envelope.
+    payload = [
+        {
+            "id": "ws_flagged",
+            "status": "monitoring_pr",
+            "attention_required": True,
+            "awaiting_human_reason": "needs a human",
+        },
+        {
+            "id": "ws_clean",
+            "status": "running",
+            "attention_required": False,
+        },
+    ]
+
+    def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    monkeypatch.setattr(workspace_commands, "_call", _call)
+
+    workspace_commands.workspace_list(
+        status=None,
+        agent=None,
+        repo_url=None,
+        limit=50,
+        api_token="token",
+        base_url=None,
+        fmt=OutputFormat.pretty,
+    )
+
+    out = capsys.readouterr().out
+    assert "⚠ ws_flagged awaiting human: needs a human" in out
+    assert "ws_clean awaiting human" not in out

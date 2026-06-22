@@ -336,7 +336,14 @@ def _echo_workspace_list_attention(response: httpx.Response, fmt: OutputFormat) 
         payload = response.json()
     except ValueError:
         return
-    items = payload.get("items") if isinstance(payload, Mapping) else None
+    # ``GET /v1/workspaces`` returns a bare ``list[WorkspaceResponse]``; tolerate an
+    # ``{"items": [...]}`` envelope too in case a future endpoint wraps the rows.
+    if isinstance(payload, list):
+        items: Any = payload
+    elif isinstance(payload, Mapping):
+        items = payload.get("items")
+    else:
+        items = None
     if not isinstance(items, list):
         return
     for item in items:
