@@ -590,3 +590,82 @@ async def test_monitor_merges_once_older_candidate_stops_blocking(
     assert candidate is not None
     assert candidate.id == later_candidate_id
     assert candidate.status == "merged"
+
+
+@pytest.mark.unit
+async def test_merge_queue_wait_clears_stale_awaiting_human_attention(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """A resolved ``NotifyHuman`` episode must not leak into a merge that only
+    waits on a non-human gate (#659).
+
+    When a prior ``HUMAN_WAIT`` is resolved and the next poll returns ``Merge``,
+    ``loop._execute`` skips its general attention clear for the ``Merge`` arm (so a
+    branch-protection rejection's COALESCE'd episode start is not reset each poll).
+    ``handle_merge_action`` must therefore clear the stale flag itself before it
+    parks on a non-human gate wait — here, waiting behind an older merge-queue
+    candidate — otherwise the console/KPI/metrics keep showing "awaiting human"
+    with a stale ``awaiting_human_since`` while the monitor is merely queued.
+    """
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Older candidate",
+        pr_number=301,
+        created_at=now,
+    )
+    later_workspace_id, _later_attempt_id, _later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later candidate",
+        pr_number=302,
+        created_at=now + timedelta(minutes=5),
+    )
+
+    # Seed a stable episode start from an earlier, now-resolved NotifyHuman poll.
+    episode_start = datetime(2026, 4, 26, 11, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            later_workspace_id, reason="prior human escalation", now=episode_start
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=later_workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=302,
+        status=_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{later_workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(later_workspace_id)
+        assert workspace is not None
+
+    # The monitor parked on the merge-queue wait (non-human gate), not a merge.
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    # Still polling, but the stale awaiting-human signal is cleared.
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.awaiting_human_since is None
+    assert workspace.awaiting_human_reason is None

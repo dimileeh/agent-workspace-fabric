@@ -522,6 +522,11 @@ async def handle_merge_action(
 
         queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
         if queue_blockers:
+            # Resolve any stale awaiting-human flag before this non-human gate wait:
+            # ``decide()`` returned ``Merge``, so a prior ``NotifyHuman`` block is
+            # gone and the operator signal must not stay "awaiting human" while the
+            # monitor only waits on the merge queue (#659).
+            await self._clear_workspace_attention(workspace_id)
             await self._wait_for_merge_queue(
                 blockers=queue_blockers,
                 workspace_id=workspace_id,
@@ -549,6 +554,10 @@ async def handle_merge_action(
             monitor_log=monitor_log,
         )
         if settle_decision.wait_seconds > 0:
+            # Resolve any stale awaiting-human flag before this non-human settle
+            # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
+            # "awaiting human" while the monitor only waits on reviewer settle (#659).
+            await self._clear_workspace_attention(workspace_id)
             requested_action = "validate" if pending_validation_gate is not None else "merge"
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
@@ -991,6 +1000,10 @@ async def handle_merge_action(
                                     break
 
         if initial_grace_recheck_wait_seconds > 0:
+            # Resolve any stale awaiting-human flag before this non-human grace
+            # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
+            # "awaiting human" while the monitor only waits out the grace period (#659).
+            await self._clear_workspace_attention(workspace_id)
             _log.info(
                 "monitor.initial_review_grace_waiting",
                 workspace_id=workspace_id,
@@ -1021,6 +1034,10 @@ async def handle_merge_action(
             return False
 
         if settle_recheck_decision is not None:
+            # Resolve any stale awaiting-human flag before this non-human settle
+            # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
+            # "awaiting human" while the monitor only waits on reviewer settle (#659).
+            await self._clear_workspace_attention(workspace_id)
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
                 settle_recheck_decision,
@@ -1043,6 +1060,11 @@ async def handle_merge_action(
             return False
 
         if queue_blockers_after_lock:
+            # Resolve any stale awaiting-human flag before this non-human gate wait:
+            # ``decide()`` returned ``Merge``, so a prior ``NotifyHuman`` block is
+            # gone and the operator signal must not stay "awaiting human" while the
+            # monitor only waits on the merge queue (#659).
+            await self._clear_workspace_attention(workspace_id)
             await self._wait_for_merge_queue(
                 blockers=queue_blockers_after_lock,
                 workspace_id=workspace_id,

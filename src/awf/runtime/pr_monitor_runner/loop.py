@@ -159,7 +159,14 @@ async def _execute(
     # poll. Clearing here first would null the persisted episode start before the
     # merge loop re-sets it, defeating the repo-side COALESCE and resetting
     # ``awaiting_human_since`` to ``now`` each cycle — the operator's "awaiting
-    # human for N" timer would never age (#659). The ``IS NOT NULL`` guard makes
+    # human for N" timer would never age (#659). ``handle_merge_action`` instead
+    # clears any stale flag itself right before each of its non-human gate waits
+    # (merge queue, reviewer settle, initial review grace) so a *resolved*
+    # ``NotifyHuman`` episode does not keep surfacing "awaiting human" while the
+    # monitor merely waits on a non-human gate; its deterministic-rejection arms
+    # re-set attention directly, and the pre-merge settle is deliberately left
+    # untouched so a branch-protection rejection that re-sets attention every poll
+    # does not flicker the signal. The ``IS NOT NULL`` guard makes
     # the repo update a no-op when the flag is already clear, so this per-poll clear
     # never churns the row — but the guarded ``UPDATE`` still round-trips once per
     # poll. We keep it unconditional rather than inferring "already clear" from
