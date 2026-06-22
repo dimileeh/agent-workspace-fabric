@@ -116,6 +116,43 @@ def test_workspace_show_json_carries_fields_without_decorated_line(
 
 
 @pytest.mark.unit
+def test_echo_attention_line_ignores_non_json_body(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A pretty 200 whose body is not valid JSON must not crash the CLI and must
+    # not emit an attention line — the decorated line is best-effort sugar.
+    response = httpx.Response(200, content=b"<<not json>>")
+
+    workspace_commands._echo_workspace_attention_line(response, OutputFormat.pretty)
+
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.unit
+def test_echo_attention_line_ignores_non_mapping_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Valid JSON that is not an object (e.g. a list) is skipped, not rendered.
+    response = httpx.Response(200, json=["not", "a", "mapping"])
+
+    workspace_commands._echo_workspace_attention_line(response, OutputFormat.pretty)
+
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.unit
+def test_echo_list_attention_ignores_non_json_body(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The per-row marker path is equally defensive against a non-JSON list body.
+    response = httpx.Response(200, content=b"oops not json")
+
+    workspace_commands._echo_workspace_list_attention(response, OutputFormat.pretty)
+
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.unit
 def test_workspace_list_pretty_emits_row_markers(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

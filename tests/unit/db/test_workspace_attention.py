@@ -68,6 +68,33 @@ async def test_set_workspace_attention_keeps_since_stable_refreshes_reason(
 
 
 @pytest.mark.unit
+async def test_update_activity_without_subphase_preserves_existing_subphase(
+    session: AsyncSession,
+) -> None:
+    repo = WorkspaceRepository(session)
+    workspace = await _create_workspace(repo, session)
+
+    # First stamp sets a subphase; the second omits it (the optional-subphase
+    # branch) and must stamp activity again WITHOUT clearing or changing subphase.
+    await repo.update_activity(workspace.id, subphase="provisioning")
+    stamped = await repo.get(workspace.id, populate_existing=True)
+    assert stamped is not None
+    assert stamped.subphase == "provisioning"
+    assert stamped.last_activity_at is not None
+    first_activity = stamped.last_activity_at
+
+    await repo.update_activity(workspace.id)
+
+    refreshed = await repo.get(workspace.id, populate_existing=True)
+    assert refreshed is not None
+    # subphase is untouched by the no-subphase path...
+    assert refreshed.subphase == "provisioning"
+    # ...while last_activity_at is still (re-)stamped.
+    assert refreshed.last_activity_at is not None
+    assert refreshed.last_activity_at >= first_activity
+
+
+@pytest.mark.unit
 async def test_clear_workspace_attention_nulls_both_columns(session: AsyncSession) -> None:
     repo = WorkspaceRepository(session)
     workspace = await _create_workspace(repo, session)
