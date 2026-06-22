@@ -369,6 +369,29 @@ That message should not trigger `NotifyHuman` and should not block merge. AWF
 still respects the initial review grace window and still handles meaningful
 review threads from Gemini, CodeRabbit, humans, or other reviewers.
 
+### Awaiting-Required-Checks Grace
+
+When a required CI context is expected but absent on the current head — the
+common case right after the monitor pushes fix commits, when the forge has not
+started CI on the new head yet — AWF applies a bounded `awaiting_required_checks`
+grace window before escalating `NotifyHuman`:
+
+```yaml
+monitor:
+  awaiting_required_checks_grace_seconds: 600
+```
+
+Rules:
+
+- Default is 600 seconds (covers the observed ≈5.5-min CI-start lag with margin).
+- `0` (or any value `<= 0`) disables the grace: a required context that is
+  absent escalates `NotifyHuman` immediately (pre-#655 behavior).
+- The grace is head-scoped: a new `head_sha` starts a fresh window.
+- During the window the monitor stays in `WaitForCI` instead of escalating; if
+  CI genuinely never arrives, the window expires and the head escalates as
+  before.
+- The upper bound is 86400 seconds (parity with the other monitor knobs).
+
 ## Local Service Stack
 
 Docker Compose is the default local runtime for the always-on AWF control

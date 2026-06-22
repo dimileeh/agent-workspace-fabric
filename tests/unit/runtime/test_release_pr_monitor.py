@@ -137,6 +137,7 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
         non_check_reviewer_settle_seconds=45,
         non_check_reviewer_logins=["custom-reviewer"],
         require_ci=False,
+        awaiting_required_checks_grace_seconds=250,
     )
     assert runner._config.poll_interval_seconds == 15
     assert runner._config.settle_interval_seconds == 7
@@ -145,6 +146,40 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
     assert runner._config.non_check_reviewer_settle_seconds == 45
     assert runner._config.non_check_reviewer_logins == ("custom-reviewer",)
     assert runner._config.require_ci is False
+    assert runner._config.awaiting_required_checks_grace_seconds == 250
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("builder", [build_release_pr_monitor, build_feature_pr_monitor])
+def test_factories_awaiting_required_checks_grace_defaults_600(builder, tmp_path: Path) -> None:
+    # Omitting the kwarg preserves the MonitorConfig dataclass default (#662).
+    cmd = FakeCommandRunner()
+    runner = builder(
+        session_factory=None,  # type: ignore[arg-type]
+        runner=cmd,
+        adapter=_StubAdapter(),
+        gh=GitHubClient(cmd),
+        validation=_validation(cmd, tmp_path),
+        worktrees_root=tmp_path,
+    )
+    assert runner._config.awaiting_required_checks_grace_seconds == 600.0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("builder", [build_release_pr_monitor, build_feature_pr_monitor])
+def test_factories_awaiting_required_checks_grace_zero_disables(builder, tmp_path: Path) -> None:
+    # The documented ``<= 0`` disable escape hatch must reach MonitorConfig (#662).
+    cmd = FakeCommandRunner()
+    runner = builder(
+        session_factory=None,  # type: ignore[arg-type]
+        runner=cmd,
+        adapter=_StubAdapter(),
+        gh=GitHubClient(cmd),
+        validation=_validation(cmd, tmp_path),
+        worktrees_root=tmp_path,
+        awaiting_required_checks_grace_seconds=0,
+    )
+    assert runner._config.awaiting_required_checks_grace_seconds == 0
 
 
 @pytest.mark.unit
