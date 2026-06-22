@@ -747,6 +747,7 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
     assert audit_payload["outcome"] == "cancelled"
 
 
+@pytest.mark.unit
 async def test_merge_task_timeout_cancels_operation_and_keeps_polling(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
