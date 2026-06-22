@@ -481,6 +481,21 @@ class ProfileMonitor(BaseModel):
         default_factory=lambda: ["greptile-apps", "chatgpt-codex-connector"],
         max_length=64,
     )
+    awaiting_required_checks_grace_seconds: float = Field(default=600.0, le=86400)
+    """Grace window for required CI that is expected but absent on the current
+    head before the monitor escalates ``NotifyHuman`` (#655 / #662).
+
+    Right after a monitor push the forge has not started CI on the new head yet,
+    so the head shows an empty check set while branch protection reports
+    ``BLOCKED`` (the required context is absent). Within this window the monitor
+    defers to a bounded ``WaitForCI`` instead of a premature ``NotifyHuman``; once
+    it expires a head that genuinely never gets CI escalates as before. The
+    default (``600.0``) preserves today's hard-coded behavior and covers the
+    observed ≈5.5-min CI-start lag with margin. Set ``<= 0`` to disable the grace
+    (escalate immediately, pre-#655 behavior). The upper bound (``86400``) mirrors
+    the other monitor knobs; there is deliberately no lower bound so the
+    documented ``<= 0`` disable escape hatch is reachable from operator
+    configuration."""
 
     @field_validator("non_check_reviewer_logins")
     @classmethod
