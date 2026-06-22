@@ -67,7 +67,7 @@ async def clear_workspace_attention(session: AsyncSession, workspace_id: str) ->
 
     Guarded by ``awaiting_human_since IS NOT NULL`` so the per-poll clear is
     a DB-level no-op (no row churn, no spurious ``updated_at`` bump) when the
-    flag is already clear. ``COALESCE`` works on both SQLite and Postgres.
+    flag is already clear.
     """
     await session.execute(
         update(Workspace)
