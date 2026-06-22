@@ -127,6 +127,14 @@ class TestAddressThread:
         # New guidance defers protected-file gating to AWF; assert a stable phrase.
         assert "governed by AWF" in prompt
         assert "AWF automatically pauses" in prompt
+        # PR #654 review (PRRT_kwDOSJAM6s6LMWeR): the auto-pause claim must be
+        # qualified. find_protected_quality_gate_changes skips _is_owned paths and
+        # classified-safe edits, and the monitor passes workspace.owned_paths into
+        # the protected-scope push checks, so an OWNED protected edit (or a benign
+        # one) pushes WITHOUT a pause. Promising an unconditional pause would have
+        # agents/operators rely on an approval checkpoint that never fires.
+        assert "this task does not own" in prompt
+        assert "push normally without a pause" in prompt
         # The general human-decision verdict stays for genuine design calls.
         assert "AWF-VERDICT: NEEDS_HUMAN: <what you need>" in prompt
         # Follow-up to #652 (PR #653 review): the shared verdict guidance and the
@@ -365,6 +373,10 @@ class TestAddressReviewComment:
         assert "Declared owned_paths" not in prompt
         assert "governed by AWF" in prompt
         assert "AWF automatically pauses" in prompt
+        # PR #654 review (PRRT_kwDOSJAM6s6LMWeR): qualify the auto-pause to unowned,
+        # non-benign protected changes — owned protected edits push without a pause.
+        assert "this task does not own" in prompt
+        assert "push normally without a pause" in prompt
         assert "AWF-VERDICT: NEEDS_HUMAN: <what you need>" in prompt
         # Follow-up to #652 (PR #653 review): the shared verdict guidance must not
         # invite a protected-file self-escalation around the deterministic gate.
@@ -784,6 +796,10 @@ class TestFixCiPrompt:
         assert "Declared owned_paths" not in prompt
         assert "governed by AWF" in prompt
         assert "AWF automatically pauses" in prompt
+        # PR #654 review (PRRT_kwDOSJAM6s6LMWeR): qualify the auto-pause to unowned,
+        # non-benign protected changes — owned protected edits push without a pause.
+        assert "this task does not own" in prompt
+        assert "push normally without a pause" in prompt
         assert "python" not in prompt.lower()
 
     @pytest.mark.unit

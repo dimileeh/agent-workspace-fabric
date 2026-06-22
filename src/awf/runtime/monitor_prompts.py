@@ -106,10 +106,12 @@ def _protected_file_policy(owned_paths: Sequence[str] = ()) -> str:
         "  - A fixed set of protected quality-gate files — CI and release "
         "workflows, build and dependency configuration (for example "
         "`pyproject.toml`), and test and coverage configuration — "
-        "is governed by AWF directly. If your fix edits one of them, AWF "
-        "automatically pauses the PR for operator approval on push, with the "
-        "concrete paths attached. You do not need to detect this or print any "
-        "protected-file verdict.\n"
+        "is governed by AWF directly. If your fix changes one of them that this "
+        "task does not own, in a way AWF cannot classify as a narrowly safe edit, "
+        "AWF automatically pauses the PR for operator approval on push, with the "
+        "concrete paths attached. Edits to protected files this task owns, and "
+        "edits AWF classifies as safe, push normally without a pause. Either way "
+        "you do not need to detect this or print any protected-file verdict.\n"
     )
 
 
