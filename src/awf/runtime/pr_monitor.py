@@ -1178,8 +1178,28 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # (require_ci=False) AND the forge authoritatively reported zero checks
     # (no_checks_observed); the signal defaults False so a forgotten populate
     # never bypasses this gate.
-    if status.check_state == CheckState.PENDING and (
-        config.require_ci or not status.no_checks_observed
+    #
+    # #660 carve-out: the ABSENT-PENDING shape (a fresh head whose required
+    # ``ci-required`` context never started, surfacing as the null status
+    # rollup: ``check_state == PENDING`` AND ``no_checks_observed == True``)
+    # under ``require_ci == True`` on a BLOCKED/HAS_HOOKS merge state must NOT
+    # be parked here forever. Let it fall through to gate 8b, which owns the
+    # required-CI grace window for absent checks (grace active → bounded
+    # WaitForCI; grace expired → gate 9 → NotifyHuman). The GENUINE-PENDING
+    # shape (real checks present and running, ``no_checks_observed == False``)
+    # keeps waiting here — the #469 "require_ci=True waits forever for
+    # genuinely pending checks" contract is preserved. The carve-out is scoped
+    # to BLOCKED/HAS_HOOKS so an absent-PENDING head on a CLEAN state still
+    # waits here (no grace gate would catch it; merging a PENDING head blind
+    # is forbidden).
+    if (
+        status.check_state == CheckState.PENDING
+        and (config.require_ci or not status.no_checks_observed)
+        and not (
+            config.require_ci
+            and status.no_checks_observed
+            and status.merge_state_status in (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS)
+        )
     ):
         return WaitForCI(reason="pending_checks")
     if (
