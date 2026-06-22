@@ -66,6 +66,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.loop_helpers import (
+    _post_workflow_scope_notification_best_effort,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
 )
@@ -75,41 +78,6 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
 )
-
-
-async def _post_workflow_scope_notification_best_effort(
-    self: Any,
-    *,
-    workspace_id: str,
-    repo: RepoRef,
-    pr_number: int,
-    status: PRStatus,
-    state: MonitorState,
-    blocker_reason: str,
-) -> None:
-    """Post the human hint without blocking workflow-scope failure handling."""
-    try:
-        await self._post_human_notification_once(
-            repo=repo,
-            pr_number=pr_number,
-            status=status,
-            state=state,
-            blocker_reason=blocker_reason,
-        )
-    except ForgeClientError as exc:
-        # A Bitbucket workspace posts the human hint through ``BitbucketClient``,
-        # whose ``post_comment`` raises ``BitbucketClientError`` (not
-        # ``GitHubClientError``). Catch it alongside the GitHub error so a
-        # transient or permanent comment failure degrades to a logged warning
-        # here too, instead of escaping this best-effort helper and aborting the
-        # surrounding workflow-scope failure handling.
-        _log.warning(
-            "monitor.workflow_scope_notification_failed",
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            head_sha=status.head_sha[:10],
-            error=_redact_and_truncate_forge_error(str(exc)),
-        )
 
 
 async def _execute(
@@ -178,6 +146,21 @@ async def _execute(
             "blocking_reviews": len(status.blocking_reviews),
         },
     )
+
+    # Clear the awaiting-human attention flag the moment the monitor resumes with
+    # a non-``NotifyHuman`` action: ``decide()`` returns exactly one action per
+    # poll and ``NotifyHuman`` is the only human-block action, so every other arm
+    # (WaitForCI / AddressComments / SyncBase / Merge / terminal completes+aborts)
+    # means the external blocker is gone. The ``IS NOT NULL`` guard makes the repo
+    # update a no-op when the flag is already clear, so this per-poll clear never
+    # churns the row — but the guarded ``UPDATE`` still round-trips once per poll.
+    # We keep it unconditional rather than inferring "already clear" from in-process
+    # state: ``awaiting_human_since`` is persisted, so a monitor restart between the
+    # ``NotifyHuman`` set and this clear would otherwise strand a stale attention
+    # signal. The round-trip is negligible beside the operation/state/audit writes
+    # each poll already performs.
+    if not isinstance(action, NotifyHuman):
+        await self._clear_workspace_attention(workspace_id)
 
     if isinstance(action, ShortCircuitCompleted):
         self._write_defer_signal(
@@ -1405,12 +1388,13 @@ async def _execute(
                     )
                     return False
 
+        human_wait_reason = action.message or _notify_human_reason(status, state)
         operation = await self._begin_monitor_operation(
             workspace_id=workspace_id,
             operation_type=OperationType.human_wait,
             action="human_wait",
             requested_action="notify_human",
-            reason=action.message or _notify_human_reason(status, state),
+            reason=human_wait_reason,
             reason_code="HUMAN_WAIT",
             pr_number=pr_number,
             status=status,
@@ -1419,6 +1403,10 @@ async def _execute(
             monitor_log=monitor_log,
             extra_identity=(action.message or "", state.iter_count),
         )
+        # Surface the escalation as a first-class, operator-visible attention
+        # signal on the still-``monitoring_pr`` row. ``since`` stays stable across
+        # repeated NotifyHuman for the same block; the reason tracks the latest.
+        await self._set_workspace_attention(workspace_id, reason=human_wait_reason)
         try:
             await self._post_human_notification_once(
                 repo=repo,

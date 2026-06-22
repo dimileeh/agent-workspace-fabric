@@ -873,6 +873,13 @@ class WorkspaceResponse(BaseModel):
     )
     runtime_health: WorkspaceRuntimeHealthResponse | None = None
     block_state: WorkspaceBlockStateResponse | None = None
+    # Awaiting-human attention flag, surfaced only while ``status == monitoring_pr``.
+    # ``attention_required`` is derived from the persisted ``awaiting_human_since``
+    # column; a PR-monitor ``NotifyHuman`` escalation (HUMAN_WAIT) sets it without
+    # changing status (the monitor keeps polling and auto-recovers).
+    attention_required: bool = False
+    awaiting_human_since: datetime | None = None
+    awaiting_human_reason: str | None = None
     secret_leases: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
     app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
     provider_recovery_state: ProviderRecoveryStateResponse | None = None
@@ -1092,6 +1099,12 @@ class WorkspaceOverviewResponse(BaseModel):
     # "Blocked for N" without falling back to the lossy last-event/``updated_at``
     # heuristic. ``None`` when the workspace is not blocked.
     blocked_at: datetime | None = None
+    # Awaiting-human attention flag, surfaced only while ``status == monitoring_pr``
+    # (mirrors the ``blocked_at`` status gate). ``attention_required`` lets list
+    # cards show an attention marker without inferring it from the PR comment.
+    attention_required: bool = False
+    awaiting_human_since: datetime | None = None
+    awaiting_human_reason: str | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -280,7 +280,10 @@ async def summarize_resource_saturation_for_session(
     # reserved_resources, and concurrency metrics describe this node's workload.
     node_id = _local_capacity_node_id(settings)
     status_counts = await _count_current_by_status(session, node_id=node_id)
-    workspace_counts = _workspace_saturation_counts(status_counts)
+    awaiting_human_count = await _count_awaiting_human(session, node_id=node_id)
+    workspace_counts = _workspace_saturation_counts(
+        status_counts, awaiting_human=awaiting_human_count
+    )
     worker = WorkerConcurrencySettings(
         max_concurrent_provisions=settings.worker_max_concurrent_provisions,
         max_concurrent_executions=settings.worker_max_concurrent_executions,
@@ -420,6 +423,26 @@ async def _count_current_by_status(
     for status, count in rows.all():
         counts[str(status)] = int(count)
     return counts
+
+
+async def _count_awaiting_human(
+    session: AsyncSession,
+    *,
+    node_id: str | None = None,
+) -> int:
+    """Count workspaces flagged awaiting human attention while monitoring a PR.
+
+    Scoped identically to ``_count_current_by_status`` (node-local) and gated on
+    the same surfacing guard as the API/console responses:
+    ``status == monitoring_pr`` AND ``awaiting_human_since IS NOT NULL``.
+    """
+    stmt = select(func.count()).where(
+        Workspace.status == WorkspaceStatus.monitoring_pr.value,
+        Workspace.awaiting_human_since.is_not(None),
+    )
+    if node_id is not None:
+        stmt = stmt.where(_workspace_node_scope_filter(node_id))
+    return int((await session.execute(stmt)).scalar_one())
 
 
 async def _count_by_failure_reason(
@@ -811,7 +834,11 @@ def _provider_recovery_from_details(details_payload: dict[str, Any]) -> dict[str
     return value if isinstance(value, dict) else None
 
 
-def _workspace_saturation_counts(status_counts: dict[str, int]) -> WorkspaceSaturationCounts:
+def _workspace_saturation_counts(
+    status_counts: dict[str, int],
+    *,
+    awaiting_human: int,
+) -> WorkspaceSaturationCounts:
     active_total = sum(
         count
         for status, count in status_counts.items()
@@ -829,6 +856,9 @@ def _workspace_saturation_counts(status_counts: dict[str, int]) -> WorkspaceSatu
         monitoring_pr=status_counts[WorkspaceStatus.monitoring_pr.value],
         blocked=status_counts[WorkspaceStatus.blocked.value],
         recovering=status_counts[WorkspaceStatus.recovering.value],
+        # monitoring_pr is already in active_total (non-terminal), so the flag is
+        # already counted ACTIVE; it is intentionally NOT added to any in-use set.
+        awaiting_human=awaiting_human,
         destroying=status_counts[WorkspaceStatus.destroying.value],
         completed=status_counts[WorkspaceStatus.completed.value],
         failed=status_counts[WorkspaceStatus.failed.value],

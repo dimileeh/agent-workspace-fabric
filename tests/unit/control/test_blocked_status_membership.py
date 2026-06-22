@@ -98,7 +98,7 @@ class TestBlockedSaturationCount:
 
         status_counts = {status.value: 0 for status in WorkspaceStatus}
         status_counts[_BLOCKED.value] = 3
-        counts = _workspace_saturation_counts(status_counts)
+        counts = _workspace_saturation_counts(status_counts, awaiting_human=0)
         assert counts.blocked == 3
         # A blocked workspace is non-terminal, so it counts toward active_total.
         assert counts.active_total == 3

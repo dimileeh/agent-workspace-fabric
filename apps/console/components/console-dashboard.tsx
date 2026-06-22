@@ -863,6 +863,19 @@ const searchParams = useSearchParams();
         stale: saturationStale,
       },
       {
+        // PR-monitor HUMAN_WAIT escalation: a `monitoring_pr` workspace flagged
+        // awaiting a human (blocking review / deferred-human / merge BLOCKED). It
+        // is NOT a pause — the monitor keeps polling and auto-recovers — so it
+        // stays in `monitoring_pr` and counts inside Active (via active_total) but
+        // deliberately NOT inside Running, the same non-Running rule as blocked.
+        // `warn` tone because it needs an operator (mirrors "Awaiting operator").
+        id: "awaiting_human",
+        label: "Awaiting human",
+        value: counts ? (counts.awaiting_human ?? 0) : dash,
+        tone: counts?.awaiting_human ? "warn" : undefined,
+        stale: saturationStale,
+      },
+      {
         id: "queued",
         label: "Queued",
         value: queued ?? dash,

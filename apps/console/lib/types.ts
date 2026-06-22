@@ -210,6 +210,12 @@ export interface WorkspaceOverview {
   failure_message: string | null;
   // Authoritative pause start, present only while `status === "blocked"`.
   blocked_at?: string | null;
+  // Awaiting-human attention flag, present only while `status === "monitoring_pr"`.
+  // A PR-monitor HUMAN_WAIT escalation sets it WITHOUT changing status (the monitor
+  // keeps polling and auto-recovers), so `attention_required` is the derived signal.
+  attention_required?: boolean;
+  awaiting_human_since?: string | null;
+  awaiting_human_reason?: string | null;
   latest_queue_decision?: QueueDecisionSummary | null;
   active_resource_reservation?: ResourceReservationSummary | null;
   created_at: string;
@@ -532,6 +538,9 @@ export interface Workspace {
   failure_reason: string | null;
   failure_message: string | null;
   block_state?: WorkspaceBlockState | null;
+  attention_required?: boolean;
+  awaiting_human_since?: string | null;
+  awaiting_human_reason?: string | null;
   secret_leases: WorkspaceSecretLease[];
   policy_findings: PolicyFinding[];
   egress_audit: WorkspaceEgressAudit | null;
@@ -678,6 +687,7 @@ export interface WorkspaceSaturationCounts {
   monitoring_pr: number;
   blocked: number;
   recovering: number;
+  awaiting_human: number;
   destroying: number;
   completed: number;
   failed: number;
