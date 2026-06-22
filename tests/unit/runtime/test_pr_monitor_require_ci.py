@@ -220,13 +220,102 @@ def test_require_ci_false_absent_ci_blocked_unchanged() -> None:
 
 @pytest.mark.unit
 def test_pending_checks_still_routes_to_gate_6() -> None:
-    # A.6: ordering preserved — PENDING fires gate 6 before the new gate, even
-    # with the grace flag set and a BLOCKED merge state.
+    # A.6: ordering preserved — the GENUINE-PENDING shape (real checks present
+    # and running, ``no_checks_observed=False``) still fires gate 6 before the
+    # required-CI grace gate, even with the grace flag set and a BLOCKED merge
+    # state. This pins the #469 contract that genuinely pending required checks
+    # wait forever at gate 6. The ABSENT-PENDING shape
+    # (``no_checks_observed=True``) is covered separately by the
+    # #660 absent-PENDING tests below — it no longer parks at gate 6.
+    action = decide(
+        status=_status(
+            check_state=CheckState.PENDING,
+            no_checks_observed=False,
+            merge_state_status=MergeStateStatus.BLOCKED,
+            awaiting_required_checks_grace_active=True,
+        ),
+        state=MonitorState(),
+        config=MonitorConfig(),
+    )
+    assert isinstance(action, WaitForCI)
+    assert action.reason == "pending_checks"
+
+
+# ── #660: route the ABSENT-PENDING shape through the required-CI grace ──
+#
+# The null-rollup shape reports ``check_state == PENDING`` together with
+# ``no_checks_observed == True``. Gate 6 used to intercept this under
+# ``require_ci=True`` and poll forever, defeating #656's "a head that
+# genuinely never gets CI still surfaces HUMAN_WAIT after the grace"
+# guarantee. The fix carves ONLY the ABSENT-PENDING + BLOCKED/HAS_HOOKS shape
+# out of gate 6 so it falls through to gate 8b (grace active → bounded
+# WaitForCI; grace expired → gate 9 → NotifyHuman). The GENUINE-PENDING shape
+# (A.6 above) is untouched.
+
+
+@pytest.mark.unit
+def test_absent_pending_grace_expired_routes_to_notify_human() -> None:
+    # The bug fix: ABSENT-PENDING (null rollup) + BLOCKED + require_ci, grace
+    # EXPIRED → NotifyHuman (was WaitForCI("pending_checks") forever).
     action = decide(
         status=_status(
             check_state=CheckState.PENDING,
             no_checks_observed=True,
             merge_state_status=MergeStateStatus.BLOCKED,
+            awaiting_required_checks_grace_active=False,
+        ),
+        state=MonitorState(),
+        config=MonitorConfig(),
+    )
+    assert isinstance(action, NotifyHuman)
+
+
+@pytest.mark.unit
+def test_absent_pending_within_grace_routes_to_awaiting_required_checks() -> None:
+    # Same ABSENT-PENDING shape, grace ACTIVE → bounded WaitForCI within the
+    # required-CI grace window (gate 8b), not the gate-6 forever wait.
+    action = decide(
+        status=_status(
+            check_state=CheckState.PENDING,
+            no_checks_observed=True,
+            merge_state_status=MergeStateStatus.BLOCKED,
+            awaiting_required_checks_grace_active=True,
+        ),
+        state=MonitorState(),
+        config=MonitorConfig(),
+    )
+    assert isinstance(action, WaitForCI)
+    assert action.reason == "awaiting_required_checks"
+
+
+@pytest.mark.unit
+def test_absent_pending_has_hooks_grace_expired_routes_to_notify_human() -> None:
+    # HAS_HOOKS variant — pins that the carve-out covers both members of the
+    # merge-state tuple gate 8b matches (mirrors A.3 for the SUCCESS/NEUTRAL
+    # shape).
+    action = decide(
+        status=_status(
+            check_state=CheckState.PENDING,
+            no_checks_observed=True,
+            merge_state_status=MergeStateStatus.HAS_HOOKS,
+            awaiting_required_checks_grace_active=False,
+        ),
+        state=MonitorState(),
+        config=MonitorConfig(),
+    )
+    assert isinstance(action, NotifyHuman)
+
+
+@pytest.mark.unit
+def test_absent_pending_clean_state_still_waits_at_gate_6() -> None:
+    # Narrowness pin: absent-PENDING on a CLEAN state does NOT escape gate 6 —
+    # no grace gate would catch it, and we must not merge a PENDING head blind.
+    # The carve-out is scoped to BLOCKED/HAS_HOOKS only.
+    action = decide(
+        status=_status(
+            check_state=CheckState.PENDING,
+            no_checks_observed=True,
+            merge_state_status=MergeStateStatus.CLEAN,
             awaiting_required_checks_grace_active=True,
         ),
         state=MonitorState(),
