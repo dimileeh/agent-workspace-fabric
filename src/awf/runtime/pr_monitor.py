@@ -35,7 +35,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
 
@@ -366,21 +366,73 @@ class MonitorState:
         """Drop the workflow-scope wait marker (idempotent)."""
         self.threads_addressed_ids.pop(_AWAITING_WORKFLOW_SCOPE_STATE_KEY, None)
 
-    @property
-    def merge_block_attention_active(self) -> bool:
-        """Whether the merge loop set attention for an active branch-protection block.
+    def merge_block_attention_active(
+        self,
+        *,
+        now: datetime | None = None,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        """Whether the branch-protection attention marker is STILL active.
 
         Set when ``handle_merge_action``'s branch-protection fallback escalates to
         a human directly without recording a sticky blocker, so ``decide()`` keeps
         returning ``Merge``. The non-human gate waits honor it to preserve the
         still-active awaiting-human signal across polls instead of clearing it as a
         resolved ``NotifyHuman`` episode.
-        """
-        return bool(self.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY))
 
-    def mark_merge_block_attention(self) -> None:
-        """Flag that the merge loop set attention for an active branch-protection block."""
-        self.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] = "1"
+        Distinguishes a STILL-blocked fallback (re-stamped every poll, fresh
+        within the TTL) from a RESOLVED block (no fallback has fired recently,
+        marker age exceeds the TTL). Returns ``True`` (preserve) when:
+
+        - the marker is absent (nothing to clear — caller short-circuits), or
+        - the marker is a legacy boolean ``"1"`` (unknown age ⇒ treat as fresh
+          on first read so an in-flight monitor is not cleared on age alone),
+          or
+        - ``ttl_seconds`` is ``None`` (TTL disabled — pre-#661/#663 contract), or
+        - the marker age is ``<= ttl_seconds`` (fresh — still blocked).
+
+        Returns ``False`` (resolved — clear proceeds) when the marker is a
+        timestamp whose age exceeds ``ttl_seconds``, and drops the stale marker
+        so the next fresh poll re-stamps cleanly. ``now`` defaults to
+        ``datetime.now(UTC)``.
+        """
+        raw = self.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
+        if not raw:
+            return False
+        # Legacy boolean marker (pre-TTL persisted state): unknown age ⇒ fresh.
+        if raw == "1":
+            return True
+        if ttl_seconds is None:
+            return True
+        try:
+            stamped = datetime.fromisoformat(raw)
+        except ValueError:
+            # Unrecognized shape: treat as fresh rather than silently clearing
+            # an in-flight block. The next fallback re-stamps to a known form.
+            return True
+        if stamped.tzinfo is None:
+            stamped = stamped.replace(tzinfo=UTC)
+        reference = now if now is not None else datetime.now(UTC)
+        age = (reference - stamped).total_seconds()
+        if age <= ttl_seconds:
+            return True
+        # Stale (resolved): drop the marker so the clear proceeds and the next
+        # fresh poll re-stamps cleanly.
+        self.threads_addressed_ids.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None)
+        return False
+
+    def mark_merge_block_attention(self, *, now: datetime | None = None) -> None:
+        """Flag that the merge loop set attention for an active branch-protection block.
+
+        Stamps a wall-clock timestamp (default ``datetime.now(UTC)``) so a later
+        poll can distinguish a STILL-blocked marker (re-stamped every poll, fresh
+        within the TTL) from a RESOLVED marker (no fallback has fired recently,
+        age exceeds the TTL). The branch-protection fallback calls this every
+        poll while blocked, so the TTL only expires a block that has resolved
+        externally between polls (#661/#663).
+        """
+        stamped = now if now is not None else datetime.now(UTC)
+        self.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] = stamped.isoformat()
 
     def clear_merge_block_attention(self) -> None:
         """Drop the merge-block attention marker (idempotent)."""
@@ -449,6 +501,18 @@ class MonitorConfig:
     # Only used by the RUNNER, not decide(); listed here so the full config
     # travels in one object.
     poll_interval_seconds: float = 60.0
+    merge_block_attention_ttl_seconds: float = 120.0
+    """Bounded TTL on the ``merge_block_attention`` marker that distinguishes a
+    STILL-blocked branch-protection fallback (re-stamped every poll, fresh
+    within the TTL) from a RESOLVED block (no fallback has fired recently, marker
+    age exceeds the TTL) (#661/#663).
+
+    The branch-protection fallback calls ``mark_merge_block_attention`` every
+    poll while blocked, so the TTL only expires a block that has resolved
+    externally between polls. Bounded to a small multiple of
+    ``poll_interval_seconds`` (default ~2×) so a blocked poll's marker is always
+    fresh even if a single poll is delayed. Set ``<= 0`` to disable the TTL and
+    preserve the pre-#661/#663 contract (marker active whenever present)."""
     settle_interval_seconds: float = 30.0
     initial_review_grace_period_seconds: float = 900.0
     """One-time wait after the PR first enters monitoring before the first

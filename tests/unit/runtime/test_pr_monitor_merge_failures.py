@@ -38,6 +38,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    pr_payload,
     seed_monitoring_workspace,
 )
 
@@ -270,13 +271,23 @@ async def test_merge_blocker_fallback_keeps_attention_since_stable_across_polls(
     )
 
     # Seed a STABLE episode start from an earlier poll: the operator has already
-    # been blocked since well before this poll runs.
+    # been blocked since well before this poll runs. The prior poll's
+    # branch-protection fallback also stamped a FRESH ``merge_block_attention``
+    # marker (now stamps ``now``), which is what tells the critical-section-entry
+    # / non-human-gate clears to PRESERVE the still-active signal (#661/#663).
+    # The DB ``awaiting_human_since`` (the COALESCE'd episode start) stays at the
+    # old timestamp; the marker timestamp is fresh (within the TTL) so the
+    # still-blocked signal survives the critical-section-entry clear.
     episode_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
     async with factory() as session:
         await WorkspaceRepository(session).set_workspace_attention(
             workspace_id, reason="prior escalation", now=episode_start
         )
         await session.commit()
+    state = MonitorState()
+    # Stamp the marker fresh (this poll's wall-clock) so the TTL gate treats it
+    # as still-blocked; the fallback re-stamps it again this poll.
+    state.mark_merge_block_attention()
 
     terminal = await runner._execute(
         action=Merge(),
@@ -285,7 +296,7 @@ async def test_merge_blocker_fallback_keeps_attention_since_stable_across_polls(
         repo=_TEST_REPO,
         pr_number=_TEST_PR_NUMBER,
         status=_mergeable_status(),
-        state=MonitorState(),
+        state=state,
         base_branch=_TEST_DEFAULT_BASE_BRANCH,
         remote_branch=f"awf/{workspace_id}",
         remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
@@ -815,3 +826,165 @@ async def test_merge_task_timeout_cancels_operation_and_keeps_polling(
     audit_payload = timeout_events[0].payload
     assert isinstance(audit_payload, dict)
     assert audit_payload["outcome"] == "cancelled"
+
+
+class _AttentionCheckingSleep(RecordedSleep):
+    """Records sleeps and asserts ``awaiting_human_since`` is cleared mid-sleep.
+
+    Used by the #661 tests to prove the resolved ``NotifyHuman`` attention flag is
+    cleared BEFORE the pre-merge settle sleep / fast-path merge attempt, not
+    only after the whole poll resolves.
+    """
+
+    def __init__(
+        self,
+        *,
+        factory: async_sessionmaker[AsyncSession],
+        workspace_id: str,
+    ) -> None:
+        super().__init__()
+        self._factory = factory
+        self._workspace_id = workspace_id
+        self.cleared_before_sleep: list[bool] = []
+
+    async def __call__(self, seconds: float) -> None:
+        async with self._factory() as session:
+            ws = await WorkspaceRepository(session).get(self._workspace_id)
+            assert ws is not None
+            self.cleared_before_sleep.append(ws.awaiting_human_since is None)
+        await super().__call__(seconds)
+
+
+@pytest.mark.unit
+async def test_resolved_human_wait_clears_attention_before_pre_merge_settle(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """#661: a resolved ``HUMAN_WAIT`` episode must not keep surfacing
+    "awaiting human" while the monitor settles before merging.
+
+    ``decide()`` returns ``Merge`` after the human block resolves, so the
+    top-of-``_execute`` clear is skipped for the ``Merge`` arm. The merge loop
+    must clear the stale flag at critical-section entry — BEFORE the pre-merge
+    settle sleep — so console KPIs/badges do not show "awaiting human" for the
+    ~90s settle window while the monitor is merely waiting to merge.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # git fetch origin development
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload(check_state="PENDING"))
+    sleep_fn = _AttentionCheckingSleep(factory=factory, workspace_id=workspace_id)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        pre_merge_settle_seconds=5,
+    )
+
+    # Seed a stable episode start from an earlier, now-resolved NotifyHuman poll.
+    episode_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            workspace_id, reason="prior human escalation", now=episode_start
+        )
+        await session.commit()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=MonitorState(),
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    # The recheck after settle returned PENDING → WaitForCI, no merge attempted.
+    assert terminal is False
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        # The flag was cleared at critical-section entry, before the settle sleep.
+        assert ws.awaiting_human_since is None
+        assert ws.awaiting_human_reason is None
+    # The settle sleep (the first recorded sleep) observed the flag already clear.
+    assert sleep_fn.cleared_before_sleep
+    assert all(sleep_fn.cleared_before_sleep)
+
+
+@pytest.mark.unit
+async def test_resolved_human_wait_clears_attention_on_fast_path_into_merge(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """#661 fast path: with ``pre_merge_settle_seconds == 0`` the critical-section
+    entry clear runs right before the merge attempt, so the resolved
+    ``NotifyHuman`` flag is cleared and the merge proceeds without surfacing
+    "awaiting human" while actively merging.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=["MERGESHA123"],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+        initial_review_grace_period_seconds=0,
+        pre_merge_settle_seconds=0,
+    )
+
+    # Seed a stable episode start from an earlier, now-resolved NotifyHuman poll.
+    episode_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            workspace_id, reason="prior human escalation", now=episode_start
+        )
+        await session.commit()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=MonitorState(),
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    # The merge succeeded.
+    assert terminal is True
+    assert gh.merge_calls  # a merge was attempted
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        # The flag was cleared at critical-section entry before the merge attempt.
+        assert ws.awaiting_human_since is None
+        assert ws.awaiting_human_reason is None

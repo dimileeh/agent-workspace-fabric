@@ -410,22 +410,40 @@ async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str)
 
 async def _clear_stale_merge_attention(self: Any, workspace_id: str, state: MonitorState) -> None:
     """Clear a resolved ``NotifyHuman`` attention flag before a non-human gate wait,
-    unless the merge loop itself set attention for an active branch-protection block.
+    unless the merge loop itself set attention for an *still-active* branch-protection
+    block.
 
     The merge loop's non-human gate waits (merge queue, reviewer settle, initial
-    review grace) clear ``awaiting_human_since`` so a *resolved* ``NotifyHuman``
-    episode does not keep surfacing "awaiting human" while the monitor only waits on
-    a non-human gate (#659). But the branch-protection fallback escalates to a human
-    *without* a sticky blocker, so ``decide()`` keeps returning ``Merge``; that
-    attention is still active. Skipping the clear when
-    ``merge_block_attention_active`` is set keeps that signal up across a queue/settle/
-    grace wait instead of wrongly nulling it (PRRT_kwDOSJAM6s6LXscz). The
-    merge-method preflight arm needs no such guard: it records a sticky
+    review grace) and the merge critical-section entry clear ``awaiting_human_since``
+    so a *resolved* ``NotifyHuman`` episode does not keep surfacing "awaiting human"
+    while the monitor only waits on a non-human gate or is actively merging (#659,
+    #661). But the branch-protection fallback escalates to a human *without* a
+    sticky blocker, so ``decide()`` keeps returning ``Merge``; that attention is
+    still active while the block persists. Skipping the clear when the marker is
+    fresh keeps that signal up across a queue/settle/grace wait instead of wrongly
+    nulling it (PRRT_kwDOSJAM6s6LXscz, #663 regression).
+
+    A bounded marker TTL distinguishes a STILL-blocked fallback (re-stamped every
+    poll, fresh within the TTL) from a RESOLVED block (no fallback has fired
+    recently, marker age exceeds the TTL) (#663). When the marker is stale the
+    helper clears it (via ``state.clear_merge_block_attention()``) and proceeds
+    with ``_clear_workspace_attention`` so the surfaced flag stops reporting
+    "awaiting human" once only non-human gates remain. When fresh (still-blocked)
+    behavior is unchanged (preserve — #663 regression intact).
+
+    The merge-method preflight arm needs no such guard: it records a sticky
     ``_merge_method_blocked_key`` so ``decide()`` returns ``NotifyHuman`` and these
     ``Merge``-arm gate waits are never reached for it.
     """
-    if state.merge_block_attention_active:
+    ttl_seconds = self._config.merge_block_attention_ttl_seconds
+    if state.merge_block_attention_active(
+        now=datetime.now(UTC),
+        ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
+    ):
         return
+    # Stale (resolved) marker: drop it so the next fresh poll re-stamps cleanly,
+    # then clear the surfaced flag.
+    state.clear_merge_block_attention()
     await self._clear_workspace_attention(workspace_id)
 
 

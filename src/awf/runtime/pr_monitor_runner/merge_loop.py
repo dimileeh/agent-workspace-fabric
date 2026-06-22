@@ -711,6 +711,20 @@ async def handle_merge_action(
                 pr_number=pr_number,
                 status=merge_status,
             )
+            # #661: clear a resolved ``NotifyHuman`` attention flag before the
+            # pre-merge settle sleep and the fast path into the merge attempt.
+            # ``decide()`` returned ``Merge``, so a prior ``NotifyHuman`` block is
+            # gone and the operator signal must not stay "awaiting human" while the
+            # monitor is actively merging or settling. The branch-protection
+            # fallback re-stamps ``merge_block_attention`` every poll while still
+            # blocked, so a FRESH marker (still-blocked) is preserved by the TTL
+            # and a STALE marker (resolved externally between polls) is cleared
+            # (#663). Placed at critical-section entry so a single call covers
+            # both the settle-sleep path (clear before the sleep) and the fast
+            # path (clear before the merge attempt); the existing
+            # merge-queue/settle/grace clears earlier in the function are
+            # unchanged.
+            await self._clear_stale_merge_attention(workspace_id, state)
             if self._config.pre_merge_settle_seconds > 0:
                 wait_seconds = self._config.pre_merge_settle_seconds
                 await self._record_pre_merge_settle_event(
