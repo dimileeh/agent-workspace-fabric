@@ -183,8 +183,14 @@ async def _execute(
     # a non-``NotifyHuman`` action: ``decide()`` returns exactly one action per
     # poll and ``NotifyHuman`` is the only human-block action, so every other arm
     # (WaitForCI / AddressComments / SyncBase / Merge / terminal completes+aborts)
-    # means the external blocker is gone. The repo update is a no-op when the flag
-    # is already clear, so this per-poll clear never churns the row.
+    # means the external blocker is gone. The ``IS NOT NULL`` guard makes the repo
+    # update a no-op when the flag is already clear, so this per-poll clear never
+    # churns the row — but the guarded ``UPDATE`` still round-trips once per poll.
+    # We keep it unconditional rather than inferring "already clear" from in-process
+    # state: ``awaiting_human_since`` is persisted, so a monitor restart between the
+    # ``NotifyHuman`` set and this clear would otherwise strand a stale attention
+    # signal. The round-trip is negligible beside the operation/state/audit writes
+    # each poll already performs.
     if not isinstance(action, NotifyHuman):
         await self._clear_workspace_attention(workspace_id)
 

@@ -412,7 +412,13 @@ async def _clear_workspace_attention(self: Any, workspace_id: str) -> None:
     """Clear the awaiting-human attention flag once the monitor resumes.
 
     Called whenever ``decide()`` returns a non-``NotifyHuman`` action (the human
-    blocker is gone). A DB-level no-op when the flag is already clear.
+    blocker is gone). The ``IS NOT NULL``-guarded ``UPDATE`` changes no row when
+    the flag is already clear, but it still round-trips (open session + statement
+    + commit) once per poll per workspace. That per-poll cost is deliberate:
+    ``awaiting_human_since`` is persisted, so inferring "already clear" from
+    in-process state would strand a stale signal across a monitor restart that
+    lands between the set and this clear. The round-trip is negligible beside the
+    operation/state/audit writes each poll already performs.
     """
     async with self._deps.session_factory() as s:
         await WorkspaceRepository(s).clear_workspace_attention(workspace_id)
