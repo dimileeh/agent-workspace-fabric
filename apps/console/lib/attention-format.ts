@@ -6,18 +6,18 @@
 
 // "Awaiting human since" timestamp for the overview/list + KPI surfaces. The
 // overview carries the authoritative `awaiting_human_since` (the same column the
-// detail response reads), so prefer it; fall back to `updated_at` only when it is
-// absent so a flagged row still renders a (looser) age.
+// detail response reads). The caller only reads this for a flagged monitoring_pr
+// row, where the server (`workspace_attention_fields`) guarantees
+// `awaiting_human_since` is populated whenever `attention_required` is true — so
+// there is deliberately no `updated_at` fallback. A missing value yields null (a
+// dash), matching `attentionAgeSeconds`, rather than a misleading "Awaiting human
+// for N" age measured from the last arbitrary DB update.
 export function attentionSince(
   overview: {
-    updated_at?: string | null;
     awaiting_human_since?: string | null;
   },
 ): string | null {
-  if (overview.awaiting_human_since) {
-    return overview.awaiting_human_since;
-  }
-  return overview.updated_at ?? null;
+  return overview.awaiting_human_since ?? null;
 }
 
 // Elapsed seconds since a workspace started awaiting human attention, for the

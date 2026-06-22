@@ -8,30 +8,19 @@ import {
   isAwaitingHuman,
 } from "./attention-format.ts";
 
-test("attentionSince prefers the authoritative awaiting_human_since", () => {
+test("attentionSince returns the authoritative awaiting_human_since", () => {
   assert.equal(
-    attentionSince({
-      updated_at: "2026-06-20T11:00:00.000Z",
-      awaiting_human_since: "2026-06-20T09:00:00.000Z",
-    }),
+    attentionSince({ awaiting_human_since: "2026-06-20T09:00:00.000Z" }),
     "2026-06-20T09:00:00.000Z",
   );
 });
 
-test("attentionSince falls back to updated_at when awaiting_human_since is absent", () => {
-  assert.equal(
-    attentionSince({ updated_at: "2026-06-20T11:00:00.000Z" }),
-    "2026-06-20T11:00:00.000Z",
-  );
-  assert.equal(
-    attentionSince({ updated_at: "2026-06-20T11:00:00.000Z", awaiting_human_since: null }),
-    "2026-06-20T11:00:00.000Z",
-  );
-});
-
-test("attentionSince returns null when no timestamp is available", () => {
+test("attentionSince returns null when awaiting_human_since is absent — no updated_at fallback", () => {
+  // The caller only invokes this for a flagged monitoring_pr row, where the
+  // server guarantees `awaiting_human_since` is populated. A missing value must
+  // yield a dash, never an age measured from an arbitrary DB update.
   assert.equal(attentionSince({}), null);
-  assert.equal(attentionSince({ updated_at: null }), null);
+  assert.equal(attentionSince({ awaiting_human_since: null }), null);
 });
 
 test("attentionAgeSeconds computes elapsed seconds with an injected clock", () => {
