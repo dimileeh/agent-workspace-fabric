@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,7 @@ from awf.runtime.pr_monitor_runner.config import (
 )
 from awf.runtime.pr_monitor_runner.constants import _GIT_BASE_BEHIND_FAILED_REASON
 from awf.runtime.pr_monitor_runner.helpers import (
+    _awaiting_required_checks_grace,
     _clear_transient_base_fetch_retry_state,
     _clear_transient_forge_retry_state,
     _infer_service_work_dir,
@@ -354,6 +357,17 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     remote_branch=remote_branch,
                     monitor_log=monitor_log,
                 )
+                # #655: derive the per-head grace flag for the transient
+                # required-CI-absent window. Persisting the first-seen marker is
+                # mandatory: run() reloads ``state`` from the DB every poll, so an
+                # unpersisted marker would re-read as absent forever and a genuine
+                # never-CI head would never escalate past the grace.
+                grace_active, grace_state_changed = _awaiting_required_checks_grace(
+                    status, state, self._config, now=datetime.now(UTC)
+                )
+                if grace_state_changed:
+                    await self._persist_state(workspace_id, state)
+                status = replace(status, awaiting_required_checks_grace_active=grace_active)
                 action = decide(status, state, self._config)
                 try:
                     terminal = await self._execute(
