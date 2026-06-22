@@ -384,6 +384,14 @@ async def _handle_merge_gate_blocker(
         )
     )
     if grace_wait_seconds > 0:
+        # Resolve any stale awaiting-human flag before this non-human grace wait so
+        # a resolved ``NotifyHuman`` episode does not keep surfacing "awaiting human"
+        # while the monitor merely waits out the initial-review grace (whether the
+        # grace is deferring stale recovery or just gating an otherwise-clean merge).
+        # ``loop._execute`` excludes ``Merge`` and the manual-ready ``NotifyHuman``
+        # handoff from its general clear, so — like the other non-human gate waits in
+        # ``handle_merge_action`` — clear it here before parking (#659).
+        await runner._clear_workspace_attention(workspace_id)
         if stale_reason is not None:
             grace_defer_payload: dict[str, object] = {
                 "stale_reason": stale_reason,
