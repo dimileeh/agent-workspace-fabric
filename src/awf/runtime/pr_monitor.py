@@ -501,7 +501,7 @@ class MonitorConfig:
     # Only used by the RUNNER, not decide(); listed here so the full config
     # travels in one object.
     poll_interval_seconds: float = 60.0
-    merge_block_attention_ttl_seconds: float = 120.0
+    merge_block_attention_ttl_seconds: float | None = None
     """Bounded TTL on the ``merge_block_attention`` marker that distinguishes a
     STILL-blocked branch-protection fallback (re-stamped every poll, fresh
     within the TTL) from a RESOLVED block (no fallback has fired recently, marker
@@ -509,10 +509,37 @@ class MonitorConfig:
 
     The branch-protection fallback calls ``mark_merge_block_attention`` every
     poll while blocked, so the TTL only expires a block that has resolved
-    externally between polls. Bounded to a small multiple of
-    ``poll_interval_seconds`` (default ~2×) so a blocked poll's marker is always
-    fresh even if a single poll is delayed. Set ``<= 0`` to disable the TTL and
-    preserve the pre-#661/#663 contract (marker active whenever present)."""
+    externally between polls. Defaults to ``None`` which resolves to
+    ``2 * poll_interval_seconds`` (see ``__post_init__``) so a blocked poll's
+    marker is always fresh even if a single poll is delayed — coupling the TTL
+    to the actual poll cadence instead of a fixed ``120.0`` that an operator can
+    silently outrun by raising ``poll_interval_seconds`` (PRRT_kwDOSJAM6s6LaEpY).
+    Set ``<= 0`` to disable the TTL and preserve the pre-#661/#663 contract
+    (marker active whenever present)."""
+
+    def __post_init__(self) -> None:
+        """Couple the merge-block TTL to the poll interval by default.
+
+        ``merge_block_attention_ttl_seconds`` defaults to ``None``; resolving it
+        to ``2 * poll_interval_seconds`` here (instead of a fixed ``120.0``)
+        guarantees the branch-protection marker re-stamped at the end of poll N
+        stays fresh through poll N+1. Without this coupling an operator who sets
+        ``poll_interval_seconds`` above the fixed default TTL (e.g. a 5-minute
+        poll with the legacy 120 s TTL) would have ``_clear_stale_merge_attention``
+        see a "stale" marker on the next poll and wrongly clear the still-active
+        awaiting-human signal — the exact #663 regression (PRRT_kwDOSJAM6s6LaEpY).
+        A positive explicit TTL is honored as-is; ``<= 0`` keeps the legacy
+        pre-TTL contract (disabled). Frozen dataclass so we mutate via
+        ``object.__setattr__``.
+        """
+        ttl = self.merge_block_attention_ttl_seconds
+        if ttl is None:
+            object.__setattr__(
+                self,
+                "merge_block_attention_ttl_seconds",
+                2.0 * self.poll_interval_seconds,
+            )
+
     settle_interval_seconds: float = 30.0
     initial_review_grace_period_seconds: float = 900.0
     """One-time wait after the PR first enters monitoring before the first

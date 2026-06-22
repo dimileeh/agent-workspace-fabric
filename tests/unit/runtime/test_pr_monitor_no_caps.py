@@ -89,3 +89,38 @@ class TestMonitorConfigShape:
         cfg = MonitorConfig(auto_merge=True, poll_interval_seconds=30.0)
         assert cfg.auto_merge is True
         assert cfg.poll_interval_seconds == 30.0
+
+
+class TestMergeBlockAttentionTtlCoupling:
+    """The merge-block attention TTL must track ``poll_interval_seconds`` so a
+    marker re-stamped at the end of poll N stays fresh through poll N+1.
+
+    A fixed TTL default (the legacy ``120.0``) silently broke when an operator
+    raised ``poll_interval_seconds`` above it: the branch-protection fallback's
+    fresh marker at end of poll N had already aged past the TTL by poll N+1, so
+    ``_clear_stale_merge_attention`` treated the still-active block as resolved
+    and cleared the awaiting-human signal — the exact #663 regression
+    (PRRT_kwDOSJAM6s6LaEpY)."""
+
+    def test_default_ttl_couples_to_default_poll_interval(self) -> None:
+        cfg = MonitorConfig()
+        assert cfg.poll_interval_seconds == 60.0
+        # 2× the default poll interval = the historical 120 s default.
+        assert cfg.merge_block_attention_ttl_seconds == 120.0
+
+    def test_ttl_scales_with_poll_interval_when_not_set(self) -> None:
+        cfg = MonitorConfig(poll_interval_seconds=300.0)
+        # A 5-minute poll must carry a TTL above 5 minutes so the marker
+        # survives to the next poll instead of being read as resolved.
+        assert cfg.merge_block_attention_ttl_seconds == 600.0
+
+    def test_explicit_ttl_is_honored_unchanged(self) -> None:
+        cfg = MonitorConfig(
+            poll_interval_seconds=300.0,
+            merge_block_attention_ttl_seconds=60.0,
+        )
+        assert cfg.merge_block_attention_ttl_seconds == 60.0
+
+    def test_ttl_above_poll_interval_when_default_poll_scaled(self) -> None:
+        cfg = MonitorConfig(poll_interval_seconds=90.0)
+        assert cfg.merge_block_attention_ttl_seconds > cfg.poll_interval_seconds
