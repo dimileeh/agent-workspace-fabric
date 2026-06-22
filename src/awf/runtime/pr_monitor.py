@@ -384,17 +384,19 @@ class MonitorState:
         within the TTL) from a RESOLVED block (no fallback has fired recently,
         marker age exceeds the TTL). Returns ``True`` (preserve) when:
 
-        - the marker is absent (nothing to clear — caller short-circuits), or
         - the marker is a legacy boolean ``"1"`` (unknown age ⇒ treat as fresh
           on first read so an in-flight monitor is not cleared on age alone),
           or
         - ``ttl_seconds`` is ``None`` (TTL disabled — pre-#661/#663 contract), or
         - the marker age is ``<= ttl_seconds`` (fresh — still blocked).
 
-        Returns ``False`` (resolved — clear proceeds) when the marker is a
-        timestamp whose age exceeds ``ttl_seconds``, and drops the stale marker
-        so the next fresh poll re-stamps cleanly. ``now`` defaults to
-        ``datetime.now(UTC)``.
+        Returns ``False`` (clear proceeds) when:
+
+        - the marker is absent (no block to preserve), or
+        - the marker is a timestamp whose age exceeds ``ttl_seconds``
+          (resolved — stale marker is also dropped).
+
+        ``now`` defaults to ``datetime.now(UTC)``.
         """
         raw = self.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
         if not raw:
