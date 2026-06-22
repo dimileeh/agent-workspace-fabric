@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 import urllib.parse
+from collections.abc import Mapping
 from typing import Any
 
+import httpx
 import typer
 
 from awf.cli.common import (
@@ -284,6 +286,65 @@ def workspace_create(
     _handle_response(response, fmt)
 
 
+def format_attention_line(payload: Mapping[str, Any]) -> str | None:
+    """Return the operator-facing awaiting-human line for a workspace payload.
+
+    Pure + deterministic (no I/O) so it is unit-testable without a live API.
+    Returns ``None`` when the workspace is not flagged for human attention.
+    """
+    if not isinstance(payload, Mapping) or not payload.get("attention_required"):
+        return None
+    reason = payload.get("awaiting_human_reason") or "reason unavailable"
+    since = payload.get("awaiting_human_since")
+    if since:
+        return f"⚠ awaiting human: {reason} (since {since})"
+    return f"⚠ awaiting human: {reason}"
+
+
+def attention_marker(item: Mapping[str, Any]) -> str:
+    """Return a per-row awaiting-human marker for a list item.
+
+    Empty string when the item is not flagged, so callers can skip rendering.
+    """
+    if not isinstance(item, Mapping) or not item.get("attention_required"):
+        return ""
+    workspace_id = item.get("workspace_id") or item.get("id") or "?"
+    reason = item.get("awaiting_human_reason") or "reason unavailable"
+    return f"⚠ {workspace_id} awaiting human: {reason}"
+
+
+def _echo_workspace_attention_line(response: httpx.Response, fmt: OutputFormat) -> None:
+    """Echo the awaiting-human attention line after a pretty ``workspace show``."""
+    if fmt != OutputFormat.pretty or response.status_code >= 400 or not response.content:
+        return
+    try:
+        payload = response.json()
+    except ValueError:
+        return
+    if not isinstance(payload, Mapping):
+        return
+    line = format_attention_line(payload)
+    if line is not None:
+        typer.echo(line)
+
+
+def _echo_workspace_list_attention(response: httpx.Response, fmt: OutputFormat) -> None:
+    """Echo per-row awaiting-human markers after a pretty ``workspace list``."""
+    if fmt != OutputFormat.pretty or response.status_code >= 400 or not response.content:
+        return
+    try:
+        payload = response.json()
+    except ValueError:
+        return
+    items = payload.get("items") if isinstance(payload, Mapping) else None
+    if not isinstance(items, list):
+        return
+    for item in items:
+        marker = attention_marker(item) if isinstance(item, Mapping) else ""
+        if marker:
+            typer.echo(marker)
+
+
 @workspace_app.command("show")
 def workspace_show(
     workspace_id: str = typer.Argument(...),
@@ -299,6 +360,7 @@ def workspace_show(
         headers=_api_token_headers(api_token),
     )
     _handle_response(response, fmt)
+    _echo_workspace_attention_line(response, fmt)
 
 
 @workspace_app.command("retry")
@@ -904,6 +966,7 @@ def workspace_list(
         headers=_api_token_headers(api_token),
     )
     _handle_response(response, fmt)
+    _echo_workspace_list_attention(response, fmt)
 
 
 @locks_app.command("list")

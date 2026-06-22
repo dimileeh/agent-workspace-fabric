@@ -179,6 +179,15 @@ async def _execute(
         },
     )
 
+    # Clear the awaiting-human attention flag the moment the monitor resumes with
+    # a non-``NotifyHuman`` action: ``decide()`` returns exactly one action per
+    # poll and ``NotifyHuman`` is the only human-block action, so every other arm
+    # (WaitForCI / AddressComments / SyncBase / Merge / terminal completes+aborts)
+    # means the external blocker is gone. The repo update is a no-op when the flag
+    # is already clear, so this per-poll clear never churns the row.
+    if not isinstance(action, NotifyHuman):
+        await self._clear_workspace_attention(workspace_id)
+
     if isinstance(action, ShortCircuitCompleted):
         self._write_defer_signal(
             workspace_id=workspace_id,
@@ -1406,12 +1415,13 @@ async def _execute(
                     )
                     return False
 
+        human_wait_reason = action.message or _notify_human_reason(status, state)
         operation = await self._begin_monitor_operation(
             workspace_id=workspace_id,
             operation_type=OperationType.human_wait,
             action="human_wait",
             requested_action="notify_human",
-            reason=action.message or _notify_human_reason(status, state),
+            reason=human_wait_reason,
             reason_code="HUMAN_WAIT",
             pr_number=pr_number,
             status=status,
@@ -1420,6 +1430,10 @@ async def _execute(
             monitor_log=monitor_log,
             extra_identity=(action.message or "", state.iter_count),
         )
+        # Surface the escalation as a first-class, operator-visible attention
+        # signal on the still-``monitoring_pr`` row. ``since`` stays stable across
+        # repeated NotifyHuman for the same block; the reason tracks the latest.
+        await self._set_workspace_attention(workspace_id, reason=human_wait_reason)
         try:
             await self._post_human_notification_once(
                 repo=repo,

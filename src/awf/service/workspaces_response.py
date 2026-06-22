@@ -48,6 +48,7 @@ from awf.service.validation_observability import (
 )
 from awf.service.workspace_observability import (
     is_workspace_stale_running,
+    workspace_attention_fields,
     workspace_observability_payload,
     workspace_pricing_metadata,
 )
@@ -183,6 +184,7 @@ def workspace_response(
     )
     computed_fields["runtime_health"] = _workspace_runtime_health_from_events(workspace)
     computed_fields["block_state"] = _workspace_block_state_response(workspace)
+    computed_fields.update(workspace_attention_fields(workspace))
     computed_fields["failure_details"] = workspace_failure_details_payload(workspace)
     computed_fields["coordination_warnings"] = coordination_warnings_from_task_policy(
         workspace.task_policy

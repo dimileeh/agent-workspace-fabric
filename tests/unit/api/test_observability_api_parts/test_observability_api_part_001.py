@@ -130,6 +130,32 @@ async def _block_workspace(engine: AsyncEngine, workspace_id: str, *, blocked_at
         await session.commit()
 
 
+async def _flag_awaiting_human(
+    engine: AsyncEngine,
+    workspace_id: str,
+    *,
+    since: datetime,
+    reason: str,
+) -> None:
+    """Drive a workspace into ``monitoring_pr`` and stamp the awaiting-human flag."""
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.monitoring_pr,
+        ):
+            await repo.transition(workspace, to=target, reason_code="TEST")
+        workspace.awaiting_human_since = since
+        workspace.awaiting_human_reason = reason
+        await session.commit()
+
+
 async def _dispatch_monitor_recovery(engine: AsyncEngine, workspace_id: str) -> None:
     factory = make_session_factory(engine)
     async with factory() as session:
@@ -417,6 +443,86 @@ class TestConsoleViews:
         # age is derived from it rather than the trailing non-blocked last_event.
         assert item["last_event"]["event_type"] == "workspace.note"
         assert datetime.fromisoformat(item["blocked_at"]) == blocked_at
+
+    @pytest.mark.unit
+    async def test_workspace_overview_surfaces_awaiting_human_attention(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        since = datetime(2026, 6, 20, 9, 0, tzinfo=UTC)
+        await _flag_awaiting_human(
+            engine,
+            workspace_id,
+            since=since,
+            reason="blocking review requires a human",
+        )
+
+        response = await client.get("/v1/workspaces/overview")
+
+        assert response.status_code == 200
+        item = response.json()["items"][0]
+        assert item["workspace_id"] == workspace_id
+        assert item["status"] == "monitoring_pr"
+        assert item["attention_required"] is True
+        assert datetime.fromisoformat(item["awaiting_human_since"]) == since
+        assert item["awaiting_human_reason"] == "blocking review requires a human"
+
+    @pytest.mark.unit
+    async def test_workspace_detail_surfaces_awaiting_human_attention(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        since = datetime(2026, 6, 20, 9, 0, tzinfo=UTC)
+        await _flag_awaiting_human(
+            engine,
+            workspace_id,
+            since=since,
+            reason="merge BLOCKED by branch protection",
+        )
+
+        response = await client.get(f"/v1/workspaces/{workspace_id}")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["attention_required"] is True
+        assert datetime.fromisoformat(body["awaiting_human_since"]) == since
+        assert body["awaiting_human_reason"] == "merge BLOCKED by branch protection"
+
+    @pytest.mark.unit
+    async def test_workspace_overview_omits_attention_when_not_flagged(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        # A monitoring_pr workspace that has not escalated carries no attention.
+        workspace_id = await _create_workspace(client)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            for target in (
+                WorkspaceStatus.provisioning,
+                WorkspaceStatus.ready,
+                WorkspaceStatus.running,
+                WorkspaceStatus.validating,
+                WorkspaceStatus.monitoring_pr,
+            ):
+                await repo.transition(workspace, to=target, reason_code="TEST")
+            await session.commit()
+
+        response = await client.get("/v1/workspaces/overview")
+
+        assert response.status_code == 200
+        item = response.json()["items"][0]
+        assert item["status"] == "monitoring_pr"
+        assert item["attention_required"] is False
+        assert item["awaiting_human_since"] is None
+        assert item["awaiting_human_reason"] is None
 
     @pytest.mark.unit
     async def test_workspace_detail_and_overview_expose_monitor_recovery_summary(

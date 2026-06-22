@@ -1376,6 +1376,46 @@ async def test_resource_saturation_prefers_active_reservations_and_falls_back_fo
 
 
 @pytest.mark.unit
+async def test_resource_saturation_counts_awaiting_human_separately(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A monitoring_pr workspace flagged via the HUMAN_WAIT escalation gets its own
+    # awaiting_human KPI: counted ACTIVE (monitoring_pr is non-terminal) but never
+    # folded into the running/validating/pushing statuses, and it does not change
+    # slot/in-use accounting.
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
+
+    flagged_id = await create_workspace(
+        session_factory, status=WorkspaceStatus.monitoring_pr, updated_at=now
+    )
+    await create_workspace(session_factory, status=WorkspaceStatus.monitoring_pr, updated_at=now)
+    async with session_factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            flagged_id, reason="blocking review requires a human", now=now
+        )
+        await session.commit()
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    counts = summary.workspace_counts
+    assert counts.awaiting_human == 1
+    assert counts.monitoring_pr == 2
+    # Counted ACTIVE (both monitoring_pr rows), excluded from the Running statuses.
+    assert counts.active_total == 2
+    assert counts.running == 0
+    assert counts.validating == 0
+    assert counts.pushing == 0
+
+
+@pytest.mark.unit
 async def test_resource_saturation_uses_latest_active_reservation_per_workspace(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

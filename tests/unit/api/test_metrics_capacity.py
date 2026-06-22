@@ -1023,6 +1023,7 @@ def test_saturation_counts_response_carries_recovering() -> None:
         monitoring_pr=0,
         blocked=0,
         recovering=2,
+        awaiting_human=0,
         destroying=0,
         completed=0,
         failed=0,
@@ -1033,3 +1034,36 @@ def test_saturation_counts_response_carries_recovering() -> None:
     assert response.recovering == 2
     assert response.active_total == 2
     assert response.model_dump()["recovering"] == 2
+
+
+@pytest.mark.unit
+def test_saturation_counts_response_carries_awaiting_human() -> None:
+    # The PR-monitor HUMAN_WAIT escalation (#657) gets its own per-flag saturation
+    # count alongside blocked/recovering. The response model maps it by name from
+    # the ``WorkspaceSaturationCounts`` dataclass (``from_attributes``). The flag
+    # lives on monitoring_pr rows, so it is already inside ``active_total``.
+    from awf.service.metrics_types import WorkspaceSaturationCounts
+
+    counts = WorkspaceSaturationCounts(
+        by_status={WorkspaceStatus.monitoring_pr.value: 3},
+        active_total=3,
+        requested=0,
+        provisioning=0,
+        ready=0,
+        running=0,
+        validating=0,
+        pushing=0,
+        monitoring_pr=3,
+        blocked=0,
+        recovering=0,
+        awaiting_human=2,
+        destroying=0,
+        completed=0,
+        failed=0,
+        cancelled=0,
+        destroyed=0,
+    )
+    response = metrics_route.WorkspaceSaturationCountsResponse.model_validate(counts)
+    assert response.awaiting_human == 2
+    assert response.active_total == 3
+    assert response.model_dump()["awaiting_human"] == 2

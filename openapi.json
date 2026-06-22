@@ -9343,6 +9343,34 @@
             "title": "Agent Model Source",
             "type": "string"
           },
+          "attention_required": {
+            "default": false,
+            "title": "Attention Required",
+            "type": "boolean"
+          },
+          "awaiting_human_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting Human Reason"
+          },
+          "awaiting_human_since": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting Human Since"
+          },
           "base_branch": {
             "title": "Base Branch",
             "type": "string"
@@ -10474,9 +10502,37 @@
             "title": "App Endpoints",
             "type": "array"
           },
+          "attention_required": {
+            "default": false,
+            "title": "Attention Required",
+            "type": "boolean"
+          },
           "auto_merge": {
             "title": "Auto Merge",
             "type": "boolean"
+          },
+          "awaiting_human_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting Human Reason"
+          },
+          "awaiting_human_since": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting Human Since"
           },
           "base_commit": {
             "anyOf": [
@@ -11125,6 +11181,10 @@
             "title": "Active Total",
             "type": "integer"
           },
+          "awaiting_human": {
+            "title": "Awaiting Human",
+            "type": "integer"
+          },
           "blocked": {
             "title": "Blocked",
             "type": "integer"
@@ -11201,6 +11261,7 @@
           "monitoring_pr",
           "blocked",
           "recovering",
+          "awaiting_human",
           "destroying",
           "completed",
           "failed",

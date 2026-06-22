@@ -393,6 +393,32 @@ def _merge_concurrent_operator_freeze_state(
     return threads_addressed
 
 
+async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str) -> None:
+    """Persist the awaiting-human attention flag when the monitor escalates.
+
+    Set at the single ``NotifyHuman`` touch-point. Keeps the episode start stable
+    across repeated escalations (COALESCE in the repo) while refreshing the reason.
+    """
+    async with self._deps.session_factory() as s:
+        await WorkspaceRepository(s).set_workspace_attention(
+            workspace_id,
+            reason=reason,
+            now=datetime.now(UTC),
+        )
+        await s.commit()
+
+
+async def _clear_workspace_attention(self: Any, workspace_id: str) -> None:
+    """Clear the awaiting-human attention flag once the monitor resumes.
+
+    Called whenever ``decide()`` returns a non-``NotifyHuman`` action (the human
+    blocker is gone). A DB-level no-op when the flag is already clear.
+    """
+    async with self._deps.session_factory() as s:
+        await WorkspaceRepository(s).clear_workspace_attention(workspace_id)
+        await s.commit()
+
+
 async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> None:
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)

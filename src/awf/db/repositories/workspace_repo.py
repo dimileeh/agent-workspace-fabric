@@ -262,6 +262,51 @@ class WorkspaceRepository:
         await self._session.execute(stmt)
         await self._session.flush()
 
+    async def set_workspace_attention(
+        self,
+        workspace_id: str,
+        *,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        """Flag a workspace as awaiting human attention (a HUMAN_WAIT escalation).
+
+        ``COALESCE`` keeps the episode start (``awaiting_human_since``) stable
+        across repeated ``NotifyHuman`` for the same ongoing block, while the
+        reason is always refreshed to the latest escalation message. This is an
+        out-of-band metadata flag on a still-polling ``monitoring_pr`` row — it
+        deliberately does NOT bump ``version`` (it is not a state transition).
+        """
+        await self._session.execute(
+            update(Workspace)
+            .where(Workspace.id == workspace_id)
+            .values(
+                awaiting_human_since=func.coalesce(Workspace.awaiting_human_since, now),
+                awaiting_human_reason=reason,
+            )
+        )
+        await self._session.flush()
+
+    async def clear_workspace_attention(self, workspace_id: str) -> None:
+        """Clear the awaiting-human attention flag once the monitor resumes.
+
+        Guarded by ``awaiting_human_since IS NOT NULL`` so the per-poll clear is
+        a DB-level no-op (no row churn, no spurious ``updated_at`` bump) when the
+        flag is already clear. ``COALESCE`` works on both SQLite and Postgres.
+        """
+        await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.awaiting_human_since.is_not(None),
+            )
+            .values(
+                awaiting_human_since=None,
+                awaiting_human_reason=None,
+            )
+        )
+        await self._session.flush()
+
     async def get(self, workspace_id: str, *, populate_existing: bool = False) -> Workspace | None:
         """Return a workspace by primary key, if it exists.
 

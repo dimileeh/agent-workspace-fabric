@@ -237,6 +237,7 @@ class WorkspaceSaturationCountsResponse(BaseModel):
     monitoring_pr: int
     blocked: int
     recovering: int
+    awaiting_human: int
     destroying: int
     completed: int
     failed: int

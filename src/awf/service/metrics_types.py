@@ -137,6 +137,12 @@ class WorkspaceSaturationCounts:
     monitoring_pr: int
     blocked: int
     recovering: int
+    # Workspaces flagged awaiting human attention while still ``monitoring_pr``
+    # (a PR-monitor HUMAN_WAIT escalation). Counted inside ``active_total`` but NOT
+    # folded into the "Running" KPI (same non-Running rule as blocked/recovering),
+    # and it does not change slot/in-use accounting (monitoring_pr already holds
+    # whatever it holds).
+    awaiting_human: int
     destroying: int
     completed: int
     failed: int

@@ -36,6 +36,12 @@ useState
 
 import { formatAgentLabel,formatAgentTitle } from "@/lib/agent-format";
 import { copyTextToClipboard } from "@/lib/clipboard";
+import {
+  attentionAgeSeconds,
+  attentionBadgeLabel,
+  attentionSince,
+  isAwaitingHuman,
+} from "@/lib/attention-format";
 import { blockedAgeSeconds, blockedSince } from "@/lib/blocked-format";
 import { summarizeVisibleCoordinationWarnings } from "@/lib/coordination-format";
 import {
@@ -680,6 +686,11 @@ export function WorkspaceList({
         // transition event / `updated_at` only when it is absent.
         const blockedFor =
           item.status === "blocked" ? blockedAgeSeconds(blockedSince(item)) : null;
+        // "Awaiting human for N" from the authoritative `awaiting_human_since` the
+        // overview carries while a monitoring_pr workspace is flagged (HUMAN_WAIT).
+        const awaitingHumanFor = isAwaitingHuman(item)
+          ? attentionAgeSeconds(attentionSince(item))
+          : null;
         return (
           <div
             key={item.workspace_id}
@@ -775,6 +786,20 @@ export function WorkspaceList({
                   >
                     <AlertCircle size={12} aria-hidden />
                     <span className="truncate">Blocked for {compactDuration(blockedFor)}</span>
+                  </span>
+                ) : null}
+                {isAwaitingHuman(item) ? (
+                  <span
+                    data-testid={`workspace-awaiting-human-${item.workspace_id}`}
+                    title={item.awaiting_human_reason ?? "Awaiting human"}
+                    className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900"
+                  >
+                    <AlertCircle size={12} aria-hidden />
+                    <span className="truncate">
+                      {attentionBadgeLabel(
+                        awaitingHumanFor != null ? compactDuration(awaitingHumanFor) : null,
+                      )}
+                    </span>
                   </span>
                 ) : null}
                 {recoveryBadge ? (
