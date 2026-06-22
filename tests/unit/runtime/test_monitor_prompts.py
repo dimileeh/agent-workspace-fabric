@@ -129,6 +129,11 @@ class TestAddressThread:
         assert "AWF automatically pauses" in prompt
         # The general human-decision verdict stays for genuine design calls.
         assert "AWF-VERDICT: NEEDS_HUMAN: <what you need>" in prompt
+        # Follow-up to #652 (PR #653 review): the shared verdict guidance and the
+        # inline decision tree must not invite a protected-file self-escalation
+        # either, or a weak agent can still NEEDS_HUMAN around the deterministic gate.
+        assert "protected-file call" not in prompt
+        assert "protected-file approval" not in prompt
         assert "python" not in prompt.lower()
 
     @pytest.mark.unit
@@ -356,6 +361,10 @@ class TestAddressReviewComment:
         assert "governed by AWF" in prompt
         assert "AWF automatically pauses" in prompt
         assert "AWF-VERDICT: NEEDS_HUMAN: <what you need>" in prompt
+        # Follow-up to #652 (PR #653 review): the shared verdict guidance must not
+        # invite a protected-file self-escalation around the deterministic gate.
+        assert "protected-file call" not in prompt
+        assert "protected-file approval" not in prompt
         assert "python" not in prompt.lower()
 
     @pytest.mark.unit

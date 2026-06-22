@@ -73,7 +73,7 @@ _COMMENT_VERDICT_GUIDANCE = (
     "  - Pick the verdict that fits: FIXED for a genuine correctness, security, "
     "or logic bug, or a clearly correct improvement; FALSE POSITIVE only with "
     "concrete evidence; DEFER for valid but out-of-scope follow-ups; NEEDS_HUMAN "
-    "for a design, taste, or protected-file call you cannot make yourself.\n"
+    "for a design or taste call you cannot make yourself.\n"
     "  - Keep any fix minimal: change only what THIS comment requires; do not "
     "refactor unrelated code or expand the PR.\n"
 )
@@ -160,7 +160,7 @@ def address_thread_prompt(
         "monitor only by printing `AWF-VERDICT: FALSE POSITIVE: "
         "<one-sentence justification>` to stdout.\n"
         "  (3) If you genuinely need a human decision you can't make yourself "
-        "(e.g. a design decision from the user, or protected-file approval), "
+        "(e.g. a design decision from the user), "
         "print `AWF-VERDICT: NEEDS_HUMAN: <what you need>` and exit — AWF blocks "
         "the merge and surfaces it to the human; the thread is never "
         "auto-resolved.\n"
