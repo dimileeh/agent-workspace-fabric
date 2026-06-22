@@ -393,6 +393,62 @@ def _merge_concurrent_operator_freeze_state(
     return threads_addressed
 
 
+async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str) -> None:
+    """Persist the awaiting-human attention flag when the monitor escalates.
+
+    Set at the single ``NotifyHuman`` touch-point. Keeps the episode start stable
+    across repeated escalations (COALESCE in the repo) while refreshing the reason.
+    """
+    async with self._deps.session_factory() as s:
+        await WorkspaceRepository(s).set_workspace_attention(
+            workspace_id,
+            reason=reason,
+            now=datetime.now(UTC),
+        )
+        await s.commit()
+
+
+async def _clear_stale_merge_attention(self: Any, workspace_id: str, state: MonitorState) -> None:
+    """Clear a resolved ``NotifyHuman`` attention flag before a non-human gate wait,
+    unless the merge loop itself set attention for an active branch-protection block.
+
+    The merge loop's non-human gate waits (merge queue, reviewer settle, initial
+    review grace) clear ``awaiting_human_since`` so a *resolved* ``NotifyHuman``
+    episode does not keep surfacing "awaiting human" while the monitor only waits on
+    a non-human gate (#659). But the branch-protection fallback escalates to a human
+    *without* a sticky blocker, so ``decide()`` keeps returning ``Merge``; that
+    attention is still active. Skipping the clear when
+    ``merge_block_attention_active`` is set keeps that signal up across a queue/settle/
+    grace wait instead of wrongly nulling it (PRRT_kwDOSJAM6s6LXscz). The
+    merge-method preflight arm needs no such guard: it records a sticky
+    ``_merge_method_blocked_key`` so ``decide()`` returns ``NotifyHuman`` and these
+    ``Merge``-arm gate waits are never reached for it.
+    """
+    if state.merge_block_attention_active:
+        return
+    await self._clear_workspace_attention(workspace_id)
+
+
+async def _clear_workspace_attention(self: Any, workspace_id: str) -> None:
+    """Clear the awaiting-human attention flag once the monitor resumes.
+
+    Called when ``decide()`` returns a resuming action (the human blocker is
+    gone) — every action except ``NotifyHuman`` (the block itself) and ``Merge``
+    (whose merge loop owns the flag so a branch-protection fallback that keeps
+    returning ``Merge`` is not reset every poll). The ``IS NOT NULL``-guarded
+    ``UPDATE`` changes no row when the flag is already clear, but it still
+    round-trips (open session + statement
+    + commit) once per poll per workspace. That per-poll cost is deliberate:
+    ``awaiting_human_since`` is persisted, so inferring "already clear" from
+    in-process state would strand a stale signal across a monitor restart that
+    lands between the set and this clear. The round-trip is negligible beside the
+    operation/state/audit writes each poll already performs.
+    """
+    async with self._deps.session_factory() as s:
+        await WorkspaceRepository(s).clear_workspace_attention(workspace_id)
+        await s.commit()
+
+
 async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> None:
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)

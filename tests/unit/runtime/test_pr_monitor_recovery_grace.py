@@ -210,6 +210,79 @@ async def test_initial_review_grace_defers_stale_recovery_dispatch(
 
 
 @pytest.mark.unit
+async def test_grace_defers_recovery_clears_stale_awaiting_human_attention(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The initial-review grace wait inside ``_handle_merge_gate_blocker`` must
+    clear a stale ``awaiting_human_since`` (#659).
+
+    When a prior ``HUMAN_WAIT`` is resolved and the next poll returns ``Merge``,
+    ``loop._execute`` skips its general attention clear for the ``Merge`` arm. If
+    the merge gate then requires validation recovery but the grace window is still
+    active (``non_check_reviewer_settle_seconds == 0`` so the grace is not skipped),
+    ``_handle_merge_gate_blocker`` parks on an ``INITIAL_REVIEW_GRACE`` wait before
+    recovery. That non-human grace wait must clear the stale flag itself, otherwise
+    the console/KPI/metrics — surfaced on ``(status == monitoring_pr AND
+    awaiting_human_since IS NOT NULL)`` — keep showing "awaiting human" while the
+    monitor is merely waiting out the grace period.
+    """
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+
+    # Seed a stable episode start from an earlier, now-resolved NotifyHuman poll.
+    episode_start = datetime(2026, 4, 26, 11, 0, tzinfo=UTC)
+    async with factory() as s:
+        await WorkspaceRepository(s).set_workspace_attention(
+            workspace_id, reason="prior human escalation", now=episode_start
+        )
+        await s.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=900,
+    )
+
+    state = MonitorState(started_at=time.monotonic())
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_pr_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    # The monitor parked on the grace wait (non-human gate), not a merge.
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+        assert len(operations) == 1
+        assert operations[0].payload["reason_code"] == "INITIAL_REVIEW_GRACE"
+        # Still polling, but the stale awaiting-human signal is cleared.
+        assert ws.awaiting_human_since is None
+        assert ws.awaiting_human_reason is None
+
+
+@pytest.mark.unit
 async def test_grace_elapsed_then_stale_recovery_dispatches_with_event(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

@@ -235,6 +235,18 @@ class PRStatus:
     exist → do NOT skip the pending-checks wait"), so a forgotten populate can
     never enable an unsafe no-CI merge. Consumed only by ``decide`` gate 6 in
     combination with ``MonitorConfig.require_ci``."""
+    awaiting_required_checks_grace_active: bool = False
+    """Within the bounded grace window for required CI that is expected but
+    absent on the current head (#655).
+
+    Time-derived and set by the RUNNER (``decide`` stays pure), exactly like
+    ``no_checks_observed`` is populated upstream. ``True`` means the head first
+    showed "required CI expected but absent" recently enough that the new
+    pre-gate-9 gate defers to a bounded ``WaitForCI`` instead of pinging a human;
+    once the per-head grace expires the runner flips it ``False`` and gate 9
+    escalates. The default ``False`` means "escalate immediately" — so a
+    forgotten populate reverts to pre-#655 behavior (a possibly-premature ping),
+    never an unsafe merge."""
     changed_paths: tuple[str, ...] = ()
     closed: bool = False
     merged: bool = False
@@ -270,6 +282,31 @@ restart reconstructs it and the idempotent-push ancestry check avoids a
 duplicate push (WS-2 §5). Defined here (the pure core) so ``decide`` can spot a
 still-preserved protected commit; the runner re-exports it from
 ``remote_repair``."""
+
+
+_AWAITING_WORKFLOW_SCOPE_STATE_KEY = "__awf_awaiting_workflow_scope__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that the previous
+poll's comment repair left the workspace waiting on an operator to grant the
+GitHub ``workflow`` token scope. That arm requeues ``AddressComments`` and keeps
+the row in ``monitoring_pr`` (it does NOT terminally fail like the sync-base /
+CI-repair workflow-scope arms), so the human wait spans polls. ``decide`` never
+reads it (it only ever looks up real thread/comment IDs), so — like the preserved
+protected-block key — it is inert to the decision core; it exists only to let the
+runner keep the awaiting-human attention flag set across those requeued polls
+instead of nulling it at the top-of-poll resume clear."""
+
+
+_MERGE_BLOCK_ATTENTION_STATE_KEY = "__awf_merge_block_attention__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key flagging that the merge
+loop's branch-protection fallback set the awaiting-human attention flag for an
+active deterministic merge rejection. That arm records NO sticky blocker (branch
+protection can clear externally without a code change), so ``decide`` keeps
+returning ``Merge`` every poll. ``decide`` never reads this key (it only looks up
+real thread/comment IDs) — like the workflow-scope key, it is inert to the
+decision core; it exists only so ``handle_merge_action``'s non-human gate waits
+(merge queue, reviewer settle, initial review grace) preserve that still-active
+human signal across polls instead of clearing it as a resolved ``NotifyHuman``
+episode (PRRT_kwDOSJAM6s6LXscz)."""
 
 
 @dataclass
@@ -309,6 +346,45 @@ class MonitorState:
         the offending protected commit is still sitting on the workspace HEAD.
         """
         return bool(self.threads_addressed_ids.get(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY))
+
+    @property
+    def awaiting_workflow_scope(self) -> bool:
+        """Whether the previous poll's comment repair is waiting on workflow scope.
+
+        Set when a comment-repair push was rejected for a missing GitHub
+        ``workflow`` token scope (the requeue arm that stays in
+        ``monitoring_pr``). The runner honors it to keep the awaiting-human
+        attention flag set across the requeued polls.
+        """
+        return bool(self.threads_addressed_ids.get(_AWAITING_WORKFLOW_SCOPE_STATE_KEY))
+
+    def mark_awaiting_workflow_scope(self) -> None:
+        """Flag that this poll's comment repair is blocked on workflow scope."""
+        self.threads_addressed_ids[_AWAITING_WORKFLOW_SCOPE_STATE_KEY] = "1"
+
+    def clear_awaiting_workflow_scope(self) -> None:
+        """Drop the workflow-scope wait marker (idempotent)."""
+        self.threads_addressed_ids.pop(_AWAITING_WORKFLOW_SCOPE_STATE_KEY, None)
+
+    @property
+    def merge_block_attention_active(self) -> bool:
+        """Whether the merge loop set attention for an active branch-protection block.
+
+        Set when ``handle_merge_action``'s branch-protection fallback escalates to
+        a human directly without recording a sticky blocker, so ``decide()`` keeps
+        returning ``Merge``. The non-human gate waits honor it to preserve the
+        still-active awaiting-human signal across polls instead of clearing it as a
+        resolved ``NotifyHuman`` episode.
+        """
+        return bool(self.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY))
+
+    def mark_merge_block_attention(self) -> None:
+        """Flag that the merge loop set attention for an active branch-protection block."""
+        self.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] = "1"
+
+    def clear_merge_block_attention(self) -> None:
+        """Drop the merge-block attention marker (idempotent)."""
+        self.threads_addressed_ids.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None)
 
     def changed_thread_ids(self) -> set[str]:
         return set(self._changed_thread_ids)
@@ -397,6 +473,20 @@ class MonitorConfig:
     exceeded this age. This is observability only; pending checks still
     block merge through the ordinary WaitForCI path."""
 
+    awaiting_required_checks_grace_seconds: float = 600.0
+    """Grace window for required CI that is expected but absent on the current
+    head before escalating to a human (#655).
+
+    Right after a monitor push the forge has not started CI on the new head yet,
+    so the head shows an empty check set while branch protection reports
+    ``BLOCKED`` (the required context is absent). Within this window ``decide``
+    defers to a bounded ``WaitForCI`` instead of a premature ``NotifyHuman``;
+    once it expires a head that genuinely never gets CI escalates as before. The
+    default (600s) covers the observed ≈5.5-min CI-start lag with margin. Used by
+    the RUNNER to derive ``PRStatus.awaiting_required_checks_grace_active``, not
+    by ``decide`` directly. Set ``<= 0`` to disable the grace (escalate
+    immediately, pre-#655 behavior)."""
+
     max_no_progress_sync_base_attempts: int = 3
     """Abort or move to still-actionable review feedback after this many
     consecutive no-op SyncBase attempts for the same PR snapshot. This
@@ -472,7 +562,11 @@ class SyncBase:
 class WaitForCI:
     """CI still running; sleep poll_interval then re-decide. Does NOT bump iter_count."""
 
-    reason: Literal["pending_checks", "unknown_mergeable_state"] = "pending_checks"
+    reason: Literal[
+        "pending_checks",
+        "unknown_mergeable_state",
+        "awaiting_required_checks",
+    ] = "pending_checks"
 
 
 @dataclass(frozen=True)
@@ -922,6 +1016,19 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         NotifyHuman. Deferred BOT feedback does not block — bots
         can't themselves mark threads resolved, so their deferred
         nits would linger forever.
+    8b. Required CI expected-but-ABSENT on the current head within the
+        grace window (#655) → bounded WaitForCI("awaiting_required_checks").
+        Right after a monitor push the forge has not started CI on the new
+        head yet, so the head shows an empty check set
+        (``no_checks_observed``) while branch protection reports
+        BLOCKED/HAS_HOOKS (the required context is missing). Without this
+        gate ``decide`` falls through to gate 9 and posts a premature human
+        ping that the monitor self-recovers from once CI lands. The runner
+        sets ``awaiting_required_checks_grace_active`` per head, so once the
+        window expires this gate stops matching and gate 9 escalates. Safety
+        hinge: it fires ONLY when checks are ABSENT — a genuine human-gate
+        block (checks PRESENT + BLOCKED) leaves ``no_checks_observed`` False
+        and escalates immediately via gate 9.
     9.  ``merge_state_status`` BLOCKED / HAS_HOOKS → NotifyHuman. These
         protected states can represent missing approval or branch-protection
         hooks even when there is no unresolved review thread to address.
@@ -1164,6 +1271,34 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     )
     if has_blocking_feedback:
         return NotifyHuman()
+
+    # 8b. Bounded grace before HUMAN_WAIT on transient required-CI absence (#655).
+    # Right after a monitor push the forge has not started CI on the new head
+    # yet, so the head shows an empty check set (``no_checks_observed``) while
+    # branch protection reports BLOCKED/HAS_HOOKS (the required context is
+    # absent). Defer to a bounded WaitForCI while the runner-set per-head grace
+    # window is active, instead of pinging a human that the monitor would
+    # self-recover from once CI lands. Safety hinge: this fires ONLY when checks
+    # are ABSENT — a genuine human-gate block (checks PRESENT + BLOCKED) leaves
+    # ``no_checks_observed`` False, so the gate is skipped and gate 9 escalates
+    # immediately. ``check_state != FAILURE`` is defensive (gate 5 already
+    # returned on FAILURE above); once the grace expires the runner flips the
+    # flag False and gate 9 takes over.
+    if (
+        config.require_ci
+        and status.no_checks_observed
+        and status.merge_state_status
+        in (
+            MergeStateStatus.BLOCKED,
+            MergeStateStatus.HAS_HOOKS,
+        )
+        # Defensive/redundant: gate 5 above already returns on FAILURE, so mypy
+        # narrows ``check_state`` to exclude it here. Kept explicit so a future
+        # gate reordering can't silently steal the FAILURE path into this wait.
+        and status.check_state != CheckState.FAILURE  # type: ignore[comparison-overlap]
+        and status.awaiting_required_checks_grace_active
+    ):
+        return WaitForCI(reason="awaiting_required_checks")
 
     # 9. GitHub may report BLOCKED / HAS_HOOKS because required approval,
     # protected hooks, or maintainer-controlled review state has not cleared.

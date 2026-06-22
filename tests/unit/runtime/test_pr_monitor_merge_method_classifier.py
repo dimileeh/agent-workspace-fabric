@@ -7,11 +7,13 @@ import pytest
 from awf.common.audit import redact_audit_text
 from awf.common.github_client import GitHubClientError
 from awf.runtime.pr_monitor_runner.merge_loop import (
+    _MergeAttemptOutcome,
+    _MergeAttemptResult,
+)
+from awf.runtime.pr_monitor_runner.merge_methods import (
     _effective_merge_methods,
     _merge_error_supports_method_alternative,
     _merge_method_rejection_method,
-    _MergeAttemptOutcome,
-    _MergeAttemptResult,
 )
 
 

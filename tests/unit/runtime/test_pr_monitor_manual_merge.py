@@ -9,6 +9,7 @@ and ordinary blockers still take precedence over readiness.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -31,6 +32,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     NotifyHuman,
     PRStatus,
+    ReviewThread,
     decide,
 )
 from awf.runtime.release_pr_monitor import build_release_pr_monitor
@@ -237,6 +239,140 @@ async def test_manual_merge_green_open_pr_notifies_and_stays_monitoring(
     assert not _has_call(cmd, _is_pr_merge)
     assert not _has_call(cmd, _is_docker_down)
     assert sleep_fn.calls == [60]
+
+
+@pytest.mark.unit
+async def test_manual_ready_handoff_persists_fallback_attention_reason(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """A clean manual-ready handoff persists a "ready to merge" attention reason (#659).
+
+    ``decide()`` returns a message-less ``NotifyHuman()`` for a green PR with
+    ``auto_merge`` off (the "ready for a human to merge" handoff), and
+    ``_notify_human_reason`` returns ``None`` when nothing blocks. Without a
+    fallback the ``None`` reason is subscripted by ``set_workspace_attention``'s
+    length clamp and raises ``TypeError`` mid-poll (and would otherwise persist a
+    null ``awaiting_human_reason``). The fallback keeps the operator-visible reason
+    a sensible non-empty string AND, for this genuine manual-ready handoff, makes
+    it match the "ready to merge — human action required" PR comment that
+    ``_post_human_notification_once`` posts, instead of a vague "waiting for
+    human" reason the operator can't reconcile with the PR (#659).
+    """
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+    )
+
+    cmd.queue_result(returncode=0)  # gh pr comment
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    since, reason, status = await _read_attention(factory, ws_id)
+    assert status == WorkspaceStatus.monitoring_pr.value
+    assert since is not None
+    assert (
+        reason == "PR is ready to merge — AWF will not merge automatically; human action required."
+    )
+    # The console reason now matches what was posted on the PR: the clean
+    # manual-ready handoff comment uses the "ready to merge" template (#659).
+    comment_calls = _calls(cmd, _is_pr_comment)
+    assert len(comment_calls) == 1
+    body = comment_calls[0][comment_calls[0].index("--body") + 1]
+    assert "ready to merge" in body
+    assert "human action required" in body
+
+
+@pytest.mark.unit
+async def test_manual_ready_fallback_does_not_claim_ready_for_blocking_outdated_thread(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """A reasonless ``NotifyHuman`` that is NOT ready keeps the generic reason (#659).
+
+    An outdated inline thread downgraded to ``needs_human`` still blocks the merge
+    (``decide`` gate 7) so ``decide()`` returns a message-less ``NotifyHuman()``,
+    but ``_notify_human_reason`` returns ``None`` (it consults the non-outdated
+    feeds only) and this is not a manual-ready handoff. The fallback must keep the
+    safe generic wait reason here rather than falsely advertising "ready to merge"
+    — the console reason must not over-claim readiness for a still-blocked PR.
+    """
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+    )
+
+    outdated_thread = ReviewThread(
+        thread_id="THREAD_outdated",
+        path="src/app.py",
+        line=10,
+        body_excerpt="please rework this",
+        is_resolved=False,
+        is_outdated=True,
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=(outdated_thread,),
+    )
+    state = MonitorState()
+    state.mark_addressed(outdated_thread.thread_id, "needs_human")
+
+    cmd.queue_result(returncode=0)  # gh pr comment
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    _, reason, ws_status = await _read_attention(factory, ws_id)
+    assert ws_status == WorkspaceStatus.monitoring_pr.value
+    assert reason == "PR monitor is waiting for human attention."
 
 
 @pytest.mark.unit
@@ -523,6 +659,197 @@ async def test_manual_ready_handoff_waits_for_review_settle_before_validation(
         operations = await OperationRepository(session).list_all(workspace_id=ws_id)
     validate_operations = [op for op in operations if op.type == OperationType.validate.value]
     assert validate_operations == []
+
+
+async def _seed_stale_attention(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> None:
+    """Stamp a stable episode start from an earlier, now-resolved NotifyHuman poll."""
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            workspace_id,
+            reason="prior human escalation",
+            now=datetime(2026, 4, 26, 11, 0, tzinfo=UTC),
+        )
+        await session.commit()
+
+
+async def _read_attention(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> tuple[object, str | None, str]:
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        return ws.awaiting_human_since, ws.awaiting_human_reason, ws.status
+
+
+@pytest.mark.unit
+async def test_manual_ready_handoff_merge_queue_wait_clears_stale_attention(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """A resolved ``NotifyHuman`` episode must not leak into a manual-ready handoff
+    that only waits on the merge queue (#659).
+
+    ``loop._execute`` excludes ``NotifyHuman`` from its general attention clear so
+    the eventual ready notification keeps a stable COALESCE'd episode start. When a
+    prior block is resolved and ``decide()`` returns a manual-ready ``NotifyHuman``,
+    the handoff can park behind an older merge-queue candidate before posting that
+    notification. Without a clear here the console/KPI surface keeps showing
+    "awaiting human" with a stale ``awaiting_human_since`` while the monitor is
+    merely queued — mirror ``handle_merge_action``'s ``Merge`` arm and clear it.
+    """
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    await _seed_stale_attention(factory, ws_id)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+    )
+    waited: list[str] = []
+
+    async def _queue_blockers(_workspace_id: str) -> list[object]:
+        return [object()]
+
+    async def _wait_for_queue(**_kwargs: object) -> None:
+        waited.append("queue")
+
+    runner._merge_queue_blockers_for_workspace = _queue_blockers  # type: ignore[method-assign]
+    runner._wait_for_merge_queue = _wait_for_queue  # type: ignore[method-assign]
+
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    # Parked on the merge-queue wait (non-human gate), not a human handoff.
+    assert waited == ["queue"]
+    assert not _calls(cmd, _is_pr_comment)
+    since, reason, status = await _read_attention(factory, ws_id)
+    assert status == WorkspaceStatus.monitoring_pr.value
+    assert since is None
+    assert reason is None
+
+
+@pytest.mark.unit
+async def test_manual_ready_handoff_validation_settle_wait_clears_stale_attention(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """A resolved ``NotifyHuman`` episode must not leak into a manual-ready handoff
+    that only waits on reviewer settle before validation recovery (#659)."""
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        ws.task_class = TaskClass.refactor_task.value
+        await session.commit()
+    await _seed_stale_attention(factory, ws_id)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=900,
+    )
+
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    # Parked on the reviewer-settle wait (non-human gate) before validation.
+    assert sleep_fn.calls == [60]
+    since, reason, status = await _read_attention(factory, ws_id)
+    assert status == WorkspaceStatus.monitoring_pr.value
+    assert since is None
+    assert reason is None
+
+
+@pytest.mark.unit
+async def test_manual_ready_handoff_settle_wait_clears_stale_attention(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """A resolved ``NotifyHuman`` episode must not leak into a manual-ready handoff
+    that only waits on reviewer settle before the ready notification (#659)."""
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    await _seed_stale_attention(factory, ws_id)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=900,
+    )
+
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    # Parked on the reviewer-settle wait (non-human gate); no human handoff posted.
+    assert sleep_fn.calls == [60]
+    assert not _calls(cmd, _is_pr_comment)
+    since, reason, status = await _read_attention(factory, ws_id)
+    assert status == WorkspaceStatus.monitoring_pr.value
+    assert since is None
+    assert reason is None
 
 
 @pytest.mark.unit

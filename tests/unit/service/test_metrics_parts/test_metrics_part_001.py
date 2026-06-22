@@ -1419,3 +1419,36 @@ async def test_resource_saturation_malformed_not_before_does_not_crash_query(
     prs = summary.provider_recovery_state_summary
     assert prs.pending_retry == 1
     assert prs.in_cooldown == 0
+
+
+@pytest.mark.unit
+async def test_count_awaiting_human_node_agnostic_spans_all_nodes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The helper's default node_id=None counts awaiting-human monitoring_pr
+    # workspaces across every node; a node_id scopes the count to that node
+    # (plus unassigned rows). Unflagged monitoring_pr rows are excluded either way.
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
+    local_flagged = await create_workspace(
+        session_factory, status=WorkspaceStatus.monitoring_pr, updated_at=now
+    )
+    remote_flagged = await create_workspace(
+        session_factory, status=WorkspaceStatus.monitoring_pr, updated_at=now
+    )
+    await create_workspace(session_factory, status=WorkspaceStatus.monitoring_pr, updated_at=now)
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        for workspace_id, node in ((local_flagged, "local"), (remote_flagged, "remote")):
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = node
+            await repo.set_workspace_attention(workspace_id, reason="needs a human", now=now)
+        await session.commit()
+
+    async with session_factory() as session:
+        # node_id=None spans both nodes (the node-agnostic branch)...
+        assert await metrics_resources._count_awaiting_human(session, node_id=None) == 2  # noqa: SLF001
+        # ...while a node scope excludes the workspace pinned to another node.
+        assert (
+            await metrics_resources._count_awaiting_human(session, node_id="local") == 1  # noqa: SLF001
+        )

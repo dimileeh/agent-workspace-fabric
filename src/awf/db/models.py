@@ -307,6 +307,26 @@ class Workspace(Base):
     conformance gate. ``None`` when conformance was satisfied inline (no pending
     handoff), so a resume faithfully reproduces the original run."""
 
+    # Attention flag (populated only while status == ``monitoring_pr``).
+    #
+    # Set when the PR monitor escalates via ``NotifyHuman`` (decide() blocking
+    # review / deferred-human / merge BLOCKED) and cleared when the monitor
+    # resumes with a non-``NotifyHuman`` action. Unlike ``blocked``/``recovering``
+    # this is NOT a pause and NOT a ``WorkspaceStatus``: the monitor keeps polling
+    # and auto-recovers, so the row stays ``monitoring_pr``. Persisted (not derived
+    # from the operation log) so the console KPI can COUNT flagged workspaces and
+    # the flag survives a monitor restart. ``attention_required`` is derived as
+    # ``awaiting_human_since is not None`` (gated on live status for surfacing).
+    awaiting_human_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """Wall-clock start of the current HUMAN_WAIT episode; stable across repeated
+    ``NotifyHuman`` for the same ongoing block."""
+
+    awaiting_human_reason: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    """Latest human-readable escalation reason; refreshed on each ``NotifyHuman``.
+    Sized like ``failure_message`` (the reason is a short human sentence)."""
+
     # Idempotency
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 

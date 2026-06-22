@@ -499,6 +499,70 @@ def test_workspace_response_omits_stale_block_state_after_resume() -> None:
     assert response.block_state is None
 
 
+def _attention_workspace_fixture(
+    *,
+    status: str,
+    since: datetime | None,
+    reason: str | None,
+) -> SimpleNamespace:
+    workspace = _workspace_response_fixture(
+        workspace_id="ws_attention",
+        status=status,
+        events=[],
+    )
+    workspace.awaiting_human_since = since
+    workspace.awaiting_human_reason = reason
+    return workspace
+
+
+@pytest.mark.unit
+def test_workspace_response_projects_attention_while_monitoring() -> None:
+    since = datetime(2026, 4, 27, 11, 0, tzinfo=UTC)
+    workspace = _attention_workspace_fixture(
+        status=WorkspaceStatus.monitoring_pr.value,
+        since=since,
+        reason="blocking review requires a human",
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.attention_required is True
+    assert response.awaiting_human_since == since
+    assert response.awaiting_human_reason == "blocking review requires a human"
+
+
+@pytest.mark.unit
+def test_workspace_response_omits_attention_when_not_monitoring() -> None:
+    # The columns are not cleared out-of-band on a terminal exit, so the surfacing
+    # guard (status == monitoring_pr) must suppress a stale flag.
+    workspace = _attention_workspace_fixture(
+        status=WorkspaceStatus.completed.value,
+        since=datetime(2026, 4, 27, 11, 0, tzinfo=UTC),
+        reason="stale escalation",
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.attention_required is False
+    assert response.awaiting_human_since is None
+    assert response.awaiting_human_reason is None
+
+
+@pytest.mark.unit
+def test_workspace_response_attention_false_when_flag_clear() -> None:
+    workspace = _attention_workspace_fixture(
+        status=WorkspaceStatus.monitoring_pr.value,
+        since=None,
+        reason=None,
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.attention_required is False
+    assert response.awaiting_human_since is None
+    assert response.awaiting_human_reason is None
+
+
 @pytest.mark.unit
 def test_workspace_response_skips_malformed_block_violation_mapping() -> None:
     workspace = _blocked_workspace_fixture(status=WorkspaceStatus.blocked.value)

@@ -5,14 +5,9 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
-import time
-from dataclasses import (
-    replace,
-)
 from pathlib import Path
 from typing import Any, cast
 
-from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
     ComposeExecCleanupError,
@@ -32,6 +27,7 @@ from awf.runtime.pr_monitor import (
     Abort,
     AddressComments,
     AddressOperatorHint,
+    Merge,
     MonitorAction,
     MonitorState,
     NotifyHuman,
@@ -44,28 +40,28 @@ from awf.runtime.pr_monitor import (
     _ci_transient_rerun_count,
     _ci_transient_rerun_state_key,
 )
-from awf.runtime.pr_monitor_runner import merge_loop as _merge_loop
+from awf.runtime.pr_monitor_runner import (
+    merge_loop as _merge_loop,
+)
+from awf.runtime.pr_monitor_runner import (
+    notify_human_loop as _notify_human_loop,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _CI_TRANSIENT_RERUN_FAILED_REASON,
     _CI_TRANSIENT_RERUN_REASON,
 )
-from awf.runtime.pr_monitor_runner.gates import (
-    _NonCheckReviewerSettleDecision,
-)
 from awf.runtime.pr_monitor_runner.helpers import (
     _ci_failure_payload,
     _ci_transient_rerun_attempt,
     _clear_transient_base_fetch_retry_state,
-    _gate_requires_validation_recovery,
-    _is_manual_ready_handoff,
-    _non_check_reviewer_settle_decision,
-    _non_check_reviewer_settle_wait_operation_context,
-    _notify_human_reason,
     _pending_review_feedback_count,
     _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.loop_helpers import (
+    _post_workflow_scope_notification_best_effort,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
 )
@@ -75,41 +71,6 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
 )
-
-
-async def _post_workflow_scope_notification_best_effort(
-    self: Any,
-    *,
-    workspace_id: str,
-    repo: RepoRef,
-    pr_number: int,
-    status: PRStatus,
-    state: MonitorState,
-    blocker_reason: str,
-) -> None:
-    """Post the human hint without blocking workflow-scope failure handling."""
-    try:
-        await self._post_human_notification_once(
-            repo=repo,
-            pr_number=pr_number,
-            status=status,
-            state=state,
-            blocker_reason=blocker_reason,
-        )
-    except ForgeClientError as exc:
-        # A Bitbucket workspace posts the human hint through ``BitbucketClient``,
-        # whose ``post_comment`` raises ``BitbucketClientError`` (not
-        # ``GitHubClientError``). Catch it alongside the GitHub error so a
-        # transient or permanent comment failure degrades to a logged warning
-        # here too, instead of escaping this best-effort helper and aborting the
-        # surrounding workflow-scope failure handling.
-        _log.warning(
-            "monitor.workflow_scope_notification_failed",
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            head_sha=status.head_sha[:10],
-            error=_redact_and_truncate_forge_error(str(exc)),
-        )
 
 
 async def _execute(
@@ -179,6 +140,61 @@ async def _execute(
         },
     )
 
+    # Clear the awaiting-human attention flag the moment the monitor resumes with
+    # a resuming action: ``decide()`` returns exactly one action per poll, so
+    # WaitForCI / AddressComments / SyncBase / terminal completes+aborts each mean
+    # the external blocker is gone. ``NotifyHuman`` is excluded because it IS the
+    # human-block action. ``Merge`` is excluded too: ``handle_merge_action`` owns
+    # the attention flag for that arm because a deterministic merge rejection
+    # (branch protection / restrictions) falls back to notifying a human *without*
+    # recording a sticky blocker, so ``decide()`` keeps returning ``Merge`` every
+    # poll. Clearing here first would null the persisted episode start before the
+    # merge loop re-sets it, defeating the repo-side COALESCE and resetting
+    # ``awaiting_human_since`` to ``now`` each cycle — the operator's "awaiting
+    # human for N" timer would never age (#659). ``handle_merge_action`` (for
+    # ``Merge``) and the manual-ready ``NotifyHuman`` handoff below instead clear
+    # any stale flag themselves right before each of their non-human gate waits
+    # (merge queue, reviewer settle, initial review grace) so a *resolved*
+    # ``NotifyHuman`` episode does not keep surfacing "awaiting human" while the
+    # monitor merely waits on a non-human gate; their deterministic-rejection arms
+    # re-set attention directly, and the pre-merge settle is deliberately left
+    # untouched so a branch-protection rejection that re-sets attention every poll
+    # does not flicker the signal. The ``IS NOT NULL`` guard makes
+    # the repo update a no-op when the flag is already clear, so this per-poll clear
+    # never churns the row — but the guarded ``UPDATE`` still round-trips once per
+    # poll. We keep it unconditional rather than inferring "already clear" from
+    # in-process state: ``awaiting_human_since`` is persisted, so a monitor restart
+    # between the ``NotifyHuman`` set and this clear would otherwise strand a stale
+    # attention signal. The round-trip is negligible beside the operation/state/
+    # audit writes each poll already performs.
+    #
+    # ``AddressComments`` is the one resuming action that can itself be a human
+    # wait: a comment-repair push rejected for a missing ``workflow`` token scope
+    # requeues ``AddressComments`` and keeps the row in ``monitoring_pr`` (it does
+    # NOT terminally fail like the sync-base / CI-repair workflow-scope arms),
+    # waiting on an operator to grant the scope. That arm persists
+    # ``awaiting_workflow_scope`` so this poll knows the previous one ended on that
+    # wait; honor it by skipping the clear (the attention set by the prior poll
+    # survives — ``set_workspace_attention`` COALESCEs the episode start, so it
+    # stays stable across the requeued polls). Reset the marker first so the moment
+    # a poll is no longer workflow-scope-blocked (push succeeds, or ``decide``
+    # returns a different action) we fall back to the normal resume clear next
+    # cycle — at most one extra poll of "awaiting human" after the block resolves.
+    awaiting_workflow_scope = state.awaiting_workflow_scope
+    state.clear_awaiting_workflow_scope()
+    # The merge-block attention marker only makes sense while ``decide()`` stays on
+    # the ``Merge`` arm (the branch-protection fallback that sets it keeps
+    # ``decide()`` returning ``Merge``). The moment ``decide()`` returns any other
+    # action the branch-protection retry context is over, so drop the marker — a
+    # later ``Merge`` poll's non-human gate wait must then clear a now-stale
+    # ``NotifyHuman`` episode normally instead of preserving it
+    # (PRRT_kwDOSJAM6s6LXscz). ``handle_merge_action`` re-sets it each poll the
+    # branch-protection block persists.
+    if not isinstance(action, Merge):
+        state.clear_merge_block_attention()
+    if not isinstance(action, (NotifyHuman, Merge)) and not awaiting_workflow_scope:
+        await self._clear_workspace_attention(workspace_id)
+
     if isinstance(action, ShortCircuitCompleted):
         self._write_defer_signal(
             workspace_id=workspace_id,
@@ -240,11 +256,10 @@ async def _execute(
             workspace_id=workspace_id,
             action="check_wait",
             requested_action="wait_for_ci",
-            reason=(
-                "CI checks are still pending."
-                if action.reason == "pending_checks"
-                else "GitHub has not reported a stable mergeable state."
-            ),
+            reason={
+                "pending_checks": "CI checks are still pending.",
+                "awaiting_required_checks": "Required CI has not started on the new head yet.",
+            }.get(action.reason, "GitHub has not reported a stable mergeable state."),
             reason_code="CHECK_WAIT",
             pr_number=pr_number,
             status=status,
@@ -1056,6 +1071,20 @@ async def _execute(
                 error_message=push_result.error_message,
             )
             if push_result.workflow_scope_required:
+                # Unlike sync-base / CI-repair, this arm does NOT terminally fail
+                # on a missing ``workflow`` token scope — it requeues
+                # ``AddressComments`` and stays in ``monitoring_pr`` while an
+                # operator grants the scope, so the direct PR comment below is the
+                # only human escalation. Surface that wait as a first-class
+                # attention signal, in parity with the ``NotifyHuman`` touch-point
+                # and the merge-loop direct notifications, and persist
+                # ``awaiting_workflow_scope`` so the top-of-poll resume clear keeps
+                # the flag set across the requeued polls.
+                state.mark_awaiting_workflow_scope()
+                await self._set_workspace_attention(
+                    workspace_id,
+                    reason=push_result.error_message or push_result.reason_code,
+                )
                 await _post_workflow_scope_notification_best_effort(
                     self,
                     workspace_id=workspace_id,
@@ -1268,232 +1297,21 @@ async def _execute(
         return merge_result
 
     if isinstance(action, NotifyHuman):
-        if _is_manual_ready_handoff(action, status, state, self._config):
-            policy_blocked = await self._refresh_scope_policy_for_merge(
-                workspace_id=workspace_id,
-                changed_paths=status.changed_paths,
-            )
-            if policy_blocked:
-                action = NotifyHuman(
-                    message=(
-                        "OUT_OF_SCOPE_CHANGE: changed files outside declared "
-                        "owned_paths require an operator scope decision."
-                    )
-                )
-            else:
-                queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
-                if queue_blockers:
-                    await self._wait_for_merge_queue(
-                        blockers=queue_blockers,
-                        workspace_id=workspace_id,
-                        repo_url=repo_url,
-                        base_branch=base_branch,
-                        pr_number=pr_number,
-                        status=status,
-                        state=state,
-                        monitor_log=monitor_log,
-                    )
-                    return False
-
-                merge_gate = await self._merge_gate_with_legacy_head_support(
-                    workspace_id,
-                    check_policy=True,
-                    current_head_sha=status.head_sha,
-                )
-                manual_ready_handled = None
-                settle_config = replace(self._config, auto_merge=True)
-                notify_settle_decision: _NonCheckReviewerSettleDecision | None = None
-                if _gate_requires_validation_recovery(merge_gate):
-                    notify_settle_decision = _non_check_reviewer_settle_decision(
-                        status,
-                        state,
-                        settle_config,
-                        pr_number=pr_number,
-                        now=time.monotonic(),
-                    )
-                    await self._record_non_check_reviewer_settle_decision(
-                        decision=notify_settle_decision,
-                        workspace_id=workspace_id,
-                        pr_number=pr_number,
-                        status=status,
-                        monitor_log=monitor_log,
-                    )
-                    if notify_settle_decision.wait_seconds > 0:
-                        settle_operation_context = (
-                            _non_check_reviewer_settle_wait_operation_context(
-                                settle_config,
-                                notify_settle_decision,
-                            )
-                        )
-                        await self._sleep_with_monitor_state_operation(
-                            workspace_id=workspace_id,
-                            action="reviewer_settle_wait",
-                            requested_action="validate",
-                            reason=(
-                                "Waiting for configured non-check reviewers to settle "
-                                "before final validation."
-                            ),
-                            reason_code="NON_CHECK_REVIEWER_SETTLE",
-                            pr_number=pr_number,
-                            status=status,
-                            base_branch=base_branch,
-                            remote_branch=remote_branch,
-                            wait_seconds=notify_settle_decision.wait_seconds,
-                            monitor_log=monitor_log,
-                            extra_payload=settle_operation_context.extra_payload,
-                            extra_identity=settle_operation_context.extra_identity,
-                        )
-                        return False
-
-                    manual_ready_handled = await self._handle_merge_gate_blocker(
-                        gate=merge_gate,
-                        workspace_id=workspace_id,
-                        repo_url=repo_url,
-                        repo=repo,
-                        pr_number=pr_number,
-                        status=status,
-                        state=state,
-                        base_branch=base_branch,
-                        remote_branch=remote_branch,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        monitor_log=monitor_log,
-                        skip_initial_review_grace=(
-                            self._config.non_check_reviewer_settle_seconds > 0
-                        ),
-                    )
-
-                if manual_ready_handled is not None:
-                    return cast(bool, manual_ready_handled)
-
-                if notify_settle_decision is None:
-                    notify_settle_decision = _non_check_reviewer_settle_decision(
-                        status,
-                        state,
-                        settle_config,
-                        pr_number=pr_number,
-                        now=time.monotonic(),
-                    )
-                await self._record_non_check_reviewer_settle_decision(
-                    decision=notify_settle_decision,
-                    workspace_id=workspace_id,
-                    pr_number=pr_number,
-                    status=status,
-                    monitor_log=monitor_log,
-                )
-                if notify_settle_decision.wait_seconds > 0:
-                    settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
-                        settle_config,
-                        notify_settle_decision,
-                    )
-                    await self._sleep_with_monitor_state_operation(
-                        workspace_id=workspace_id,
-                        action="reviewer_settle_wait",
-                        requested_action="notify_human",
-                        reason=(
-                            "Waiting for configured non-check reviewers to settle "
-                            "before human ready notification."
-                        ),
-                        reason_code="NON_CHECK_REVIEWER_SETTLE",
-                        pr_number=pr_number,
-                        status=status,
-                        base_branch=base_branch,
-                        remote_branch=remote_branch,
-                        wait_seconds=notify_settle_decision.wait_seconds,
-                        monitor_log=monitor_log,
-                        extra_payload=settle_operation_context.extra_payload,
-                        extra_identity=settle_operation_context.extra_identity,
-                    )
-                    return False
-
-        operation = await self._begin_monitor_operation(
+        return await _notify_human_loop.handle_notify_human_action(
+            self,
+            action=action,
             workspace_id=workspace_id,
-            operation_type=OperationType.human_wait,
-            action="human_wait",
-            requested_action="notify_human",
-            reason=action.message or _notify_human_reason(status, state),
-            reason_code="HUMAN_WAIT",
+            repo_url=repo_url,
+            repo=repo,
             pr_number=pr_number,
             status=status,
+            state=state,
             base_branch=base_branch,
             remote_branch=remote_branch,
+            compose_project=compose_project,
+            compose_file=compose_file,
             monitor_log=monitor_log,
-            extra_identity=(action.message or "", state.iter_count),
         )
-        try:
-            await self._post_human_notification_once(
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                blocker_reason=action.message,
-            )
-        except ForgeClientError as exc:
-            # Both forges post the human notification through ``self._deps.gh``;
-            # either raises a ``ForgeClientError`` subclass. Catching the shared base
-            # keeps a Bitbucket fault from escaping ``_execute`` uncaught. A transient
-            # blip waits then keeps polling; a permanent fault finishes the operation
-            # as failed and re-raises. The operation outcome/error-code strings stay
-            # forge-specific (catalogued reason codes) via the selection below.
-            is_bitbucket = isinstance(exc, BitbucketClientError)
-            transient_outcome = (
-                "transient_bitbucket_error" if is_bitbucket else "transient_github_error"
-            )
-            transient_code = (
-                "BITBUCKET_TRANSIENT_ERROR" if is_bitbucket else "GITHUB_TRANSIENT_ERROR"
-            )
-            failed_outcome = "bitbucket_error" if is_bitbucket else "github_error"
-            failed_code = "BITBUCKET_ERROR" if is_bitbucket else "GITHUB_ERROR"
-            if await self._wait_after_transient_forge_error(
-                exc,
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                context="post_human_notification",
-                state=state,
-                monitor_log=monitor_log,
-            ):
-                await self._finish_monitor_operation(
-                    operation,
-                    status=OperationStatus.failed,
-                    result={
-                        "status": "failed",
-                        "outcome": transient_outcome,
-                        "reason_code": transient_code,
-                    },
-                    error_code=transient_code,
-                    error_message=str(exc),
-                )
-                return False
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": failed_outcome,
-                    "reason_code": failed_code,
-                },
-                error_code=failed_code,
-                error_message=str(exc),
-            )
-            raise
-        # The notification posted: clear any stale ``post_human_notification`` retry
-        # count so a recovered blip never accumulates toward the bounded budget.
-        await self._clear_forge_transient_retry_state_on_success(
-            workspace_id=workspace_id,
-            state=state,
-            context="post_human_notification",
-        )
-        await self._deps.sleep(self._config.poll_interval_seconds)
-        await self._finish_monitor_operation(
-            operation,
-            status=OperationStatus.succeeded,
-            result={
-                "status": "succeeded",
-                "outcome": "human_notification_posted",
-                "slept_seconds": self._config.poll_interval_seconds,
-            },
-        )
-        return False
 
     # If we got here the MonitorAction union gained a variant without
     # a dispatch arm — fail loudly so tests catch it.

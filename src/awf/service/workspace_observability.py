@@ -327,6 +327,32 @@ async def list_workspace_stale_reasons_response(
     )
 
 
+def workspace_attention_fields(ws: Workspace) -> dict[str, Any]:
+    """Project the persisted awaiting-human attention flag for API/overview responses.
+
+    A PR-monitor ``NotifyHuman`` escalation (HUMAN_WAIT) stamps
+    ``awaiting_human_since``/``awaiting_human_reason`` while the workspace keeps
+    polling in ``monitoring_pr``. The columns are not cleared out-of-band on
+    operator-driven exits (cancel/stop/destroy go through ``controls.py``), so
+    surface them only while the live status is ``monitoring_pr`` — the same
+    status gate used for ``blocked_at``. ``attention_required`` is the derived
+    boolean operators key off.
+    """
+    awaiting_since = getattr(ws, "awaiting_human_since", None)
+    flagged = str(ws.status) == WorkspaceStatus.monitoring_pr.value and awaiting_since is not None
+    if not flagged:
+        return {
+            "attention_required": False,
+            "awaiting_human_since": None,
+            "awaiting_human_reason": None,
+        }
+    return {
+        "attention_required": True,
+        "awaiting_human_since": awaiting_since,
+        "awaiting_human_reason": getattr(ws, "awaiting_human_reason", None),
+    }
+
+
 def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
     ordered_events = workspace_events_by_occurrence(ws)
     observability = workspace_observability_payload(
@@ -393,6 +419,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
             if str(ws.status) == WorkspaceStatus.blocked.value
             else None
         ),
+        **workspace_attention_fields(ws),
         created_at=ws.created_at,
         updated_at=ws.updated_at,
     )

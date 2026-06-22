@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
@@ -39,6 +40,7 @@ from awf.runtime.pr_monitor_runner.gates import (
     _NonCheckReviewerSettleDecision,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
+    _awaiting_required_checks_grace,
     _bitbucket_merge_rejection_reason,
     _clear_transient_base_fetch_retry_state,
     _clear_transient_forge_retry_state,
@@ -54,21 +56,19 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.merge_methods import (
+    _MERGE_METHOD_MISMATCH_REASON,
+    _merge_completion_marker,
+    _merge_method_mismatch_message,
+    _merge_method_preflight_rejection_reason,
+    _merge_method_rejection_method,
+    _resolve_effective_merge_methods,
+)
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
 )
 from awf.service.merge_queue import MergeQueueBlocker
-
-# ``fast_forward`` is intentionally LAST so squash stays the default and the
-# GitHub precedence (squash > merge > rebase) is unchanged: it only ever wins on a
-# repo/branch policy that allows no other method (e.g. a fast-forward-only Bitbucket
-# repo, which previously wedged on a spurious MERGE_METHOD_MISMATCH — issue #448).
-# AWF preference wins among allowed strategies; Bitbucket's ``default_merge_strategy``
-# is ignored, uniform with GitHub.
-_MERGE_METHOD_PREFERENCE = ("squash", "merge", "rebase", "fast_forward")
-_KNOWN_MERGE_METHODS = frozenset(_MERGE_METHOD_PREFERENCE)
-_MERGE_METHOD_MISMATCH_REASON = "MERGE_METHOD_MISMATCH"
 
 # Bitbucket reason codes whose merge attempt is still in flight server-side rather
 # than a deterministic failure: the 409 already-in-progress signal and the exhausted
@@ -111,109 +111,6 @@ class _MergeAttemptResult:
         if not self.notification_reason:  # pragma: no cover
             raise RuntimeError("method-blocker merge attempt result has no reason")
         return self.notification_reason
-
-
-def _effective_merge_methods(
-    *,
-    repo_methods: tuple[str, ...],
-    branch_methods: tuple[str, ...] | None,
-) -> tuple[str, ...]:
-    """Intersect repo and branch merge policies in AWF preference order."""
-    repo_allowed = {method for method in repo_methods if method in _KNOWN_MERGE_METHODS}
-    branch_allowed = (
-        None
-        if branch_methods is None
-        else {method for method in branch_methods if method in _KNOWN_MERGE_METHODS}
-    )
-    allowed = repo_allowed if branch_allowed is None else repo_allowed.intersection(branch_allowed)
-    return tuple(method for method in _MERGE_METHOD_PREFERENCE if method in allowed)
-
-
-async def _resolve_effective_merge_methods(
-    self: Any,
-    *,
-    repo: RepoRef,
-    base_branch: str,
-) -> tuple[str, ...]:
-    """Fetch repository and base-branch policy before selecting merge methods.
-
-    ``self`` is the ``PullRequestMonitorRunner`` instance; this follows the
-    extract-to-module-function pattern used throughout this module.
-    """
-    repo_methods = await self._deps.gh.fetch_repo_merge_methods(repo=repo)
-    branch_methods = await self._deps.gh.fetch_branch_pull_request_allowed_merge_methods(
-        repo=repo,
-        branch=base_branch,
-    )
-    return _effective_merge_methods(repo_methods=repo_methods, branch_methods=branch_methods)
-
-
-def _merge_method_rejection_method(exc: GitHubClientError) -> str | None:
-    """Return the merge method explicitly rejected by GitHub, when known."""
-    # GitHubClientError stores redacted stderr. These policy phrases contain no
-    # secret-like material, so redaction should preserve the classifier signal.
-    text = exc.stderr.lower()
-    if (
-        "squash merges are not allowed" in text
-        or "merge method squash merging is not allowed" in text
-    ):
-        return "squash"
-    if (
-        "merge commits are not allowed" in text
-        or "merge method merge commit is not allowed" in text
-    ):
-        return "merge"
-    if "rebase merges are not allowed" in text or "merge method rebase is not allowed" in text:
-        return "rebase"
-    return None
-
-
-def _merge_error_supports_method_alternative(exc: GitHubClientError) -> bool:
-    """Detect GitHub merge failures that can be retried with another method."""
-    return _merge_method_rejection_method(exc) is not None
-
-
-def _merge_method_mismatch_message(
-    *,
-    base_branch: str,
-    attempted_method: str | None,
-    effective_methods: tuple[str, ...],
-    detail: str | None = None,
-) -> str:
-    """Build the human-facing merge-method mismatch notification."""
-    allowed = ", ".join(effective_methods) if effective_methods else "none"
-    attempted = attempted_method or "none"
-    suffix = f" GitHub reported: {detail}" if detail else ""
-    return (
-        "MERGE_METHOD_MISMATCH: AWF could not merge this PR because no merge "
-        f"method succeeded for base branch {base_branch!r}. "
-        f"attempted={attempted}; effective_allowed={allowed}.{suffix}"
-    )[:2000]
-
-
-def _merge_method_preflight_rejection_reason(exc: GitHubClientError) -> str:
-    """Build an operator-facing reason for merge-method policy preflight failures.
-
-    Only called with ``GitHubClientError``; ``BitbucketClientError`` has no
-    ``stderr`` attribute and is handled separately by
-    ``_bitbucket_merge_rejection_reason``.
-    """
-    detail = " ".join(_redact_and_truncate_forge_error(exc.stderr).split())[:240]
-    if detail:
-        return f"GitHub rejected merge-method preflight: {detail}"
-    return "GitHub rejected merge-method preflight"
-
-
-def _merge_completion_marker(
-    *,
-    merge_sha: str | None,
-    head_sha: str,
-) -> str:
-    """Return the non-empty marker used to record a completed PR merge."""
-    normalized_merge_sha = merge_sha.strip() if merge_sha else None
-    if normalized_merge_sha:
-        return normalized_merge_sha
-    return head_sha
 
 
 async def _record_empty_effective_merge_methods_blocker(
@@ -625,6 +522,14 @@ async def handle_merge_action(
 
         queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
         if queue_blockers:
+            # Resolve any stale awaiting-human flag before this non-human gate wait:
+            # ``decide()`` returned ``Merge``, so a prior ``NotifyHuman`` block is
+            # gone and the operator signal must not stay "awaiting human" while the
+            # monitor only waits on the merge queue (#659). The branch-protection
+            # fallback also keeps ``decide()`` on ``Merge`` while genuinely awaiting a
+            # human, so the helper preserves *that* still-active signal across the
+            # queue wait (PRRT_kwDOSJAM6s6LXscz).
+            await self._clear_stale_merge_attention(workspace_id, state)
             await self._wait_for_merge_queue(
                 blockers=queue_blockers,
                 workspace_id=workspace_id,
@@ -652,6 +557,12 @@ async def handle_merge_action(
             monitor_log=monitor_log,
         )
         if settle_decision.wait_seconds > 0:
+            # Resolve any stale awaiting-human flag before this non-human settle
+            # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
+            # "awaiting human" while the monitor only waits on reviewer settle (#659).
+            # An active branch-protection escalation is preserved by the helper
+            # (PRRT_kwDOSJAM6s6LXscz).
+            await self._clear_stale_merge_attention(workspace_id, state)
             requested_action = "validate" if pending_validation_gate is not None else "merge"
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
@@ -861,6 +772,29 @@ async def handle_merge_action(
                         state=state,
                     ):
                         pre_merge_state_changed = True
+                    # #656: decorate the freshly fetched status with the same
+                    # per-head required-CI-start grace the outer loop applies
+                    # before ``decide`` (runner.py). This recheck fetches a NEW
+                    # status that can show the transient empty-checks + BLOCKED
+                    # CI-start gap (the head changed during the settle window, or
+                    # GitHub recomputed mergeability); without the decoration
+                    # ``decide`` sees the default
+                    # ``awaiting_required_checks_grace_active=False``, gate 8b is
+                    # skipped, and the monitor pages a human prematurely before
+                    # the next outer poll can recover. Persisting the first-seen
+                    # marker is mandatory for the same reason as in the outer
+                    # loop: the runner reloads ``state`` from the DB every poll,
+                    # so an unpersisted marker would re-read as absent forever and
+                    # a genuine never-CI head would never escalate past the grace.
+                    grace_active, grace_state_changed = _awaiting_required_checks_grace(
+                        checked_status, state, self._config, now=datetime.now(UTC)
+                    )
+                    if grace_state_changed:
+                        pre_merge_state_changed = True
+                    checked_status = replace(
+                        checked_status,
+                        awaiting_required_checks_grace_active=grace_active,
+                    )
                     if pre_merge_state_changed:
                         await self._persist_state(workspace_id, state)
                     checked_action = decide(checked_status, state, self._config)
@@ -1071,6 +1005,12 @@ async def handle_merge_action(
                                     break
 
         if initial_grace_recheck_wait_seconds > 0:
+            # Resolve any stale awaiting-human flag before this non-human grace
+            # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
+            # "awaiting human" while the monitor only waits out the grace period (#659).
+            # An active branch-protection escalation is preserved by the helper
+            # (PRRT_kwDOSJAM6s6LXscz).
+            await self._clear_stale_merge_attention(workspace_id, state)
             _log.info(
                 "monitor.initial_review_grace_waiting",
                 workspace_id=workspace_id,
@@ -1101,6 +1041,12 @@ async def handle_merge_action(
             return False
 
         if settle_recheck_decision is not None:
+            # Resolve any stale awaiting-human flag before this non-human settle
+            # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
+            # "awaiting human" while the monitor only waits on reviewer settle (#659).
+            # An active branch-protection escalation is preserved by the helper
+            # (PRRT_kwDOSJAM6s6LXscz).
+            await self._clear_stale_merge_attention(workspace_id, state)
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
                 settle_recheck_decision,
@@ -1123,6 +1069,12 @@ async def handle_merge_action(
             return False
 
         if queue_blockers_after_lock:
+            # Resolve any stale awaiting-human flag before this non-human gate wait:
+            # ``decide()`` returned ``Merge``, so a prior ``NotifyHuman`` block is
+            # gone and the operator signal must not stay "awaiting human" while the
+            # monitor only waits on the merge queue (#659). An active branch-protection
+            # escalation is preserved by the helper (PRRT_kwDOSJAM6s6LXscz).
+            await self._clear_stale_merge_attention(workspace_id, state)
             await self._wait_for_merge_queue(
                 blockers=queue_blockers_after_lock,
                 workspace_id=workspace_id,
@@ -1286,6 +1238,17 @@ async def handle_merge_action(
                 notification_reason,
             )
             await self._persist_state(workspace_id, state)
+            # Surface the escalation as a first-class attention signal now, in
+            # parity with the ``NotifyHuman`` touch-point in ``loop._execute``.
+            # This path notifies a human directly without re-entering
+            # ``NotifyHuman``, so without this set ``awaiting_human_since`` stays
+            # NULL until a later poll's ``decide()`` returns ``NotifyHuman`` off
+            # the sticky merge-method blocker just marked above. No
+            # ``mark_merge_block_attention`` here (unlike the branch-protection
+            # fallback below): the sticky blocker flips ``decide()`` to
+            # ``NotifyHuman`` next poll, so the ``Merge``-arm non-human gate waits
+            # are never reached for this head and cannot clear the flag prematurely.
+            await self._set_workspace_attention(workspace_id, reason=notification_reason)
             try:
                 await self._post_human_notification_once(
                     repo=repo,
@@ -1410,6 +1373,20 @@ async def handle_merge_action(
                 workspace_id=workspace_id,
                 stderr=blocker_detail,
             )
+            # Surface the escalation as a first-class attention signal now, in
+            # parity with the ``NotifyHuman`` touch-point in ``loop._execute``.
+            # Unlike the merge-method preflight arm, this fallback records no
+            # sticky blocker, so ``decide()`` keeps returning ``Merge`` and never
+            # re-enters ``NotifyHuman``; without this set ``awaiting_human_since``
+            # would stay NULL for the whole branch-protection wait.
+            await self._set_workspace_attention(workspace_id, reason=blocker_reason)
+            # Mark this attention as merge-loop-owned and still active so the
+            # non-human gate waits (merge queue, reviewer settle, initial review
+            # grace) on a later ``Merge`` poll do NOT clear it as a resolved
+            # ``NotifyHuman`` episode while the operator is still blocked
+            # (PRRT_kwDOSJAM6s6LXscz). ``decide()`` returning a non-``Merge`` action
+            # drops the marker via ``loop._execute``.
+            state.mark_merge_block_attention()
             try:
                 await self._post_human_notification_once(
                     repo=repo,
