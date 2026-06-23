@@ -632,33 +632,24 @@ async def handle_merge_action(
             status=status,
         )
         # Capture the wall-clock at coordinator ENTRY. The serialized merge
-        # coordinator can block behind another merge for longer than the
-        # merge-block TTL without any branch-protection fallback firing (no poll
-        # runs during that wait), so measuring the marker's age against the
-        # post-wait clock would reclassify a FRESH-at-entry marker as STALE and
-        # clear ``awaiting_human_since`` — then the deterministic rejection re-
-        # stamps it, flickering/restarting the human-wait timer though the
-        # operator block never resolved (PRRT_kwDOSJAM6s6La_SZ). Judge freshness
-        # against this entry timestamp so a marker fresh when we started waiting
-        # is preserved across the wait; a marker already stale at entry is still
-        # cleared (the block resolved before the wait).
+        # coordinator can block behind another merge longer than the merge-block
+        # TTL with no branch-protection fallback firing (no poll runs during the
+        # wait). Measuring the marker's age against the post-wait clock would
+        # reclassify a FRESH-at-entry marker as STALE, clearing
+        # ``awaiting_human_since`` so the deterministic rejection re-stamps it —
+        # flickering the human-wait timer though the block never resolved
+        # (PRRT_kwDOSJAM6s6La_SZ). Judge freshness against this entry timestamp
+        # so a fresh-at-entry marker is preserved; a stale-at-entry marker is
+        # still cleared (the block resolved before the wait).
         merge_critical_section_entered_at = datetime.now(UTC)
-        # #661: clear a resolved ``NotifyHuman`` attention flag BEFORE entering
-        # the serialized merge coordinator. ``decide()`` returned ``Merge``, so
-        # a prior ``NotifyHuman`` block is gone and the operator signal must not
-        # stay "awaiting human" while the monitor only waits on the non-human
-        # merge lock. The in-process coordinator waits on its asyncio lock and
-        # the Postgres coordinator polls ``pg_try_advisory_lock`` until it
-        # acquires (src/awf/runtime/merge_coordinator.py), so performing the
-        # clear only after acquisition leaves ``awaiting_human_since`` surfaced
-        # for the entire non-human merge-lock wait even though ``decide()`` has
-        # already resumed to ``Merge``. Clearing before the wait (using the same
-        # entry timestamp for the TTL) closes that visibility window; the
-        # branch-protection fallback re-stamps ``merge_block_attention`` every
-        # poll while blocked, so a FRESH marker (still-blocked) is preserved by
-        # the TTL and a STALE marker (resolved externally between polls) is
-        # cleared (#663). The merge-queue/settle/grace clears earlier in the
-        # function are unchanged.
+        # #661: clear a resolved ``NotifyHuman`` flag BEFORE the non-human merge-
+        # lock wait so it does not stay "awaiting human" while ``decide()`` has
+        # already resumed to ``Merge``. Clearing after acquisition (the
+        # coordinator waits on its asyncio lock / ``pg_try_advisory_lock``)
+        # leaves the flag surfaced for the whole non-human wait. Using the entry
+        # timestamp for the TTL preserves a FRESH (still-blocked) marker and
+        # clears a STALE (resolved between polls) one (#663); the earlier
+        # queue/settle/grace clears are unchanged.
         await self._clear_stale_merge_attention(
             workspace_id,
             state,
@@ -1279,8 +1270,8 @@ async def handle_merge_action(
             # the sticky merge-method blocker just marked above. No
             # ``mark_merge_block_attention`` here (unlike the branch-protection
             # fallback below): the sticky blocker flips ``decide()`` to
-            # ``NotifyHuman`` next poll, so the ``Merge``-arm non-human gate waits
-            # are never reached for this head and cannot clear the flag prematurely.
+            # ``NotifyHuman`` next poll, so the ``Merge``-arm non-human gate
+            # waits are never reached for this head and cannot clear it early.
             await self._set_workspace_attention(workspace_id, reason=notification_reason)
             try:
                 await self._post_human_notification_once(
@@ -1399,41 +1390,37 @@ async def handle_merge_action(
                     state=state,
                     context="merge_pr",
                 )
-            # Branch protection / restrictions often block merges; fall back to
-            # the release-PR notify flow rather than failing the workspace.
+            # Branch protection / restrictions often block merges; fall back to the release-PR notify flow rather than failing the workspace.
             _log.warning(
                 "monitor.merge_blocked_falling_back_to_notify",
                 workspace_id=workspace_id,
                 stderr=blocker_detail,
             )
             # Surface the escalation as a first-class attention signal now, in
-            # parity with the ``NotifyHuman`` touch-point in ``loop._execute``.
-            # Unlike the merge-method preflight arm, this fallback records no
-            # sticky blocker, so ``decide()`` keeps returning ``Merge`` and never
-            # re-enters ``NotifyHuman``; without this set ``awaiting_human_since``
-            # would stay NULL for the whole branch-protection wait.
+            # parity with ``loop._execute``'s ``NotifyHuman`` touch-point. Unlike
+            # the merge-method preflight arm, this fallback records no sticky
+            # blocker, so ``decide()`` keeps returning ``Merge`` and never re-enters
+            # ``NotifyHuman``; without this set ``awaiting_human_since`` would stay
+            # NULL for the whole branch-protection wait.
             #
-            # Mark this attention as merge-loop-owned and still active so the
-            # non-human gate waits (merge queue, reviewer settle, initial review
-            # grace) on a later ``Merge`` poll do NOT clear it as a resolved
-            # ``NotifyHuman`` episode while the operator is still blocked
-            # (PRRT_kwDOSJAM6s6LXscz). ``decide()`` returning a non-``Merge`` action
+            # Mark this attention merge-loop-owned and still active so later
+            # ``Merge``-poll non-human gate waits (queue, settle, grace) do NOT
+            # clear it as a resolved ``NotifyHuman`` episode while the operator
+            # is still blocked (PRRT_kwDOSJAM6s6LXscz); a non-``Merge`` ``decide()``
             # drops the marker via ``loop._execute``.
             #
             # Persist the marker BEFORE setting ``awaiting_human_since``: the
             # attention flag commits in its own transaction inside
-            # ``_set_workspace_attention``, while the marker lives in the in-memory
-            # ``state`` that the outer ``run()`` loop persists only AFTER
-            # ``_execute`` returns. A monitor restart/cancel in that window would
-            # strand the DB with ``awaiting_human_since`` set but no marker, so the
-            # next poll's ``_clear_stale_merge_attention`` would see no marker, clear
-            # the flag, the deterministic rejection would re-stamp attention to
-            # ``now`` — resetting the operator-visible human-wait timer even though
-            # the block never resolved (PRRT_kwDOSJAM6s6LbY_X). Persisting first
-            # mirrors the merge-method preflight arm's ordering
-            # (``_persist_state`` then ``_set_workspace_attention``) and makes the
-            # marker durable so a restart between the two steps preserves the
-            # still-active signal.
+            # ``_set_workspace_attention``, while the marker lives in the
+            # in-memory ``state`` the outer ``run()`` loop persists only AFTER
+            # ``_execute`` returns. A restart/cancel in that window would strand
+            # the DB with ``awaiting_human_since`` set but no marker, so the next
+            # poll's ``_clear_stale_merge_attention`` would clear the flag and the
+            # deterministic rejection would re-stamp it to ``now`` — resetting the
+            # human-wait timer though the block never resolved
+            # (PRRT_kwDOSJAM6s6LbY_X). Persisting first mirrors the merge-method
+            # preflight arm's ordering and makes the marker durable across that
+            # window.
             state.mark_merge_block_attention()
             await self._persist_state(workspace_id, state)
             await self._set_workspace_attention(workspace_id, reason=blocker_reason)
