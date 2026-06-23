@@ -392,8 +392,10 @@ async def _handle_merge_gate_blocker(
         # handoff from its general clear, so — like the other non-human gate waits in
         # ``handle_merge_action`` — clear it here before parking (#659). An active
         # branch-protection escalation is preserved by the helper
-        # (PRRT_kwDOSJAM6s6LXscz).
-        await runner._clear_stale_merge_attention(workspace_id, state)
+        # (PRRT_kwDOSJAM6s6LXscz). PRESERVE-WHILE-QUEUED: the marker is never aged
+        # out by TTL while parked on the initial-grace wait (operator decision on
+        # #663).
+        await runner._clear_stale_merge_attention(workspace_id, state, allow_age_out=False)
         if stale_reason is not None:
             grace_defer_payload: dict[str, object] = {
                 "stale_reason": stale_reason,

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import awf.db.repositories as repositories
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -24,10 +24,19 @@ from awf.db.repositories import (
     sync_candidate_readiness,
 )
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import Merge, MonitorState
+from awf.runtime.pr_monitor import (
+    _MERGE_BLOCK_ATTENTION_STATE_KEY,
+    Merge,
+    MonitorState,
+)
 from awf.service.merge_queue import list_merge_queue_blockers_for_candidate
 from tests.postgres import postgres_test_engine
-from tests.unit.runtime._monitor_runner_fixtures import FakeAdapter, RecordedSleep, make_runner
+from tests.unit.runtime._monitor_runner_fixtures import (
+    FakeAdapter,
+    RecordedSleep,
+    make_runner,
+    seed_monitoring_workspace,
+)
 from tests.unit.runtime.test_pr_monitor import _status
 
 REPO_URL = "git@github.com:dimileeh/aira-web.git"
@@ -724,7 +733,9 @@ async def test_merge_queue_wait_preserves_active_branch_protection_attention(
     )
 
     active_block_state = MonitorState()
-    active_block_state.mark_merge_block_attention()
+    # Stamp the marker FRESH (this poll's wall-clock) so the TTL gate treats it
+    # as still-blocked and the merge-queue wait preserves the signal (#663).
+    active_block_state.mark_merge_block_attention(now=datetime.now(UTC))
 
     terminal = await runner._execute(
         action=Merge(),
@@ -753,3 +764,478 @@ async def test_merge_queue_wait_preserves_active_branch_protection_attention(
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
     assert workspace.awaiting_human_since == episode_start
     assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
+    # The still-active marker was refreshed to this poll's wall-clock so the TTL
+    # clock resets for the next non-human gate wait (PRRT_kwDOSJAM6s6LbXWQ).
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in active_block_state.threads_addressed_ids
+    refreshed_marker = active_block_state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    assert refreshed_marker != "1"
+
+
+@pytest.mark.unit
+async def test_clear_stale_merge_attention_restamps_preserved_marker(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6LbXWQ + PRRT_kwDOSJAM6s6LdM4X: ``_clear_stale_merge_attention``
+    must re-stamp a still-active marker so the TTL clock resets and consecutive
+    non-human gate waits do not age the marker past the TTL.
+
+    Without the re-stamp, a marker stamped once by the branch-protection fallback
+    is never refreshed during merge-queue/reviewer-settle/initial-grace waits
+    (the fallback only re-stamps when it actually runs, after the serialized
+    merge coordinator). After enough consecutive waits the marker ages past the
+    TTL and the next wait clears ``awaiting_human_since`` even though the human
+    gate is unchanged (PRRT_kwDOSJAM6s6LbXWQ).
+
+    PRRT_kwDOSJAM6s6LdM4X: the re-stamp must use a CURRENT wall-clock, not the
+    caller-supplied ``now``. The merge critical-section entry and post-lock gate
+    clears pass the coordinator-ENTRY timestamp as ``now`` so a marker FRESH at
+    entry is preserved across a serialized merge wait longer than the TTL
+    (PRRT_kwDOSJAM6s6La_SZ, PRRT_kwDOSJAM6s6LcfXk); but that entry timestamp is
+    stale relative to REAL time after the wait. Re-stamping the marker with the
+    stale entry timestamp would let the marker age past the TTL during the
+    subsequent post-lock gate wait, so the next poll — or a restart during that
+    wait — would clear ``awaiting_human_since`` though the operator block never
+    resolved. This test models that scenario directly: the caller ``now`` is a
+    stale entry timestamp (in the past, but still within the TTL of the marker
+    so the freshness check preserves it), and asserts the re-stamp is a CURRENT
+    wall-clock (within the real-now window around the call), NOT the stale
+    caller ``now``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory, pr_number=333)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    # Prior poll's branch-protection fallback stamped the marker 30s ago (real
+    # wall-clock). This poll re-enters the merge loop still blocked.
+    real_start = datetime.now(UTC)
+    t_fallback = real_start - timedelta(seconds=30)
+    state = MonitorState()
+    state.mark_merge_block_attention(now=t_fallback)
+
+    # The coordinator-ENTRY timestamp was captured 10s ago (before a serialized
+    # merge wait). The marker age at entry is 20s (< 120s TTL) → FRESH at entry
+    # → preserved. But that entry timestamp is STALE relative to real time after
+    # the wait. The re-stamp MUST use a current wall-clock so the marker is fresh
+    # against real time going into the post-lock gate wait, NOT the stale entry
+    # timestamp.
+    stale_entry_now = real_start - timedelta(seconds=10)
+    before_call = datetime.now(UTC)
+    await runner._clear_stale_merge_attention(workspace_id, state, now=stale_entry_now)
+    after_call = datetime.now(UTC)
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    first_stamp = datetime.fromisoformat(
+        state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    )
+    # The re-stamp is a CURRENT wall-clock (within the real-now window around
+    # the call), NOT the stale caller ``now``: the marker is fresh relative to
+    # real time going into the gate wait.
+    assert first_stamp != stale_entry_now
+    assert before_call <= first_stamp <= after_call
+    # And the marker age against the stale entry timestamp is now tiny (re-stamp
+    # is current, entry is in the past) rather than the 10s it was before — the
+    # TTL clock reset against real time, not the entry clock.
+    assert (first_stamp - stale_entry_now).total_seconds() >= 0
+
+    # A second preserve (modeling a later poll's post-lock clear) still preserves
+    # the marker and re-stamps it to a current wall-clock: consecutive non-human
+    # gate waits do not age the marker past the TTL because each preserve resets
+    # the clock against real time.
+    second_before = datetime.now(UTC)
+    await runner._clear_stale_merge_attention(workspace_id, state, now=stale_entry_now)
+    second_after = datetime.now(UTC)
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    second_stamp = datetime.fromisoformat(
+        state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    )
+    assert second_stamp != stale_entry_now
+    assert second_before <= second_stamp <= second_after
+
+    # Parity: a genuinely RESOLVED marker (stale relative to its OWN last stamp,
+    # well past the TTL with no re-stamp in between) is still cleared. Stamp a
+    # fresh marker, then jump ``now`` past the TTL with no intervening preserve.
+    resolved_state = MonitorState()
+    resolved_state.mark_merge_block_attention(now=real_start - timedelta(seconds=600))
+    resolved_now = real_start + timedelta(seconds=600)
+    await runner._clear_stale_merge_attention(workspace_id, resolved_state, now=resolved_now)
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in resolved_state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_clear_stale_merge_attention_restamps_preserved_marker_durably(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6LcL-G + PRRT_kwDOSJAM6s6LdM4X: the preserve re-stamp must
+    be DURABLE on the workspace row, not only in the in-memory ``state`` the loop
+    flushes later, AND must use a CURRENT wall-clock (not the caller's stale
+    ``now``).
+
+    The outer ``run()`` loop only flushes ``state`` after ``_execute`` returns
+    (``runner.py:455``); a cancel/restart during the subsequent non-human gate
+    wait (merge queue / reviewer settle / initial review grace) would strand
+    the OLD marker timestamp on the persisted row. The next poll's
+    ``_clear_stale_merge_attention`` would then measure the stale marker
+    against ``now``, exceed the TTL, clear ``awaiting_human_since``, and let the
+    still-active branch-protection rejection re-stamp it — restarting the
+    human-wait timer even though the operator block never resolved.
+
+    The durable re-stamp uses a CURRENT wall-clock (PRRT_kwDOSJAM6s6LdM4X) so the
+    persisted marker is fresh relative to real time going into the gate wait,
+    not the stale coordinator-ENTRY timestamp the caller passes as ``now``.
+    Assert the re-stamped marker is on the persisted ``monitor_threads_addressed``
+    row WITHOUT any ``_persist_state`` flush (mirroring
+    ``test_terminal_directive_drop_clears_stale_preserved_marker_durably``),
+    and that it is a current wall-clock rather than the caller's ``now``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory, pr_number=334)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    # Stamp a marker FRESH at a prior poll's fallback (30s ago, within the
+    # default 120s TTL).
+    real_start = datetime.now(UTC)
+    t_fallback = real_start - timedelta(seconds=30)
+    state = MonitorState()
+    state.mark_merge_block_attention(now=t_fallback)
+
+    async def _fail_persist_state(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("durable re-stamp must not rely on the outer _persist_state flush")
+
+    monkeypatch.setattr(runner, "_persist_state", _fail_persist_state)
+
+    # Preserve + re-stamp: the caller passes a STALE coordinator-ENTRY timestamp
+    # (10s ago, marker age 20s < TTL → fresh at entry → preserved). The re-stamp
+    # must use a CURRENT wall-clock so the persisted marker is fresh against real
+    # time going into the gate wait.
+    stale_entry_now = real_start - timedelta(seconds=10)
+    before_call = datetime.now(UTC)
+    await runner._clear_stale_merge_attention(workspace_id, state, now=stale_entry_now)
+    after_call = datetime.now(UTC)
+
+    # The in-memory marker was re-stamped to a CURRENT wall-clock (not the
+    # stale caller ``now``)...
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    in_memory_stamp = datetime.fromisoformat(
+        state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    )
+    assert in_memory_stamp != stale_entry_now
+    assert before_call <= in_memory_stamp <= after_call
+    # ... AND the same re-stamped marker is DURABLE on the persisted row
+    # WITHOUT any ``_persist_state`` flush (the monkeypatched ``_persist_state``
+    # would have raised above if the durability relied on it).
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        persisted = (workspace.monitor_threads_addressed or {}).get(
+            _MERGE_BLOCK_ATTENTION_STATE_KEY
+        )
+    assert persisted is not None
+    persisted_stamp = datetime.fromisoformat(persisted)
+    assert persisted_stamp == in_memory_stamp
+    assert persisted_stamp != stale_entry_now
+
+
+def _stale_merge_block_state(*, episode_start: datetime) -> MonitorState:
+    """Build a ``MonitorState`` carrying a STALE ``merge_block_attention`` marker.
+
+    Simulates a branch-protection block that resolved externally between polls:
+    the prior poll's fallback stamped attention + a fresh marker, but no fallback
+    has fired since (marker age now exceeds the TTL), so the marker is RESOLVED
+    and ``_clear_stale_merge_attention`` must clear it instead of preserving it
+    (#663).
+    """
+    state = MonitorState()
+    # Stamp the marker well outside the default 120s TTL → stale (resolved).
+    stale_marker_time = episode_start - timedelta(seconds=600)
+    state.mark_merge_block_attention(now=stale_marker_time)
+    return state
+
+
+@pytest.mark.unit
+async def test_resolved_branch_protection_marker_preserved_on_merge_queue_wait(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """#663 PRESERVE-WHILE-QUEUED (operator decision): a branch-protection block
+    that RESOLVED externally between polls is PRESERVED behind a merge-queue
+    wait, NOT cleared by TTL age-out.
+
+    While queued there is no observable signal distinguishing "block still
+    active" from "block resolved externally between polls" — both yield
+    ``decide()=Merge`` + queue blocker + a marker no fallback has re-stamped
+    this poll — so ageing the marker out by TTL would falsely clear a
+    still-active branch-protection escalation. The marker persists until a
+    REAL signal confirms resolution (a merge re-stamp / success / new commit).
+    The bounded false-positive (a resolved block still shows "awaiting human"
+    until the queue clears) is an ACCEPTED limitation; no forge re-check is
+    added (deferred to a follow-up). This reverses the prior #663 test which
+    asserted the stale marker was cleared behind a queue.
+    """
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    _older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Older candidate",
+        pr_number=321,
+        created_at=now,
+    )
+    later_workspace_id, _later_attempt_id, _later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later candidate",
+        pr_number=322,
+        created_at=now + timedelta(minutes=5),
+    )
+
+    # Seed the surfaced attention + STALE marker from a prior, now-resolved poll.
+    episode_start = datetime(2026, 4, 26, 11, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            later_workspace_id, reason="GitHub rejected the merge attempt", now=episode_start
+        )
+        await session.commit()
+    state = _stale_merge_block_state(episode_start=episode_start)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    before_execute = datetime.now(UTC)
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=later_workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=322,
+        status=_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{later_workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+    after_execute = datetime.now(UTC)
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(later_workspace_id)
+        assert workspace is not None
+
+    # The monitor parked on the merge-queue wait (non-human gate), not a merge.
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    # PRESERVE-WHILE-QUEUED: the (stale) marker is PRESERVED behind the queue —
+    # the surfaced "awaiting human" signal stays up because resolution cannot be
+    # confirmed while queued. The bounded false-positive is accepted.
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.awaiting_human_since == episode_start
+    assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
+    # The marker was re-stamped (current wall-clock) and preserved in state, NOT
+    # aged out by TTL.
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    preserved = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    assert preserved != "1"
+    # The re-stamp is a current wall-clock bracketed by the _execute call, so the
+    # TTL clock resets against real time for the next wait. Bracketing (rather
+    # than a fixed 30s threshold) is immune to CI stalls and rejects negative
+    # (future) timestamps.
+    assert before_execute <= datetime.fromisoformat(preserved) <= after_execute
+
+
+@pytest.mark.unit
+async def test_resolved_branch_protection_marker_preserved_on_reviewer_settle_wait(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """#663 PRESERVE-WHILE-QUEUED parity: a RESOLVED branch-protection marker is
+    PRESERVED when the poll parks on the non-check reviewer-settle wait, NOT
+    cleared by TTL age-out (operator decision on #663).
+    """
+    pr_number = 323
+    head_sha = "c" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    # The non-check reviewer settle wait only triggers for refactor tasks with
+    # configured non-check reviewers.
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.task_class = TaskClass.refactor_task.value
+        await session.commit()
+
+    # Seed the surfaced attention + STALE marker from a prior, now-resolved poll.
+    episode_start = datetime(2026, 4, 26, 11, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            workspace_id, reason="GitHub rejected the merge attempt", now=episode_start
+        )
+        await session.commit()
+    state = _stale_merge_block_state(episode_start=episode_start)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    before_execute = datetime.now(UTC)
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=pr_number,
+        status=_status(head_sha=head_sha),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+    after_execute = datetime.now(UTC)
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    # The monitor parked on the reviewer-settle wait (non-human gate), not a merge.
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    settle_ops = [
+        op
+        for op in operations
+        if op.type == OperationType.monitor_state.value
+        and op.payload.get("reason_code") == "NON_CHECK_REVIEWER_SETTLE"
+    ]
+    assert len(settle_ops) == 1
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    # PRESERVE-WHILE-QUEUED: the (stale) marker is PRESERVED behind the
+    # reviewer-settle wait — the surfaced signal stays up.
+    assert workspace.awaiting_human_since == episode_start
+    assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    preserved = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    assert preserved != "1"
+    # The re-stamp is a current wall-clock bracketed by the _execute call, immune
+    # to CI stalls and negative (future) timestamps (reviewer hardening).
+    assert before_execute <= datetime.fromisoformat(preserved) <= after_execute
+
+
+@pytest.mark.unit
+async def test_resolved_branch_protection_marker_preserved_on_initial_grace_wait(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """#663 PRESERVE-WHILE-QUEUED parity: a RESOLVED branch-protection marker is
+    PRESERVED when the poll parks on the initial-review-grace wait, NOT cleared
+    by TTL age-out (operator decision on #663).
+    """
+    pr_number = 324
+    workspace_id = await seed_monitoring_workspace(factory, pr_number=pr_number)
+
+    # Seed the surfaced attention + STALE marker from a prior, now-resolved poll.
+    episode_start = datetime(2026, 4, 26, 11, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            workspace_id, reason="GitHub rejected the merge attempt", now=episode_start
+        )
+        await session.commit()
+    state = _stale_merge_block_state(episode_start=episode_start)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=900,
+    )
+
+    before_execute = datetime.now(UTC)
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=pr_number,
+        status=_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+    after_execute = datetime.now(UTC)
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    # The monitor parked on the initial-review-grace wait (non-human gate).
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    grace_ops = [
+        op
+        for op in operations
+        if op.type == OperationType.monitor_state.value
+        and op.payload.get("reason_code") == "INITIAL_REVIEW_GRACE"
+    ]
+    assert len(grace_ops) == 1
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    # PRESERVE-WHILE-QUEUED: the (stale) marker is PRESERVED behind the
+    # initial-grace wait — the surfaced signal stays up.
+    assert workspace.awaiting_human_since == episode_start
+    assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    preserved = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    assert preserved != "1"
+    # The re-stamp is a current wall-clock bracketed by the _execute call, immune
+    # to CI stalls and negative (future) timestamps (reviewer hardening).
+    assert before_execute <= datetime.fromisoformat(preserved) <= after_execute
