@@ -738,6 +738,7 @@ async def test_merge_queue_wait_preserves_active_branch_protection_attention(
     # it because the forge still reports branch protection as blocked, not
     # because the timestamp is fresh.
     active_block_state.mark_merge_block_attention(now=datetime.now(UTC))
+    original_marker = active_block_state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
 
     terminal = await runner._execute(
         action=Merge(),
@@ -766,46 +767,29 @@ async def test_merge_queue_wait_preserves_active_branch_protection_attention(
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
     assert workspace.awaiting_human_since == episode_start
     assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
-    # The still-active marker was refreshed to this poll's wall-clock so the TTL
-    # clock resets for the next non-human gate wait (PRRT_kwDOSJAM6s6LbXWQ).
-    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in active_block_state.threads_addressed_ids
-    refreshed_marker = active_block_state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
-    assert refreshed_marker != "1"
+    # Queue waits preserve from forge status and do not re-stamp the marker.
+    assert (
+        active_block_state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+        == original_marker
+    )
 
 
 @pytest.mark.unit
-async def test_clear_stale_merge_attention_restamps_preserved_marker(
+async def test_merge_critical_section_restamps_preserved_marker(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6LbXWQ + PRRT_kwDOSJAM6s6LdM4X: ``_clear_stale_merge_attention``
-    must re-stamp a still-active marker so the TTL clock resets and consecutive
-    non-human gate waits do not age the marker past the TTL.
+    """#661 critical-section preserve re-stamps with a current wall-clock.
 
-    Without the re-stamp, a marker stamped once by the branch-protection fallback
-    is never refreshed during merge-queue/reviewer-settle/initial-grace waits
-    (the fallback only re-stamps when it actually runs, after the serialized
-    merge coordinator). After enough consecutive waits the marker ages past the
-    TTL and the next wait clears ``awaiting_human_since`` even though the human
-    gate is unchanged (PRRT_kwDOSJAM6s6LbXWQ).
-
-    PRRT_kwDOSJAM6s6LdM4X: the re-stamp must use a CURRENT wall-clock, not the
-    caller-supplied ``now``. The merge critical-section entry and post-lock gate
-    clears pass the coordinator-ENTRY timestamp as ``now`` so a marker FRESH at
-    entry is preserved across a serialized merge wait longer than the TTL
-    (PRRT_kwDOSJAM6s6La_SZ, PRRT_kwDOSJAM6s6LcfXk); but that entry timestamp is
-    stale relative to REAL time after the wait. Re-stamping the marker with the
-    stale entry timestamp would let the marker age past the TTL during the
-    subsequent post-lock gate wait, so the next poll — or a restart during that
-    wait — would clear ``awaiting_human_since`` though the operator block never
-    resolved. This test models that scenario directly: the caller ``now`` is a
-    stale entry timestamp (in the past, but still within the TTL of the marker
-    so the freshness check preserves it), and asserts the re-stamp is a CURRENT
-    wall-clock (within the real-now window around the call), NOT the stale
-    caller ``now``.
+    Queue/reviewer/grace waits are forge-signal driven (#671) and preserve
+    without re-stamping; this helper now covers the merge critical-section TTL
+    path only. When a marker is fresh at critical-section entry, the helper must
+    preserve it and write a current timestamp rather than the caller's older
+    entry timestamp, so a later critical-section check or restart does not age
+    the same active branch-protection block out as resolved.
     """
     workspace_id = await seed_monitoring_workspace(factory, pr_number=333)
     runner = make_runner(
@@ -824,12 +808,10 @@ async def test_clear_stale_merge_attention_restamps_preserved_marker(
     state = MonitorState()
     state.mark_merge_block_attention(now=t_fallback)
 
-    # The coordinator-ENTRY timestamp was captured 10s ago (before a serialized
-    # merge wait). The marker age at entry is 20s (< 120s TTL) → FRESH at entry
-    # → preserved. But that entry timestamp is STALE relative to real time after
-    # the wait. The re-stamp MUST use a current wall-clock so the marker is fresh
-    # against real time going into the post-lock gate wait, NOT the stale entry
-    # timestamp.
+    # The coordinator-ENTRY timestamp was captured 10s ago. The marker age at
+    # entry is 20s (< 120s TTL), so it is fresh for the critical-section
+    # preserve decision. The re-stamp must use a current wall-clock, not the
+    # stale entry timestamp.
     stale_entry_now = real_start - timedelta(seconds=10)
     before_call = datetime.now(UTC)
     await runner._clear_stale_merge_attention(workspace_id, state, now=stale_entry_now)
@@ -839,19 +821,14 @@ async def test_clear_stale_merge_attention_restamps_preserved_marker(
         state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
     )
     # The re-stamp is a CURRENT wall-clock (within the real-now window around
-    # the call), NOT the stale caller ``now``: the marker is fresh relative to
-    # real time going into the gate wait.
+    # the call), NOT the stale caller ``now``.
     assert first_stamp != stale_entry_now
     assert before_call <= first_stamp <= after_call
-    # And the marker age against the stale entry timestamp is now tiny (re-stamp
-    # is current, entry is in the past) rather than the 10s it was before — the
-    # TTL clock reset against real time, not the entry clock.
+    # And the stamp moved forward relative to the stale entry timestamp: the TTL
+    # clock for the critical-section path resets against real time.
     assert (first_stamp - stale_entry_now).total_seconds() >= 0
 
-    # A second preserve (modeling a later poll's post-lock clear) still preserves
-    # the marker and re-stamps it to a current wall-clock: consecutive non-human
-    # gate waits do not age the marker past the TTL because each preserve resets
-    # the clock against real time.
+    # A second critical-section preserve still keeps the marker current.
     second_before = datetime.now(UTC)
     await runner._clear_stale_merge_attention(workspace_id, state, now=stale_entry_now)
     second_after = datetime.now(UTC)
@@ -862,7 +839,7 @@ async def test_clear_stale_merge_attention_restamps_preserved_marker(
     assert second_stamp != stale_entry_now
     assert second_before <= second_stamp <= second_after
 
-    # Parity: a genuinely RESOLVED marker (stale relative to its OWN last stamp,
+    # Parity: a genuinely RESOLVED marker (stale relative to its own last stamp,
     # well past the TTL with no re-stamp in between) is still cleared. Stamp a
     # fresh marker, then jump ``now`` past the TTL with no intervening preserve.
     resolved_state = MonitorState()
@@ -873,7 +850,7 @@ async def test_clear_stale_merge_attention_restamps_preserved_marker(
 
 
 @pytest.mark.unit
-async def test_clear_stale_merge_attention_restamps_preserved_marker_durably(
+async def test_merge_critical_section_restamps_preserved_marker_durably(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
@@ -881,27 +858,13 @@ async def test_clear_stale_merge_attention_restamps_preserved_marker_durably(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6LcL-G + PRRT_kwDOSJAM6s6LdM4X: the preserve re-stamp must
-    be DURABLE on the workspace row, not only in the in-memory ``state`` the loop
-    flushes later, AND must use a CURRENT wall-clock (not the caller's stale
-    ``now``).
+    """#661 critical-section preserve re-stamp is durable and current.
 
-    The outer ``run()`` loop only flushes ``state`` after ``_execute`` returns
-    (``runner.py:455``); a cancel/restart during the subsequent non-human gate
-    wait (merge queue / reviewer settle / initial review grace) would strand
-    the OLD marker timestamp on the persisted row. The next poll's
-    ``_clear_stale_merge_attention`` would then measure the stale marker
-    against ``now``, exceed the TTL, clear ``awaiting_human_since``, and let the
-    still-active branch-protection rejection re-stamp it — restarting the
-    human-wait timer even though the operator block never resolved.
-
-    The durable re-stamp uses a CURRENT wall-clock (PRRT_kwDOSJAM6s6LdM4X) so the
-    persisted marker is fresh relative to real time going into the gate wait,
-    not the stale coordinator-ENTRY timestamp the caller passes as ``now``.
-    Assert the re-stamped marker is on the persisted ``monitor_threads_addressed``
-    row WITHOUT any ``_persist_state`` flush (mirroring
-    ``test_terminal_directive_drop_clears_stale_preserved_marker_durably``),
-    and that it is a current wall-clock rather than the caller's ``now``.
+    The outer ``run()`` loop only flushes ``state`` after ``_execute`` returns.
+    This helper therefore persists the critical-section re-stamp directly, so a
+    cancel/restart cannot reload the old marker and age out the same active
+    branch-protection block. Queue/reviewer/grace waits use the #671 forge
+    signal path and do not re-stamp.
     """
     workspace_id = await seed_monitoring_workspace(factory, pr_number=334)
     runner = make_runner(
@@ -926,9 +889,8 @@ async def test_clear_stale_merge_attention_restamps_preserved_marker_durably(
     monkeypatch.setattr(runner, "_persist_state", _fail_persist_state)
 
     # Preserve + re-stamp: the caller passes a STALE coordinator-ENTRY timestamp
-    # (10s ago, marker age 20s < TTL → fresh at entry → preserved). The re-stamp
-    # must use a CURRENT wall-clock so the persisted marker is fresh against real
-    # time going into the gate wait.
+    # (10s ago, marker age 20s < TTL, so fresh at entry). The re-stamp must use
+    # a current wall-clock and be persisted directly.
     stale_entry_now = real_start - timedelta(seconds=10)
     before_call = datetime.now(UTC)
     await runner._clear_stale_merge_attention(workspace_id, state, now=stale_entry_now)

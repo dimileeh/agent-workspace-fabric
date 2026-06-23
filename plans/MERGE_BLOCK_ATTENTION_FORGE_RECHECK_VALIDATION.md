@@ -63,3 +63,28 @@ Plan reference: `plans/MERGE_BLOCK_ATTENTION_FORGE_RECHECK_PLAN.md`
   documentation requirement for this agent pass.
 - No broad coverage command was run during this repair, consistent with the
   workspace contract and the saved plan non-goals.
+
+## Attempt 3 Conformance Repair
+
+- Retargeted the stale queue-wait TTL re-stamp regressions in
+  `tests/unit/runtime/test_merge_queue_ordering.py`:
+  - `test_clear_stale_merge_attention_restamps_preserved_marker` is now
+    `test_merge_critical_section_restamps_preserved_marker`.
+  - `test_clear_stale_merge_attention_restamps_preserved_marker_durably` is now
+    `test_merge_critical_section_restamps_preserved_marker_durably`.
+- Both tests now document the #661 merge critical-section-only TTL/re-stamp
+  behavior. Queue/reviewer/grace waits remain covered by #671 forge-signal
+  tests and preserve without re-stamping.
+- Updated
+  `test_merge_queue_wait_preserves_active_branch_protection_attention` to assert
+  the queue-wait marker is stable when forge status is `BLOCKED`, rather than
+  asserting or describing a queue-wait re-stamp.
+
+Focused evidence:
+
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_merge_queue_ordering.py::test_merge_queue_wait_preserves_active_branch_protection_attention tests/unit/runtime/test_merge_queue_ordering.py::test_merge_critical_section_restamps_preserved_marker tests/unit/runtime/test_merge_queue_ordering.py::test_merge_critical_section_restamps_preserved_marker_durably -q`
+  - Passed: `3 passed in 4.82s`
+- `uv run --python 3.12 --extra dev ruff check tests/unit/runtime/test_merge_queue_ordering.py`
+  - Passed: `All checks passed!`
+- `uv run --python 3.12 --extra dev ruff format --check tests/unit/runtime/test_merge_queue_ordering.py`
+  - Passed: `1 file already formatted`
