@@ -518,11 +518,25 @@ async def _clear_stale_merge_attention(
     merge attempt never re-stamp the marker, so a still-active block can age past
     the TTL across consecutive waits and the next wait's clear would drop
     ``awaiting_human_since`` even though the human gate is unchanged
-    (PRRT_kwDOSJAM6s6LbXWQ). Re-stamping the marker to ``now`` whenever this
-    helper preserves it resets the TTL clock for the next wait, so a marker that
-    was fresh when observed stays fresh across consecutive non-human gate waits.
+    (PRRT_kwDOSJAM6s6LbXWQ). Re-stamping the marker whenever this helper
+    preserves it resets the TTL clock for the next wait, so a marker that was
+    fresh when observed stays fresh across consecutive non-human gate waits.
     The branch-protection fallback still re-stamps when it fires, and a genuinely
     resolved marker (stale) is still cleared below.
+
+    The freshness check measures the marker's age against the caller-supplied
+    ``now`` (defaulting to the current wall-clock), but the durable re-stamp on
+    preserve ALWAYS uses a fresh ``datetime.now(UTC)``. The merge critical-section
+    entry and post-lock gate clears pass the coordinator-ENTRY timestamp as ``now``
+    so a marker FRESH at entry is preserved across a serialized merge wait longer
+    than the TTL (PRRT_kwDOSJAM6s6La_SZ, PRRT_kwDOSJAM6s6LcfXk); but that entry
+    timestamp is stale relative to real time after the wait, so re-stamping the
+    marker with it would let the marker age past the TTL during the subsequent
+    post-lock gate wait. The next poll — or a restart during that wait — would
+    then clear ``awaiting_human_since`` though the operator block never resolved
+    (PRRT_kwDOSJAM6s6LdM4X). Using a current wall-clock for the re-stamp keeps
+    the TTL clock fresh against real time going into the gate wait, while the
+    entry-time reference still governs the preserve/clear decision.
     """
     ttl_seconds = self._config.merge_block_attention_ttl_seconds
     reference = now if now is not None else datetime.now(UTC)
@@ -535,7 +549,26 @@ async def _clear_stale_merge_attention(
         # waits that never reach the merge-blocker fallback let the marker age
         # past the TTL and the next wait clears the still-active signal
         # (PRRT_kwDOSJAM6s6LbXWQ).
-        state.mark_merge_block_attention(now=reference)
+        #
+        # The freshness check above uses ``reference`` (the caller-supplied
+        # ``now``): the merge critical-section entry and post-lock gate clears
+        # pass the coordinator-ENTRY timestamp so a marker FRESH at entry is
+        # preserved across a serialized merge wait longer than the TTL
+        # (PRRT_kwDOSJAM6s6La_SZ, PRRT_kwDOSJAM6s6LcfXk). But the durable
+        # re-stamp that follows must use a CURRENT wall-clock: the entry
+        # timestamp is stale relative to real time after the wait, so stamping
+        # the marker with it would let the marker age past the TTL during the
+        # subsequent post-lock gate wait (merge queue / reviewer settle /
+        # initial review grace). The next poll — or a restart during that
+        # wait — would then measure the stale marker, exceed the TTL, clear
+        # ``awaiting_human_since``, and let the still-active branch-protection
+        # rejection re-stamp it, restarting the human-wait timer though the
+        # operator block never resolved (PRRT_kwDOSJAM6s6LdM4X). Use a fresh
+        # wall-clock for the re-stamp so the TTL clock resets against real time
+        # going into the gate wait; the freshness check is unaffected because
+        # a marker fresh at ``reference`` is still fresh at any later clock.
+        stamp_now = datetime.now(UTC)
+        state.mark_merge_block_attention(now=stamp_now)
         # Persist the re-stamped marker DURABLY before returning. The outer
         # ``run()`` loop only flushes ``state`` after ``_execute`` returns
         # (``runner.py:455``); a cancel/restart during the subsequent non-human
