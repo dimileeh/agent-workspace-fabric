@@ -1437,21 +1437,31 @@ async def handle_merge_action(
             # is still blocked (PRRT_kwDOSJAM6s6LXscz); a non-``Merge`` ``decide()``
             # drops the marker via ``loop._execute``.
             #
-            # Persist the marker BEFORE setting ``awaiting_human_since``: the
-            # attention flag commits in its own transaction inside
-            # ``_set_workspace_attention``, while the marker lives in the
-            # in-memory ``state`` the outer ``run()`` loop persists only AFTER
-            # ``_execute`` returns. A restart/cancel in that window would strand
-            # the DB with ``awaiting_human_since`` set but no marker, so the next
-            # poll's ``_clear_stale_merge_attention`` would clear the flag and the
-            # deterministic rejection would re-stamp it to ``now`` — resetting the
-            # human-wait timer though the block never resolved
-            # (PRRT_kwDOSJAM6s6LbY_X). Persisting first mirrors the merge-method
-            # preflight arm's ordering and makes the marker durable across that
-            # window.
+            # Persist the marker AND set ``awaiting_human_since`` in a SINGLE
+            # transaction. The previous ordering (``_persist_state`` then a separate
+            # ``_set_workspace_attention`` commit) closed the window where
+            # ``awaiting_human_since`` was set but the marker was missing
+            # (PRRT_kwDOSJAM6s6LbY_X), but created the RECIPROCAL window: a
+            # cancel/restart after the marker commit but before the attention
+            # commit left the DB with a FRESH marker but NULL
+            # ``awaiting_human_since``. On the next poll, if the PR parked on a
+            # non-human gate wait (merge queue / reviewer settle / initial review
+            # grace / merge lock) before another merge attempt reached this
+            # fallback, ``_clear_stale_merge_attention``'s preserve path saw the
+            # fresh marker, re-stamped it, and returned WITHOUT setting the
+            # attention flag — so the active branch-protection escalation was
+            # never surfaced to the operator until a later merge retry re-entered
+            # the fallback (PRRT_kwDOSJAM6s6Lcgk0). The atomic pairing writes both
+            # pieces to the same workspace row in one transaction so a restart can
+            # never observe one without the other. The outer ``run()`` loop still
+            # flushes the rest of ``state`` via its own ``_persist_state`` after
+            # ``_execute`` returns.
             state.mark_merge_block_attention()
-            await self._persist_state(workspace_id, state)
-            await self._set_workspace_attention(workspace_id, reason=blocker_reason)
+            await self._set_workspace_attention_with_merge_block_marker(
+                workspace_id,
+                state,
+                reason=blocker_reason,
+            )
             try:
                 await self._post_human_notification_once(
                     repo=repo,

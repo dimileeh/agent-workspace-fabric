@@ -409,6 +409,61 @@ async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str)
         await s.commit()
 
 
+async def _set_workspace_attention_with_merge_block_marker(
+    self: Any,
+    workspace_id: str,
+    state: MonitorState,
+    *,
+    reason: str,
+) -> None:
+    """Atomically persist the merge-block attention marker AND set the
+    awaiting-human attention flag in a SINGLE transaction.
+
+    The branch-protection fallback's previous ordering — ``_persist_state`` (marker
+    durable) then a separate ``_set_workspace_attention`` commit — closed the window
+    where ``awaiting_human_since`` was set but the marker was missing
+    (PRRT_kwDOSJAM6s6LbY_X), but created the RECIPROCAL window: a cancel/restart
+    after the marker commit but before the attention commit leaves the DB with a
+    FRESH ``__awf_merge_block_attention__`` marker but NULL
+    ``awaiting_human_since``. On the next poll, if the PR parks on a non-human gate
+    wait (merge queue / reviewer settle / initial review grace / merge lock)
+    BEFORE another merge attempt reaches the fallback, the preserve path in
+    ``_clear_stale_merge_attention`` sees the fresh marker, re-stamps it, and
+    returns WITHOUT setting ``awaiting_human_since`` — so the active
+    branch-protection escalation is never surfaced to the operator until a later
+    merge retry re-enters the fallback (PRRT_kwDOSJAM6s6Lcgk0).
+
+    Writing both the marker (merged onto ``monitor_threads_addressed``) and the
+    attention columns (``awaiting_human_since`` / ``awaiting_human_reason``) on the
+    same workspace row inside one transaction makes the two pieces durable together:
+    a restart can never observe one without the other. The marker is taken from the
+    in-memory ``state`` (already stamped by ``mark_merge_block_attention``), and
+    the attention flag uses the same ``COALESCE`` episode-stability semantics as
+    ``set_workspace_attention``.
+
+    The merge-method preflight arm needs no such atomic pairing: it records a
+    sticky ``_merge_method_blocked_key`` blocker that flips ``decide()`` to
+    ``NotifyHuman``, so the ``Merge``-arm non-human gate waits (and their preserve
+    path) are never reached for that head — the reciprocal window cannot form.
+    """
+    stamped = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
+        if ws is None:
+            return
+        if stamped is not None:
+            threads_addressed = dict(ws.monitor_threads_addressed or {})
+            if threads_addressed.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) != stamped:
+                threads_addressed[_MERGE_BLOCK_ATTENTION_STATE_KEY] = stamped
+                ws.monitor_threads_addressed = threads_addressed
+        await WorkspaceRepository(s).set_workspace_attention(
+            workspace_id,
+            reason=reason,
+            now=datetime.now(UTC),
+        )
+        await s.commit()
+
+
 async def _clear_stale_merge_attention(
     self: Any,
     workspace_id: str,

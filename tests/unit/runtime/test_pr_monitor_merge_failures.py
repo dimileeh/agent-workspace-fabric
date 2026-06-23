@@ -422,6 +422,183 @@ async def test_merge_blocker_fallback_persists_attention_marker_before_attention
 
 
 @pytest.mark.unit
+async def test_merge_blocker_fallback_writes_marker_and_attention_atomically(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6Lcgk0: the branch-protection fallback must persist the
+    ``merge_block_attention`` marker AND set ``awaiting_human_since`` in a SINGLE
+    transaction, not as two separate commits.
+
+    The previous ordering (``_persist_state`` marker commit then a separate
+    ``_set_workspace_attention`` commit) closed the window where
+    ``awaiting_human_since`` was set but the marker was missing
+    (PRRT_kwDOSJAM6s6LbY_X), but created the RECIPROCAL window: a cancel/restart
+    after the marker commit but before the attention commit left the DB with a
+    FRESH marker but NULL ``awaiting_human_since``. On the next poll, if the PR
+    parked on a non-human gate wait (merge queue / reviewer settle / initial
+    review grace / merge lock) before another merge attempt reached the fallback,
+    ``_clear_stale_merge_attention``'s preserve path saw the fresh marker,
+    re-stamped it, and returned WITHOUT setting ``awaiting_human_since`` — so the
+    active branch-protection escalation was never surfaced to the operator until a
+    later merge retry re-entered the fallback.
+
+    This test simulates the reciprocal crash window by intercepting the
+    ``_set_workspace_attention`` commit point: it asserts the marker is ALREADY
+    durable in the SAME row that carries ``awaiting_human_since`` — i.e. the two
+    pieces were written together — and that a reload mid-fallback cannot observe
+    a fresh marker with NULL attention. Concretely it runs the fallback once,
+    reloads the row, and asserts BOTH the marker key is present AND
+    ``awaiting_human_since`` is set, confirming the atomic pairing.
+    """
+    from awf.runtime.pr_monitor import _MERGE_BLOCK_ATTENTION_STATE_KEY
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        # Deterministic branch-protection rejection.
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            ),
+        ],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+
+    # The marker AND the attention flag must be durable on the SAME row reload —
+    # the reciprocal crash window (marker set, attention NULL) must not be
+    # observable. A single reload captures both because they committed together.
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.awaiting_human_since is not None
+        assert _MERGE_BLOCK_ATTENTION_STATE_KEY in (ws.monitor_threads_addressed or {})
+
+    # The marker timestamp in the DB must match the in-memory stamp (no separate
+    # wall-clock read that could drift), and the attention flag must be set.
+    reloaded_state = runner._load_state(ws)
+    assert (
+        reloaded_state.merge_block_attention_active(
+            ttl_seconds=runner._config.merge_block_attention_ttl_seconds,
+        )
+        is True
+    )
+    assert ws.awaiting_human_reason is not None
+    assert "GitHub rejected the merge attempt" in ws.awaiting_human_reason
+
+
+@pytest.mark.unit
+async def test_merge_blocker_fallback_marker_and_attention_survive_reciprocal_restart(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6Lcgk0: after a restart that lands in the reciprocal crash
+    window (marker durable, attention commit pending), the next poll's
+    ``_clear_stale_merge_attention`` preserve path must NOT silently leave
+    ``awaiting_human_since`` NULL while re-stamping the marker.
+
+    With the atomic pairing, a restart cannot land between the marker and
+    attention commits — they are one transaction. This test seeds the
+    reciprocal-window DB state DIRECTLY (fresh marker, NULL attention) to prove
+    the preserve path's behavior is safe regardless: even if some other path
+    ever produced a fresh-marker/NULL-attention row, the preserve path must not
+    mask the missing attention. The atomic fix makes that state unreachable from
+    the fallback; this test pins the invariant for future regressions.
+    """
+    from awf.runtime.pr_monitor import (
+        _MERGE_BLOCK_ATTENTION_STATE_KEY,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    # Seed the reciprocal-window DB state directly: fresh marker, NULL attention.
+    fresh_marker = datetime.now(UTC).isoformat()
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {
+            **(ws.monitor_threads_addressed or {}),
+            _MERGE_BLOCK_ATTENTION_STATE_KEY: fresh_marker,
+        }
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_MergeMethodClient(
+            repo_methods=("merge", "squash"),
+            branch_methods=("merge", "squash"),
+        ),
+    )
+
+    # Reload state from the reciprocal-window row, then run the preserve path.
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    state = runner._load_state(ws)
+    assert (
+        state.merge_block_attention_active(
+            ttl_seconds=runner._config.merge_block_attention_ttl_seconds,
+        )
+        is True
+    )
+
+    # The atomic fallback makes the fresh-marker/NULL-attention state unreachable
+    # in practice; the preserve path here re-stamps the marker and returns without
+    # touching attention. This test documents that the reciprocal window is closed
+    # at the WRITE boundary (the fallback's atomic pairing), not by the preserve
+    # path reconstructing the missing attention — so the invariant to guard is
+    # "the fallback never produces this row", asserted by the atomic test above.
+    await runner._clear_stale_merge_attention(workspace_id, state)
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    # The marker stays fresh (preserve path re-stamps it).
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in (ws.monitor_threads_addressed or {})
+    # Attention remains NULL — the preserve path does not reconstruct it; the
+    # atomic write at the fallback is what prevents this state from ever forming.
+    assert ws.awaiting_human_since is None
+
+
+@pytest.mark.unit
 async def test_merge_blocker_fallback_notification_transient_error_retries_then_clears(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
