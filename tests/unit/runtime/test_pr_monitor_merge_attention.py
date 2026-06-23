@@ -20,7 +20,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import GitHubClient, GitHubClientError
+from awf.common.github_client import GitHubClientError
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
@@ -442,7 +442,7 @@ async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestam
         session_factory=factory,
         runner=FakeCommandRunner(),
         adapter=FakeAdapter(),
-        gh=GitHubClient(FakeCommandRunner()),
+        gh=gh,
         monitor_config=monitor_config,
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=20,
@@ -703,7 +703,7 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
         session_factory=factory,
         runner=FakeCommandRunner(),
         adapter=FakeAdapter(),
-        gh=GitHubClient(FakeCommandRunner()),
+        gh=gh,
         monitor_config=monitor_config,
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=20,
