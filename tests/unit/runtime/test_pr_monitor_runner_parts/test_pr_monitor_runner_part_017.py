@@ -196,6 +196,13 @@ class TestParseVerdict:
         assert result.reason is None
 
     @pytest.mark.unit
+    def test_private_awf_verdict_fixed_placeholder_only_has_no_reason(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: FIXED: <one-sentence summary>")
+
+        assert result.verdict == "fix_committed"
+        assert result.reason is None
+
+    @pytest.mark.unit
     def test_private_awf_verdict_fixed_marker_preserves_reason(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: FIXED: pushed regression test")
 
@@ -205,6 +212,13 @@ class TestParseVerdict:
     @pytest.mark.unit
     def test_false_positive_case_insensitive(self) -> None:
         assert _parse_verdict("false positive: minor") == "false_positive"
+
+    @pytest.mark.unit
+    def test_bare_false_positive_without_reason_has_no_reason(self) -> None:
+        result = _parse_verdict_result("FALSE POSITIVE:")
+
+        assert result.verdict == "false_positive"
+        assert result.reason is None
 
     @pytest.mark.unit
     def test_defer_marker(self) -> None:

@@ -18,16 +18,21 @@ Scope is strictly limited to `src/awf/runtime/pr_monitor_runner/helpers.py` and
 
 ## Requirements checklist
 
-- [ ] Do not switch branches, push, rebase, or run broad AWF/GitHub validation.
-- [ ] Fix the `AWF-VERDICT` parsing behavior so a real `NEEDS_HUMAN` reason is
+- [x] Do not switch branches, push, rebase, or run broad AWF/GitHub validation.
+- [x] Fix the `AWF-VERDICT` parsing behavior so a real `NEEDS_HUMAN` reason is
   preserved when followed by a placeholder verdict line in the same output.
-- [ ] Keep behavior minimal and preserve existing verdict priority ordering and parsing
+- [x] Keep behavior minimal and preserve existing verdict priority ordering and parsing
   of prompt-echo fallback lines.
-- [ ] Resolve the file line-limit gate by splitting tests from the oversized shard-
+- [x] Resolve the file line-limit gate by splitting tests from the oversized shard-
   8 file into a new focused file.
-- [ ] Run focused regression tests for both touched test modules and the maintainability
+- [x] Run focused regression tests for both touched test modules and the maintainability
   line-limit test.
-- [ ] Record evidence in `plans/PR670_CI_FIX_VALIDATION.md`.
+- [x] Record evidence in `plans/PR670_CI_FIX_VALIDATION.md`.
+- [x] Diagnose the latest `python-full-coverage` failure from run `28008500485`.
+- [x] Add meaningful parser coverage for the uncovered verdict branches that caused
+  the combined line+branch percentage to miss `99.00%` by `0.003%`.
+- [x] Run focused parser tests with coverage against `helpers.py` and record evidence;
+  leave full AWF/GitHub validation to AWF after this agent phase.
 
 ## Implementation steps
 
@@ -40,3 +45,26 @@ Scope is strictly limited to `src/awf/runtime/pr_monitor_runner/helpers.py` and
    `test_pr_monitor_runner_part_017.py` so each test file remains under 1500 lines.
 3. Remove now-unused imports from `test_pr_monitor_runner_part_004.py`.
 4. Run focused commands for the changed test targets.
+
+## Iteration 2: latest full-coverage near miss
+
+GitHub Actions run `28008500485` reports:
+
+- `python-full-coverage`: combined line+branch coverage `98.997%`, below required `99.00%`.
+- `ci-required`: derivative failure because `python-full-coverage` failed.
+
+The downloaded `coverage.xml` shows the PR-touched verdict parser still has uncovered
+branches in `src/awf/runtime/pr_monitor_runner/helpers.py`:
+
+- AWF canonical verdict with no usable reason and no earlier fallback reason returns
+  the latest non-blocking verdict.
+- Bare verdict priority selection preserves a no-reason verdict when no reasoned
+  higher-priority verdict exists.
+
+Focused implementation steps:
+
+1. Add behavior tests to `tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_017.py`
+   for placeholder-only canonical `FIXED` and bare `FALSE POSITIVE:` without a reason.
+2. Run the parser test module and a targeted coverage command for `helpers.py`.
+3. Update `plans/PR670_CI_FIX_VALIDATION.md` with the focused evidence and note that
+   broad coverage validation remains AWF/GitHub-owned.
