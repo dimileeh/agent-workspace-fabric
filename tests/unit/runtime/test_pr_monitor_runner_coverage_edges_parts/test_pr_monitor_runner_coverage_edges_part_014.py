@@ -1074,6 +1074,48 @@ async def test_post_human_notification_sanitizes_placeholder_reason_before_posti
     )
 
 
+@pytest.mark.unit
+async def test_post_human_notification_uses_generic_reason_when_explicit_blocker_sanitizes_away(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    status = _status_for_helpers()
+    generic_reason = "human attention is required before AWF can continue"
+    state = MonitorState()
+
+    await runner._post_human_notification_once(
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=42,
+        status=status,
+        state=state,
+        blocker_reason='<what you need> and exit."',
+    )
+    await runner._post_human_notification_once(
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=42,
+        status=status,
+        state=state,
+        blocker_reason='<what you need> and exit."',
+    )
+
+    assert len(gh.posts) == 1
+    body = str(gh.posts[0]["body"])
+    assert "<what you need>" not in body
+    assert generic_reason in body
+    assert state.threads_addressed_ids[f"__awf_notify__:{status.head_sha}:{generic_reason}"] == (
+        "notified"
+    )
+
+
 class _RecordingGh:
     """Minimal gh double that records ``post_comment`` invocations."""
 
