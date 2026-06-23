@@ -239,24 +239,33 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         # triggering the follow-up defer capture (comment + filed issue +
         # resolve) on a thread the agent never actually addressed (#305).
         return VerdictResult(verdict="needs_human")
-    # Keep "last matching line wins" behavior across both private AWF verdict
-    # formats and plain bare verdict lines. The CLI output can contain inline
-    # template echoes before the actual final instruction; the latest parsable
-    # line in stdout is the verdict that should control monitor behavior.
-    for line in reversed(stdout.splitlines()):
+    # Preserve verdict priority while still respecting final-line intent:
+    # ``false_positive`` and ``needs_human`` must not be silently dropped by a
+    # later ``defer``. If multiple matches for the same verdict appear,
+    # prefer the latest reason.
+    verdicts: list[VerdictResult] = []
+    for line in stdout.splitlines():
         stripped = line.strip()
         awf_match = _AWF_VERDICT.fullmatch(stripped)
         if awf_match is not None:
-            return _verdict_result_from_match(
-                label=awf_match.group("label"),
-                reason=awf_match.group("reason"),
+            verdicts.append(
+                _verdict_result_from_match(
+                    label=awf_match.group("label"),
+                    reason=awf_match.group("reason"),
+                )
             )
         bare_match = _BARE_VERDICT_LINE.fullmatch(stripped)
         if bare_match is not None:
-            return _verdict_result_from_match(
-                label=bare_match.group("label"),
-                reason=bare_match.group("reason"),
+            verdicts.append(
+                _verdict_result_from_match(
+                    label=bare_match.group("label"),
+                    reason=bare_match.group("reason"),
+                )
             )
+    for verdict in ("false_positive", "needs_human", "defer", "fix_committed"):
+        for parsed in reversed(verdicts):
+            if parsed.verdict == verdict:
+                return parsed
     return VerdictResult(verdict="fix_committed")
 
 

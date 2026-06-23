@@ -1372,16 +1372,16 @@ class TestParseVerdict:
         assert _parse_verdict("Committed fix in abc1234: renamed variable.") == "fix_committed"
 
     @pytest.mark.unit
-    def test_later_bare_defer_overrides_earlier_false_positive_marker(self) -> None:
-        # Last matching verdict now controls, even across prior contradictory lines.
+    def test_later_defer_does_not_overwrite_prior_false_positive_marker(self) -> None:
+        # Hardening keeps blocking verdicts from being demoted by a later defer.
         reply = "FALSE POSITIVE: not a real issue.\nDEFER: follow-up issue"
-        assert _parse_verdict(reply) == "defer"
+        assert _parse_verdict(reply) == "false_positive"
 
     @pytest.mark.unit
-    def test_later_bare_defer_overrides_bare_needs_human(self) -> None:
-        # Last matching verdict now controls, including within bare verdict lines.
+    def test_later_defer_does_not_overwrite_bare_needs_human(self) -> None:
+        # ``NEEDS_HUMAN`` must keep merge-blocking priority over later defer text.
         reply = "NEEDS_HUMAN: follow-up needed\nDEFER: follow-up issue"
-        assert _parse_verdict(reply) == "defer"
+        assert _parse_verdict(reply) == "needs_human"
 
     @pytest.mark.unit
     def test_bare_false_positive_takes_precedence_over_bare_defer(self) -> None:
