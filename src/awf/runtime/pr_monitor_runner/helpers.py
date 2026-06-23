@@ -15,7 +15,6 @@ from datetime import (
     datetime,
 )
 from pathlib import Path
-from typing import Any
 
 from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
@@ -441,7 +440,7 @@ class _StalePendingCheckWarning:
     check_conclusion: str | None
     details_url: str | None
 
-    def payload(self: Any) -> dict[str, object]:
+    def payload(self: _StalePendingCheckWarning) -> dict[str, object]:
         return {
             "check_name": self.check_name,
             "age_seconds": self.age_seconds,
