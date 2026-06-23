@@ -62,6 +62,16 @@ class TestParseVerdict:
         assert result.reason == "maintainer decision required"
 
     @pytest.mark.unit
+    def test_private_awf_later_verdict_wins_over_prior_verdict(self) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FALSE POSITIVE: stale review boilerplate\n"
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer follow-up required"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer follow-up required"
+
+    @pytest.mark.unit
     def test_private_awf_multiple_needs_human_uses_latest_reason(self) -> None:
         result = _parse_verdict_result(
             "AWF-VERDICT: NEEDS_HUMAN: first pass needs human review\nAWF-VERDICT: NEEDS_HUMAN:"

@@ -239,9 +239,10 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         # triggering the follow-up defer capture (comment + filed issue +
         # resolve) on a thread the agent never actually addressed (#305).
         return VerdictResult(verdict="needs_human")
-    # Preserve verdict priority while still respecting final-line intent.
     # AWF-prefixed verdicts are canonical and must win over bare fallback lines,
-    # even when bare lines appear later in output.
+    # even when bare lines appear later in output. When multiple AWF verdicts are
+    # present, the final AWF line wins; if that line omits a reason, reuse the
+    # latest reason from an earlier line with the same canonical verdict.
     awf_verdicts: list[VerdictResult] = []
     bare_verdicts: list[VerdictResult] = []
     for line in stdout.splitlines():
@@ -263,6 +264,15 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                 )
             )
     verdicts = awf_verdicts or bare_verdicts
+    if verdicts is awf_verdicts:
+        latest = verdicts[-1]
+        if latest.reason is None:
+            latest_verdict = latest.verdict
+            for parsed in reversed(verdicts[:-1]):
+                if parsed.verdict == latest_verdict and parsed.reason is not None:
+                    return parsed
+            return latest
+        return latest
     for verdict in ("false_positive", "needs_human", "defer", "fix_committed"):
         selected: VerdictResult | None = None
         for parsed in reversed(verdicts):
