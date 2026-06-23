@@ -15,7 +15,6 @@ from datetime import (
     datetime,
 )
 from pathlib import Path
-from typing import Any
 
 from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
@@ -107,9 +106,6 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TRANSIENT_GITHUB_ERROR_MARKERS,
     _URL_CREDENTIAL_RE,
     _VALIDATION_RECOVERY_STALE_REASONS,
-    _VERDICT_DEFER,
-    _VERDICT_FALSE_POSITIVE,
-    _VERDICT_NEEDS_HUMAN,
 )
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
@@ -187,6 +183,16 @@ _reviewer_has_visible_check = _reviewer_settle._reviewer_has_visible_check
 _utc_datetime = _reviewer_settle._utc_datetime
 _visible_check_identities = _reviewer_settle._visible_check_identities
 
+_BARE_VERDICT_LINE = re.compile(
+    r"^(?P<label>FALSE\s+POSITIVE|DEFER|NEEDS[\s_]+HUMAN)\s*:\s*(?P<reason>[^\n\r]*)$",
+    re.IGNORECASE,
+)
+_VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
+    r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)\b[^>\n\r]{0,80}>",
+    re.IGNORECASE,
+)
+_CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
+
 
 async def _record_ignored_monitor_terminal_callback(
     repo: WorkspaceRepository,
@@ -234,38 +240,120 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         # triggering the follow-up defer capture (comment + filed issue +
         # resolve) on a thread the agent never actually addressed (#305).
         return VerdictResult(verdict="needs_human")
-    awf_match = _AWF_VERDICT.search(stdout)
-    if awf_match is not None:
-        # Canonicalize any run of whitespace/underscores to a single space, so
-        # every separator variant the label regex accepts (NEEDS_HUMAN,
-        # NEEDS HUMAN, NEEDS_ HUMAN, ...) maps to one label. The regex and this
-        # normalization must stay equally permissive, or a matched NEEDS_HUMAN
-        # could silently fall through to fix_committed — the unsafe dir (#305).
-        label = re.sub(r"[\s_]+", " ", awf_match.group("label").strip().lower())
-        reason = awf_match.group("reason").strip() or None
-        if label == "false positive":
-            return VerdictResult(verdict="false_positive", reason=reason)
-        if label == "needs human":
-            return VerdictResult(verdict="needs_human", reason=reason)
-        if label == "defer":
-            return VerdictResult(verdict="defer", reason=reason)
-        return VerdictResult(verdict="fix_committed", reason=reason)
-    if _VERDICT_FALSE_POSITIVE.search(stdout):
-        return VerdictResult(verdict="false_positive", reason=_verdict_reason(stdout))
-    # Check needs_human before defer so a bare ``NEEDS_HUMAN:`` (no
-    # ``AWF-VERDICT:`` prefix) blocks the merge instead of falling through to
-    # ``fix_committed`` and being resolved (the unsafe direction, #305).
-    if _VERDICT_NEEDS_HUMAN.search(stdout):
-        return VerdictResult(verdict="needs_human", reason=_verdict_reason(stdout))
-    if _VERDICT_DEFER.search(stdout):
-        return VerdictResult(verdict="defer", reason=_verdict_reason(stdout))
+    # AWF-prefixed verdicts are canonical and must win over bare fallback lines,
+    # even when bare lines appear later in output. When multiple AWF verdicts are
+    # present, the final AWF line wins. If that line omits a reason, preserve an
+    # earlier reason for the same verdict. Sanitized non-blocking placeholders
+    # (for example ``AWF-VERDICT: FIXED: <one-sentence summary>``) may fall back
+    # to an earlier reasoned verdict or a bare blocking fallback so a prompt echo
+    # cannot clear a hard block; blocking final verdicts remain authoritative
+    # even with no usable reason.
+    awf_verdicts: list[VerdictResult] = []
+    bare_verdicts: list[VerdictResult] = []
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        for verdict_line in _verdict_line_candidates(stripped):
+            awf_match = _AWF_VERDICT.fullmatch(verdict_line)
+            if awf_match is not None:
+                awf_verdicts.append(
+                    _verdict_result_from_match(
+                        label=awf_match.group("label"),
+                        reason=awf_match.group("reason"),
+                    )
+                )
+            bare_match = _BARE_VERDICT_LINE.fullmatch(verdict_line)
+            if bare_match is not None:
+                bare_verdicts.append(
+                    _verdict_result_from_match(
+                        label=bare_match.group("label"),
+                        reason=bare_match.group("reason"),
+                    )
+                )
+    verdicts = awf_verdicts or bare_verdicts
+    if verdicts is awf_verdicts:
+        latest = verdicts[-1]
+        if latest.reason is None:
+            latest_verdict = latest.verdict
+            for parsed in reversed(verdicts[:-1]):
+                if parsed.verdict == latest_verdict and parsed.reason is not None:
+                    return parsed
+            if latest_verdict in {"defer", "needs_human"}:
+                return latest
+            for parsed in reversed(verdicts[:-1]):
+                if parsed.reason is not None:
+                    return parsed
+            bare_blocking = _select_bare_verdict(
+                bare_verdicts,
+                priorities=("needs_human", "defer"),
+            )
+            if bare_blocking is not None:
+                return bare_blocking
+            return latest
+        return latest
+    selected_bare = _select_bare_verdict(
+        bare_verdicts,
+        priorities=("needs_human", "false_positive", "defer", "fix_committed"),
+    )
+    if selected_bare is not None:
+        return selected_bare
     return VerdictResult(verdict="fix_committed")
 
 
-def _verdict_reason(stdout: str) -> str | None:
-    _prefix, _separator, reason = stdout.partition(":")
+def _select_bare_verdict(
+    verdicts: Sequence[VerdictResult],
+    *,
+    priorities: Sequence[Verdict],
+) -> VerdictResult | None:
+    for verdict in priorities:
+        selected: VerdictResult | None = None
+        for parsed in reversed(verdicts):
+            if parsed.verdict != verdict:
+                continue
+            if parsed.reason is not None:
+                return parsed
+            if selected is None:
+                selected = parsed
+        if selected is not None:
+            return selected
+    return None
+
+
+def _verdict_line_candidates(stripped: str) -> Iterable[str]:
+    yield stripped
+    code_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(stripped)
+    if code_match is None:
+        return
+    inner = code_match.group("line").strip()
+    if inner:
+        yield inner
+
+
+def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
+    # Canonicalize any run of whitespace/underscores to a single space, so
+    # every separator variant the label regex accepts (NEEDS_HUMAN,
+    # NEEDS HUMAN, NEEDS_ HUMAN, ...) maps to one label. The regex and this
+    # normalization must stay equally permissive, or a matched NEEDS_HUMAN
+    # could silently fall through to fix_committed — the unsafe direction (#305).
+    normalized_label = re.sub(r"[\s_]+", " ", label.strip().lower())
+    cleaned_reason = _sanitize_verdict_reason(reason)
+    if normalized_label == "false positive":
+        return VerdictResult(verdict="false_positive", reason=cleaned_reason)
+    if normalized_label == "needs human":
+        return VerdictResult(verdict="needs_human", reason=cleaned_reason)
+    if normalized_label == "defer":
+        return VerdictResult(verdict="defer", reason=cleaned_reason)
+    return VerdictResult(verdict="fix_committed", reason=cleaned_reason)
+
+
+def _sanitize_verdict_reason(reason: str | None) -> str | None:
+    if reason is None:
+        return None
     cleaned = reason.strip()
-    return cleaned or None
+    if not cleaned:
+        return None
+    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
+        return None
+    return cleaned
 
 
 def _review_comment_resolution_body(comment: ReviewComment) -> str:
@@ -298,8 +386,8 @@ def _sync_needs_human_reason(
 ) -> None:
     """Persist or clear the agent's needs-human reason for a review item."""
     reason_key = _needs_human_reason_state_key(item_id)
-    if result.verdict == "needs_human" and result.reason:
-        state.mark_addressed(reason_key, result.reason)
+    if result.verdict == "needs_human" and (reason := _sanitize_verdict_reason(result.reason)):
+        state.mark_addressed(reason_key, reason)
     else:
         state.threads_addressed_ids.pop(reason_key, None)
 
@@ -407,7 +495,7 @@ class _StalePendingCheckWarning:
     check_conclusion: str | None
     details_url: str | None
 
-    def payload(self: Any) -> dict[str, object]:
+    def payload(self: _StalePendingCheckWarning) -> dict[str, object]:
         return {
             "check_name": self.check_name,
             "age_seconds": self.age_seconds,
@@ -575,10 +663,12 @@ def _first_needs_human_reason(status: PRStatus, state: MonitorState) -> str | No
     for item_id in [t.thread_id for t in status.unresolved_inline_threads] + [
         c.comment_id for c in status.unresolved_review_comments
     ]:
-        if state.threads_addressed_ids.get(item_id) == "needs_human" and (
-            reason := state.threads_addressed_ids.get(_needs_human_reason_state_key(item_id))
+        if (
+            state.threads_addressed_ids.get(item_id) == "needs_human"
+            and (reason := state.threads_addressed_ids.get(_needs_human_reason_state_key(item_id)))
+            and (sanitized_reason := _sanitize_verdict_reason(reason))
         ):
-            return reason
+            return sanitized_reason
     return None
 
 

@@ -595,6 +595,18 @@ async def test_address_thread_stashes_agent_verdict_reasons(
     )
     assert s5.threads_addressed_ids[needs_human_reason_key] == "requires approval"
 
+    # needs_human + template placeholder -> verdict remains, but no bad
+    # operator-facing reason is stashed for NotifyHuman comments.
+    s_placeholder = MonitorState()
+    assert (
+        await _call(
+            _runner(VerdictResult(verdict="needs_human", reason='<what you need> and exit."')),
+            s_placeholder,
+        )
+        == "needs_human"
+    )
+    assert needs_human_reason_key not in s_placeholder.threads_addressed_ids
+
     # A re-triage with a bare needs_human CLEARS a stale reason from a prior pass.
     s6 = MonitorState()
     await _call(_runner(VerdictResult(verdict="needs_human", reason="old reason")), s6)
