@@ -84,6 +84,25 @@ class TestParseVerdict:
         assert result.reason == "maintainer follow-up required"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_reason",
+        [
+            "",
+            "<what you need>",
+        ],
+    )
+    def test_private_awf_empty_final_needs_human_wins_over_prior_fixed(
+        self,
+        final_reason: str,
+    ) -> None:
+        result = _parse_verdict_result(
+            f"AWF-VERDICT: FIXED: committed a fix\nAWF-VERDICT: NEEDS_HUMAN: {final_reason}"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason is None
+
+    @pytest.mark.unit
     def test_private_awf_multiple_needs_human_uses_latest_reason(self) -> None:
         result = _parse_verdict_result(
             "AWF-VERDICT: NEEDS_HUMAN: first pass needs human review\nAWF-VERDICT: NEEDS_HUMAN:"
