@@ -1026,6 +1026,7 @@ async def test_resolved_branch_protection_marker_preserved_on_merge_queue_wait(
         initial_review_grace_period_seconds=0,
     )
 
+    before_execute = datetime.now(UTC)
     terminal = await runner._execute(
         action=Merge(),
         workspace_id=later_workspace_id,
@@ -1040,6 +1041,7 @@ async def test_resolved_branch_protection_marker_preserved_on_merge_queue_wait(
         compose_file=tmp_path / "compose.yml",
         monitor_log=None,
     )
+    after_execute = datetime.now(UTC)
 
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(later_workspace_id)
@@ -1060,9 +1062,11 @@ async def test_resolved_branch_protection_marker_preserved_on_merge_queue_wait(
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
     preserved = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
     assert preserved != "1"
-    # The re-stamp is a current wall-clock (within the real-now window around the
-    # queue clear), so the TTL clock resets against real time for the next wait.
-    assert (datetime.now(UTC) - datetime.fromisoformat(preserved)).total_seconds() < 30.0
+    # The re-stamp is a current wall-clock bracketed by the _execute call, so the
+    # TTL clock resets against real time for the next wait. Bracketing (rather
+    # than a fixed 30s threshold) is immune to CI stalls and rejects negative
+    # (future) timestamps.
+    assert before_execute <= datetime.fromisoformat(preserved) <= after_execute
 
 
 @pytest.mark.unit
@@ -1112,6 +1116,7 @@ async def test_resolved_branch_protection_marker_preserved_on_reviewer_settle_wa
         non_check_reviewer_logins=("greptile-apps",),
     )
 
+    before_execute = datetime.now(UTC)
     terminal = await runner._execute(
         action=Merge(),
         workspace_id=workspace_id,
@@ -1126,6 +1131,7 @@ async def test_resolved_branch_protection_marker_preserved_on_reviewer_settle_wa
         compose_file=tmp_path / "compose.yml",
         monitor_log=None,
     )
+    after_execute = datetime.now(UTC)
 
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
@@ -1151,7 +1157,9 @@ async def test_resolved_branch_protection_marker_preserved_on_reviewer_settle_wa
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
     preserved = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
     assert preserved != "1"
-    assert (datetime.now(UTC) - datetime.fromisoformat(preserved)).total_seconds() < 30.0
+    # The re-stamp is a current wall-clock bracketed by the _execute call, immune
+    # to CI stalls and negative (future) timestamps (reviewer hardening).
+    assert before_execute <= datetime.fromisoformat(preserved) <= after_execute
 
 
 @pytest.mark.unit
@@ -1187,6 +1195,7 @@ async def test_resolved_branch_protection_marker_preserved_on_initial_grace_wait
         initial_review_grace_period_seconds=900,
     )
 
+    before_execute = datetime.now(UTC)
     terminal = await runner._execute(
         action=Merge(),
         workspace_id=workspace_id,
@@ -1201,6 +1210,7 @@ async def test_resolved_branch_protection_marker_preserved_on_initial_grace_wait
         compose_file=tmp_path / "compose.yml",
         monitor_log=None,
     )
+    after_execute = datetime.now(UTC)
 
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
@@ -1226,4 +1236,6 @@ async def test_resolved_branch_protection_marker_preserved_on_initial_grace_wait
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
     preserved = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
     assert preserved != "1"
-    assert (datetime.now(UTC) - datetime.fromisoformat(preserved)).total_seconds() < 30.0
+    # The re-stamp is a current wall-clock bracketed by the _execute call, immune
+    # to CI stalls and negative (future) timestamps (reviewer hardening).
+    assert before_execute <= datetime.fromisoformat(preserved) <= after_execute
