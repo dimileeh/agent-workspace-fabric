@@ -390,9 +390,8 @@ async def _handle_merge_gate_blocker(
     )
     if grace_wait_seconds > 0:
         attention_status: PRStatus | None = status
-        if (
-            state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
-            and _merge_block_attention_queue_verdict(status) == "indeterminate"
+        if state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) and (
+            _merge_block_attention_queue_verdict(status, forge=repo.forge) == "indeterminate"
         ):
             try:
                 attention_status = await runner._fetch_status_for_decision(
@@ -407,6 +406,7 @@ async def _handle_merge_gate_blocker(
             workspace_id,
             state,
             status=attention_status,
+            forge=repo.forge,
         )
         if stale_reason is not None:
             grace_defer_payload: dict[str, object] = {

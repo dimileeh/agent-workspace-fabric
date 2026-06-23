@@ -172,7 +172,10 @@ async def handle_merge_action(
         async def _queue_wait_merge_attention_status(current_status: PRStatus) -> PRStatus | None:
             if not state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY):
                 return current_status
-            if _merge_block_attention_queue_verdict(current_status) != "indeterminate":
+            if (
+                _merge_block_attention_queue_verdict(current_status, forge=repo.forge)
+                != "indeterminate"
+            ):
                 return current_status
             try:
                 return cast(
@@ -192,6 +195,7 @@ async def handle_merge_action(
                 workspace_id,
                 state,
                 status=await _queue_wait_merge_attention_status(status),
+                forge=repo.forge,
             )
             await self._wait_for_merge_queue(
                 blockers=queue_blockers,
@@ -224,6 +228,7 @@ async def handle_merge_action(
                 workspace_id,
                 state,
                 status=await _queue_wait_merge_attention_status(status),
+                forge=repo.forge,
             )
             requested_action = "validate" if pending_validation_gate is not None else "merge"
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
@@ -689,6 +694,7 @@ async def handle_merge_action(
                 workspace_id,
                 state,
                 status=await _queue_wait_merge_attention_status(merge_status),
+                forge=repo.forge,
             )
             _log.info(
                 "monitor.initial_review_grace_waiting",
@@ -724,6 +730,7 @@ async def handle_merge_action(
                 workspace_id,
                 state,
                 status=await _queue_wait_merge_attention_status(merge_status),
+                forge=repo.forge,
             )
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
@@ -751,6 +758,7 @@ async def handle_merge_action(
                 workspace_id,
                 state,
                 status=await _queue_wait_merge_attention_status(merge_status),
+                forge=repo.forge,
             )
             await self._wait_for_merge_queue(
                 blockers=queue_blockers_after_lock,

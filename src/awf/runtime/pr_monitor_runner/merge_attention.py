@@ -24,12 +24,16 @@ _MergeBlockAttentionQueueVerdict = Literal["active", "resolved", "indeterminate"
 
 def _merge_block_attention_queue_verdict(
     status: PRStatus | None,
+    *,
+    forge: str = "github",
 ) -> _MergeBlockAttentionQueueVerdict:
     """Classify branch-protection attention from an observable forge status."""
     if status is None:
         return "indeterminate"
     if status.merge_state_status in (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS):
         return "active"
+    if forge == "bitbucket" and status.merge_state_status is MergeStateStatus.CLEAN:
+        return "indeterminate"
     if status.merge_state_status is MergeStateStatus.CLEAN:
         return "resolved"
     return "indeterminate"
@@ -246,6 +250,7 @@ async def _clear_or_preserve_merge_attention_for_queue_wait(
     state: MonitorState,
     *,
     status: PRStatus | None,
+    forge: str = "github",
 ) -> None:
     """Apply the queue-wait forge verdict to ``merge_block_attention``.
 
@@ -259,12 +264,16 @@ async def _clear_or_preserve_merge_attention_for_queue_wait(
       ``awaiting_human_since`` without re-stamping;
     - clean/mergeable -> clear the marker and surfaced attention promptly;
     - unknown/error -> preserve conservatively.
+
+    Bitbucket open PRs map to ``CLEAN`` because Bitbucket Cloud does not expose a
+    GitHub-style merge-state signal, so Bitbucket ``CLEAN`` is treated like an
+    unknown signal and preserves conservatively.
     """
     if not state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY):
         state.clear_merge_block_attention()
         await self._clear_workspace_attention(workspace_id)
         return
-    verdict = _merge_block_attention_queue_verdict(status)
+    verdict = _merge_block_attention_queue_verdict(status, forge=forge)
     if verdict in ("active", "indeterminate"):
         return
     await _clear_merge_block_attention_and_workspace_attention_durably(

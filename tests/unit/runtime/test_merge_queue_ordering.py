@@ -1078,6 +1078,55 @@ async def test_branch_protection_marker_cleared_on_merge_queue_wait_when_forge_r
 
 
 @pytest.mark.unit
+async def test_bitbucket_clean_preserves_branch_protection_marker_on_merge_queue_wait(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """Bitbucket OPEN PRs map to CLEAN, so CLEAN is not a resolution signal."""
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=522,
+        head_sha="b" * 40,
+    )
+    episode_start = datetime(2026, 4, 26, 11, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            workspace_id, reason="Bitbucket rejected the merge attempt", now=episode_start
+        )
+        await session.commit()
+    state = _stale_merge_block_state(episode_start=episode_start)
+    original_marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    await runner._clear_or_preserve_merge_attention_for_queue_wait(
+        workspace_id,
+        state,
+        status=_status(merge_state_status=MergeStateStatus.CLEAN),
+        forge="bitbucket",
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+    assert workspace.awaiting_human_since == episode_start
+    assert workspace.awaiting_human_reason == "Bitbucket rejected the merge attempt"
+    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == original_marker
+    assert (workspace.monitor_threads_addressed or {}) == {}
+
+
+@pytest.mark.unit
 async def test_branch_protection_marker_cleared_on_reviewer_settle_wait_when_forge_resolved(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
