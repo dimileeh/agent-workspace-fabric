@@ -19,7 +19,7 @@ from awf.common.bitbucket_client import (
     BitbucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import GitHubClientError
+from awf.common.github_client import GitHubClient, GitHubClientError
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.config import MonitorRunnerConfig
 from awf.runtime.pr_monitor_runner.runner import PullRequestMonitorRunner
+from awf.service.merge_queue import MergeQueueBlocker
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._merge_methods_fixtures import (
     _TEST_DEFAULT_BASE_BRANCH,
@@ -1340,3 +1341,156 @@ async def test_stale_at_coordinator_entry_marker_still_cleared_after_long_wait(
     # episode does not stay "awaiting human" once the monitor is merging.
     assert ws.awaiting_human_since is None
     assert ws.awaiting_human_reason is None
+
+
+class _QueueAfterLockRunner(PullRequestMonitorRunner):
+    """Return no blockers pre-lock, then a blocker on the post-lock call.
+
+    Models the real merge coordinator blocking behind another merge in the
+    same repo/base lane: the pre-lock queue is clear, but by the time the
+    serialized coordinator yields an older candidate has claimed the lane so
+    the post-lock recheck reports a queue blocker. Used to reproduce the
+    post-lock ``_clear_stale_merge_attention`` regression (PRRT_kwDOSJAM6s6LcfXk).
+    """
+
+    def __init__(self, *, blocker: MergeQueueBlocker, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._blocker = blocker
+        self.blocker_calls = 0
+
+    async def _merge_queue_blockers_for_workspace(
+        self,
+        workspace_id: str,
+    ) -> list[MergeQueueBlocker]:
+        assert workspace_id
+        self.blocker_calls += 1
+        return [] if self.blocker_calls == 1 else [self._blocker]
+
+
+@pytest.mark.unit
+async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_post_lock_queue_wait(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6LcfXk: a serialized-merge wait longer than the merge-block
+    TTL must NOT clear a ``merge_block_attention`` marker that was FRESH at
+    coordinator entry when a post-lock queue blocker parks the monitor on a
+    non-human gate wait.
+
+    The critical-section-entry clear re-stamps a fresh marker to the entry
+    timestamp. The serialized merge coordinator can block behind another merge
+    for longer than the TTL with no branch-protection fallback firing (no poll
+    runs during the wait). Before the fix, the post-lock queue-blocker clear
+    measured the marker's age against the post-wait wall-clock (``now=None``),
+    so a marker fresh at entry aged past the TTL during the wait and was
+    misclassified as RESOLVED — clearing ``awaiting_human_since`` even though
+    the branch-protection block was still active. On the next poll the
+    fallback re-stamps via COALESCE, restarting the human-wait timer though
+    the operator block never resolved.
+
+    The fix passes the coordinator-ENTRY timestamp to the post-lock clears too,
+    so a marker fresh when the wait started stays fresh across the post-lock
+    queue wait; the attention signal is preserved.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=["MERGESHA123"],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    blocker = MergeQueueBlocker(
+        candidate_id="mc_after_lock",
+        workspace_id="ws_older",
+        attempt_id="attempt_older",
+        task_id="task_older",
+        title="Older candidate",
+        pr_url="https://github.com/example-org/example-repo/pull/41",
+        pr_number=41,
+        status="open",
+        blocker_state="ready",
+    )
+    # TTL small enough that the 1.5s coordinator wait exceeds it, so a
+    # post-wait wall-clock measurement would reclassify a fresh-at-entry
+    # marker as stale. The entry-time reference preserves it instead.
+    monitor_config = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        pre_merge_settle_seconds=0,
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=0,
+        non_check_reviewer_logins=(),
+        merge_block_attention_ttl_seconds=1.0,
+    )
+    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5)
+    runner = _QueueAfterLockRunner(
+        blocker=blocker,
+        session_factory=factory,
+        runner=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        gh=GitHubClient(FakeCommandRunner()),
+        monitor_config=monitor_config,
+        runner_config=MonitorRunnerConfig(
+            max_outer_iterations=20,
+            max_fix_cycle_passes=3,
+            pre_push_validation_fix_passes=1,
+        ),
+        sleep=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        merge_coordinator=coordinator,
+    )
+
+    # Seed a stable episode start from an earlier poll's branch-protection
+    # fallback (COALESCE'd start). This poll re-enters the merge loop still
+    # blocked, so the marker is fresh at entry.
+    episode_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    async with factory() as session:
+        await WorkspaceRepository(session).set_workspace_attention(
+            workspace_id, reason="prior escalation", now=episode_start
+        )
+        await session.commit()
+    state = MonitorState()
+    # Stamp the marker FRESH at this poll's entry — still-blocked. The
+    # coordinator wait (1.5s) exceeds the TTL (1.0s), so without the entry-time
+    # reference the post-lock queue clear would measure the marker against the
+    # post-wait wall-clock, age it past the TTL, and clear the signal.
+    state.mark_merge_block_attention()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    # The post-lock queue blocker parked the monitor on a non-human wait.
+    assert terminal is False
+    assert runner.blocker_calls == 2
+    assert coordinator.entries == [
+        (f"git@github.com:{_TEST_REPO.slug()}.git", _TEST_DEFAULT_BASE_BRANCH)
+    ]
+    # The merge attempt was skipped because the post-lock queue blocker was
+    # present before the merge-method preflight/attempt ran.
+    assert gh.merge_calls == []
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    # The still-active branch-protection signal is PRESERVED across the long
+    # coordinator wait AND the post-lock queue wait: the episode start is NOT
+    # reset (no flicker/restart of the human-wait timer).
+    assert ws.awaiting_human_since == episode_start
+    assert ws.awaiting_human_reason is not None
