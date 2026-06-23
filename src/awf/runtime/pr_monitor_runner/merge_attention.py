@@ -312,8 +312,8 @@ async def _clear_merge_block_attention_durably(self: Any, workspace_id: str) -> 
     ``run()`` loop only flushes ``state`` after ``_execute`` returns
     (``runner.py:455``). A cancel/restart before that full ``_persist_state``
     would otherwise reload the STALE marker from the persisted row while
-    ``awaiting_human_since`` is already null — so the next poll's
-    a later poll could then reload one side without the other, losing the
+    ``awaiting_human_since`` is already null — a later poll could then reload
+    one side without the other, losing the
     invariant that marker and surfaced attention move together
     (PRRT_kwDOSJAM6s6Lf_37).
 
