@@ -384,13 +384,13 @@ class MonitorState:
         within the TTL) from a RESOLVED block (no fallback has fired recently,
         marker age exceeds the TTL). Returns ``True`` (preserve) when:
 
-        - the marker is a legacy boolean ``"1"`` (pre-TTL persisted state, unknown
-          age ⇒ treated as fresh on first read so an in-flight monitor is not
-          cleared on age alone). The legacy value is *re-stamped to a
-          timestamp on that first read* so the marker becomes age-trackable;
-          if the branch-protection block later resolves and no fallback fires
-          to re-stamp via ``mark_merge_block_attention``, the TTL can still age
-          the marker out and ``_clear_stale_merge_attention`` can drop the stale
+        - the marker is a legacy boolean ``"1"`` (pre-TTL persisted state,
+          unknown age ⇒ treated as fresh on first read so an in-flight monitor
+          is not cleared on age alone). The legacy value is *re-stamped to a
+          timestamp on that first read* so the marker becomes age-trackable; if
+          the branch-protection block later resolves and no fallback fires to
+          re-stamp via ``mark_merge_block_attention``, the TTL can still age the
+          marker out and ``_clear_stale_merge_attention`` can drop the stale
           ``awaiting_human_since`` (PRRT_kwDOSJAM6s6LapQB), or
         - ``ttl_seconds`` is ``None`` (TTL disabled — pre-#661/#663 contract), or
         - the marker age is ``<= ttl_seconds`` (fresh — still blocked).
@@ -398,10 +398,11 @@ class MonitorState:
         Returns ``False`` (clear proceeds) when:
 
         - the marker is absent (no block to preserve), or
-        - the marker is a timestamp whose age exceeds ``ttl_seconds``
-          (resolved — stale marker is also dropped).
+        - the marker is a timestamp whose age exceeds ``ttl_seconds`` (resolved
+          — stale marker is also dropped).
 
-        ``now`` defaults to ``datetime.now(UTC)``.
+        ``now`` defaults to ``datetime.now(UTC)``. The marker is only dropped
+        on a STALE (resolved) read; a FRESH (still-blocked) read preserves it.
         """
         raw = self.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
         if not raw:
