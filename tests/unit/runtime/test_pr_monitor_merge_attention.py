@@ -877,3 +877,85 @@ async def test_persist_merge_block_attention_durably_already_equal_is_noop(
         ws_after = await WorkspaceRepository(session).get(workspace_id)
         assert ws_after is not None
     assert (ws_after.monitor_threads_addressed or {})[_MERGE_BLOCK_ATTENTION_STATE_KEY] == stamped
+
+
+@pytest.mark.unit
+async def test_set_workspace_attention_with_merge_block_marker_absent_marker_skips_marker_write(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The atomic write sets ``awaiting_human_since`` even when no marker is
+    stamped into state (the caller did not re-stamp) — the marker merge is
+    skipped, but the attention flag is still persisted. This is the defensive
+    ``if stamped is not None`` False branch: production always stamps at the
+    merge_loop call site, but the helper must not drop the attention write when
+    the marker is absent."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # No marker stamped into state ⇒ the marker merge is skipped, but the
+    # attention flag must still be persisted.
+    state = MonitorState()
+    await runner._set_workspace_attention_with_merge_block_marker(
+        workspace_id,
+        state,
+        reason="merge_blocked",
+    )
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in (ws.monitor_threads_addressed or {})
+    assert ws.awaiting_human_since is not None
+    assert ws.awaiting_human_reason == "merge_blocked"
+
+
+@pytest.mark.unit
+async def test_set_workspace_attention_with_merge_block_marker_already_equal_skips_marker_merge(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The atomic write's marker merge is idempotent: when the DB row already
+    carries the in-memory stamp, the merge is skipped (no redundant assignment)
+    but the attention flag is still refreshed and committed. This is the
+    ``if threads_addressed.get(...) != stamped`` False branch — a second
+    fallback poll re-stamps the same marker the first poll already persisted."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # First call persists the marker AND sets attention.
+    state = MonitorState()
+    state.mark_merge_block_attention()
+    await runner._set_workspace_attention_with_merge_block_marker(
+        workspace_id,
+        state,
+        reason="merge_blocked",
+    )
+    stamped = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    assert (ws.monitor_threads_addressed or {})[_MERGE_BLOCK_ATTENTION_STATE_KEY] == stamped
+    first_attention = ws.awaiting_human_since
+    assert first_attention is not None
+    # A second call with the SAME stamp must skip the marker merge (already
+    # equal) but still refresh and commit the attention flag.
+    await runner._set_workspace_attention_with_merge_block_marker(
+        workspace_id,
+        state,
+        reason="merge_blocked",
+    )
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert (ws_after.monitor_threads_addressed or {})[_MERGE_BLOCK_ATTENTION_STATE_KEY] == stamped
+    assert ws_after.awaiting_human_since is not None
