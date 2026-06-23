@@ -498,6 +498,7 @@ async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
     assert ws.awaiting_human_reason is not None
     persisted_raw = (ws.monitor_threads_addressed or {}).get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
     assert persisted_raw is not None
+    assert state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) == persisted_raw
     assert persisted_raw != original_marker
     assert coordinator.yielded_at is not None
     assert datetime.fromisoformat(persisted_raw) < coordinator.yielded_at
@@ -746,6 +747,7 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
     assert ws.awaiting_human_reason is not None
     persisted_raw = (ws.monitor_threads_addressed or {}).get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
     assert persisted_raw is not None
+    assert state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) == persisted_raw
     assert persisted_raw != original_marker
     assert coordinator.yielded_at is not None
     assert datetime.fromisoformat(persisted_raw) < coordinator.yielded_at
