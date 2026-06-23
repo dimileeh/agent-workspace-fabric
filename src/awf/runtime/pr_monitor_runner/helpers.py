@@ -239,34 +239,24 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         # triggering the follow-up defer capture (comment + filed issue +
         # resolve) on a thread the agent never actually addressed (#305).
         return VerdictResult(verdict="needs_human")
-    verdicts: list[VerdictResult] = []
-    for line in stdout.splitlines():
+    # Keep "last matching line wins" behavior across both private AWF verdict
+    # formats and plain bare verdict lines. The CLI output can contain inline
+    # template echoes before the actual final instruction; the latest parsable
+    # line in stdout is the verdict that should control monitor behavior.
+    for line in reversed(stdout.splitlines()):
         stripped = line.strip()
         awf_match = _AWF_VERDICT.fullmatch(stripped)
         if awf_match is not None:
-            verdicts.append(
-                _verdict_result_from_match(
-                    label=awf_match.group("label"),
-                    reason=awf_match.group("reason"),
-                )
+            return _verdict_result_from_match(
+                label=awf_match.group("label"),
+                reason=awf_match.group("reason"),
             )
         bare_match = _BARE_VERDICT_LINE.fullmatch(stripped)
         if bare_match is not None:
-            verdicts.append(
-                _verdict_result_from_match(
-                    label=bare_match.group("label"),
-                    reason=bare_match.group("reason"),
-                )
+            return _verdict_result_from_match(
+                label=bare_match.group("label"),
+                reason=bare_match.group("reason"),
             )
-
-    # Preserve historical priority across bare verdict lines regardless of output
-    # order: FALSE POSITIVE/NEEDS_HUMAN block merge or resolve a thread even if a
-    # later DEFER exists in chatty output. This keeps multiline prompts safe and
-    # avoids trailing defer lines unblocking a thread unintentionally (#305).
-    for verdict in ("false_positive", "needs_human", "defer", "fix_committed"):
-        for verdict_result in verdicts:
-            if verdict_result.verdict == verdict:
-                return verdict_result
     return VerdictResult(verdict="fix_committed")
 
 

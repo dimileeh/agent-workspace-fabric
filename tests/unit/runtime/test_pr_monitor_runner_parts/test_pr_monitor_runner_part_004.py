@@ -1372,15 +1372,16 @@ class TestParseVerdict:
         assert _parse_verdict("Committed fix in abc1234: renamed variable.") == "fix_committed"
 
     @pytest.mark.unit
-    def test_false_positive_takes_precedence_over_defer(self) -> None:
-        # Scanner checks FALSE POSITIVE first.
-        reply = "FALSE POSITIVE: not a real issue. (not DEFER:)"
-        assert _parse_verdict(reply) == "false_positive"
+    def test_later_bare_defer_overrides_earlier_false_positive_marker(self) -> None:
+        # Last matching verdict now controls, even across prior contradictory lines.
+        reply = "FALSE POSITIVE: not a real issue.\nDEFER: follow-up issue"
+        assert _parse_verdict(reply) == "defer"
 
     @pytest.mark.unit
-    def test_bare_needs_human_takes_precedence_over_bare_defer(self) -> None:
+    def test_later_bare_defer_overrides_bare_needs_human(self) -> None:
+        # Last matching verdict now controls, including within bare verdict lines.
         reply = "NEEDS_HUMAN: follow-up needed\nDEFER: follow-up issue"
-        assert _parse_verdict(reply) == "needs_human"
+        assert _parse_verdict(reply) == "defer"
 
     @pytest.mark.unit
     def test_bare_false_positive_takes_precedence_over_bare_defer(self) -> None:
