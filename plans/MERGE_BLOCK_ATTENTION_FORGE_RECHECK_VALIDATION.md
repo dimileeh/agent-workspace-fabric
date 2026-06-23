@@ -29,5 +29,39 @@ Plan reference: `plans/MERGE_BLOCK_ATTENTION_FORGE_RECHECK_PLAN.md`
   - Passed: `All checks passed!`
 - `uv run --python 3.12 --extra dev mypy src/awf/runtime/pr_monitor.py src/awf/runtime/pr_monitor_runner/merge_attention.py src/awf/runtime/pr_monitor_runner/merge_loop.py src/awf/runtime/pr_monitor_runner/gates.py src/awf/runtime/pr_monitor_runner/mixins.py`
   - Passed: `Success: no issues found in 5 source files`
+- Attempt 1 documentation repair checks:
+  - `uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor_runner/merge_attention.py`
+    - Passed: `All checks passed!`
+  - `uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/pr_monitor_runner/merge_attention.py`
+    - Passed: `1 file already formatted`
+  - `uv run --python 3.12 --extra dev pytest tests/unit/runtime -k 'merge_attention or merge_block or stale or queue' -q`
+    - Passed: `202 passed, 2574 deselected in 192.12s`
+  - `git diff --check`
+    - Passed with no output.
 
-Full AWF/GitHub validation, full coverage, and CI-equivalent gates were not run inside the agent phase per the workspace contract; AWF owns those after completion.
+## Attempt 1 Conformance Repair
+
+- Documentation repair: updated
+  `src/awf/runtime/pr_monitor_runner/merge_attention.py` so
+  `_clear_stale_merge_attention` and its durable re-stamp helper no longer claim
+  queue/reviewer/initial-grace waits use the TTL re-stamp-on-preserve path. The
+  text now states that re-stamping is limited to the merge critical-section TTL
+  path, and queue/reviewer/initial-grace waits are forge-signal-driven via
+  `_clear_or_preserve_merge_attention_for_queue_wait`.
+- Configured full coverage gate: `.awf/workspace.yml` declares
+  `minimum_percent: 99` with command
+  `uv run --python 3.12 --extra dev pytest --timeout=300 --cov=awf --cov-report=term-missing --cov-fail-under=99`.
+- AWF-owned coverage evidence for this unpushed local head is not available
+  inside the agent workspace:
+  - no checked-in or temporary coverage artifact was present under `/workspace`
+    or `/tmp`;
+  - a read-only local control-plane DB lookup could not attach coverage
+    provenance because this workspace DB has no `validation_runs` table;
+  - `gh run list --repo dimileeh/agent-workspace-fabric --commit "$(git rev-parse HEAD)" --limit 20 --json ...`
+    returned `[]`.
+
+Full AWF/GitHub validation, the configured 99% coverage gate, and
+CI-equivalent gates were not run inside the agent phase per the workspace
+contract. No local document should be read as claiming that the 99% gate is
+satisfied for this head; AWF/GitHub must produce that authoritative evidence
+after the agent exits and the head is pushed.
