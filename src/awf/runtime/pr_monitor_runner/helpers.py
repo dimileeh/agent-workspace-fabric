@@ -268,7 +268,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         for parsed in reversed(verdicts):
             if parsed.verdict != verdict:
                 continue
-            if parsed.reason is not None and selected is None:
+            if parsed.reason is not None:
                 return parsed
             if selected is None:
                 selected = parsed
