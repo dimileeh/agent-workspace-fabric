@@ -720,9 +720,24 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
         status="open",
         blocker_state="ready",
     )
-    # TTL small enough that the 1.5s coordinator wait exceeds it, so a
-    # post-wait wall-clock measurement would reclassify a fresh-at-entry
-    # marker as stale. The entry-time reference preserves it instead.
+    # TTL large enough that the marker stays FRESH at the critical-section-entry
+    # clear regardless of how long the pre-coordinator setup (DB loads, gate
+    # checks, status fetch) takes inside ``_execute`` — the production entry-time
+    # fix measures the marker's age against the coordinator-ENTRY clock, so the
+    # marker only has to be fresh *then*, not survive the whole setup gap. A 1.0s
+    # TTL is too tight under CI load (the setup gap can exceed it, making the
+    # marker stale at entry and clearing ``awaiting_human_since`` — a flaky false
+    # failure, not the regression under test). 30s absorbs any plausible setup
+    # gap. The regression under test (post-wait wall-clock measurement
+    # reclassifying a fresh-at-entry marker as stale) is exercised by the 1.5s
+    # coordinator wait advancing real time past the entry window — the production
+    # fix already passes the entry timestamp to the post-lock clears, so the
+    # small-TTL "post-wait reclassification" rationale only described the
+    # PRE-FIX behavior and is TTL-independent here now; the 1.5s wait still
+    # drives the post-lock preserve path. Mirrors the sibling
+    # ``test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestamp``
+    # (PRRT_kwDOSJAM6s6LdM4X) and ``test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention``
+    # (PRRT_kwDOSJAM6s6La_SZ) TTL bumps.
     monitor_config = MonitorConfig(
         auto_merge=True,
         poll_interval_seconds=60,
@@ -730,7 +745,7 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
         initial_review_grace_period_seconds=0,
         non_check_reviewer_settle_seconds=0,
         non_check_reviewer_logins=(),
-        merge_block_attention_ttl_seconds=1.0,
+        merge_block_attention_ttl_seconds=30.0,
     )
     coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5)
     runner = _QueueAfterLockRunner(
