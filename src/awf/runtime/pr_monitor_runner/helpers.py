@@ -273,7 +273,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                     return parsed
             return latest
         return latest
-    for verdict in ("false_positive", "needs_human", "defer", "fix_committed"):
+    for verdict in ("needs_human", "false_positive", "defer", "fix_committed"):
         selected: VerdictResult | None = None
         for parsed in reversed(verdicts):
             if parsed.verdict != verdict:

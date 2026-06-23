@@ -182,6 +182,13 @@ class TestParseVerdict:
         assert _parse_verdict(reply) == "needs_human"
 
     @pytest.mark.unit
+    def test_later_false_positive_does_not_overwrite_bare_needs_human(self) -> None:
+        # ``NEEDS_HUMAN`` must keep merge-blocking priority over later false-positive
+        # text so a non-blocking later marker cannot clear a hard block.
+        reply = "NEEDS_HUMAN: follow-up needed\nFALSE POSITIVE: not a real issue"
+        assert _parse_verdict(reply) == "needs_human"
+
+    @pytest.mark.unit
     def test_bare_false_positive_takes_precedence_over_bare_defer(self) -> None:
         reply = "DEFER: fix this later\nFALSE POSITIVE: not a real problem"
         assert _parse_verdict(reply) == "false_positive"
