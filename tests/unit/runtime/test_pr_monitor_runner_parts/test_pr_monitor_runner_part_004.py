@@ -1274,6 +1274,15 @@ class TestParseVerdict:
         assert result.reason == "maintainer must choose the checkout policy"
 
     @pytest.mark.unit
+    def test_private_awf_and_bare_mixed_verdict_uses_later_bare_match(self) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: DEFER: follow this later\nNEEDS_HUMAN: merge needs maintainer decision"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "merge needs maintainer decision"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_inline_prompt_template(self) -> None:
         stdout = (
             'Re-reading: "If you need a human decision, print '
