@@ -2968,6 +2968,12 @@
         "additionalProperties": false,
         "description": "PR monitor policy supplied by the workspace profile.",
         "properties": {
+          "awaiting_required_checks_grace_seconds": {
+            "default": 600.0,
+            "maximum": 86400.0,
+            "title": "Awaiting Required Checks Grace Seconds",
+            "type": "number"
+          },
           "initial_review_grace_period_seconds": {
             "default": 900.0,
             "maximum": 86400.0,

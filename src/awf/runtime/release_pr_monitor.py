@@ -56,6 +56,7 @@ def build_release_pr_monitor(
     non_check_reviewer_settle_seconds: float = 180.0,
     non_check_reviewer_logins: list[str] | tuple[str, ...] = ("greptile-apps",),
     require_ci: bool = True,
+    awaiting_required_checks_grace_seconds: float = 600.0,
     max_outer_iterations: int = 10_000,
     max_fix_cycle_passes: int = 5,
     merge_coordinator: MergeCoordinator | None = None,
@@ -80,6 +81,7 @@ def build_release_pr_monitor(
             pre_merge_settle_seconds=pre_merge_settle_seconds,
             non_check_reviewer_settle_seconds=non_check_reviewer_settle_seconds,
             non_check_reviewer_logins=tuple(non_check_reviewer_logins),
+            awaiting_required_checks_grace_seconds=awaiting_required_checks_grace_seconds,
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations,
@@ -113,6 +115,7 @@ def build_feature_pr_monitor(
     non_check_reviewer_settle_seconds: float = 180.0,
     non_check_reviewer_logins: list[str] | tuple[str, ...] = ("greptile-apps",),
     require_ci: bool = True,
+    awaiting_required_checks_grace_seconds: float = 600.0,
     max_outer_iterations: int = 10_000,
     max_fix_cycle_passes: int = 5,
     merge_coordinator: MergeCoordinator | None = None,
@@ -137,6 +140,7 @@ def build_feature_pr_monitor(
             pre_merge_settle_seconds=pre_merge_settle_seconds,
             non_check_reviewer_settle_seconds=non_check_reviewer_settle_seconds,
             non_check_reviewer_logins=tuple(non_check_reviewer_logins),
+            awaiting_required_checks_grace_seconds=awaiting_required_checks_grace_seconds,
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations,
