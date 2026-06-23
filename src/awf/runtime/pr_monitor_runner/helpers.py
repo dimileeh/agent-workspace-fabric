@@ -267,12 +267,6 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     return VerdictResult(verdict="fix_committed")
 
 
-def _verdict_reason(stdout: str) -> str | None:
-    _prefix, _separator, reason = stdout.partition(":")
-    cleaned = reason.strip()
-    return _sanitize_verdict_reason(cleaned)
-
-
 def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
     # Canonicalize any run of whitespace/underscores to a single space, so
     # every separator variant the label regex accepts (NEEDS_HUMAN,

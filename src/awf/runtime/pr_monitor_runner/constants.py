@@ -210,15 +210,9 @@ _PLANNING_VALIDATION_HANDOFF_EVENT = "workspace.planning_conformance_requires_aw
 
 _POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT = "workspace.post_validation_conformance_satisfied"
 
-_VERDICT_FALSE_POSITIVE = re.compile(r"\bFALSE\s+POSITIVE\s*:", re.IGNORECASE)
-
 # Fail-safe fallback for a bare ``NEEDS_HUMAN:`` (no ``AWF-VERDICT:`` prefix).
 # Without it, such output would fall through to ``fix_committed`` and the thread
 # would be resolved/merged — the exact unsafe direction #305 guards against.
-_VERDICT_NEEDS_HUMAN = re.compile(r"\bNEEDS[\s_]+HUMAN\s*:", re.IGNORECASE)
-
-_VERDICT_DEFER = re.compile(r"\bDEFER\s*:", re.IGNORECASE)
-
 _AWF_VERDICT = re.compile(
     r"\bAWF-VERDICT\s*:\s*"
     # NEEDS[\s_]+HUMAN mirrors FALSE\s+POSITIVE so ``NEEDS HUMAN`` (space) also
