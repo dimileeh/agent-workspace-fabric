@@ -88,3 +88,8 @@ Focused evidence:
   - Passed: `All checks passed!`
 - `uv run --python 3.12 --extra dev ruff format --check tests/unit/runtime/test_merge_queue_ordering.py`
   - Passed: `1 file already formatted`
+
+Validation complete: Attempt 3 is the final validated state for this plan, and
+its focused evidence confirms the plan-conformance requirements are satisfied.
+The earlier attempts remain as repair history only; full AWF/GitHub validation
+continues to run after the agent phase.

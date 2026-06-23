@@ -115,9 +115,9 @@ Do not run full coverage gates, whole-repo pytest, full `.awf/workspace.yml` val
 
 ## Explicit Non-goals
 
-- Do not change branch management, push behavior, PR creation, or merge behavior.
-- Do not change #660/#662 required-check grace logic or broader `decide()` gate ordering.
-- Do not change #661 ordinary resolved-human attention clears before merge/pre-merge settle.
+- Avoid changing branch management, push behavior, PR creation, or merge behavior.
+- Leave #660/#662 required-check grace logic and broader `decide()` gate ordering unchanged.
+- Preserve #661 ordinary resolved-human attention clears before merge/pre-merge settle.
 - Do not introduce new branch-protection policy abstractions beyond what is required for this queue-wait marker decision.
-- Do not run broad AWF/GitHub-owned validation inside the agent phase.
-- Do not manually address review comments or merge the PR.
+- Keep broad AWF/GitHub-owned validation in the post-agent phase unless the operator explicitly requests it.
+- Manual review-comment resolution and PR merging remain out of scope for the agent phase.
