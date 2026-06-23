@@ -24,6 +24,10 @@ to GitHub.
   - Result: `173 passed`
 - `uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor_runner/helpers.py src/awf/runtime/pr_monitor_runner/comments.py tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_004.py tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_006.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_016.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_014.py tests/unit/runtime/test_monitor_prompts.py`
   - Result: `All checks passed`
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/pr_monitor_runner/helpers.py src/awf/runtime/pr_monitor_runner/comments.py tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_004.py tests/unit/runtime/test_pr_monitor_runner_parts/test_pr_monitor_runner_part_006.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_016.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges_parts/test_pr_monitor_runner_coverage_edges_part_014.py tests/unit/runtime/test_monitor_prompts.py`
+  - Result: `7 files already formatted`
+- `uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check`
+  - Result: `OK: openapi.json matches the current app spec.`
 - `uv run --python 3.12 --extra dev mypy src/awf/runtime/pr_monitor_runner/helpers.py src/awf/runtime/pr_monitor_runner/comments.py`
   - Result: `Success: no issues found in 2 source files`
 
