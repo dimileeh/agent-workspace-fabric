@@ -1057,26 +1057,55 @@ async def test_set_workspace_attention_with_merge_block_marker_already_equal_ski
     assert ws_after.awaiting_human_since is not None
 
 
-class _FailingCommitSession:
-    """Wraps an ``AsyncSession`` so the first ``commit`` raises, simulating a DB
-    error / cancellation mid-transaction (the restart-window the
-    ``PRRT_kwDOSJAM6s6Lh0zt`` regression guards). Subsequent commits succeed so
-    the test can read the post-failure DB state from a fresh session."""
+class _CommitTrapSession:
+    """Wraps an ``AsyncSession`` so ``commit`` can be trapped by attempt number.
 
-    def __init__(self, inner: AsyncSession) -> None:
+    Counts every ``commit`` call into the shared ``commit_attempts`` dict (key
+    ``"n"``) and raises ``RuntimeError`` on the attempt matching ``fail_on_attempt``
+    (1-indexed) BEFORE delegating to ``inner.commit()``, so the simulated DB
+    failure rolls that transaction back. ``fail_on_attempt=None`` never raises.
+
+    This lets a regression FAIL for the prior two-commit implementation while
+    PASSING for the current single-transaction atomic clear:
+
+    * ``fail_on_attempt=1`` simulates a failure on the (only) atomic commit —
+      the current implementation rolls both writes back (the
+      ``PRRT_kwDOSJAM6s6Lh0zt`` rollback contract). The prior two-commit
+      sequence would also roll its first commit back and never reach the
+      second, so this case does NOT by itself distinguish old from new (the
+      targeted ``fail_on_attempt=2`` case below does).
+    * ``fail_on_attempt=2`` lets the first commit land (the prior
+      implementation's ``_clear_workspace_attention`` clearing
+      ``awaiting_human_since``) and raises on the second (the prior
+      ``_clear_merge_block_attention_durably`` marker removal) — exposing the
+      half-cleared restart window the atomic fix closed. The current
+      single-commit implementation never reaches attempt 2, so it completes
+      with both fields cleared and exactly one recorded commit attempt.
+    """
+
+    def __init__(
+        self,
+        inner: AsyncSession,
+        commit_attempts: dict[str, int],
+        *,
+        fail_on_attempt: int | None = None,
+    ) -> None:
         self._inner = inner
-        self._committed = False
+        self._commit_attempts = commit_attempts
+        self._fail_on_attempt = fail_on_attempt
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
     async def commit(self) -> None:
-        if not self._committed:
-            self._committed = True
+        self._commit_attempts["n"] += 1
+        if self._fail_on_attempt is not None and (
+            self._commit_attempts["n"] == self._fail_on_attempt
+        ):
             raise RuntimeError("simulated DB failure mid-transaction")
         await self._inner.commit()
 
-    async def __aenter__(self) -> _FailingCommitSession:
+    async def __aenter__(self) -> _CommitTrapSession:
         await self._inner.__aenter__()
         return self
 
@@ -1124,13 +1153,13 @@ async def test_clear_stale_merge_attention_atomic_clear_rolls_back_together(
     # Wrap the session factory so the FIRST session's commit raises — the
     # restart-window between the (old) two commits, now exercised against the
     # single atomic transaction.
-    call_count = {"n": 0}
+    commit_attempts: dict[str, int] = {"n": 0}
 
     @asynccontextmanager
-    async def _failing_factory() -> AsyncIterator[_FailingCommitSession]:
-        call_count["n"] += 1
+    async def _failing_factory() -> AsyncIterator[_CommitTrapSession]:
+        commit_attempts["n"]  # shared counter touched inside the trap
         async with factory() as inner:
-            yield _FailingCommitSession(inner)
+            yield _CommitTrapSession(inner, commit_attempts, fail_on_attempt=1)
 
     runner = make_runner(
         factory=factory,  # type: ignore[arg-type]
@@ -1154,8 +1183,9 @@ async def test_clear_stale_merge_attention_atomic_clear_rolls_back_together(
             allow_age_out=True,
         )
     # A session was opened (the failing-commit one) — the runner attempted the
-    # atomic clear.
-    assert call_count["n"] >= 1
+    # atomic clear, and the trap recorded exactly the single commit attempt the
+    # atomic transaction performs.
+    assert commit_attempts["n"] >= 1
 
     # Under the atomic fix, the transaction rolled back in full: the row still
     # carries BOTH the stale marker AND the still-set attention flag — neither
@@ -1169,6 +1199,99 @@ async def test_clear_stale_merge_attention_atomic_clear_rolls_back_together(
     ) == stale_stamp
     assert ws_after.awaiting_human_since is not None
     assert ws_after.awaiting_human_reason == "merge_blocked"
+
+
+@pytest.mark.unit
+async def test_clear_stale_merge_attention_atomic_clear_distinguishes_two_commit_window(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6Lh0zt (PRRT_kwDOSJAM6s6LiZkN): the atomic clear MUST
+    complete with a SINGLE commit that lands BOTH the stale marker removal and
+    the ``awaiting_human_since`` clear. The sibling rollback regression above
+    traps a mid-transaction failure (``fail_on_attempt=1``), but it does NOT by
+    itself distinguish the current single-transaction implementation from the
+    prior two-commit sequence: the prior ``_clear_workspace_attention`` (commit
+    #1) then ``_clear_merge_block_attention_durably`` (commit #2) would ALSO
+    roll its first commit back and never reach the second when commit #1
+    raises, leaving both fields unchanged — the same observable end state as the
+    atomic rollback.
+
+    This targeted regression lets the FIRST commit land and traps the SECOND
+    (``fail_on_attempt=2``). Under the prior two-commit implementation the
+    first commit (``_clear_workspace_attention``) would clear
+    ``awaiting_human_since`` and succeed, then the second commit
+    (``_clear_merge_block_attention_durably``) would raise — leaving the DB in
+    the half-cleared restart window (attention already nulled but the STALE
+    marker still on the row) and surfacing the ``RuntimeError``. Under the
+    current single-transaction atomic clear there is only ONE commit, so the
+    trap is never reached (``fail_on_attempt=2``), the helper completes
+    cleanly, and BOTH the marker and the attention flag are cleared together.
+    Asserting exactly one recorded commit attempt AND both fields cleared
+    makes this regression FAIL for the reintroduced two-commit approach (which
+    would either raise on the second commit or leave the half-cleared state
+    visible) while passing only for the atomic implementation.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    # Seed a stale marker (resolved block) and an active attention flag — the
+    # pre-clear persisted state the atomic clear is meant to roll back from on
+    # the stale (resolved) branch.
+    stale_stamp = datetime(2024, 1, 1, tzinfo=UTC).isoformat()
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp}
+        ws.awaiting_human_since = datetime(2024, 1, 1, tzinfo=UTC)
+        ws.awaiting_human_reason = "merge_blocked"
+        await session.commit()
+
+    # Trap the SECOND commit: the prior two-commit implementation would land
+    # the attention clear on commit #1 and raise on commit #2 (marker removal),
+    # surfacing the half-cleared restart window. The current single-transaction
+    # atomic clear performs exactly one commit and never reaches attempt 2.
+    commit_attempts: dict[str, int] = {"n": 0}
+
+    @asynccontextmanager
+    async def _trapping_factory() -> AsyncIterator[_CommitTrapSession]:
+        async with factory() as inner:
+            yield _CommitTrapSession(inner, commit_attempts, fail_on_attempt=2)
+
+    runner = make_runner(
+        factory=factory,  # type: ignore[arg-type]
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    runner._deps = replace(runner._deps, session_factory=_trapping_factory)
+
+    state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp})
+    resolved_now = datetime(2024, 1, 2, tzinfo=UTC)
+    # The atomic clear completes with its single commit; the trap (set on
+    # attempt 2) is never reached. The prior two-commit implementation would
+    # raise here on its second commit.
+    await runner._clear_stale_merge_attention(
+        workspace_id,
+        state,
+        now=resolved_now,
+        allow_age_out=True,
+    )
+
+    # The atomic implementation performs EXACTLY one commit. A reintroduced
+    # two-commit sequence would record two attempts (and raise on the second).
+    assert commit_attempts["n"] == 1
+
+    # Both the stale marker AND the attention flag are cleared together in
+    # that single transaction — neither half of the pair is observable alone.
+    # A prior two-commit implementation that survived commit #1 but raised on
+    # commit #2 would leave the half-cleared state: marker still present,
+    # attention already nulled.
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert (ws_after.monitor_threads_addressed or {}).get(_MERGE_BLOCK_ATTENTION_STATE_KEY) is None
+    assert ws_after.awaiting_human_since is None
+    assert ws_after.awaiting_human_reason is None
 
 
 @pytest.mark.unit
