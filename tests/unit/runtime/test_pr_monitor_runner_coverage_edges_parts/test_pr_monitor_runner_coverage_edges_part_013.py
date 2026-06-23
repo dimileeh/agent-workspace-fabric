@@ -39,6 +39,10 @@ from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
 )
+from awf.runtime.pr_monitor_runner.gates import (
+    _handle_merge_gate_blocker,
+    _MergeGateResult,
+)
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
@@ -334,6 +338,68 @@ async def test_stale_recovery_dispatch_ignores_terminal_workspace_race(
         "callback_action": "recovery_dispatch",
         "expected_status": WorkspaceStatus.monitoring_pr.value,
         "actual_status": final_status.value,
+        "requested_status": WorkspaceStatus.ready.value,
+        "reason_code": "STALE_CALLBACK_IGNORED",
+    }
+
+
+@pytest.mark.unit
+async def test_stale_gate_handler_records_ignored_callback_for_terminal_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _force_workspace_status(factory, workspace_id, WorkspaceStatus.completed)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+
+    handled = await _handle_merge_gate_blocker(
+        runner,
+        gate=_MergeGateResult(
+            workspace=ws,
+            stale_reason="validation_missing_for_current_head",
+            req_action="validate",
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+        skip_initial_review_grace=True,
+    )
+
+    async with factory() as s:
+        refreshed = await WorkspaceRepository(s).get(workspace_id)
+        assert refreshed is not None
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+        ignored_events = [
+            event
+            for event in refreshed.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+
+    assert handled is True
+    assert refreshed.status == WorkspaceStatus.completed.value
+    assert operations == []
+    assert ignored_events[-1].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "recovery_dispatch",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": WorkspaceStatus.completed.value,
         "requested_status": WorkspaceStatus.ready.value,
         "reason_code": "STALE_CALLBACK_IGNORED",
     }

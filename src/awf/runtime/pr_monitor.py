@@ -376,9 +376,10 @@ class MonitorState:
 
         Set when ``handle_merge_action``'s branch-protection fallback escalates to
         a human directly without recording a sticky blocker, so ``decide()`` keeps
-        returning ``Merge``. The non-human gate waits honor it to preserve the
-        still-active awaiting-human signal across polls instead of clearing it as a
-        resolved ``NotifyHuman`` episode.
+        returning ``Merge``. The merge critical-section entry uses this TTL check
+        to avoid clearing a still-active awaiting-human signal as a resolved
+        ``NotifyHuman`` episode. Queue/reviewer/grace waits use a fresh forge
+        mergeability signal instead.
 
         Distinguishes a STILL-blocked fallback (re-stamped every poll, fresh
         within the TTL) from a RESOLVED block (no fallback has fired recently,
@@ -522,7 +523,7 @@ class MonitorConfig:
     """Bounded TTL on the ``merge_block_attention`` marker that distinguishes a
     STILL-blocked branch-protection fallback (re-stamped every poll, fresh
     within the TTL) from a RESOLVED block (no fallback has fired recently, marker
-    age exceeds the TTL) (#661/#663).
+    age exceeds the TTL) at merge critical-section entry (#661/#663).
 
     The branch-protection fallback calls ``mark_merge_block_attention`` every
     poll while blocked, so the TTL only expires a block that has resolved
