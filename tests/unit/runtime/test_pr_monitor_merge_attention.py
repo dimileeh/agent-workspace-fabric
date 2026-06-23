@@ -13,8 +13,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1053,3 +1055,147 @@ async def test_set_workspace_attention_with_merge_block_marker_already_equal_ski
         assert ws_after is not None
     assert (ws_after.monitor_threads_addressed or {})[_MERGE_BLOCK_ATTENTION_STATE_KEY] == stamped
     assert ws_after.awaiting_human_since is not None
+
+
+class _FailingCommitSession:
+    """Wraps an ``AsyncSession`` so the first ``commit`` raises, simulating a DB
+    error / cancellation mid-transaction (the restart-window the
+    ``PRRT_kwDOSJAM6s6Lh0zt`` regression guards). Subsequent commits succeed so
+    the test can read the post-failure DB state from a fresh session."""
+
+    def __init__(self, inner: AsyncSession) -> None:
+        self._inner = inner
+        self._committed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def commit(self) -> None:
+        if not self._committed:
+            self._committed = True
+            raise RuntimeError("simulated DB failure mid-transaction")
+        await self._inner.commit()
+
+    async def __aenter__(self) -> _FailingCommitSession:
+        await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        await self._inner.__aexit__(exc_type, exc, tb)
+
+
+@pytest.mark.unit
+async def test_clear_stale_merge_attention_atomic_clear_rolls_back_together(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6Lh0zt: the stale (resolved) branch's marker removal and
+    ``awaiting_human_since`` clear MUST land in a SINGLE transaction. The prior
+    two-commit sequence (``_clear_workspace_attention`` then
+    ``_clear_merge_block_attention_durably``) left a cancel/restart window where
+    ``awaiting_human_since`` was already nulled but the STALE marker still sat on
+    the DB row — so the next poll's preserve path re-stamped the stale marker
+    fresh and wedged the monitor in a faux "awaiting human" state until another
+    merge fallback ran (the ``PRRT_kwDOSJAM6s6Lf_37`` window's reciprocal). With
+    both writes under one ``get_for_update`` transaction, a mid-transaction
+    failure rolls BOTH back: a restart can never observe the cleared flag
+    without the also-cleared marker, or vice versa.
+
+    This test simulates the restart window by making the stale-branch commit
+    raise. Under the atomic fix the transaction rolls back in full, so the row
+    still carries BOTH the stale marker AND the still-set attention flag —
+    exactly the pre-failure state, with neither half observable alone. The
+    in-memory marker is dropped before the DB write (mirroring production), so
+    the assertion focuses on the DB row's atomic consistency.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    # Seed a stale marker (resolved block) and an active attention flag into the
+    # persisted row — the state the monitor would reload after a cancel/restart
+    # before the outer loop's full ``_persist_state`` flush.
+    stale_stamp = datetime(2024, 1, 1, tzinfo=UTC).isoformat()
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp}
+        ws.awaiting_human_since = datetime(2024, 1, 1, tzinfo=UTC)
+        ws.awaiting_human_reason = "merge_blocked"
+        await session.commit()
+
+    # Wrap the session factory so the FIRST session's commit raises — the
+    # restart-window between the (old) two commits, now exercised against the
+    # single atomic transaction.
+    call_count = {"n": 0}
+
+    @asynccontextmanager
+    async def _failing_factory() -> AsyncIterator[_FailingCommitSession]:
+        call_count["n"] += 1
+        async with factory() as inner:
+            yield _FailingCommitSession(inner)
+
+    runner = make_runner(
+        factory=factory,  # type: ignore[arg-type]
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # Override the runner's session factory with the failing-commit wrapper so
+    # the stale branch's single atomic commit raises mid-transaction.
+    runner._deps = replace(runner._deps, session_factory=_failing_factory)
+
+    state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp})
+    resolved_now = datetime(2024, 1, 2, tzinfo=UTC)
+    # The stale branch raises mid-transaction; the atomic transaction rolls back.
+    with pytest.raises(RuntimeError, match="simulated DB failure"):
+        await runner._clear_stale_merge_attention(
+            workspace_id,
+            state,
+            now=resolved_now,
+            allow_age_out=True,
+        )
+    # A session was opened (the failing-commit one) — the runner attempted the
+    # atomic clear.
+    assert call_count["n"] >= 1
+
+    # Under the atomic fix, the transaction rolled back in full: the row still
+    # carries BOTH the stale marker AND the still-set attention flag — neither
+    # half of the marker/attention pair is observable independently. This is
+    # the contract the prior two-commit sequence violated.
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert (ws_after.monitor_threads_addressed or {}).get(
+        _MERGE_BLOCK_ATTENTION_STATE_KEY
+    ) == stale_stamp
+    assert ws_after.awaiting_human_since is not None
+    assert ws_after.awaiting_human_reason == "merge_blocked"
+
+
+@pytest.mark.unit
+async def test_clear_stale_merge_attention_atomic_clear_missing_workspace_skips_writes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6Lh0zt: the atomic clear no-ops when the workspace row is
+    gone (a GC/destroy race between the stale-clear and the atomic write) — no
+    marker removal, no attention clear, no commit. Mirrors the established
+    ``get_for_update``-returns-None no-op guard in the sibling durable helpers."""
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    stale_stamp = datetime(2024, 1, 1, tzinfo=UTC).isoformat()
+    state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp})
+    # The workspace does not exist — the atomic clear returns before any write.
+    await runner._clear_stale_merge_attention(
+        "ws_does_not_exist",
+        state,
+        now=datetime(2024, 1, 2, tzinfo=UTC),
+        allow_age_out=True,
+    )
+    # In-memory marker is still dropped (the caller's signal), but no DB write
+    # was attempted against a missing row.
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
