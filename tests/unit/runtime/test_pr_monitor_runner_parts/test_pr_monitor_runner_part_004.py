@@ -1274,13 +1274,13 @@ class TestParseVerdict:
         assert result.reason == "maintainer must choose the checkout policy"
 
     @pytest.mark.unit
-    def test_private_awf_and_bare_mixed_verdict_uses_later_bare_match(self) -> None:
+    def test_private_awf_mixed_verdict_prefers_awf_over_bare_fallback(self) -> None:
         result = _parse_verdict_result(
-            "AWF-VERDICT: DEFER: follow this later\nNEEDS_HUMAN: merge needs maintainer decision"
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer decision required\nFALSE POSITIVE: maintainer later added a comment"
         )
 
         assert result.verdict == "needs_human"
-        assert result.reason == "merge needs maintainer decision"
+        assert result.reason == "maintainer decision required"
 
     @pytest.mark.unit
     def test_private_awf_multiple_needs_human_uses_latest_reason(self) -> None:
