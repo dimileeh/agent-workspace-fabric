@@ -1370,7 +1370,7 @@ async def handle_merge_action(
                     monitor_log=monitor_log,
                 ):
                     return False
-                blocker_detail = str(merge_blocker)[:400]
+                blocker_detail = _redact_and_truncate_forge_error(str(merge_blocker))
                 blocker_reason = _bitbucket_merge_rejection_reason(merge_blocker)
                 blocker_is_transient = _is_transient_bitbucket_client_error(merge_blocker)
             else:

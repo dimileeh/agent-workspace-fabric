@@ -863,6 +863,67 @@ async def test_deterministic_bitbucket_merge_failure_notifies_and_keeps_polling(
 
 
 @pytest.mark.unit
+async def test_deterministic_bitbucket_merge_failure_redacts_blocker_detail_in_log(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The Bitbucket merge-blocker detail is redacted before reaching live logs.
+
+    Regression for PRRT_kwDOSJAM6s6LgK-e: the Bitbucket arm previously logged
+    ``str(merge_blocker)[:400]`` raw, unlike the GitHub arm that routes
+    ``merge_blocker.stderr`` through ``_redact_and_truncate_forge_error``. A
+    blocker body carrying a URL-credential secret must be redacted in the
+    ``monitor.merge_blocked_falling_back_to_notify`` warning so the secret
+    never reaches live logs (coding guideline: "Never log secrets").
+    """
+    import logging
+
+    from awf.common.config import Settings
+    from awf.common.logging import configure_logging
+
+    configure_logging(Settings(service_name="test", env="local", log_level="INFO", _env_file=None))
+
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitbucketClientError(
+                operation="merge_pr",
+                status=403,
+                body=(
+                    "merge checks have not passed for "
+                    "https://user:raw_secret_value@bitbucket.org/org/repo"
+                ),
+            )
+        ],
+    )
+
+    logger_name = "awf.runtime.pr_monitor_runner.logging"
+    caplog.set_level(logging.WARNING, logger=logger_name)
+    stdlib_logger = logging.getLogger(logger_name)
+    stdlib_logger.addHandler(caplog.handler)
+    stdlib_logger.propagate = False
+
+    await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    blocker_records = [
+        record
+        for record in caplog.records
+        if "monitor.merge_blocked_falling_back_to_notify" in str(record.msg)
+    ]
+    assert blocker_records, "expected a merge-blocked fallback warning to be logged"
+    for record in blocker_records:
+        rendered = repr(record.msg) + repr(record.__dict__)
+        assert "raw_secret_value" not in rendered
+        assert "https://<redacted>@" in rendered or "https://[redacted]@" in rendered
+
+
+@pytest.mark.unit
 async def test_deterministic_bitbucket_merge_failure_forwards_specific_reason_code(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
