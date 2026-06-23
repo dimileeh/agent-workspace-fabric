@@ -241,8 +241,9 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         return VerdictResult(verdict="needs_human")
     # Preserve verdict priority while still respecting final-line intent:
     # ``false_positive`` and ``needs_human`` must not be silently dropped by a
-    # later ``defer``. If multiple matches for the same verdict appear,
-    # prefer the latest reason.
+    # later ``defer``. If multiple matches for the same verdict appear, use the
+    # latest explicit reason and fall back to the latest empty/placeholder-free
+    # reason only if none include a concrete explanation.
     verdicts: list[VerdictResult] = []
     for line in stdout.splitlines():
         stripped = line.strip()
@@ -263,9 +264,16 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                 )
             )
     for verdict in ("false_positive", "needs_human", "defer", "fix_committed"):
+        selected: VerdictResult | None = None
         for parsed in reversed(verdicts):
-            if parsed.verdict == verdict:
+            if parsed.verdict != verdict:
+                continue
+            if parsed.reason is not None and selected is None:
                 return parsed
+            if selected is None:
+                selected = parsed
+        if selected is not None:
+            return selected
     return VerdictResult(verdict="fix_committed")
 
 

@@ -1283,6 +1283,15 @@ class TestParseVerdict:
         assert result.reason == "merge needs maintainer decision"
 
     @pytest.mark.unit
+    def test_private_awf_multiple_needs_human_uses_latest_reason(self) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: first pass needs human review\nAWF-VERDICT: NEEDS_HUMAN:"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "first pass needs human review"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_ignores_inline_prompt_template(self) -> None:
         stdout = (
             'Re-reading: "If you need a human decision, print '
