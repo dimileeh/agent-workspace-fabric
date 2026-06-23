@@ -1164,10 +1164,17 @@ async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
         pr_number=_TEST_PR_NUMBER,
         base_branch=_TEST_DEFAULT_BASE_BRANCH,
     )
-    # TTL large enough that the marker stays fresh through the (sub-second) test
-    # setup between stamping it and entering the coordinator, but smaller than
-    # the coordinator wait (1.5s) so the marker ages past the TTL *during* the
-    # wait — reproducing the flicker (PRRT_kwDOSJAM6s6La_SZ).
+    # TTL large enough that the marker stays FRESH at coordinator entry
+    # regardless of how long the pre-coordinator setup (DB loads, gate checks)
+    # takes inside ``_execute`` — the production entry-time fix measures the
+    # marker's age against the coordinator-ENTRY clock, so the marker only has
+    # to be fresh *then*, not survive the whole setup gap. A 1.0s TTL is too
+    # tight under CI load (the setup gap can exceed it, making the marker stale
+    # at entry and clearing ``awaiting_human_since`` — a flaky false failure,
+    # not the regression under test). 30s absorbs any plausible setup gap while
+    # still exercising the long-wait path; the during-wait aging only mattered
+    # for the pre-fix post-wait clock behavior, which is already fixed
+    # (PRRT_kwDOSJAM6s6La_SZ).
     monitor_config = MonitorConfig(
         auto_merge=True,
         poll_interval_seconds=60,
@@ -1175,7 +1182,7 @@ async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
         initial_review_grace_period_seconds=0,
         non_check_reviewer_settle_seconds=0,
         non_check_reviewer_logins=(),
-        merge_block_attention_ttl_seconds=1.0,
+        merge_block_attention_ttl_seconds=30.0,
     )
     coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5)
     runner = PullRequestMonitorRunner(
@@ -1205,9 +1212,10 @@ async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
         await session.commit()
     state = MonitorState()
     # Stamp the marker FRESH at this poll's entry — still-blocked. The
-    # coordinator wait (0.4s > 0.1s TTL) will age it past the TTL *during* the
-    # wait; without the entry-time fix the critical-section-entry clear would
-    # see it as stale (post-wait clock) and wipe the signal.
+    # coordinator wait (1.5s) is shorter than the TTL (30s), so the entry-time
+    # fix preserves the marker across the wait; without that fix the
+    # critical-section-entry clear would measure age against the post-wait
+    # clock and (with a tight TTL) wipe the signal.
     state.mark_merge_block_attention()
 
     terminal = await runner._execute(
