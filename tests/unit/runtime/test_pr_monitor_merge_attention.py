@@ -28,6 +28,7 @@ from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     _MERGE_BLOCK_ATTENTION_STATE_KEY,
     Merge,
+    MergeStateStatus,
     MonitorConfig,
     MonitorState,
 )
@@ -234,6 +235,7 @@ class _LongWaitMergeCoordinator:
     def __init__(self, wait_seconds: float) -> None:
         self._wait_seconds = wait_seconds
         self.entries: list[tuple[str, str]] = []
+        self.yielded_at: datetime | None = None
 
     @asynccontextmanager
     async def serialized_merge(
@@ -245,6 +247,7 @@ class _LongWaitMergeCoordinator:
         self.entries.append((repo_url, base_branch))
         # Real sleep so datetime.now(UTC) advances past the TTL inside the wait.
         await asyncio.sleep(self._wait_seconds)
+        self.yielded_at = datetime.now(UTC)
         yield
 
 
@@ -376,50 +379,15 @@ async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
 
 
 @pytest.mark.unit
-async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestamp(
+async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6LdM4X: after a serialized merge wait, the post-lock
-    non-human gate clear must re-stamp a FRESH-at-entry
-    ``merge_block_attention`` marker to a CURRENT wall-clock, not the
-    coordinator-ENTRY timestamp.
+    """#671: post-lock queue waits preserve only on forge-confirmed blockage.
 
-    The freshness check at the critical-section ENTRY still uses the entry
-    timestamp so a marker fresh at entry is preserved across the long wait
-    (PRRT_kwDOSJAM6s6La_SZ, PRRT_kwDOSJAM6s6LcfXk). But the durable re-stamp
-    that follows the preserve MUST be fresh relative to REAL time: the entry
-    timestamp is stale after the wait, so stamping the marker with it would let
-    the marker age past the TTL during the subsequent post-lock gate wait (merge
-    queue / reviewer settle / initial review grace). The next poll — or a
-    restart during that wait — would then measure the stale marker, exceed the
-    TTL, clear ``awaiting_human_since``, and let the still-active
-    branch-protection rejection re-stamp it, restarting the human-wait timer
-    though the operator block never resolved.
-
-    This test reproduces the review-thread scenario: a serialized merge wait,
-    then a post-lock queue blocker parks the monitor on a non-human gate wait.
-    It asserts the persisted marker on the row is a current wall-clock (within
-    the real-now window around the post-lock clear), NOT the coordinator-ENTRY
-    timestamp, so the signal survives the post-lock wait and a restart during
-    it.
-
-    The post-lock ``allow_age_out=False`` preserve is TTL-independent: it always
-    re-stamps with a current ``datetime.now(UTC)`` regardless of marker age, so
-    the regression under test (re-stamp with the stale entry timestamp) is
-    exercised purely by asserting that persisted re-stamp is a current
-    wall-clock strictly later than the entry window. The TTL only governs the
-    critical-section-entry clear's preserve/clear decision, so it just has to
-    keep the marker FRESH at that entry clear: the marker is stamped by the
-    test before ``_execute``, and the setup gap inside ``_execute`` (scope
-    policy refresh, merge-gate fetch, queue-blockers lookup, settle decision,
-    status fetch) is variable and can exceed a tiny TTL under CI load — which
-    would make the entry clear misclassify a fresh-at-setup marker as stale and
-    clear ``awaiting_human_since`` (a flaky false failure, not the regression
-    under test). A 30s TTL absorbs any plausible setup gap (matching the
-    sibling ``test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention``
-    rationale) while the 1.5s coordinator wait still advances real time past the
-    entry window so the post-lock re-stamp is strictly later than it.
+    The old queue preserve path re-stamped markers after the coordinator wait.
+    The signal is now forge-driven: ``BLOCKED`` preserves the existing marker and
+    stable timer without refreshing the timestamp.
     """
     workspace_id = await seed_monitoring_workspace(factory)
     sleep_fn = RecordedSleep()
@@ -452,11 +420,9 @@ async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestam
     # TTL is too tight under CI load (the setup gap can exceed it, making the
     # marker stale at entry and clearing ``awaiting_human_since`` — a flaky false
     # failure, not the regression under test). 30s absorbs any plausible setup
-    # gap. The post-lock ``allow_age_out=False`` preserve is TTL-independent
-    # (always re-stamps with a current wall-clock), so the regression under test
-    # (re-stamp with the stale entry timestamp) is exercised without the wait
-    # having to exceed the TTL; the 1.5s wait still advances real time past the
-    # entry window so the post-lock re-stamp is strictly later than it.
+    # gap. The post-lock queue wait is now forge-signal-driven; this setup only
+    # needs the critical-section-entry clear to preserve the marker before the
+    # serialized wait.
     monitor_config = MonitorConfig(
         auto_merge=True,
         poll_interval_seconds=60,
@@ -494,14 +460,10 @@ async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestam
         )
         await session.commit()
     state = MonitorState()
-    # Stamp the marker FRESH at this poll's entry — still-blocked. The 30s TTL
-    # absorbs the variable setup gap inside ``_execute`` so the marker is still
-    # fresh at the critical-section-entry clear. Capture the entry-window upper
-    # bound so the persisted re-stamp (taken AFTER the 1.5s wait) can be asserted
-    # strictly later than the entry timestamp — the post-lock preserve re-stamps
-    # with a CURRENT wall-clock, not the stale entry timestamp.
+    # Stamp the marker FRESH at this poll's entry so the #661 critical-section
+    # entry clear preserves it. The later post-lock queue wait must not re-stamp.
     state.mark_merge_block_attention()
-    entry_wall_clock_after = datetime.now(UTC)
+    original_marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
 
     terminal = await runner._execute(
         action=Merge(),
@@ -509,7 +471,7 @@ async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestam
         repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
         repo=_TEST_REPO,
         pr_number=_TEST_PR_NUMBER,
-        status=_mergeable_status(),
+        status=replace(_mergeable_status(), merge_state_status=MergeStateStatus.BLOCKED),
         state=state,
         base_branch=_TEST_DEFAULT_BASE_BRANCH,
         remote_branch=f"awf/{workspace_id}",
@@ -534,24 +496,11 @@ async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestam
     # reset (no flicker/restart of the human-wait timer).
     assert ws.awaiting_human_since == episode_start
     assert ws.awaiting_human_reason is not None
-    # The persisted marker is NOT the coordinator-ENTRY timestamp (which would
-    # be ~entry_wall_clock_before/after). It is a CURRENT wall-clock taken at the
-    # post-lock clear, so the marker is fresh relative to real time going into
-    # the post-lock gate wait. The post-lock ``allow_age_out=False`` preserve
-    # always re-stamps with ``datetime.now(UTC)`` (TTL-independent), so this
-    # assertion is what guards the PRRT_kwDOSJAM6s6LdM4X regression: a
-    # re-introduction of the stale entry-timestamp re-stamp would fail it.
     persisted_raw = (ws.monitor_threads_addressed or {}).get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
     assert persisted_raw is not None
-    persisted_stamp = datetime.fromisoformat(persisted_raw)
-    # The entry timestamp was captured before the 1.5s wait; the persisted
-    # re-stamp is taken AFTER the wait, so it must be strictly later than the
-    # entry-window upper bound (the wait alone advanced the clock past it).
-    assert persisted_stamp > entry_wall_clock_after
-    # And the persisted re-stamp is within the post-lock clear window (it is a
-    # current wall-clock at that clear, not the entry timestamp). Allow a loose
-    # upper bound to absorb DB round-trip latency under CI load.
-    assert (datetime.now(UTC) - persisted_stamp).total_seconds() < 30.0
+    assert persisted_raw != original_marker
+    assert coordinator.yielded_at is not None
+    assert datetime.fromisoformat(persisted_raw) < coordinator.yielded_at
 
 
 @pytest.mark.unit
@@ -677,26 +626,7 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6LcfXk: a serialized-merge wait longer than the merge-block
-    TTL must NOT clear a ``merge_block_attention`` marker that was FRESH at
-    coordinator entry when a post-lock queue blocker parks the monitor on a
-    non-human gate wait.
-
-    The critical-section-entry clear re-stamps a fresh marker to the entry
-    timestamp. The serialized merge coordinator can block behind another merge
-    for longer than the TTL with no branch-protection fallback firing (no poll
-    runs during the wait). Before the fix, the post-lock queue-blocker clear
-    measured the marker's age against the post-wait wall-clock (``now=None``),
-    so a marker fresh at entry aged past the TTL during the wait and was
-    misclassified as RESOLVED — clearing ``awaiting_human_since`` even though
-    the branch-protection block was still active. On the next poll the
-    fallback re-stamps via COALESCE, restarting the human-wait timer though
-    the operator block never resolved.
-
-    The fix passes the coordinator-ENTRY timestamp to the post-lock clears too,
-    so a marker fresh when the wait started stays fresh across the post-lock
-    queue wait; the attention signal is preserved.
-    """
+    """#671: a long coordinator wait still preserves when the forge says blocked."""
     workspace_id = await seed_monitoring_workspace(factory)
     sleep_fn = RecordedSleep()
     gh = _MergeMethodClient(
@@ -775,11 +705,11 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
         )
         await session.commit()
     state = MonitorState()
-    # Stamp the marker FRESH at this poll's entry — still-blocked. The
-    # coordinator wait (1.5s) exceeds the TTL (1.0s), so without the entry-time
-    # reference the post-lock queue clear would measure the marker against the
-    # post-wait wall-clock, age it past the TTL, and clear the signal.
+    # Stamp the marker FRESH at this poll's entry so the #661 critical-section
+    # entry clear preserves it. The later post-lock queue wait is decided by the
+    # forge ``BLOCKED`` signal, not marker age.
     state.mark_merge_block_attention()
+    original_marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
 
     terminal = await runner._execute(
         action=Merge(),
@@ -787,7 +717,7 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
         repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
         repo=_TEST_REPO,
         pr_number=_TEST_PR_NUMBER,
-        status=_mergeable_status(),
+        status=replace(_mergeable_status(), merge_state_status=MergeStateStatus.BLOCKED),
         state=state,
         base_branch=_TEST_DEFAULT_BASE_BRANCH,
         remote_branch=f"awf/{workspace_id}",
@@ -814,6 +744,11 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
     # reset (no flicker/restart of the human-wait timer).
     assert ws.awaiting_human_since == episode_start
     assert ws.awaiting_human_reason is not None
+    persisted_raw = (ws.monitor_threads_addressed or {}).get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
+    assert persisted_raw is not None
+    assert persisted_raw != original_marker
+    assert coordinator.yielded_at is not None
+    assert datetime.fromisoformat(persisted_raw) < coordinator.yielded_at
 
 
 # ── Defensive no-op branches for the new atomic-persist helpers ──────────────
@@ -940,10 +875,8 @@ async def test_clear_stale_merge_attention_drops_marker_durably_on_resolve(
     in-memory ``state`` after ``_execute`` returns (``runner.py:455``); a
     cancel/restart before that full ``_persist_state`` would otherwise reload the
     STALE marker from the DB while ``awaiting_human_since`` is already null, so
-    the next poll's preserve path (or an ``allow_age_out=False`` queue-wait) would
-    re-stamp the stale marker fresh and PRESERVE the human-wait signal without
-    any fallback having fired to restore ``awaiting_human_since`` — wedging the
-    monitor in a faux "awaiting human" state until another merge fallback runs.
+    a later poll could otherwise observe the stale marker without the cleared
+    attention flag, losing the invariant that both pieces move together.
     """
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
@@ -970,7 +903,6 @@ async def test_clear_stale_merge_attention_drops_marker_durably_on_resolve(
         workspace_id,
         state,
         now=resolved_now,
-        allow_age_out=True,
     )
     # In-memory marker dropped and attention cleared.
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
@@ -1025,7 +957,6 @@ async def test_clear_stale_merge_attention_atomic_clear_marker_absent_on_row_sti
         workspace_id,
         state,
         now=resolved_now,
-        allow_age_out=True,
     )
     # In-memory marker dropped.
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
@@ -1319,7 +1250,6 @@ async def test_clear_stale_merge_attention_atomic_clear_rolls_back_together(
             workspace_id,
             state,
             now=resolved_now,
-            allow_age_out=True,
         )
     # A session was opened (the failing-commit one) — the runner attempted the
     # atomic clear, and the trap recorded exactly the single commit attempt the
@@ -1413,7 +1343,6 @@ async def test_clear_stale_merge_attention_atomic_clear_distinguishes_two_commit
         workspace_id,
         state,
         now=resolved_now,
-        allow_age_out=True,
     )
 
     # The atomic implementation performs EXACTLY one commit. A reintroduced
@@ -1456,7 +1385,6 @@ async def test_clear_stale_merge_attention_atomic_clear_missing_workspace_skips_
         "ws_does_not_exist",
         state,
         now=datetime(2024, 1, 2, tzinfo=UTC),
-        allow_age_out=True,
     )
     # In-memory marker is still dropped (the caller's signal), but no DB write
     # was attempted against a missing row.

@@ -14,6 +14,7 @@ from awf.common.github_client import GitHubClientError, RepoRef
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import _merge_method_blocked_key
 from awf.runtime.pr_monitor import (
+    _MERGE_BLOCK_ATTENTION_STATE_KEY,
     Merge,
     MonitorAction,
     MonitorState,
@@ -49,6 +50,9 @@ from awf.runtime.pr_monitor_runner.merge_attempts import (
     _attempt_merge_method,
     _MergeAttemptOutcome,
     _record_empty_effective_merge_methods_blocker,
+)
+from awf.runtime.pr_monitor_runner.merge_attention import (
+    _merge_block_attention_queue_verdict,
 )
 from awf.runtime.pr_monitor_runner.merge_methods import (
     _merge_method_mismatch_message,
@@ -164,19 +168,31 @@ async def handle_merge_action(
                 return cast(bool | None, handled)
 
         queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
+
+        async def _queue_wait_merge_attention_status(current_status: PRStatus) -> PRStatus | None:
+            if not state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY):
+                return current_status
+            if _merge_block_attention_queue_verdict(current_status) != "indeterminate":
+                return current_status
+            try:
+                return cast(
+                    PRStatus,
+                    await self._fetch_status_for_decision(
+                        repo=repo,
+                        pr_number=pr_number,
+                        workspace_id=workspace_id,
+                        base_branch=base_branch,
+                    ),
+                )
+            except (ForgeClientError, BaseFetchError, BaseBehindCountError):
+                return None
+
         if queue_blockers:
-            # Resolve any stale awaiting-human flag before this non-human gate wait:
-            # ``decide()`` returned ``Merge``, so a prior ``NotifyHuman`` block is
-            # gone and the operator signal must not stay "awaiting human" while the
-            # monitor only waits on the merge queue (#659). The branch-protection
-            # fallback also keeps ``decide()`` on ``Merge`` while genuinely awaiting a
-            # human, so the helper preserves *that* still-active signal across the
-            # queue wait (PRRT_kwDOSJAM6s6LXscz). PRESERVE-WHILE-QUEUED: while queued
-            # there is no observable signal distinguishing a still-active block from
-            # one resolved externally between polls, so the marker is NEVER aged out
-            # by TTL here — it persists until a real signal (merge re-stamp / success
-            # / new commit) confirms resolution (operator decision on #663).
-            await self._clear_stale_merge_attention(workspace_id, state, allow_age_out=False)
+            await self._clear_or_preserve_merge_attention_for_queue_wait(
+                workspace_id,
+                state,
+                status=await _queue_wait_merge_attention_status(status),
+            )
             await self._wait_for_merge_queue(
                 blockers=queue_blockers,
                 workspace_id=workspace_id,
@@ -204,14 +220,11 @@ async def handle_merge_action(
             monitor_log=monitor_log,
         )
         if settle_decision.wait_seconds > 0:
-            # Resolve any stale awaiting-human flag before this non-human settle
-            # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
-            # "awaiting human" while the monitor only waits on reviewer settle (#659).
-            # An active branch-protection escalation is preserved by the helper
-            # (PRRT_kwDOSJAM6s6LXscz). PRESERVE-WHILE-QUEUED: the marker is never
-            # aged out by TTL while parked on the reviewer-settle wait (operator
-            # decision on #663).
-            await self._clear_stale_merge_attention(workspace_id, state, allow_age_out=False)
+            await self._clear_or_preserve_merge_attention_for_queue_wait(
+                workspace_id,
+                state,
+                status=await _queue_wait_merge_attention_status(status),
+            )
             requested_action = "validate" if pending_validation_gate is not None else "merge"
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
@@ -672,19 +685,10 @@ async def handle_merge_action(
                                     break
 
         if initial_grace_recheck_wait_seconds > 0:
-            # Clear any stale awaiting-human flag before this non-human grace wait
-            # so a resolved ``NotifyHuman`` episode does not keep surfacing
-            # "awaiting human" (#659); an active branch-protection escalation is
-            # preserved (PRRT_kwDOSJAM6s6LXscz). PRESERVE-WHILE-QUEUED: the
-            # marker is never aged out by TTL while parked on the initial-grace
-            # wait (operator decision on #663) — the ``allow_age_out=False``
-            # path re-stamps to a current wall-clock and persists durably
-            # regardless of the entry timestamp, so the explicit
-            # coordinator-ENTRY ``now`` is no longer needed here.
-            await self._clear_stale_merge_attention(
+            await self._clear_or_preserve_merge_attention_for_queue_wait(
                 workspace_id,
                 state,
-                allow_age_out=False,
+                status=await _queue_wait_merge_attention_status(merge_status),
             )
             _log.info(
                 "monitor.initial_review_grace_waiting",
@@ -716,13 +720,10 @@ async def handle_merge_action(
             return False
 
         if settle_recheck_decision is not None:
-            # Same stale-flag clear as the grace arm above. PRESERVE-WHILE-QUEUED:
-            # the marker is never aged out by TTL while parked on the
-            # reviewer-settle wait (operator decision on #663).
-            await self._clear_stale_merge_attention(
+            await self._clear_or_preserve_merge_attention_for_queue_wait(
                 workspace_id,
                 state,
-                allow_age_out=False,
+                status=await _queue_wait_merge_attention_status(merge_status),
             )
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
@@ -746,13 +747,10 @@ async def handle_merge_action(
             return False
 
         if queue_blockers_after_lock:
-            # Same stale-flag clear as the grace arm above. PRESERVE-WHILE-QUEUED:
-            # the marker is never aged out by TTL while parked on the post-lock
-            # merge-queue wait (operator decision on #663).
-            await self._clear_stale_merge_attention(
+            await self._clear_or_preserve_merge_attention_for_queue_wait(
                 workspace_id,
                 state,
-                allow_age_out=False,
+                status=await _queue_wait_merge_attention_status(merge_status),
             )
             await self._wait_for_merge_queue(
                 blockers=queue_blockers_after_lock,

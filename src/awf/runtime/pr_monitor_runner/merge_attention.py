@@ -9,13 +9,30 @@ Behavior is unchanged: the functions are wired back onto the runner via
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_monitor import (
     _MERGE_BLOCK_ATTENTION_STATE_KEY,
+    MergeStateStatus,
     MonitorState,
+    PRStatus,
 )
+
+_MergeBlockAttentionQueueVerdict = Literal["active", "resolved", "indeterminate"]
+
+
+def _merge_block_attention_queue_verdict(
+    status: PRStatus | None,
+) -> _MergeBlockAttentionQueueVerdict:
+    """Classify branch-protection attention from an observable forge status."""
+    if status is None:
+        return "indeterminate"
+    if status.merge_state_status in (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS):
+        return "active"
+    if status.merge_state_status is MergeStateStatus.CLEAN:
+        return "resolved"
+    return "indeterminate"
 
 
 async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str) -> None:
@@ -94,46 +111,18 @@ async def _clear_stale_merge_attention(
     state: MonitorState,
     *,
     now: datetime | None = None,
-    allow_age_out: bool = True,
 ) -> None:
-    """Clear a resolved ``NotifyHuman`` attention flag before a non-human gate wait,
-    unless the merge loop itself set attention for an *still-active* branch-protection
-    block.
+    """Clear a resolved attention flag at merge critical-section entry.
 
-    The merge loop's non-human gate waits (merge queue, reviewer settle, initial
-    review grace) and the merge critical-section entry clear ``awaiting_human_since``
-    so a *resolved* ``NotifyHuman`` episode does not keep surfacing "awaiting human"
-    while the monitor only waits on a non-human gate or is actively merging (#659,
-    #661). But the branch-protection fallback escalates to a human *without* a
-    sticky blocker, so ``decide()`` keeps returning ``Merge``; that attention is
-    still active while the block persists. Skipping the clear when the marker is
-    fresh keeps that signal up across a queue/settle/grace wait instead of wrongly
-    nulling it (PRRT_kwDOSJAM6s6LXscz, #663 regression).
+    This is the #661 merge-window path: once ``decide()`` resumes to ``Merge``,
+    clear stale ``NotifyHuman`` attention before the monitor parks in the
+    serialized merge lane. A merge-loop branch-protection fallback has no sticky
+    blocker, so a fresh ``merge_block_attention`` marker still means the merge
+    loop owns the surfaced human wait and must preserve it.
 
-    A bounded marker TTL distinguishes a STILL-blocked fallback (re-stamped every
-    poll, fresh within the TTL) from a RESOLVED block (no fallback has fired
-    recently, marker age exceeds the TTL) (#663). When the marker is stale the
-    helper clears it (via ``state.clear_merge_block_attention()``) and proceeds
-    with ``_clear_workspace_attention`` so the surfaced flag stops reporting
-    "awaiting human" once only non-human gates remain. When fresh (still-blocked)
-    behavior is unchanged (preserve — #663 regression intact).
-
-    PRESERVE-WHILE-QUEUED (operator decision on the #663 queue-wait tension): the
-    pre-merge non-human gate waits (merge queue, reviewer settle, initial review
-    grace) pass ``allow_age_out=False`` so the marker is NEVER aged out by TTL
-    while the monitor is parked behind a non-human gate — a still-active
-    branch-protection escalation that has resolved externally between polls is
-    indistinguishable from one that is still blocked while queued (both yield
-    ``decide()=Merge`` + queue blocker + a marker no fallback has re-stamped this
-    poll), so ageing the marker out by TTL would falsely clear a still-active
-    escalation. The marker persists until a REAL signal confirms resolution: a
-    merge re-stamp (the branch-protection fallback firing again), a successful
-    merge, or a new commit landing. The bounded false-positive (a resolved block
-    still shows "awaiting human" until the queue clears) is an ACCEPTED
-    limitation; no forge re-check is added (deferred to a follow-up). The
-    critical-section-entry clear (the #661 path) keeps ``allow_age_out=True`` so a
-    marker that was already stale at coordinator entry (the block resolved BEFORE
-    the wait) is still cleared once the monitor is actively merging.
+    Queue/reviewer/grace waits no longer use this TTL heuristic. They call
+    ``_clear_or_preserve_merge_attention_for_queue_wait`` and decide from an
+    observable forge mergeability signal instead (#671).
 
     The merge-method preflight arm needs no such guard: it records a sticky
     ``_merge_method_blocked_key`` so ``decide()`` returns ``NotifyHuman`` and these
@@ -192,38 +181,14 @@ async def _clear_stale_merge_attention(
         state.clear_merge_block_attention()
         await self._clear_workspace_attention(workspace_id)
         return
-    if not allow_age_out:
-        # PRESERVE-WHILE-QUEUED (operator decision on the #663 queue-wait
-        # tension): the monitor is parking behind a pre-merge non-human gate
-        # wait (merge queue / reviewer settle / initial review grace). While
-        # queued there is no observable signal distinguishing "block still
-        # active" from "block resolved externally between polls" — both yield
-        # ``decide()=Merge`` + queue blocker + a marker no fallback has
-        # re-stamped this poll — so ageing the marker out by TTL would
-        # falsely clear a still-active branch-protection escalation. Never
-        # age out by TTL here: the marker persists until a REAL signal
-        # confirms resolution (a merge re-stamp from the branch-protection
-        # fallback firing again, a successful merge, or a new commit
-        # landing). Re-stamp to a CURRENT wall-clock so the TTL clock resets
-        # for the next wait (PRRT_kwDOSJAM6s6LbXWQ), and persist the re-stamp
-        # durably so a cancel/restart during the wait does not strand the old
-        # marker timestamp on the DB row (PRRT_kwDOSJAM6s6LcL-G). The bounded
-        # false-positive (a resolved block still shows "awaiting human" until
-        # the queue clears) is an ACCEPTED limitation; no forge re-check is
-        # added (deferred to a follow-up).
-        stamp_now = datetime.now(UTC)
-        state.mark_merge_block_attention(now=stamp_now)
-        await self._persist_merge_block_attention_durably(workspace_id, state)
-        return
-    # ``allow_age_out=True`` (critical-section entry, the #661 path): use the
-    # bounded TTL to distinguish a STILL-blocked fallback (re-stamped every
-    # poll, fresh within the TTL) from a RESOLVED block (no fallback has fired
-    # recently, marker age exceeds the TTL). The freshness check uses
+    # Use the bounded TTL to distinguish a STILL-blocked fallback (re-stamped
+    # every poll, fresh within the TTL) from a RESOLVED block (no fallback has
+    # fired recently, marker age exceeds the TTL). The freshness check uses
     # ``reference`` (the caller-supplied ``now``): the critical-section entry
     # passes the coordinator-ENTRY timestamp so a marker FRESH at entry is
-    # preserved across a serialized merge wait longer than the TTL
-    # (PRRT_kwDOSJAM6s6La_SZ, PRRT_kwDOSJAM6s6LcfXk). A marker already stale
-    # at entry (the block resolved BEFORE the wait) is still cleared.
+    # preserved across a serialized merge wait longer than the TTL. A marker
+    # already stale at entry (the block resolved BEFORE the wait) is still
+    # cleared.
     if state.merge_block_attention_active(
         now=reference,
         ttl_seconds=ttl_seconds if ttl_seconds is not None and ttl_seconds > 0 else None,
@@ -276,13 +241,9 @@ async def _clear_stale_merge_attention(
     # (``runner.py:455``), and the prior two-commit sequence
     # (``_clear_workspace_attention`` then ``_clear_merge_block_attention_durably``)
     # left a cancel/restart window where ``awaiting_human_since`` was already
-    # nulled but the STALE marker still sat on the DB row. The next poll's
-    # ``_clear_stale_merge_attention`` — or the ``allow_age_out=False`` queue-wait
-    # preserve path — would then re-stamp the stale marker fresh and PRESERVE the
-    # human-wait signal without any fallback having fired to restore
-    # ``awaiting_human_since`` (the ``merge_loop.py`` branch-protection re-stamp
-    # only fires on an active rejection), wedging the monitor in a faux
-    # "awaiting human" state until another merge fallback runs
+    # nulled but the STALE marker still sat on the DB row. A later poll could then
+    # reload one side without the other, losing the invariant that marker and
+    # surfaced attention move together
     # (PRRT_kwDOSJAM6s6Lf_37, PRRT_kwDOSJAM6s6Lh0zt). Performing both writes under
     # one ``get_for_update`` transaction makes the marker/attention pair
     # unobservable independently — a restart can never see the cleared flag
@@ -292,6 +253,59 @@ async def _clear_stale_merge_attention(
     # single-key durable-clear pattern (``_clear_preserved_head_marker_durably``):
     # touch ONLY the ``_MERGE_BLOCK_ATTENTION_STATE_KEY``, never flushing the
     # whole in-memory ``MonitorState``.
+    state.clear_merge_block_attention()
+    async with self._deps.session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        if threads_addressed.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None) is not None:
+            ws.monitor_threads_addressed = threads_addressed
+        await repo.clear_workspace_attention(workspace_id)
+        await s.commit()
+
+
+async def _clear_or_preserve_merge_attention_for_queue_wait(
+    self: Any,
+    workspace_id: str,
+    state: MonitorState,
+    *,
+    status: PRStatus | None,
+) -> None:
+    """Apply the queue-wait forge verdict to ``merge_block_attention``.
+
+    Queue, reviewer-settle, and initial-grace waits do not attempt a merge, so
+    they cannot infer branch-protection state from a fresh merge rejection.
+    Instead, use the forge mergeability signal already observed for this poll
+    (or a targeted re-check performed by the caller when the signal was
+    indeterminate):
+
+    - branch protection still blocked -> preserve the existing marker and stable
+      ``awaiting_human_since`` without re-stamping;
+    - clean/mergeable -> clear the marker and surfaced attention promptly;
+    - unknown/error -> preserve conservatively.
+    """
+    if not state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY):
+        state.clear_merge_block_attention()
+        await self._clear_workspace_attention(workspace_id)
+        return
+    verdict = _merge_block_attention_queue_verdict(status)
+    if verdict in ("active", "indeterminate"):
+        return
+    await _clear_merge_block_attention_and_workspace_attention_durably(
+        self,
+        workspace_id,
+        state,
+    )
+
+
+async def _clear_merge_block_attention_and_workspace_attention_durably(
+    self: Any,
+    workspace_id: str,
+    state: MonitorState,
+) -> None:
+    """Clear the marker and awaiting-human attention in one row transaction."""
     state.clear_merge_block_attention()
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -316,12 +330,8 @@ async def _clear_merge_block_attention_durably(self: Any, workspace_id: str) -> 
     (``runner.py:455``). A cancel/restart before that full ``_persist_state``
     would otherwise reload the STALE marker from the persisted row while
     ``awaiting_human_since`` is already null — so the next poll's
-    ``_clear_stale_merge_attention`` (or the ``allow_age_out=False`` queue-wait
-    preserve path) would re-stamp the stale marker fresh and PRESERVE the
-    human-wait signal without any fallback having fired to restore
-    ``awaiting_human_since`` (the ``merge_loop.py`` branch-protection re-stamp
-    only fires on an active rejection), wedging the monitor in a faux
-    "awaiting human" state until another merge fallback runs
+    a later poll could then reload one side without the other, losing the
+    invariant that marker and surfaced attention move together
     (PRRT_kwDOSJAM6s6Lf_37).
 
     Mirrors the established single-key durable-clear pattern
