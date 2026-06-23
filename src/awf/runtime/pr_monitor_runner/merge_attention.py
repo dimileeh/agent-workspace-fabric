@@ -232,16 +232,10 @@ async def _clear_stale_merge_attention(
     # touch ONLY the ``_MERGE_BLOCK_ATTENTION_STATE_KEY``, never flushing the
     # whole in-memory ``MonitorState``.
     state.clear_merge_block_attention()
-    async with self._deps.session_factory() as s:
-        repo = WorkspaceRepository(s)
-        ws = await repo.get_for_update(workspace_id)
-        if ws is None:
-            return
-        threads_addressed = dict(ws.monitor_threads_addressed or {})
-        if threads_addressed.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None) is not None:
-            ws.monitor_threads_addressed = threads_addressed
-        await repo.clear_workspace_attention(workspace_id)
-        await s.commit()
+    await _clear_merge_block_attention_and_workspace_attention_row_durably(
+        self,
+        workspace_id,
+    )
 
 
 async def _clear_or_preserve_merge_attention_for_queue_wait(
@@ -290,6 +284,17 @@ async def _clear_merge_block_attention_and_workspace_attention_durably(
 ) -> None:
     """Clear the marker and awaiting-human attention in one row transaction."""
     state.clear_merge_block_attention()
+    await _clear_merge_block_attention_and_workspace_attention_row_durably(
+        self,
+        workspace_id,
+    )
+
+
+async def _clear_merge_block_attention_and_workspace_attention_row_durably(
+    self: Any,
+    workspace_id: str,
+) -> None:
+    """Clear the persisted marker and awaiting-human attention in one transaction."""
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.get_for_update(workspace_id)
