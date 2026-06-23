@@ -245,8 +245,9 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     # present, the final AWF line wins. If that line omits a reason, preserve an
     # earlier reason for the same verdict. Sanitized non-blocking placeholders
     # (for example ``AWF-VERDICT: FIXED: <one-sentence summary>``) may fall back
-    # to an earlier reasoned verdict so a prompt echo cannot clear a hard block;
-    # blocking final verdicts remain authoritative even with no usable reason.
+    # to an earlier reasoned verdict or a bare blocking fallback so a prompt echo
+    # cannot clear a hard block; blocking final verdicts remain authoritative
+    # even with no usable reason.
     awf_verdicts: list[VerdictResult] = []
     bare_verdicts: list[VerdictResult] = []
     for line in stdout.splitlines():
@@ -281,9 +282,29 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
             for parsed in reversed(verdicts[:-1]):
                 if parsed.reason is not None:
                     return parsed
+            bare_blocking = _select_bare_verdict(
+                bare_verdicts,
+                priorities=("needs_human", "defer"),
+            )
+            if bare_blocking is not None:
+                return bare_blocking
             return latest
         return latest
-    for verdict in ("needs_human", "false_positive", "defer", "fix_committed"):
+    selected_bare = _select_bare_verdict(
+        bare_verdicts,
+        priorities=("needs_human", "false_positive", "defer", "fix_committed"),
+    )
+    if selected_bare is not None:
+        return selected_bare
+    return VerdictResult(verdict="fix_committed")
+
+
+def _select_bare_verdict(
+    verdicts: Sequence[VerdictResult],
+    *,
+    priorities: Sequence[Verdict],
+) -> VerdictResult | None:
+    for verdict in priorities:
         selected: VerdictResult | None = None
         for parsed in reversed(verdicts):
             if parsed.verdict != verdict:
@@ -294,7 +315,7 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                 selected = parsed
         if selected is not None:
             return selected
-    return VerdictResult(verdict="fix_committed")
+    return None
 
 
 def _verdict_line_candidates(stripped: str) -> Iterable[str]:

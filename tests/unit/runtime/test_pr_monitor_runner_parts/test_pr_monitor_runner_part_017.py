@@ -74,6 +74,29 @@ class TestParseVerdict:
         assert result.reason == "maintainer decision required"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("bare_line", "expected_verdict", "expected_reason"),
+        [
+            (
+                "NEEDS_HUMAN: maintainer decision required",
+                "needs_human",
+                "maintainer decision required",
+            ),
+            ("DEFER: track a follow-up", "defer", "track a follow-up"),
+        ],
+    )
+    def test_empty_non_blocking_awf_verdict_preserves_later_bare_blocker(
+        self,
+        bare_line: str,
+        expected_verdict: str,
+        expected_reason: str,
+    ) -> None:
+        result = _parse_verdict_result(f"AWF-VERDICT: FIXED:\n{bare_line}")
+
+        assert result.verdict == expected_verdict
+        assert result.reason == expected_reason
+
+    @pytest.mark.unit
     def test_private_awf_later_verdict_wins_over_prior_verdict(self) -> None:
         result = _parse_verdict_result(
             "AWF-VERDICT: FALSE POSITIVE: stale review boilerplate\n"
