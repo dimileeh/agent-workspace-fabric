@@ -454,12 +454,33 @@ async def _clear_stale_merge_attention(
     (PRRT_kwDOSJAM6s6La_SZ). Measuring against entry time preserves a marker
     that was fresh when the wait started; a marker already stale at entry is
     still cleared (the block resolved before the wait).
+
+    Refresh on preserve: the branch-protection fallback only re-stamps the marker
+    when it actually runs (``handle_merge_action``'s merge-blocker arm, after the
+    serialized merge coordinator). Polls that park on a non-human gate wait
+    (merge queue, reviewer settle, initial review grace) BEFORE reaching the
+    merge attempt never re-stamp the marker, so a still-active block can age past
+    the TTL across consecutive waits and the next wait's clear would drop
+    ``awaiting_human_since`` even though the human gate is unchanged
+    (PRRT_kwDOSJAM6s6LbXWQ). Re-stamping the marker to ``now`` whenever this
+    helper preserves it resets the TTL clock for the next wait, so a marker that
+    was fresh when observed stays fresh across consecutive non-human gate waits.
+    The branch-protection fallback still re-stamps when it fires, and a genuinely
+    resolved marker (stale) is still cleared below.
     """
     ttl_seconds = self._config.merge_block_attention_ttl_seconds
+    reference = now if now is not None else datetime.now(UTC)
     if state.merge_block_attention_active(
-        now=now,
+        now=reference,
         ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
     ):
+        # Still-active block: refresh the marker's timestamp so the TTL clock
+        # resets for the next non-human gate wait. Without this, consecutive
+        # waits that never reach the merge-blocker fallback let the marker age
+        # past the TTL and the next wait clears the still-active signal
+        # (PRRT_kwDOSJAM6s6LbXWQ). The caller persists ``state`` after the poll,
+        # so the re-stamp is durable.
+        state.mark_merge_block_attention(now=reference)
         return
     # Stale (resolved) marker: drop it so the next fresh poll re-stamps cleanly,
     # then clear the surfaced flag.

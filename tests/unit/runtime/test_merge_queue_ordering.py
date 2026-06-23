@@ -764,6 +764,79 @@ async def test_merge_queue_wait_preserves_active_branch_protection_attention(
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
     assert workspace.awaiting_human_since == episode_start
     assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
+    # The still-active marker was refreshed to this poll's wall-clock so the TTL
+    # clock resets for the next non-human gate wait (PRRT_kwDOSJAM6s6LbXWQ).
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in active_block_state.threads_addressed_ids
+    refreshed_marker = active_block_state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    assert refreshed_marker != "1"
+
+
+@pytest.mark.unit
+async def test_clear_stale_merge_attention_restamps_preserved_marker(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6LbXWQ: ``_clear_stale_merge_attention`` must re-stamp a
+    still-active marker to ``now`` when it preserves it, so the TTL clock resets
+    and consecutive non-human gate waits do not age the marker past the TTL.
+
+    Without the re-stamp, a marker stamped once by the branch-protection fallback
+    is never refreshed during merge-queue/reviewer-settle/initial-grace waits
+    (the fallback only re-stamps when it actually runs, after the serialized
+    merge coordinator). After enough consecutive waits the marker ages past the
+    TTL and the next wait clears ``awaiting_human_since`` even though the human
+    gate is unchanged. Re-stamping on preserve keeps the marker fresh across
+    waits while a genuinely resolved marker (stale) is still cleared.
+    """
+    workspace_id = await seed_monitoring_workspace(factory, pr_number=333)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    # Stamp a marker FRESH at T0 (within the default 120s TTL).
+    t0 = datetime(2026, 6, 23, 12, 0, tzinfo=UTC)
+    state = MonitorState()
+    state.mark_merge_block_attention(now=t0)
+
+    # First preserve: ``now`` well within the TTL. The marker is preserved AND
+    # re-stamped to ``now`` (proving the refresh, not just the preserve).
+    first_now = t0 + timedelta(seconds=30)
+    await runner._clear_stale_merge_attention(workspace_id, state, now=first_now)
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    assert (
+        datetime.fromisoformat(state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY])
+        == first_now
+    )
+
+    # Second preserve: ``now`` has advanced past the ORIGINAL stamp's TTL window
+    # (T0 + 150s > T0 + 120s TTL), but because the marker was re-stamped to
+    # ``first_now`` (T0 + 30s) the marker age is only 120s — still fresh
+    # (age <= ttl_seconds). Without the re-stamp the original T0 stamp would be
+    # 150s old (STALE) and the clear would wipe the still-active signal.
+    second_now = t0 + timedelta(seconds=150)
+    await runner._clear_stale_merge_attention(workspace_id, state, now=second_now)
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    assert (
+        datetime.fromisoformat(state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY])
+        == second_now
+    )
+
+    # Parity: a genuinely RESOLVED marker (stale relative to its OWN last stamp,
+    # well past the TTL with no re-stamp in between) is still cleared. Stamp a
+    # fresh marker, then jump ``now`` past the TTL with no intervening preserve.
+    resolved_state = MonitorState()
+    resolved_state.mark_merge_block_attention(now=t0)
+    resolved_now = t0 + timedelta(seconds=600)
+    await runner._clear_stale_merge_attention(workspace_id, resolved_state, now=resolved_now)
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in resolved_state.threads_addressed_ids
 
 
 def _stale_merge_block_state(*, episode_start: datetime) -> MonitorState:
