@@ -632,24 +632,18 @@ async def handle_merge_action(
             status=status,
         )
         # Capture the wall-clock at coordinator ENTRY. The serialized merge
-        # coordinator can block behind another merge longer than the merge-block
-        # TTL with no branch-protection fallback firing (no poll runs during the
-        # wait). Measuring the marker's age against the post-wait clock would
-        # reclassify a FRESH-at-entry marker as STALE, clearing
-        # ``awaiting_human_since`` so the deterministic rejection re-stamps it —
-        # flickering the human-wait timer though the block never resolved
-        # (PRRT_kwDOSJAM6s6La_SZ). Judge freshness against this entry timestamp
-        # so a fresh-at-entry marker is preserved; a stale-at-entry marker is
-        # still cleared (the block resolved before the wait).
+        # coordinator can block behind another merge longer than the merge-block TTL
+        # with no fallback firing (no poll runs during the wait); judging the
+        # marker's age against the post-wait clock would reclassify a FRESH-at-entry
+        # marker as STALE and clear ``awaiting_human_since`` — flickering the
+        # human-wait timer though the block never resolved
+        # (PRRT_kwDOSJAM6s6La_SZ). Use the entry timestamp so a fresh-at-entry
+        # marker is preserved; a stale-at-entry marker is still cleared.
         merge_critical_section_entered_at = datetime.now(UTC)
         # #661: clear a resolved ``NotifyHuman`` flag BEFORE the non-human merge-
-        # lock wait so it does not stay "awaiting human" while ``decide()`` has
-        # already resumed to ``Merge``. Clearing after acquisition (the
-        # coordinator waits on its asyncio lock / ``pg_try_advisory_lock``)
-        # leaves the flag surfaced for the whole non-human wait. Using the entry
-        # timestamp for the TTL preserves a FRESH (still-blocked) marker and
-        # clears a STALE (resolved between polls) one (#663); the earlier
-        # queue/settle/grace clears are unchanged.
+        # lock wait so it does not stay "awaiting human" once ``decide()`` resumes
+        # to ``Merge``. The entry timestamp (above) preserves a FRESH marker and
+        # clears a STALE (resolved between polls) one (#663).
         await self._clear_stale_merge_attention(
             workspace_id,
             state,
@@ -1029,19 +1023,14 @@ async def handle_merge_action(
                                     break
 
         if initial_grace_recheck_wait_seconds > 0:
-            # Resolve any stale awaiting-human flag before this non-human grace
-            # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
-            # "awaiting human" while the monitor only waits out the grace period (#659).
-            # An active branch-protection escalation is preserved by the helper
-            # (PRRT_kwDOSJAM6s6LXscz). Use the coordinator-ENTRY timestamp (the same
-            # reference the critical-section-entry clear used) so a marker that was
-            # FRESH at entry — re-stamped to that entry time — is still fresh here
-            # even after a serialized merge-coordinator wait longer than the TTL.
-            # Measuring against the post-wait wall-clock would reclassify that
-            # fresh-at-entry marker as STALE, clearing ``awaiting_human_since`` and
-            # letting the merge-blocker fallback's COALESCE restart the human-wait
-            # timer though the operator block never resolved
-            # (PRRT_kwDOSJAM6s6LcfXk).
+            # Clear any stale awaiting-human flag before this non-human grace wait
+            # so a resolved ``NotifyHuman`` episode does not keep surfacing
+            # "awaiting human" (#659); an active branch-protection escalation is
+            # preserved (PRRT_kwDOSJAM6s6LXscz). Use the coordinator-ENTRY timestamp
+            # so a marker FRESH at entry stays fresh across a serialized wait longer
+            # than the TTL — a post-wait wall-clock measurement would reclassify it
+            # as STALE and let the fallback's COALESCE restart the human-wait timer
+            # though the operator block never resolved (PRRT_kwDOSJAM6s6LcfXk).
             await self._clear_stale_merge_attention(
                 workspace_id,
                 state,
@@ -1077,15 +1066,8 @@ async def handle_merge_action(
             return False
 
         if settle_recheck_decision is not None:
-            # Resolve any stale awaiting-human flag before this non-human settle
-            # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
-            # "awaiting human" while the monitor only waits on reviewer settle (#659).
-            # An active branch-protection escalation is preserved by the helper
-            # (PRRT_kwDOSJAM6s6LXscz). Use the coordinator-ENTRY timestamp (see the
-            # initial_grace_recheck_wait_seconds arm above / PRRT_kwDOSJAM6s6LcfXk):
-            # the serialized merge coordinator can wait longer than the TTL with no
-            # fallback firing, so a marker fresh at entry must stay fresh across
-            # this post-lock wait too.
+            # Same stale-flag clear as the grace arm above, using the
+            # coordinator-ENTRY timestamp (#659, PRRT_kwDOSJAM6s6LcfXk).
             await self._clear_stale_merge_attention(
                 workspace_id,
                 state,
@@ -1113,15 +1095,8 @@ async def handle_merge_action(
             return False
 
         if queue_blockers_after_lock:
-            # Resolve any stale awaiting-human flag before this non-human gate wait:
-            # ``decide()`` returned ``Merge``, so a prior ``NotifyHuman`` block is
-            # gone and the operator signal must not stay "awaiting human" while the
-            # monitor only waits on the merge queue (#659). An active branch-protection
-            # escalation is preserved by the helper (PRRT_kwDOSJAM6s6LXscz). Use the
-            # coordinator-ENTRY timestamp (see the initial_grace_recheck_wait_seconds
-            # arm above / PRRT_kwDOSJAM6s6LcfXk): the serialized merge coordinator can
-            # wait longer than the TTL with no fallback firing, so a marker fresh at
-            # entry must stay fresh across this post-lock queue wait too.
+            # Same stale-flag clear as the grace arm above, using the
+            # coordinator-ENTRY timestamp (#659, PRRT_kwDOSJAM6s6LcfXk).
             await self._clear_stale_merge_attention(
                 workspace_id,
                 state,
@@ -1425,37 +1400,25 @@ async def handle_merge_action(
                 stderr=blocker_detail,
             )
             # Surface the escalation as a first-class attention signal now, in
-            # parity with ``loop._execute``'s ``NotifyHuman`` touch-point. Unlike
-            # the merge-method preflight arm, this fallback records no sticky
-            # blocker, so ``decide()`` keeps returning ``Merge`` and never re-enters
+            # parity with ``loop._execute``'s ``NotifyHuman`` touch-point. This
+            # fallback records no sticky blocker (unlike the merge-method preflight
+            # arm), so ``decide()`` keeps returning ``Merge`` and never re-enters
             # ``NotifyHuman``; without this set ``awaiting_human_since`` would stay
             # NULL for the whole branch-protection wait.
             #
-            # Mark this attention merge-loop-owned and still active so later
-            # ``Merge``-poll non-human gate waits (queue, settle, grace) do NOT
-            # clear it as a resolved ``NotifyHuman`` episode while the operator
-            # is still blocked (PRRT_kwDOSJAM6s6LXscz); a non-``Merge`` ``decide()``
-            # drops the marker via ``loop._execute``.
+            # Mark this attention merge-loop-owned and active so later ``Merge``-poll
+            # non-human gate waits do NOT clear it as a resolved ``NotifyHuman``
+            # episode while the operator is still blocked
+            # (PRRT_kwDOSJAM6s6LXscz); a non-``Merge`` ``decide()`` drops the marker.
             #
-            # Persist the marker AND set ``awaiting_human_since`` in a SINGLE
-            # transaction. The previous ordering (``_persist_state`` then a separate
-            # ``_set_workspace_attention`` commit) closed the window where
-            # ``awaiting_human_since`` was set but the marker was missing
-            # (PRRT_kwDOSJAM6s6LbY_X), but created the RECIPROCAL window: a
-            # cancel/restart after the marker commit but before the attention
-            # commit left the DB with a FRESH marker but NULL
-            # ``awaiting_human_since``. On the next poll, if the PR parked on a
-            # non-human gate wait (merge queue / reviewer settle / initial review
-            # grace / merge lock) before another merge attempt reached this
-            # fallback, ``_clear_stale_merge_attention``'s preserve path saw the
-            # fresh marker, re-stamped it, and returned WITHOUT setting the
-            # attention flag — so the active branch-protection escalation was
-            # never surfaced to the operator until a later merge retry re-entered
-            # the fallback (PRRT_kwDOSJAM6s6Lcgk0). The atomic pairing writes both
-            # pieces to the same workspace row in one transaction so a restart can
-            # never observe one without the other. The outer ``run()`` loop still
-            # flushes the rest of ``state`` via its own ``_persist_state`` after
-            # ``_execute`` returns.
+            # Persist the marker AND set ``awaiting_human_since`` atomically: the
+            # prior two-commit ordering closed the marker-missing window
+            # (PRRT_kwDOSJAM6s6LbY_X) but opened its reciprocal — a cancel/restart
+            # between commits left a FRESH marker with NULL
+            # ``awaiting_human_since``, so the next poll preserved the marker without
+            # surfacing the escalation (PRRT_kwDOSJAM6s6Lcgk0). One row, one
+            # transaction; the outer ``run()`` loop flushes the rest of ``state``
+            # after ``_execute`` returns.
             state.mark_merge_block_attention()
             await self._set_workspace_attention_with_merge_block_marker(
                 workspace_id,
@@ -1471,12 +1434,10 @@ async def handle_merge_action(
                     blocker_reason=blocker_reason,
                 )
             except ForgeClientError as exc:
-                # The human notification posts through ``self._deps.gh``; a transient
-                # blip waits then keeps polling while a permanent fault re-raises.
-                # Mirrors the merge-method-preflight notification arm so this
-                # merge-blocker fallback shares the same bounded backoff/counter for
-                # ``post_human_notification`` instead of letting a 502/429 escape
-                # uncaught and bypass the budget.
+                # Transient blip waits then keeps polling; permanent fault re-raises.
+                # Mirrors the merge-method-preflight arm so this fallback shares the
+                # same bounded ``post_human_notification`` backoff/counter instead of
+                # letting a 502/429 escape uncaught and bypass the budget.
                 if await self._wait_after_transient_forge_error(
                     exc,
                     workspace_id=workspace_id,
