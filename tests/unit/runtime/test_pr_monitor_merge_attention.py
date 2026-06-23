@@ -380,28 +380,46 @@ async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestam
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6LdM4X: after a serialized merge wait longer than the
-    merge-block TTL, the post-lock non-human gate clear must re-stamp a
-    FRESH-at-entry ``merge_block_attention`` marker to a CURRENT wall-clock, not
-    the coordinator-ENTRY timestamp.
+    """PRRT_kwDOSJAM6s6LdM4X: after a serialized merge wait, the post-lock
+    non-human gate clear must re-stamp a FRESH-at-entry
+    ``merge_block_attention`` marker to a CURRENT wall-clock, not the
+    coordinator-ENTRY timestamp.
 
-    The freshness check still uses the entry timestamp so a marker fresh at entry
-    is preserved across the long wait (PRRT_kwDOSJAM6s6La_SZ,
-    PRRT_kwDOSJAM6s6LcfXk). But the durable re-stamp that follows must be fresh
-    relative to REAL time: the entry timestamp is stale after the wait, so
-    stamping the marker with it would let the marker age past the TTL during the
-    subsequent post-lock gate wait (merge queue / reviewer settle / initial
-    review grace). The next poll — or a restart during that wait — would then
-    measure the stale marker, exceed the TTL, clear ``awaiting_human_since``,
-    and let the still-active branch-protection rejection re-stamp it, restarting
-    the human-wait timer though the operator block never resolved.
+    The freshness check at the critical-section ENTRY still uses the entry
+    timestamp so a marker fresh at entry is preserved across the long wait
+    (PRRT_kwDOSJAM6s6La_SZ, PRRT_kwDOSJAM6s6LcfXk). But the durable re-stamp
+    that follows the preserve MUST be fresh relative to REAL time: the entry
+    timestamp is stale after the wait, so stamping the marker with it would let
+    the marker age past the TTL during the subsequent post-lock gate wait (merge
+    queue / reviewer settle / initial review grace). The next poll — or a
+    restart during that wait — would then measure the stale marker, exceed the
+    TTL, clear ``awaiting_human_since``, and let the still-active
+    branch-protection rejection re-stamp it, restarting the human-wait timer
+    though the operator block never resolved.
 
-    This test reproduces the review-thread scenario: a serialized merge wait
-    exceeds the TTL, then a post-lock queue blocker parks the monitor on a
-    non-human gate wait. It asserts the persisted marker on the row is a current
-    wall-clock (within the real-now window around the post-lock clear), NOT the
-    coordinator-ENTRY timestamp, so the signal survives the post-lock wait and a
-    restart during it.
+    This test reproduces the review-thread scenario: a serialized merge wait,
+    then a post-lock queue blocker parks the monitor on a non-human gate wait.
+    It asserts the persisted marker on the row is a current wall-clock (within
+    the real-now window around the post-lock clear), NOT the coordinator-ENTRY
+    timestamp, so the signal survives the post-lock wait and a restart during
+    it.
+
+    The post-lock ``allow_age_out=False`` preserve is TTL-independent: it always
+    re-stamps with a current ``datetime.now(UTC)`` regardless of marker age, so
+    the regression under test (re-stamp with the stale entry timestamp) is
+    exercised purely by asserting that persisted re-stamp is a current
+    wall-clock strictly later than the entry window. The TTL only governs the
+    critical-section-entry clear's preserve/clear decision, so it just has to
+    keep the marker FRESH at that entry clear: the marker is stamped by the
+    test before ``_execute``, and the setup gap inside ``_execute`` (scope
+    policy refresh, merge-gate fetch, queue-blockers lookup, settle decision,
+    status fetch) is variable and can exceed a tiny TTL under CI load — which
+    would make the entry clear misclassify a fresh-at-setup marker as stale and
+    clear ``awaiting_human_since`` (a flaky false failure, not the regression
+    under test). A 30s TTL absorbs any plausible setup gap (matching the
+    sibling ``test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention``
+    rationale) while the 1.5s coordinator wait still advances real time past the
+    entry window so the post-lock re-stamp is strictly later than it.
     """
     workspace_id = await seed_monitoring_workspace(factory)
     sleep_fn = RecordedSleep()
@@ -426,9 +444,19 @@ async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestam
         status="open",
         blocker_state="ready",
     )
-    # TTL small enough that the 1.5s coordinator wait exceeds it, so the
-    # post-lock marker would be stale relative to real time if re-stamped with
-    # the entry timestamp.
+    # TTL large enough that the marker stays FRESH at the critical-section-entry
+    # clear regardless of how long the pre-coordinator setup (DB loads, gate
+    # checks, status fetch) takes inside ``_execute`` — the production entry-time
+    # fix measures the marker's age against the coordinator-ENTRY clock, so the
+    # marker only has to be fresh *then*, not survive the whole setup gap. A 1.0s
+    # TTL is too tight under CI load (the setup gap can exceed it, making the
+    # marker stale at entry and clearing ``awaiting_human_since`` — a flaky false
+    # failure, not the regression under test). 30s absorbs any plausible setup
+    # gap. The post-lock ``allow_age_out=False`` preserve is TTL-independent
+    # (always re-stamps with a current wall-clock), so the regression under test
+    # (re-stamp with the stale entry timestamp) is exercised without the wait
+    # having to exceed the TTL; the 1.5s wait still advances real time past the
+    # entry window so the post-lock re-stamp is strictly later than it.
     monitor_config = MonitorConfig(
         auto_merge=True,
         poll_interval_seconds=60,
@@ -436,7 +464,7 @@ async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestam
         initial_review_grace_period_seconds=0,
         non_check_reviewer_settle_seconds=0,
         non_check_reviewer_logins=(),
-        merge_block_attention_ttl_seconds=1.0,
+        merge_block_attention_ttl_seconds=30.0,
     )
     coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5)
     runner = _QueueAfterLockRunner(
@@ -466,10 +494,12 @@ async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestam
         )
         await session.commit()
     state = MonitorState()
-    # Stamp the marker FRESH at this poll's entry — still-blocked. The
-    # coordinator wait (1.5s) exceeds the TTL (1.0s). Capture the entry-window
-    # upper bound so the persisted re-stamp (taken AFTER the wait) can be
-    # asserted strictly later than the entry timestamp.
+    # Stamp the marker FRESH at this poll's entry — still-blocked. The 30s TTL
+    # absorbs the variable setup gap inside ``_execute`` so the marker is still
+    # fresh at the critical-section-entry clear. Capture the entry-window upper
+    # bound so the persisted re-stamp (taken AFTER the 1.5s wait) can be asserted
+    # strictly later than the entry timestamp — the post-lock preserve re-stamps
+    # with a CURRENT wall-clock, not the stale entry timestamp.
     state.mark_merge_block_attention()
     entry_wall_clock_after = datetime.now(UTC)
 
@@ -505,9 +535,12 @@ async def test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestam
     assert ws.awaiting_human_since == episode_start
     assert ws.awaiting_human_reason is not None
     # The persisted marker is NOT the coordinator-ENTRY timestamp (which would
-    # be ~entry_wall_clock_before/after, now stale past the 1.0s TTL after the
-    # 1.5s wait). It is a CURRENT wall-clock taken at the post-lock clear, so the
-    # marker is fresh relative to real time going into the post-lock gate wait.
+    # be ~entry_wall_clock_before/after). It is a CURRENT wall-clock taken at the
+    # post-lock clear, so the marker is fresh relative to real time going into
+    # the post-lock gate wait. The post-lock ``allow_age_out=False`` preserve
+    # always re-stamps with ``datetime.now(UTC)`` (TTL-independent), so this
+    # assertion is what guards the PRRT_kwDOSJAM6s6LdM4X regression: a
+    # re-introduction of the stale entry-timestamp re-stamp would fail it.
     persisted_raw = (ws.monitor_threads_addressed or {}).get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
     assert persisted_raw is not None
     persisted_stamp = datetime.fromisoformat(persisted_raw)
