@@ -1348,6 +1348,16 @@ class TestParseVerdict:
         assert _parse_verdict(reply) == "false_positive"
 
     @pytest.mark.unit
+    def test_bare_needs_human_takes_precedence_over_bare_defer(self) -> None:
+        reply = "NEEDS_HUMAN: follow-up needed\nDEFER: follow-up issue"
+        assert _parse_verdict(reply) == "needs_human"
+
+    @pytest.mark.unit
+    def test_bare_false_positive_takes_precedence_over_bare_defer(self) -> None:
+        reply = "DEFER: fix this later\nFALSE POSITIVE: not a real problem"
+        assert _parse_verdict(reply) == "false_positive"
+
+    @pytest.mark.unit
     def test_monitor_state_verdict_normalizes_persisted_private_verdicts(self) -> None:
         # #305: needs_human is now its own verdict, no longer collapsed to defer.
         assert _monitor_state_verdict("NEEDS_HUMAN") == "needs_human"

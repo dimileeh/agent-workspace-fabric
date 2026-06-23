@@ -247,13 +247,24 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
                 label=awf_match.group("label"),
                 reason=awf_match.group("reason"),
             )
-    for line in reversed(stdout.splitlines()):
-        bare_match = _BARE_VERDICT_LINE.fullmatch(line.strip())
-        if bare_match is not None:
-            return _verdict_result_from_match(
-                label=bare_match.group("label"),
-                reason=bare_match.group("reason"),
-            )
+    # Preserve historical priority across bare verdict lines regardless of output
+    # order: FALSE POSITIVE/NEEDS_HUMAN block merge or resolve a thread even if a
+    # later DEFER exists in chatty output. This keeps multiline prompts safe and
+    # avoids trailing defer lines unblocking a thread unintentionally (#305).
+    bare_verdicts = [
+        _verdict_result_from_match(
+            label=bare_match.group("label"),
+            reason=bare_match.group("reason"),
+        )
+        for bare_match in (
+            _BARE_VERDICT_LINE.fullmatch(line.strip()) for line in stdout.splitlines()
+        )
+        if bare_match is not None
+    ]
+    for verdict in ("false_positive", "needs_human", "defer"):
+        for bare_match in bare_verdicts:
+            if bare_match.verdict == verdict:
+                return bare_match
     return VerdictResult(verdict="fix_committed")
 
 
