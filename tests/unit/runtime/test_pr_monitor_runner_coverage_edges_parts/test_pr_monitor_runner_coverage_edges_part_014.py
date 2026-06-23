@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import comments as pr_monitor_runner_comments
 from awf.runtime.pr_monitor_runner.helpers import (
+    _needs_human_reason_state_key,
     _review_comment_body_state_key,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -1019,6 +1020,58 @@ async def test_post_human_notification_dedup_skips_github_call(
     )
 
     assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_post_human_notification_sanitizes_placeholder_reason_before_posting(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    thread = ReviewThread(
+        thread_id="T_checkout",
+        path="apps/api/checkout_policy.py",
+        line=102,
+        body_excerpt="policy tradeoff still needs a decision",
+        author="cursor[bot]",
+    )
+    status = _status_for_helpers(threads=(thread,))
+    generic_reason = "review feedback needs human input and remains unresolved on GitHub"
+    state = MonitorState(
+        threads_addressed_ids={
+            "T_checkout": "needs_human",
+            _needs_human_reason_state_key("T_checkout"): '<what you need> and exit."',
+        }
+    )
+
+    await runner._post_human_notification_once(
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=42,
+        status=status,
+        state=state,
+    )
+    await runner._post_human_notification_once(
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=42,
+        status=status,
+        state=state,
+    )
+
+    assert len(gh.posts) == 1
+    body = str(gh.posts[0]["body"])
+    assert "<what you need>" not in body
+    assert generic_reason in body
+    assert state.threads_addressed_ids[f"__awf_notify__:{status.head_sha}:{generic_reason}"] == (
+        "notified"
+    )
 
 
 class _RecordingGh:

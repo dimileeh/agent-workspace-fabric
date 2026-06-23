@@ -1261,6 +1261,38 @@ class TestParseVerdict:
         assert result.reason == "maintainer decision"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_uses_final_line_not_prompt_echo(self) -> None:
+        stdout = (
+            'Re-reading: "print AWF-VERDICT: NEEDS_HUMAN: <what you need> and exit."\n'
+            "Some deliberation about the tradeoff.\n"
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer must choose the checkout policy"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer must choose the checkout policy"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_ignores_inline_prompt_template(self) -> None:
+        stdout = (
+            'Re-reading: "If you need a human decision, print '
+            'AWF-VERDICT: NEEDS_HUMAN: <what you need> and exit."'
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason is None
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_placeholder_only_needs_human_has_no_reason(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: NEEDS_HUMAN: <what you need>")
+
+        assert result.verdict == "needs_human"
+        assert result.reason is None
+
+    @pytest.mark.unit
     def test_private_awf_verdict_needs_human_space_variant_preserves_reason(self) -> None:
         # The primary _AWF_VERDICT regex tolerates "NEEDS HUMAN" (space) like
         # "FALSE POSITIVE", so the reason is extracted cleanly instead of being

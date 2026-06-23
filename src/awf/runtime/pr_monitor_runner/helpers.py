@@ -107,9 +107,6 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TRANSIENT_GITHUB_ERROR_MARKERS,
     _URL_CREDENTIAL_RE,
     _VALIDATION_RECOVERY_STALE_REASONS,
-    _VERDICT_DEFER,
-    _VERDICT_FALSE_POSITIVE,
-    _VERDICT_NEEDS_HUMAN,
 )
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
@@ -187,6 +184,15 @@ _reviewer_has_visible_check = _reviewer_settle._reviewer_has_visible_check
 _utc_datetime = _reviewer_settle._utc_datetime
 _visible_check_identities = _reviewer_settle._visible_check_identities
 
+_BARE_VERDICT_LINE = re.compile(
+    r"^(?P<label>FALSE\s+POSITIVE|DEFER|NEEDS[\s_]+HUMAN)\s*:\s*(?P<reason>[^\n\r]*)$",
+    re.IGNORECASE,
+)
+_VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
+    r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|deferr|need)\b[^>\n\r]{0,80}>",
+    re.IGNORECASE,
+)
+
 
 async def _record_ignored_monitor_terminal_callback(
     repo: WorkspaceRepository,
@@ -234,38 +240,55 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         # triggering the follow-up defer capture (comment + filed issue +
         # resolve) on a thread the agent never actually addressed (#305).
         return VerdictResult(verdict="needs_human")
-    awf_match = _AWF_VERDICT.search(stdout)
-    if awf_match is not None:
-        # Canonicalize any run of whitespace/underscores to a single space, so
-        # every separator variant the label regex accepts (NEEDS_HUMAN,
-        # NEEDS HUMAN, NEEDS_ HUMAN, ...) maps to one label. The regex and this
-        # normalization must stay equally permissive, or a matched NEEDS_HUMAN
-        # could silently fall through to fix_committed — the unsafe dir (#305).
-        label = re.sub(r"[\s_]+", " ", awf_match.group("label").strip().lower())
-        reason = awf_match.group("reason").strip() or None
-        if label == "false positive":
-            return VerdictResult(verdict="false_positive", reason=reason)
-        if label == "needs human":
-            return VerdictResult(verdict="needs_human", reason=reason)
-        if label == "defer":
-            return VerdictResult(verdict="defer", reason=reason)
-        return VerdictResult(verdict="fix_committed", reason=reason)
-    if _VERDICT_FALSE_POSITIVE.search(stdout):
-        return VerdictResult(verdict="false_positive", reason=_verdict_reason(stdout))
-    # Check needs_human before defer so a bare ``NEEDS_HUMAN:`` (no
-    # ``AWF-VERDICT:`` prefix) blocks the merge instead of falling through to
-    # ``fix_committed`` and being resolved (the unsafe direction, #305).
-    if _VERDICT_NEEDS_HUMAN.search(stdout):
-        return VerdictResult(verdict="needs_human", reason=_verdict_reason(stdout))
-    if _VERDICT_DEFER.search(stdout):
-        return VerdictResult(verdict="defer", reason=_verdict_reason(stdout))
+    for line in reversed(stdout.splitlines()):
+        awf_match = _AWF_VERDICT.fullmatch(line.strip())
+        if awf_match is not None:
+            return _verdict_result_from_match(
+                label=awf_match.group("label"),
+                reason=awf_match.group("reason"),
+            )
+    for line in reversed(stdout.splitlines()):
+        bare_match = _BARE_VERDICT_LINE.fullmatch(line.strip())
+        if bare_match is not None:
+            return _verdict_result_from_match(
+                label=bare_match.group("label"),
+                reason=bare_match.group("reason"),
+            )
     return VerdictResult(verdict="fix_committed")
 
 
 def _verdict_reason(stdout: str) -> str | None:
     _prefix, _separator, reason = stdout.partition(":")
     cleaned = reason.strip()
-    return cleaned or None
+    return _sanitize_verdict_reason(cleaned)
+
+
+def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:
+    # Canonicalize any run of whitespace/underscores to a single space, so
+    # every separator variant the label regex accepts (NEEDS_HUMAN,
+    # NEEDS HUMAN, NEEDS_ HUMAN, ...) maps to one label. The regex and this
+    # normalization must stay equally permissive, or a matched NEEDS_HUMAN
+    # could silently fall through to fix_committed — the unsafe direction (#305).
+    normalized_label = re.sub(r"[\s_]+", " ", label.strip().lower())
+    cleaned_reason = _sanitize_verdict_reason(reason)
+    if normalized_label == "false positive":
+        return VerdictResult(verdict="false_positive", reason=cleaned_reason)
+    if normalized_label == "needs human":
+        return VerdictResult(verdict="needs_human", reason=cleaned_reason)
+    if normalized_label == "defer":
+        return VerdictResult(verdict="defer", reason=cleaned_reason)
+    return VerdictResult(verdict="fix_committed", reason=cleaned_reason)
+
+
+def _sanitize_verdict_reason(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    cleaned = reason.strip()
+    if not cleaned:
+        return None
+    if _VERDICT_REASON_TEMPLATE_PLACEHOLDER.search(cleaned):
+        return None
+    return cleaned
 
 
 def _review_comment_resolution_body(comment: ReviewComment) -> str:
@@ -298,8 +321,8 @@ def _sync_needs_human_reason(
 ) -> None:
     """Persist or clear the agent's needs-human reason for a review item."""
     reason_key = _needs_human_reason_state_key(item_id)
-    if result.verdict == "needs_human" and result.reason:
-        state.mark_addressed(reason_key, result.reason)
+    if result.verdict == "needs_human" and (reason := _sanitize_verdict_reason(result.reason)):
+        state.mark_addressed(reason_key, reason)
     else:
         state.threads_addressed_ids.pop(reason_key, None)
 
@@ -575,10 +598,12 @@ def _first_needs_human_reason(status: PRStatus, state: MonitorState) -> str | No
     for item_id in [t.thread_id for t in status.unresolved_inline_threads] + [
         c.comment_id for c in status.unresolved_review_comments
     ]:
-        if state.threads_addressed_ids.get(item_id) == "needs_human" and (
-            reason := state.threads_addressed_ids.get(_needs_human_reason_state_key(item_id))
+        if (
+            state.threads_addressed_ids.get(item_id) == "needs_human"
+            and (reason := state.threads_addressed_ids.get(_needs_human_reason_state_key(item_id)))
+            and (sanitized_reason := _sanitize_verdict_reason(reason))
         ):
-            return reason
+            return sanitized_reason
     return None
 
 
