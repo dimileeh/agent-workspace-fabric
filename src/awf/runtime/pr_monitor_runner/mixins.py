@@ -10,6 +10,7 @@ from awf.runtime.pr_monitor_runner import gate_events as _gate_events
 from awf.runtime.pr_monitor_runner import gates as _gates
 from awf.runtime.pr_monitor_runner import lifecycle as _lifecycle
 from awf.runtime.pr_monitor_runner import loop as _loop
+from awf.runtime.pr_monitor_runner import merge_attention as _merge_attention
 from awf.runtime.pr_monitor_runner import operations as _operations
 from awf.runtime.pr_monitor_runner import operator_hints as _operator_hints
 from awf.runtime.pr_monitor_runner import outdated_resolution as _outdated_resolution
@@ -64,14 +65,14 @@ class RunnerDelegatesMixin:
     _load_state = _lifecycle._load_state
     _refresh_operator_state_from_workspace = _lifecycle._refresh_operator_state_from_workspace
     _persist_state = _lifecycle._persist_state
-    _set_workspace_attention = _lifecycle._set_workspace_attention
+    _set_workspace_attention = _merge_attention._set_workspace_attention
     _set_workspace_attention_with_merge_block_marker = (
-        _lifecycle._set_workspace_attention_with_merge_block_marker
+        _merge_attention._set_workspace_attention_with_merge_block_marker
     )
-    _clear_workspace_attention = _lifecycle._clear_workspace_attention
-    _clear_stale_merge_attention = _lifecycle._clear_stale_merge_attention
-    _persist_merge_block_attention_durably = _lifecycle._persist_merge_block_attention_durably
-    _clear_merge_block_attention_durably = _lifecycle._clear_merge_block_attention_durably
+    _clear_workspace_attention = _merge_attention._clear_workspace_attention
+    _clear_stale_merge_attention = _merge_attention._clear_stale_merge_attention
+    _persist_merge_block_attention_durably = _merge_attention._persist_merge_block_attention_durably
+    _clear_merge_block_attention_durably = _merge_attention._clear_merge_block_attention_durably
     _persist_forge_transient_retry_count = _lifecycle._persist_forge_transient_retry_count
     _remove_forge_transient_retry_count = _lifecycle._remove_forge_transient_retry_count
     _clear_preserved_head_marker_durably = _lifecycle._clear_preserved_head_marker_durably
