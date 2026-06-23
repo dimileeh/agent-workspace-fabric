@@ -1239,7 +1239,11 @@ async def test_branch_protection_marker_preserved_on_initial_grace_wait_when_rec
         initial_review_grace_period_seconds=900,
     )
 
+    fetch_calls = 0
+
     async def _fail_fetch_status(*_args: object, **_kwargs: object) -> None:
+        nonlocal fetch_calls
+        fetch_calls += 1
         raise GitHubClientError(
             operation="fetch_pr_status",
             returncode=1,
@@ -1282,6 +1286,7 @@ async def test_branch_protection_marker_preserved_on_initial_grace_wait_when_rec
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
     # The current status was indeterminate and the targeted re-check errored, so
     # preserve conservatively without re-stamping.
+    assert fetch_calls == 1
     assert workspace.awaiting_human_since == episode_start
     assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
     assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == original_marker
