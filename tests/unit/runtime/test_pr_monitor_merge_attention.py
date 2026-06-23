@@ -379,6 +379,56 @@ async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
 
 
 @pytest.mark.unit
+async def test_clean_status_preserves_merge_block_attention_during_queue_wait(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6LqkOW: GitHub ``CLEAN`` during a queue-style wait is not
+    proof that a prior deterministic merge rejection has resolved.
+
+    The status that led into the prior merge attempt can already have been
+    ``CLEAN`` because the branch-protection fallback records no sticky blocker
+    and ``decide()`` keeps returning ``Merge``. If the next poll parks behind a
+    queue/reviewer/grace wait before retrying the merge, preserve the active
+    operator attention until the retry path confirms resolution.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    episode_start = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    state = MonitorState()
+    state.mark_merge_block_attention()
+    marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {_MERGE_BLOCK_ATTENTION_STATE_KEY: marker}
+        ws.awaiting_human_since = episode_start
+        ws.awaiting_human_reason = "GitHub rejected the merge attempt"
+        await session.commit()
+
+    await runner._clear_or_preserve_merge_attention_for_queue_wait(
+        workspace_id,
+        state,
+        status=_mergeable_status(),
+        forge="github",
+    )
+
+    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == marker
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert (ws_after.monitor_threads_addressed or {})[_MERGE_BLOCK_ATTENTION_STATE_KEY] == marker
+    assert ws_after.awaiting_human_since == episode_start
+    assert ws_after.awaiting_human_reason == "GitHub rejected the merge attempt"
+
+
+@pytest.mark.unit
 async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
