@@ -188,7 +188,7 @@ _BARE_VERDICT_LINE = re.compile(
     re.IGNORECASE,
 )
 _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
-    r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|deferr|need)\b[^>\n\r]{0,80}>",
+    r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)\b[^>\n\r]{0,80}>",
     re.IGNORECASE,
 )
 

@@ -1337,6 +1337,13 @@ class TestParseVerdict:
         assert result.reason == "maintainer decision"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_defer_placeholder_only_has_no_reason(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: DEFER: <defer follow-up needed>")
+
+        assert result.verdict == "defer"
+        assert result.reason is None
+
+    @pytest.mark.unit
     def test_private_awf_verdict_fixed_marker_preserves_reason(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: FIXED: pushed regression test")
 
