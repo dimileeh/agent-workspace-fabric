@@ -150,3 +150,44 @@ def test_clear_merge_block_attention_drops_marker_idempotently() -> None:
     # Second clear is a no-op.
     state.clear_merge_block_attention()
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_merge_block_attention_active_unrecognized_marker_shape_preserved_as_fresh() -> None:
+    """An unrecognized marker shape (not ``"1"``, not an ISO timestamp) is treated
+    as fresh rather than silently clearing an in-flight block. The next
+    branch-protection fallback re-stamps it to a known form via
+    ``mark_merge_block_attention``. Covers the ``except ValueError`` arm.
+    """
+    state = MonitorState(
+        threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: "not-a-timestamp"}
+    )
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
+    # Unrecognized shape ⇒ preserved (fresh) regardless of TTL; the value is
+    # left untouched (the next fallback re-stamps it).
+    assert state.merge_block_attention_active(now=now, ttl_seconds=1.0) is True
+    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == "not-a-timestamp"
+
+
+@pytest.mark.unit
+def test_merge_block_attention_active_naive_timestamp_assumed_utc() -> None:
+    """A naive (tzinfo-less) persisted timestamp is assumed UTC before measuring
+    its age against the caller's aware ``now``. Covers the ``tzinfo is None`` arm.
+
+    A naive marker could only arise from a legacy persisted value lacking tz
+    (``mark_merge_block_attention`` always stamps with an aware UTC datetime); the
+    age comparison must normalize it to UTC rather than raising on the
+    aware-minus-naive subtraction.
+    """
+    naive_stamp = datetime(2026, 6, 22, 12, 0)
+    state = MonitorState(
+        threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: naive_stamp.isoformat()}
+    )
+    # 60s later, aware ``now`` in UTC — the naive stamp is treated as 12:00 UTC,
+    # age 60s <= 120s TTL ⇒ fresh (preserve).
+    now = datetime(2026, 6, 22, 12, 1, tzinfo=UTC)
+    assert state.merge_block_attention_active(now=now, ttl_seconds=120.0) is True
+    # 300s later (>120s TTL) ⇒ stale, marker dropped.
+    later = datetime(2026, 6, 22, 12, 5, tzinfo=UTC)
+    assert state.merge_block_attention_active(now=later, ttl_seconds=120.0) is False
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids

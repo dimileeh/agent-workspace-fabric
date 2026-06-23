@@ -936,6 +936,61 @@ async def test_clear_stale_merge_attention_drops_marker_durably_on_resolve(
 
 
 @pytest.mark.unit
+async def test_clear_stale_merge_attention_atomic_clear_marker_absent_on_row_still_clears_attention(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The stale (resolved) atomic-clear branch still clears ``awaiting_human_since``
+    and commits when the persisted row carries NO merge-block marker — the in-memory
+    ``state`` had a marker (driving the stale branch) but the durable row never
+    received it (the outer loop had not flushed ``_persist_state`` yet, or a
+    restart reloaded a marker-less row that a same-poll preserve then re-stamped).
+
+    The ``threads_addressed.pop(...) is None`` guard must skip the redundant
+    ``monitor_threads_addressed`` reassignment (line 303) WITHOUT skipping the
+    attention clear + commit (lines 304-305): a row that already lacks the marker
+    still needs ``awaiting_human_since`` cleared so the resolved ``NotifyHuman``
+    episode stops surfacing. Covers the missing branch in the atomic clear path.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # The in-memory state carries a stale marker (drives the stale branch), but
+    # the persisted row has NO marker — only an active attention flag to clear.
+    stale_stamp = datetime(2024, 1, 1, tzinfo=UTC).isoformat()
+    state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp})
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        # No marker on the row; attention flag set from a prior escalation.
+        ws.monitor_threads_addressed = {}
+        ws.awaiting_human_since = datetime(2024, 1, 1, tzinfo=UTC)
+        ws.awaiting_human_reason = "merge_blocked"
+        await session.commit()
+    resolved_now = datetime(2024, 1, 2, tzinfo=UTC)
+    await runner._clear_stale_merge_attention(
+        workspace_id,
+        state,
+        now=resolved_now,
+        allow_age_out=True,
+    )
+    # In-memory marker dropped.
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
+    # The persisted row still carries no marker, and the attention flag is cleared
+    # despite the marker-absent branch skipping the threads_addressed reassignment.
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in (ws_after.monitor_threads_addressed or {})
+    assert ws_after.awaiting_human_since is None
+
+
+@pytest.mark.unit
 async def test_clear_merge_block_attention_durably_missing_workspace_is_noop(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
