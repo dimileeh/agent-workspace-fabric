@@ -1293,6 +1293,20 @@ class TestParseVerdict:
         assert result.reason is None
 
     @pytest.mark.unit
+    def test_private_awf_verdict_needs_human_without_reason(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: NEEDS_HUMAN:")
+
+        assert result.verdict == "needs_human"
+        assert result.reason is None
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_defer_without_reason(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: DEFER:")
+
+        assert result.verdict == "defer"
+        assert result.reason is None
+
+    @pytest.mark.unit
     def test_private_awf_verdict_needs_human_space_variant_preserves_reason(self) -> None:
         # The primary _AWF_VERDICT regex tolerates "NEEDS HUMAN" (space) like
         # "FALSE POSITIVE", so the reason is extracted cleanly instead of being

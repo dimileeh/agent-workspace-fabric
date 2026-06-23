@@ -225,7 +225,7 @@ _AWF_VERDICT = re.compile(
     # matches the primary regex and its reason is extracted cleanly instead of
     # falling through to the bare fallback (which garbles the reason).
     r"(?P<label>FIXED|FALSE\s+POSITIVE|DEFER|NEEDS[\s_]+HUMAN)"
-    r"\s*:\s*(?P<reason>[^\n\r]+)",
+    r"\s*:\s*(?P<reason>[^\n\r]*)",
     re.IGNORECASE,
 )
 
