@@ -35,7 +35,7 @@ from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
 )
-from awf.runtime.pr_monitor_runner.helpers import _parse_verdict
+from awf.runtime.pr_monitor_runner.helpers import _parse_verdict, _parse_verdict_result
 from tests.postgres import postgres_test_engine
 from tests.shared.monitor_runner import (
     DefaultMergeMethodGitHubClient,
@@ -1024,6 +1024,26 @@ class TestParseVerdict:
     )
     def test_parse_verdict_table(self, stdout: str, expected: str) -> None:
         assert _parse_verdict(stdout) == expected
+
+    @pytest.mark.unit
+    def test_final_empty_awf_verdict_does_not_backfill_cross_verdict_result(self) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: FIXED: committed a fix\nAWF-VERDICT: NEEDS_HUMAN:\n"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason is None
+
+    @pytest.mark.unit
+    def test_final_empty_awf_verdict_reuses_same_verdict_reason(self) -> None:
+        result = _parse_verdict_result(
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer decision needed\n"
+            "AWF-VERDICT: FIXED: committed a fix\n"
+            "AWF-VERDICT: NEEDS_HUMAN:\n"
+        )
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer decision needed"
 
 
 class TestDeferredThreadCapture:
