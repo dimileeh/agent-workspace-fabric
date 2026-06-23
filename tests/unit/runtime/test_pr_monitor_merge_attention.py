@@ -379,18 +379,16 @@ async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
 
 
 @pytest.mark.unit
-async def test_clean_status_preserves_merge_block_attention_during_queue_wait(
+async def test_bitbucket_clean_status_preserves_merge_block_attention_during_queue_wait(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """PRRT_kwDOSJAM6s6LqkOW: GitHub ``CLEAN`` during a queue-style wait is not
-    proof that a prior deterministic merge rejection has resolved.
+    """Bitbucket ``CLEAN`` during a queue-style wait is not proof that a prior
+    deterministic merge rejection has resolved.
 
-    The status that led into the prior merge attempt can already have been
-    ``CLEAN`` because the branch-protection fallback records no sticky blocker
-    and ``decide()`` keeps returning ``Merge``. If the next poll parks behind a
-    queue/reviewer/grace wait before retrying the merge, preserve the active
-    operator attention until the retry path confirms resolution.
+    Bitbucket maps open PRs to ``CLEAN`` because it does not expose GitHub's
+    branch-protection merge-state signal. Preserve active operator attention for
+    that forge while GitHub ``CLEAN`` clears as a confirmed resolution.
     """
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
@@ -409,14 +407,14 @@ async def test_clean_status_preserves_merge_block_attention_during_queue_wait(
         assert ws is not None
         ws.monitor_threads_addressed = {_MERGE_BLOCK_ATTENTION_STATE_KEY: marker}
         ws.awaiting_human_since = episode_start
-        ws.awaiting_human_reason = "GitHub rejected the merge attempt"
+        ws.awaiting_human_reason = "Bitbucket rejected the merge attempt"
         await session.commit()
 
     await runner._clear_or_preserve_merge_attention_for_queue_wait(
         workspace_id,
         state,
         status=_mergeable_status(),
-        forge="github",
+        forge="bitbucket",
     )
 
     assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == marker
@@ -425,7 +423,7 @@ async def test_clean_status_preserves_merge_block_attention_during_queue_wait(
         assert ws_after is not None
     assert (ws_after.monitor_threads_addressed or {})[_MERGE_BLOCK_ATTENTION_STATE_KEY] == marker
     assert ws_after.awaiting_human_since == episode_start
-    assert ws_after.awaiting_human_reason == "GitHub rejected the merge attempt"
+    assert ws_after.awaiting_human_reason == "Bitbucket rejected the merge attempt"
 
 
 @pytest.mark.unit

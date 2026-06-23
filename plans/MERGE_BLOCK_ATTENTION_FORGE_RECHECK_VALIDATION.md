@@ -89,7 +89,30 @@ Focused evidence:
 - `uv run --python 3.12 --extra dev ruff format --check tests/unit/runtime/test_merge_queue_ordering.py`
   - Passed: `1 file already formatted`
 
-Validation complete: Attempt 3 is the final validated state for this plan, and
+## Attempt 4 Validation-Failure Repair
+
+- Fixed the queue-wait verdict classifier so GitHub `CLEAN` is treated as a
+  resolved merge-block signal and clears `merge_block_attention` plus
+  `awaiting_human_since`.
+- Preserved the documented Bitbucket exception: Bitbucket open PRs map to
+  `CLEAN`, so Bitbucket `CLEAN` remains indeterminate and preserves
+  conservatively.
+- Retargeted the stale
+  `test_clean_status_preserves_merge_block_attention_during_queue_wait`
+  expectation to the Bitbucket-specific conservative path.
+
+Focused evidence:
+
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_merge_queue_ordering.py::test_branch_protection_marker_cleared_on_merge_queue_wait_when_forge_resolved tests/unit/runtime/test_merge_queue_ordering.py::test_branch_protection_marker_cleared_on_reviewer_settle_wait_when_forge_resolved -q`
+  - Passed: `2 passed in 4.49s`
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime -k 'merge_attention or merge_block or stale or queue' -q`
+  - Passed: `205 passed, 2574 deselected in 195.85s`
+- `uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor_runner/merge_attention.py tests/unit/runtime/test_pr_monitor_merge_attention.py`
+  - Passed: `All checks passed!`
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/pr_monitor_runner/merge_attention.py tests/unit/runtime/test_pr_monitor_merge_attention.py`
+  - Passed: `2 files already formatted`
+
+Validation complete: Attempt 4 is the final validated state for this plan, and
 its focused evidence confirms the plan-conformance requirements are satisfied.
 The earlier attempts remain as repair history only; full AWF/GitHub validation
 continues to run after the agent phase.

@@ -28,13 +28,14 @@ def _merge_block_attention_queue_verdict(
     forge: str = "github",
 ) -> _MergeBlockAttentionQueueVerdict:
     """Classify branch-protection attention from an observable forge status."""
-    _ = forge
     if status is None:
         return "indeterminate"
     if status.merge_state_status in (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS):
         return "active"
     if status.merge_state_status is MergeStateStatus.CLEAN:
-        return "indeterminate"
+        if forge == "bitbucket":
+            return "indeterminate"
+        return "resolved"
     return "indeterminate"
 
 
@@ -261,8 +262,7 @@ async def _clear_or_preserve_merge_attention_for_queue_wait(
 
     - branch protection still blocked -> preserve the existing marker and stable
       ``awaiting_human_since`` without re-stamping;
-    - clean/mergeable -> preserve conservatively until a merge retry path
-      confirms resolution;
+    - clean/mergeable -> clear on GitHub because it confirms resolution;
     - unknown/error -> preserve conservatively.
 
     Bitbucket open PRs map to ``CLEAN`` because Bitbucket Cloud does not expose a
