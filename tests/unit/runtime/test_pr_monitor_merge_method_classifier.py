@@ -201,3 +201,22 @@ def test_method_blocker_attempt_result_requires_notification_reason() -> None:
     assert _MergeAttemptResult(_MergeAttemptOutcome.SUCCESS).notification_reason is None
     assert _MergeAttemptResult(_MergeAttemptOutcome.RETRY_NEXT_METHOD).notification_reason is None
     assert _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER).notification_reason is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        _MergeAttemptOutcome.SUCCESS,
+        _MergeAttemptOutcome.RETRY_NEXT_METHOD,
+        _MergeAttemptOutcome.BLOCKER,
+    ],
+)
+def test_method_blocker_notification_reason_raises_on_non_blocker(
+    outcome: _MergeAttemptOutcome,
+) -> None:
+    """The property guards its invariant: accessing it on a non-blocker result
+    raises rather than returning a stale or empty reason."""
+    result = _MergeAttemptResult(outcome)
+    with pytest.raises(RuntimeError, match="merge attempt result is not a method blocker"):
+        _ = result.method_blocker_notification_reason

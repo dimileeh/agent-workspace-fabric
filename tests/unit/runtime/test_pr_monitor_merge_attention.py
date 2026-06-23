@@ -1031,6 +1031,42 @@ async def test_clear_merge_block_attention_durably_absent_marker_is_noop(
 
 
 @pytest.mark.unit
+async def test_clear_merge_block_attention_durably_present_marker_is_removed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The durable clear drops a present marker and commits — the symmetric
+    counterpart to ``_persist_merge_block_attention_durably``. Seeding a stale
+    marker on the row and invoking the helper leaves ``monitor_threads_addressed``
+    without the key while preserving any other addressed ids."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    stamp = datetime(2024, 1, 1, tzinfo=UTC).isoformat()
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {
+            _MERGE_BLOCK_ATTENTION_STATE_KEY: stamp,
+            "other_addressed": "kept",
+        }
+        await session.commit()
+    # Marker present ⇒ the helper reassigns threads_addressed and commits.
+    await runner._clear_merge_block_attention_durably(workspace_id)
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    addressed = ws_after.monitor_threads_addressed or {}
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in addressed
+    assert addressed.get("other_addressed") == "kept"
+
+
+@pytest.mark.unit
 async def test_set_workspace_attention_with_merge_block_marker_absent_marker_skips_marker_write(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
