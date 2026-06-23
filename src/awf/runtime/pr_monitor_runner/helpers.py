@@ -191,6 +191,7 @@ _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
     r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)\b[^>\n\r]{0,80}>",
     re.IGNORECASE,
 )
+_CODE_FORMATTED_VERDICT_LINE = re.compile(r"^(?P<ticks>`+)\s*(?P<line>.*?)\s*(?P=ticks)$")
 
 
 async def _record_ignored_monitor_terminal_callback(
@@ -250,22 +251,23 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
     bare_verdicts: list[VerdictResult] = []
     for line in stdout.splitlines():
         stripped = line.strip()
-        awf_match = _AWF_VERDICT.fullmatch(stripped)
-        if awf_match is not None:
-            awf_verdicts.append(
-                _verdict_result_from_match(
-                    label=awf_match.group("label"),
-                    reason=awf_match.group("reason"),
+        for verdict_line in _verdict_line_candidates(stripped):
+            awf_match = _AWF_VERDICT.fullmatch(verdict_line)
+            if awf_match is not None:
+                awf_verdicts.append(
+                    _verdict_result_from_match(
+                        label=awf_match.group("label"),
+                        reason=awf_match.group("reason"),
+                    )
                 )
-            )
-        bare_match = _BARE_VERDICT_LINE.fullmatch(stripped)
-        if bare_match is not None:
-            bare_verdicts.append(
-                _verdict_result_from_match(
-                    label=bare_match.group("label"),
-                    reason=bare_match.group("reason"),
+            bare_match = _BARE_VERDICT_LINE.fullmatch(verdict_line)
+            if bare_match is not None:
+                bare_verdicts.append(
+                    _verdict_result_from_match(
+                        label=bare_match.group("label"),
+                        reason=bare_match.group("reason"),
+                    )
                 )
-            )
     verdicts = awf_verdicts or bare_verdicts
     if verdicts is awf_verdicts:
         latest = verdicts[-1]
@@ -293,6 +295,16 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         if selected is not None:
             return selected
     return VerdictResult(verdict="fix_committed")
+
+
+def _verdict_line_candidates(stripped: str) -> Iterable[str]:
+    yield stripped
+    code_match = _CODE_FORMATTED_VERDICT_LINE.fullmatch(stripped)
+    if code_match is None:
+        return
+    inner = code_match.group("line").strip()
+    if inner:
+        yield inner
 
 
 def _verdict_result_from_match(*, label: str, reason: str | None) -> VerdictResult:

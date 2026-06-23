@@ -175,6 +175,20 @@ class TestParseVerdict:
         assert result.reason == "maintainer decision"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_accepts_inline_code_span(self) -> None:
+        result = _parse_verdict_result("`AWF-VERDICT: NEEDS_HUMAN: maintainer decision`")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer decision"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_accepts_one_line_code_fence(self) -> None:
+        result = _parse_verdict_result("```AWF-VERDICT: DEFER: track follow-up separately```")
+
+        assert result.verdict == "defer"
+        assert result.reason == "track follow-up separately"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_defer_placeholder_only_has_no_reason(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: DEFER: <defer follow-up needed>")
 
