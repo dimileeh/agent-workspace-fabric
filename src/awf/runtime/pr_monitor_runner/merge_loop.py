@@ -315,6 +315,8 @@ async def handle_merge_action(
             workspace_id,
             state,
             now=merge_critical_section_entered_at,
+            status=status,
+            forge=repo.forge,
         )
         fresh_action: MonitorAction | None = None
         fresh_status: PRStatus | None = None

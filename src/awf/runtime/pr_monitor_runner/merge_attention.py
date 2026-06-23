@@ -116,6 +116,8 @@ async def _clear_stale_merge_attention(
     state: MonitorState,
     *,
     now: datetime | None = None,
+    status: PRStatus | None = None,
+    forge: str = "github",
 ) -> None:
     """Clear a resolved attention flag at merge critical-section entry.
 
@@ -154,10 +156,13 @@ async def _clear_stale_merge_attention(
     mergeability signals without re-stamping the marker. When this helper does
     preserve a marker that is fresh at critical-section entry, it re-stamps with
     a current wall-clock and persists that single marker key durably. The
-    caller-supplied ``now`` still governs the preserve/clear decision, while the
-    fresh durable stamp keeps the critical-section TTL marker current for later
-    critical-section polls or restarts. A genuinely resolved marker (stale at
-    entry) is still cleared below.
+    caller-supplied ``now`` still governs the TTL preserve/clear decision, while
+    the fresh durable stamp keeps the critical-section TTL marker current for
+    later critical-section polls or restarts. When the current forge status
+    explicitly reports branch protection still active, preserve and re-stamp
+    even if a long queue wait aged the marker past the TTL without a fallback
+    re-stamp. A genuinely resolved marker (stale at entry with no active forge
+    signal) is still cleared below.
     """
     ttl_seconds = self._config.merge_block_attention_ttl_seconds
     reference = now if now is not None else datetime.now(UTC)
@@ -179,7 +184,8 @@ async def _clear_stale_merge_attention(
     # preserved across a serialized merge wait longer than the TTL. A marker
     # already stale at entry (the block resolved BEFORE the wait) is still
     # cleared.
-    if state.merge_block_attention_active(
+    forge_still_blocked = _merge_block_attention_queue_verdict(status, forge=forge) == "active"
+    if forge_still_blocked or state.merge_block_attention_active(
         now=reference,
         ttl_seconds=ttl_seconds if ttl_seconds is not None and ttl_seconds > 0 else None,
     ):
