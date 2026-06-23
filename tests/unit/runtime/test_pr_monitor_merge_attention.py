@@ -880,6 +880,100 @@ async def test_persist_merge_block_attention_durably_already_equal_is_noop(
 
 
 @pytest.mark.unit
+async def test_clear_stale_merge_attention_drops_marker_durably_on_resolve(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6Lf_37: ``_clear_stale_merge_attention``'s stale (resolved)
+    branch must durably remove the merge-block marker from the persisted row,
+    not just drop it in memory. The outer ``run()`` loop only flushes the whole
+    in-memory ``state`` after ``_execute`` returns (``runner.py:455``); a
+    cancel/restart before that full ``_persist_state`` would otherwise reload the
+    STALE marker from the DB while ``awaiting_human_since`` is already null, so
+    the next poll's preserve path (or an ``allow_age_out=False`` queue-wait) would
+    re-stamp the stale marker fresh and PRESERVE the human-wait signal without
+    any fallback having fired to restore ``awaiting_human_since`` — wedging the
+    monitor in a faux "awaiting human" state until another merge fallback runs.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # Seed a stale marker (resolved block) into BOTH the in-memory state and the
+    # persisted row — the state the monitor would reload after a cancel/restart
+    # before the outer loop's full ``_persist_state`` flush.
+    stale_stamp = datetime(2024, 1, 1, tzinfo=UTC).isoformat()
+    state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp})
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp}
+        await session.commit()
+    # Drive the stale (resolved) branch with a TTL that the marker exceeds, and a
+    # ``reference`` (entry ``now``) far enough past the stamp to age it out.
+    resolved_now = datetime(2024, 1, 2, tzinfo=UTC)
+    await runner._clear_stale_merge_attention(
+        workspace_id,
+        state,
+        now=resolved_now,
+        allow_age_out=True,
+    )
+    # In-memory marker dropped and attention cleared.
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
+    # The persisted row must NOT carry the stale marker anymore — the durable
+    # clear closed the cancel/restart window.
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in (ws_after.monitor_threads_addressed or {})
+    assert ws_after.awaiting_human_since is None
+
+
+@pytest.mark.unit
+async def test_clear_merge_block_attention_durably_missing_workspace_is_noop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The durable marker clear no-ops when the workspace row is gone (a
+    GC/destroy race between the stale-clear and the durable write)."""
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    await runner._clear_merge_block_attention_durably("ws_does_not_exist")
+
+
+@pytest.mark.unit
+async def test_clear_merge_block_attention_durably_absent_marker_is_noop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The durable clear no-ops when the persisted marker is already absent —
+    no redundant commit is issued."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # No marker on the row ⇒ the helper returns before committing.
+    await runner._clear_merge_block_attention_durably(workspace_id)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in (ws.monitor_threads_addressed or {})
+
+
+@pytest.mark.unit
 async def test_set_workspace_attention_with_merge_block_marker_absent_marker_skips_marker_write(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

@@ -645,9 +645,64 @@ async def _clear_stale_merge_attention(
         await self._persist_merge_block_attention_durably(workspace_id, state)
         return
     # Stale (resolved) marker: drop it so the next fresh poll re-stamps cleanly,
-    # then clear the surfaced flag.
+    # then clear the surfaced flag. The in-memory drop MUST be paired with a
+    # durable removal of the persisted marker: the outer ``run()`` loop only
+    # flushes ``state`` after ``_execute`` returns (``runner.py:455``), so a
+    # cancel/restart before that full ``_persist_state`` would otherwise reload
+    # the STALE marker from the DB row while ``awaiting_human_since`` is already
+    # null (cleared by ``_clear_workspace_attention``). The next
+    # ``_clear_stale_merge_attention`` poll — or the
+    # ``allow_age_out=False`` queue-wait preserve path — would then re-stamp
+    # the stale marker fresh and PRESERVE the human-wait signal without any
+    # fallback having fired to restore ``awaiting_human_since`` (the
+    # ``merge_loop.py`` branch-protection re-stamp only fires on an active
+    # rejection), wedging the monitor in a faux "awaiting human" state until
+    # another merge fallback runs (PRRT_kwDOSJAM6s6Lf_37). Mirrors the symmetric
+    # durable persist on the PRESERVE branch (``_persist_merge_block_attention_durably``
+    # at line 645) and the established single-key durable-clear pattern
+    # (``_clear_preserved_head_marker_durably``): touch ONLY the
+    # ``_MERGE_BLOCK_ATTENTION_STATE_KEY``, never flushing the whole in-memory
+    # ``MonitorState``.
     state.clear_merge_block_attention()
     await self._clear_workspace_attention(workspace_id)
+    await self._clear_merge_block_attention_durably(workspace_id)
+
+
+async def _clear_merge_block_attention_durably(self: Any, workspace_id: str) -> None:
+    """Remove ONLY the merge-block attention marker from the persisted row.
+
+    Symmetric counterpart to :func:`_persist_merge_block_attention_durably`
+    and companion to the in-memory :func:`MonitorState.clear_merge_block_attention`.
+    ``_clear_stale_merge_attention``'s stale (resolved) branch drops the marker
+    in-memory and clears ``awaiting_human_since`` in the DB, but the outer
+    ``run()`` loop only flushes ``state`` after ``_execute`` returns
+    (``runner.py:455``). A cancel/restart before that full ``_persist_state``
+    would otherwise reload the STALE marker from the persisted row while
+    ``awaiting_human_since`` is already null — so the next poll's
+    ``_clear_stale_merge_attention`` (or the ``allow_age_out=False`` queue-wait
+    preserve path) would re-stamp the stale marker fresh and PRESERVE the
+    human-wait signal without any fallback having fired to restore
+    ``awaiting_human_since`` (the ``merge_loop.py`` branch-protection re-stamp
+    only fires on an active rejection), wedging the monitor in a faux
+    "awaiting human" state until another merge fallback runs
+    (PRRT_kwDOSJAM6s6Lf_37).
+
+    Mirrors the established single-key durable-clear pattern
+    (``_clear_preserved_head_marker_durably``): touch ONLY the
+    ``_MERGE_BLOCK_ATTENTION_STATE_KEY``, merged off the DB-persisted
+    ``monitor_threads_addressed``, and NEVER flush the whole in-memory
+    ``MonitorState``. No-op when the workspace row is gone (a GC/destroy race)
+    or the marker is already absent.
+    """
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        if threads_addressed.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None) is None:
+            return
+        ws.monitor_threads_addressed = threads_addressed
+        await s.commit()
 
 
 async def _clear_workspace_attention(self: Any, workspace_id: str) -> None:
