@@ -53,6 +53,18 @@ class TestParseVerdict:
         assert result.reason == "maintainer must choose the checkout policy"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_placeholder_after_real_verdict_preserves_previous(self) -> None:
+        stdout = (
+            "AWF-VERDICT: NEEDS_HUMAN: maintainer review required\n"
+            "AWF-VERDICT: FIXED: <one-sentence summary>"
+        )
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer review required"
+
+    @pytest.mark.unit
     def test_private_awf_mixed_verdict_prefers_awf_over_bare_fallback(self) -> None:
         result = _parse_verdict_result(
             "AWF-VERDICT: NEEDS_HUMAN: maintainer decision required\nFALSE POSITIVE: maintainer later added a comment"

@@ -271,6 +271,9 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
             for parsed in reversed(verdicts[:-1]):
                 if parsed.verdict == latest_verdict and parsed.reason is not None:
                     return parsed
+            for parsed in reversed(verdicts[:-1]):
+                if parsed.reason is not None:
+                    return parsed
             return latest
         return latest
     for verdict in ("needs_human", "false_positive", "defer", "fix_committed"):
