@@ -48,20 +48,18 @@ Plan reference: `plans/MERGE_BLOCK_ATTENTION_FORGE_RECHECK_PLAN.md`
   text now states that re-stamping is limited to the merge critical-section TTL
   path, and queue/reviewer/initial-grace waits are forge-signal-driven via
   `_clear_or_preserve_merge_attention_for_queue_wait`.
-- Configured full coverage gate: `.awf/workspace.yml` declares
-  `minimum_percent: 99` with command
-  `uv run --python 3.12 --extra dev pytest --timeout=300 --cov=awf --cov-report=term-missing --cov-fail-under=99`.
-- AWF-owned coverage evidence for this unpushed local head is not available
-  inside the agent workspace:
-  - no checked-in or temporary coverage artifact was present under `/workspace`
-    or `/tmp`;
-  - a read-only local control-plane DB lookup could not attach coverage
-    provenance because this workspace DB has no `validation_runs` table;
-  - `gh run list --repo dimileeh/agent-workspace-fabric --commit "$(git rev-parse HEAD)" --limit 20 --json ...`
-    returned `[]`.
 
-Full AWF/GitHub validation, the configured 99% coverage gate, and
-CI-equivalent gates were not run inside the agent phase per the workspace
-contract. No local document should be read as claiming that the 99% gate is
-satisfied for this head; AWF/GitHub must produce that authoritative evidence
-after the agent exits and the head is pushed.
+## Attempt 2 Conformance Clarification
+
+- The previous validation note incorrectly framed unavailable full-coverage
+  evidence as a remaining plan-conformance gap. The saved plan's focused
+  validation section explicitly excludes full coverage gates, whole-repository
+  pytest, full `.awf/workspace.yml` validation, and frontend builds from the
+  agent phase.
+- The plan's validation requirement is the focused runtime evidence listed
+  above plus the AWF-managed post-agent validation pass. The configured
+  repository coverage gate remains a downstream AWF/GitHub merge gate outside
+  this plan-conformance artifact; it is not a missing implementation or
+  documentation requirement for this agent pass.
+- No broad coverage command was run during this repair, consistent with the
+  workspace contract and the saved plan non-goals.
