@@ -839,6 +839,74 @@ async def test_clear_stale_merge_attention_restamps_preserved_marker(
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in resolved_state.threads_addressed_ids
 
 
+@pytest.mark.unit
+async def test_clear_stale_merge_attention_restamps_preserved_marker_durably(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6LcL-G: the preserve re-stamp must be DURABLE on the
+    workspace row, not only in the in-memory ``state`` the loop flushes later.
+
+    The outer ``run()`` loop only flushes ``state`` after ``_execute`` returns
+    (``runner.py:455``); a cancel/restart during the subsequent non-human gate
+    wait (merge queue / reviewer settle / initial review grace) would strand
+    the OLD marker timestamp on the persisted row. The next poll's
+    ``_clear_stale_merge_attention`` would then measure the stale marker
+    against ``now``, exceed the TTL, clear ``awaiting_human_since``, and let the
+    still-active branch-protection rejection re-stamp it — restarting the
+    human-wait timer even though the operator block never resolved.
+
+    Assert the re-stamped marker is on the persisted ``monitor_threads_addressed``
+    row WITHOUT any ``_persist_state`` flush, mirroring
+    ``test_terminal_directive_drop_clears_stale_preserved_marker_durably``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory, pr_number=334)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    # Stamp a marker FRESH at T0 (within the default 120s TTL).
+    t0 = datetime(2026, 6, 23, 12, 0, tzinfo=UTC)
+    state = MonitorState()
+    state.mark_merge_block_attention(now=t0)
+
+    async def _fail_persist_state(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("durable re-stamp must not rely on the outer _persist_state flush")
+
+    monkeypatch.setattr(runner, "_persist_state", _fail_persist_state)
+
+    # Preserve + re-stamp: ``now`` well within the TTL.
+    first_now = t0 + timedelta(seconds=30)
+    await runner._clear_stale_merge_attention(workspace_id, state, now=first_now)
+
+    # The in-memory marker was re-stamped to ``first_now``...
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    assert (
+        datetime.fromisoformat(state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY])
+        == first_now
+    )
+    # ... AND the same re-stamped marker is DURABLE on the persisted row
+    # WITHOUT any ``_persist_state`` flush (the monkeypatched ``_persist_state``
+    # would have raised above if the durability relied on it).
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        persisted = (workspace.monitor_threads_addressed or {}).get(
+            _MERGE_BLOCK_ATTENTION_STATE_KEY
+        )
+    assert persisted is not None
+    assert datetime.fromisoformat(persisted) == first_now
+
+
 def _stale_merge_block_state(*, episode_start: datetime) -> MonitorState:
     """Build a ``MonitorState`` carrying a STALE ``merge_block_attention`` marker.
 

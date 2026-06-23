@@ -44,6 +44,7 @@ from awf.runtime.operator_hints import (
     persist_operator_hint,
 )
 from awf.runtime.pr_monitor import (
+    _MERGE_BLOCK_ATTENTION_STATE_KEY,
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     AbortReason,
     MonitorState,
@@ -478,9 +479,27 @@ async def _clear_stale_merge_attention(
         # resets for the next non-human gate wait. Without this, consecutive
         # waits that never reach the merge-blocker fallback let the marker age
         # past the TTL and the next wait clears the still-active signal
-        # (PRRT_kwDOSJAM6s6LbXWQ). The caller persists ``state`` after the poll,
-        # so the re-stamp is durable.
+        # (PRRT_kwDOSJAM6s6LbXWQ).
         state.mark_merge_block_attention(now=reference)
+        # Persist the re-stamped marker DURABLY before returning. The outer
+        # ``run()`` loop only flushes ``state`` after ``_execute`` returns
+        # (``runner.py:455``); a cancel/restart during the subsequent non-human
+        # gate wait (merge queue / reviewer settle / initial review grace)
+        # would otherwise strand the OLD marker timestamp on the DB row. On
+        # the next poll ``_clear_stale_merge_attention`` would measure the
+        # stale marker against ``now``, exceed the TTL, clear
+        # ``awaiting_human_since``, and let the still-active branch-protection
+        # rejection re-stamp it — restarting the human-wait timer even though
+        # the operator block never resolved (PRRT_kwDOSJAM6s6LcL-G). Mirrors the
+        # branch-protection fallback's own
+        # ``mark_merge_block_attention`` + ``_persist_state`` pairing at
+        # ``merge_loop.py:1424``. Persist ONLY the marker key (merged onto the
+        # DB-persisted ``monitor_threads_addressed``), never flushing the whole
+        # in-memory ``MonitorState`` — the established single-key durable
+        # persist pattern (``_persist_forge_transient_retry_count`` /
+        # ``_clear_preserved_head_marker_durably``) so unconfirmed in-flight
+        # verdicts are not leaked to the DB.
+        await self._persist_merge_block_attention_durably(workspace_id, state)
         return
     # Stale (resolved) marker: drop it so the next fresh poll re-stamps cleanly,
     # then clear the surfaced flag.
@@ -505,6 +524,54 @@ async def _clear_workspace_attention(self: Any, workspace_id: str) -> None:
     """
     async with self._deps.session_factory() as s:
         await WorkspaceRepository(s).clear_workspace_attention(workspace_id)
+        await s.commit()
+
+
+async def _persist_merge_block_attention_durably(
+    self: Any,
+    workspace_id: str,
+    state: MonitorState,
+) -> None:
+    """Persist ONLY the re-stamped merge-block attention marker to the DB row.
+
+    Companion to the "refresh on preserve" re-stamp in
+    :func:`_clear_stale_merge_attention`: that re-stamp lives in the in-memory
+    ``state`` the outer ``run()`` loop only flushes AFTER ``_execute`` returns
+    (``runner.py:455``). A cancel/restart during the subsequent non-human gate
+    wait (merge queue / reviewer settle / initial review grace) would strand
+    the OLD marker timestamp on the persisted row; the next poll's
+    ``_clear_stale_merge_attention`` would measure the stale marker, exceed the
+    TTL, clear ``awaiting_human_since``, and let the still-active
+    branch-protection rejection re-stamp it — restarting the human-wait timer
+    even though the operator block never resolved (PRRT_kwDOSJAM6s6LcL-G).
+
+    Mirrors the established single-key durable persist pattern
+    (``_persist_forge_transient_retry_count`` /
+    ``_clear_preserved_head_marker_durably``): touch ONLY the
+    ``_MERGE_BLOCK_ATTENTION_STATE_KEY``, merged onto the DB-persisted
+    ``monitor_threads_addressed``, and NEVER flush the whole in-memory
+    ``MonitorState``. Inside a ``Merge``-arm poll the in-memory state can still
+    carry markers the outer loop has not confirmed durably; a full
+    ``_persist_state`` here would leak them ahead of their own commit windows.
+
+    Writes the value already stamped into ``state`` by
+    ``mark_merge_block_attention`` so the DB value exactly matches the
+    in-memory value (no second wall-clock read that could drift). No-op when
+    the workspace row is gone (a GC/destroy race) or the in-memory marker is
+    absent (the caller did not re-stamp).
+    """
+    stamped = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
+    if stamped is None:
+        return
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        if threads_addressed.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) == stamped:
+            return
+        threads_addressed[_MERGE_BLOCK_ATTENTION_STATE_KEY] = stamped
+        ws.monitor_threads_addressed = threads_addressed
         await s.commit()
 
 
