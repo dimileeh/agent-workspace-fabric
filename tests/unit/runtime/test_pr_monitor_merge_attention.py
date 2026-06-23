@@ -764,3 +764,116 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
     # reset (no flicker/restart of the human-wait timer).
     assert ws.awaiting_human_since == episode_start
     assert ws.awaiting_human_reason is not None
+
+
+# ── Defensive no-op branches for the new atomic-persist helpers ──────────────
+#
+# ``_set_workspace_attention_with_merge_block_marker`` and
+# ``_persist_merge_block_attention_durably`` each have defensive early-returns
+# for a missing workspace row (a GC/destroy race) and, for the durable persist,
+# an absent in-memory marker (the caller did not re-stamp) or an already-equal
+# persisted value (no-op write). These mirror the established single-key
+# durable-persist no-op pattern (``_clear_preserved_head_marker_durably`` /
+# ``_persist_forge_transient_retry_count``); each branch is exercised here so
+# the helpers never silently lose coverage.
+
+
+@pytest.mark.unit
+async def test_set_workspace_attention_with_merge_block_marker_missing_workspace_is_noop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The atomic marker+attention write no-ops when the workspace row is gone (a
+    GC/destroy race between the fallback and the commit) rather than raising."""
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # No marker is stamped, but the helper must not raise on a missing workspace
+    # even when one IS present in state — the row lookup gates the whole write.
+    state = MonitorState()
+    state.mark_merge_block_attention()
+    await runner._set_workspace_attention_with_merge_block_marker(
+        "ws_does_not_exist",
+        state,
+        reason="merge_blocked",
+    )
+
+
+@pytest.mark.unit
+async def test_persist_merge_block_attention_durably_missing_workspace_is_noop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The durable marker persist no-ops when the workspace row is gone (a
+    GC/destroy race between the preserve re-stamp and the durable write)."""
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    state = MonitorState()
+    state.mark_merge_block_attention()
+    await runner._persist_merge_block_attention_durably("ws_does_not_exist", state)
+
+
+@pytest.mark.unit
+async def test_persist_merge_block_attention_durably_absent_marker_is_noop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The durable persist no-ops when the in-memory marker is absent — the
+    caller did not re-stamp, so there is nothing to durably persist."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # No marker stamped into state ⇒ the helper returns before touching the DB.
+    state = MonitorState()
+    await runner._persist_merge_block_attention_durably(workspace_id, state)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in (ws.monitor_threads_addressed or {})
+
+
+@pytest.mark.unit
+async def test_persist_merge_block_attention_durably_already_equal_is_noop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The durable persist no-ops when the persisted marker already equals the
+    in-memory stamp (idempotent re-write guard) — the DB value is left untouched
+    and no redundant commit is issued."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # Stamp the marker durably first so the DB row already carries it.
+    state = MonitorState()
+    state.mark_merge_block_attention()
+    await runner._persist_merge_block_attention_durably(workspace_id, state)
+    stamped = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    assert (ws.monitor_threads_addressed or {})[_MERGE_BLOCK_ATTENTION_STATE_KEY] == stamped
+    # A second persist with the SAME stamp must short-circuit (no-op write).
+    await runner._persist_merge_block_attention_durably(workspace_id, state)
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert (ws_after.monitor_threads_addressed or {})[_MERGE_BLOCK_ATTENTION_STATE_KEY] == stamped
