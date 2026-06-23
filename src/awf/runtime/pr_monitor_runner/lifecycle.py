@@ -470,6 +470,7 @@ async def _clear_stale_merge_attention(
     state: MonitorState,
     *,
     now: datetime | None = None,
+    allow_age_out: bool = True,
 ) -> None:
     """Clear a resolved ``NotifyHuman`` attention flag before a non-human gate wait,
     unless the merge loop itself set attention for an *still-active* branch-protection
@@ -492,6 +493,23 @@ async def _clear_stale_merge_attention(
     with ``_clear_workspace_attention`` so the surfaced flag stops reporting
     "awaiting human" once only non-human gates remain. When fresh (still-blocked)
     behavior is unchanged (preserve — #663 regression intact).
+
+    PRESERVE-WHILE-QUEUED (operator decision on the #663 queue-wait tension): the
+    pre-merge non-human gate waits (merge queue, reviewer settle, initial review
+    grace) pass ``allow_age_out=False`` so the marker is NEVER aged out by TTL
+    while the monitor is parked behind a non-human gate — a still-active
+    branch-protection escalation that has resolved externally between polls is
+    indistinguishable from one that is still blocked while queued (both yield
+    ``decide()=Merge`` + queue blocker + a marker no fallback has re-stamped this
+    poll), so ageing the marker out by TTL would falsely clear a still-active
+    escalation. The marker persists until a REAL signal confirms resolution: a
+    merge re-stamp (the branch-protection fallback firing again), a successful
+    merge, or a new commit landing. The bounded false-positive (a resolved block
+    still shows "awaiting human" until the queue clears) is an ACCEPTED
+    limitation; no forge re-check is added (deferred to a follow-up). The
+    critical-section-entry clear (the #661 path) keeps ``allow_age_out=True`` so a
+    marker that was already stale at coordinator entry (the block resolved BEFORE
+    the wait) is still cleared once the monitor is actively merging.
 
     The merge-method preflight arm needs no such guard: it records a sticky
     ``_merge_method_blocked_key`` so ``decide()`` returns ``NotifyHuman`` and these
@@ -540,6 +558,48 @@ async def _clear_stale_merge_attention(
     """
     ttl_seconds = self._config.merge_block_attention_ttl_seconds
     reference = now if now is not None else datetime.now(UTC)
+    raw = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
+    if not raw:
+        # No marker: a resolved ``NotifyHuman`` episode (not branch-protection),
+        # so there is no still-active block to preserve — clear the surfaced flag
+        # so it does not keep reporting "awaiting human" while only non-human
+        # gates remain (#659/#661). Idempotent clear matches the absent-marker
+        # branch of ``merge_block_attention_active``.
+        state.clear_merge_block_attention()
+        await self._clear_workspace_attention(workspace_id)
+        return
+    if not allow_age_out:
+        # PRESERVE-WHILE-QUEUED (operator decision on the #663 queue-wait
+        # tension): the monitor is parking behind a pre-merge non-human gate
+        # wait (merge queue / reviewer settle / initial review grace). While
+        # queued there is no observable signal distinguishing "block still
+        # active" from "block resolved externally between polls" — both yield
+        # ``decide()=Merge`` + queue blocker + a marker no fallback has
+        # re-stamped this poll — so ageing the marker out by TTL would
+        # falsely clear a still-active branch-protection escalation. Never
+        # age out by TTL here: the marker persists until a REAL signal
+        # confirms resolution (a merge re-stamp from the branch-protection
+        # fallback firing again, a successful merge, or a new commit
+        # landing). Re-stamp to a CURRENT wall-clock so the TTL clock resets
+        # for the next wait (PRRT_kwDOSJAM6s6LbXWQ), and persist the re-stamp
+        # durably so a cancel/restart during the wait does not strand the old
+        # marker timestamp on the DB row (PRRT_kwDOSJAM6s6LcL-G). The bounded
+        # false-positive (a resolved block still shows "awaiting human" until
+        # the queue clears) is an ACCEPTED limitation; no forge re-check is
+        # added (deferred to a follow-up).
+        stamp_now = datetime.now(UTC)
+        state.mark_merge_block_attention(now=stamp_now)
+        await self._persist_merge_block_attention_durably(workspace_id, state)
+        return
+    # ``allow_age_out=True`` (critical-section entry, the #661 path): use the
+    # bounded TTL to distinguish a STILL-blocked fallback (re-stamped every
+    # poll, fresh within the TTL) from a RESOLVED block (no fallback has fired
+    # recently, marker age exceeds the TTL). The freshness check uses
+    # ``reference`` (the caller-supplied ``now``): the critical-section entry
+    # passes the coordinator-ENTRY timestamp so a marker FRESH at entry is
+    # preserved across a serialized merge wait longer than the TTL
+    # (PRRT_kwDOSJAM6s6La_SZ, PRRT_kwDOSJAM6s6LcfXk). A marker already stale
+    # at entry (the block resolved BEFORE the wait) is still cleared.
     if state.merge_block_attention_active(
         now=reference,
         ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
@@ -550,12 +610,7 @@ async def _clear_stale_merge_attention(
         # past the TTL and the next wait clears the still-active signal
         # (PRRT_kwDOSJAM6s6LbXWQ).
         #
-        # The freshness check above uses ``reference`` (the caller-supplied
-        # ``now``): the merge critical-section entry and post-lock gate clears
-        # pass the coordinator-ENTRY timestamp so a marker FRESH at entry is
-        # preserved across a serialized merge wait longer than the TTL
-        # (PRRT_kwDOSJAM6s6La_SZ, PRRT_kwDOSJAM6s6LcfXk). But the durable
-        # re-stamp that follows must use a CURRENT wall-clock: the entry
+        # The durable re-stamp MUST use a CURRENT wall-clock: the entry
         # timestamp is stale relative to real time after the wait, so stamping
         # the marker with it would let the marker age past the TTL during the
         # subsequent post-lock gate wait (merge queue / reviewer settle /

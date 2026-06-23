@@ -528,8 +528,12 @@ async def handle_merge_action(
             # monitor only waits on the merge queue (#659). The branch-protection
             # fallback also keeps ``decide()`` on ``Merge`` while genuinely awaiting a
             # human, so the helper preserves *that* still-active signal across the
-            # queue wait (PRRT_kwDOSJAM6s6LXscz).
-            await self._clear_stale_merge_attention(workspace_id, state)
+            # queue wait (PRRT_kwDOSJAM6s6LXscz). PRESERVE-WHILE-QUEUED: while queued
+            # there is no observable signal distinguishing a still-active block from
+            # one resolved externally between polls, so the marker is NEVER aged out
+            # by TTL here — it persists until a real signal (merge re-stamp / success
+            # / new commit) confirms resolution (operator decision on #663).
+            await self._clear_stale_merge_attention(workspace_id, state, allow_age_out=False)
             await self._wait_for_merge_queue(
                 blockers=queue_blockers,
                 workspace_id=workspace_id,
@@ -561,8 +565,10 @@ async def handle_merge_action(
             # wait so a resolved ``NotifyHuman`` episode does not keep surfacing
             # "awaiting human" while the monitor only waits on reviewer settle (#659).
             # An active branch-protection escalation is preserved by the helper
-            # (PRRT_kwDOSJAM6s6LXscz).
-            await self._clear_stale_merge_attention(workspace_id, state)
+            # (PRRT_kwDOSJAM6s6LXscz). PRESERVE-WHILE-QUEUED: the marker is never
+            # aged out by TTL while parked on the reviewer-settle wait (operator
+            # decision on #663).
+            await self._clear_stale_merge_attention(workspace_id, state, allow_age_out=False)
             requested_action = "validate" if pending_validation_gate is not None else "merge"
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
@@ -1026,15 +1032,16 @@ async def handle_merge_action(
             # Clear any stale awaiting-human flag before this non-human grace wait
             # so a resolved ``NotifyHuman`` episode does not keep surfacing
             # "awaiting human" (#659); an active branch-protection escalation is
-            # preserved (PRRT_kwDOSJAM6s6LXscz). Use the coordinator-ENTRY timestamp
-            # so a marker FRESH at entry stays fresh across a serialized wait longer
-            # than the TTL — a post-wait wall-clock measurement would reclassify it
-            # as STALE and let the fallback's COALESCE restart the human-wait timer
-            # though the operator block never resolved (PRRT_kwDOSJAM6s6LcfXk).
+            # preserved (PRRT_kwDOSJAM6s6LXscz). PRESERVE-WHILE-QUEUED: the
+            # marker is never aged out by TTL while parked on the initial-grace
+            # wait (operator decision on #663) — the ``allow_age_out=False``
+            # path re-stamps to a current wall-clock and persists durably
+            # regardless of the entry timestamp, so the explicit
+            # coordinator-ENTRY ``now`` is no longer needed here.
             await self._clear_stale_merge_attention(
                 workspace_id,
                 state,
-                now=merge_critical_section_entered_at,
+                allow_age_out=False,
             )
             _log.info(
                 "monitor.initial_review_grace_waiting",
@@ -1066,12 +1073,13 @@ async def handle_merge_action(
             return False
 
         if settle_recheck_decision is not None:
-            # Same stale-flag clear as the grace arm above, using the
-            # coordinator-ENTRY timestamp (#659, PRRT_kwDOSJAM6s6LcfXk).
+            # Same stale-flag clear as the grace arm above. PRESERVE-WHILE-QUEUED:
+            # the marker is never aged out by TTL while parked on the
+            # reviewer-settle wait (operator decision on #663).
             await self._clear_stale_merge_attention(
                 workspace_id,
                 state,
-                now=merge_critical_section_entered_at,
+                allow_age_out=False,
             )
             settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
                 self._config,
@@ -1095,12 +1103,13 @@ async def handle_merge_action(
             return False
 
         if queue_blockers_after_lock:
-            # Same stale-flag clear as the grace arm above, using the
-            # coordinator-ENTRY timestamp (#659, PRRT_kwDOSJAM6s6LcfXk).
+            # Same stale-flag clear as the grace arm above. PRESERVE-WHILE-QUEUED:
+            # the marker is never aged out by TTL while parked on the post-lock
+            # merge-queue wait (operator decision on #663).
             await self._clear_stale_merge_attention(
                 workspace_id,
                 state,
-                now=merge_critical_section_entered_at,
+                allow_age_out=False,
             )
             await self._wait_for_merge_queue(
                 blockers=queue_blockers_after_lock,

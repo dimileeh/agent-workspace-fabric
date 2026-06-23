@@ -40,12 +40,15 @@ Marker TTL unit tests — all 6 green:
   regression — seed updated to stamp a fresh marker; assertion unchanged).
 
 ### `tests/unit/runtime/test_merge_queue_ordering.py`
-- `test_resolved_branch_protection_marker_cleared_on_merge_queue_wait` (#663 —
-  stale marker + merge-queue wait ⇒ flag cleared, marker dropped).
-- `test_resolved_branch_protection_marker_cleared_on_reviewer_settle_wait` (#663
-  parity — stale marker + reviewer-settle wait ⇒ flag cleared).
-- `test_resolved_branch_protection_marker_cleared_on_initial_grace_wait` (#663
-  parity — stale marker + initial-grace wait ⇒ flag cleared).
+- `test_resolved_branch_protection_marker_preserved_on_merge_queue_wait` (#663
+  PRESERVE-WHILE-QUEUED — stale marker + merge-queue wait ⇒ flag PRESERVED, not
+  aged out by TTL; operator decision on the #663 queue-wait tension).
+- `test_resolved_branch_protection_marker_preserved_on_reviewer_settle_wait`
+  (#663 PRESERVE-WHILE-QUEUED parity — stale marker + reviewer-settle wait ⇒
+  flag PRESERVED).
+- `test_resolved_branch_protection_marker_preserved_on_initial_grace_wait`
+  (#663 PRESERVE-WHILE-QUEUED parity — stale marker + initial-grace wait ⇒
+  flag PRESERVED).
 - `test_merge_queue_wait_preserves_active_branch_protection_attention` (#663
   regression — marker stamped fresh; assertion unchanged).
 
@@ -62,9 +65,11 @@ uv run --python 3.12 --extra dev ruff check \
   src/awf/runtime/pr_monitor.py \
   src/awf/runtime/pr_monitor_runner/lifecycle.py \
   src/awf/runtime/pr_monitor_runner/merge_loop.py \
+  src/awf/runtime/pr_monitor_runner/gates.py \
   tests/unit/runtime/test_pr_monitor_merge_failures.py \
   tests/unit/runtime/test_merge_queue_ordering.py \
-  tests/unit/runtime/test_pr_monitor_state.py
+  tests/unit/runtime/test_pr_monitor_state.py \
+  tests/unit/runtime/test_pr_monitor_merge_attention.py
 → All checks passed!
 ```
 
@@ -73,8 +78,9 @@ uv run --python 3.12 --extra dev ruff check \
 uv run --python 3.12 --extra dev mypy \
   src/awf/runtime/pr_monitor.py \
   src/awf/runtime/pr_monitor_runner/lifecycle.py \
-  src/awf/runtime/pr_monitor_runner/merge_loop.py
-→ Success: no issues found in 3 source files
+  src/awf/runtime/pr_monitor_runner/merge_loop.py \
+  src/awf/runtime/pr_monitor_runner/gates.py
+→ Success: no issues found in 4 source files
 ```
 
 ### Targeted pytest (touched test files + co-located regressions)
@@ -82,8 +88,9 @@ uv run --python 3.12 --extra dev mypy \
 uv run --python 3.12 --extra dev pytest \
   tests/unit/runtime/test_pr_monitor_merge_failures.py \
   tests/unit/runtime/test_merge_queue_ordering.py \
-  tests/unit/runtime/test_pr_monitor_state.py -q
-→ 40 passed in 64.67s
+  tests/unit/runtime/test_pr_monitor_state.py \
+  tests/unit/runtime/test_pr_monitor_merge_attention.py -q
+→ 56 passed in 94.80s
 ```
 
 ### Adjacent merge-loop suites (regression safety for the critical-section-entry clear)
@@ -111,8 +118,16 @@ uv run --python 3.12 --extra dev pytest \
   `python scripts/generate_openapi.py --check`, console build/test) is managed
   by AWF after agent completion and was NOT run inside the agent phase per the
   workspace contract.
-- No forge re-check / branch-protection API call per poll was added (TTL chosen
-  to stay scoped, per plan non-goals).
+- PRESERVE-WHILE-QUEUED (operator decision on the #663 queue-wait tension):
+  the pre-merge non-human gate waits (merge queue / reviewer settle / initial
+  review grace) NEVER age the `merge_block_attention` marker out by TTL — the
+  marker persists until a REAL signal (merge re-stamp / success / new commit)
+  confirms resolution. The bounded false-positive (a resolved block still shows
+  "awaiting human" until the queue clears) is an ACCEPTED limitation; no forge
+  re-check is added (deferred to a follow-up). The critical-section-entry clear
+  (the #661 path) keeps the TTL age-out so a marker already stale at entry
+  (block resolved BEFORE the wait) is cleared once the monitor is actively
+  merging.
 - No `decide()` gate logic or #656/#660 grace work changed (per plan non-goals).
 - No `set_workspace_attention` COALESCE semantics or `awaiting_human_since`
   column schema changed (per plan non-goals).
@@ -131,14 +146,18 @@ still-blocked case, and a naive clear would reset the genuinely-blocked
 "awaiting human for N" timer.
 
 Fix: decouple the clear decision from DB-flag presence by giving
-`merge_block_attention` a wall-clock timestamp + bounded TTL. The
-branch-protection fallback re-stamps the marker every poll while blocked, so a
-FRESH marker (age ≤ TTL) is preserved (still-blocked, timer stable) and a STALE
-marker (age > TTL, resolved externally between polls) is cleared. The clear is
-applied at critical-section entry (covers pre-merge settle + fast path, #661)
-and the existing merge-queue/settle/grace clears now clear the RESOLVED case via
-the TTL (#663). Both regressions preserved:
-`test_merge_blocker_fallback_keeps_attention_since_stable_across_polls` and
-`test_merge_queue_wait_preserves_active_branch_protection_attention` stay green.
+`merge_block_attention` a wall-clock timestamp + bounded TTL, and apply
+PRESERVE-WHILE-QUEUED: the pre-merge non-human gate waits (merge queue /
+reviewer settle / initial review grace) NEVER age the marker out by TTL —
+the marker persists until a REAL signal (merge re-stamp / success / new
+commit) confirms resolution. The critical-section-entry clear (the #661 path)
+keeps the TTL age-out so a marker already stale at entry (block resolved
+BEFORE the wait) is cleared once the monitor is actively merging. The
+still-blocked regression (`test_merge_queue_wait_preserves_active_branch_protection_attention`)
+and the #661 stable-timer regression
+(`test_merge_blocker_fallback_keeps_attention_since_stable_across_polls`) stay
+green. The bounded false-positive (a resolved block still shows "awaiting
+human" until the queue clears) is an ACCEPTED limitation; no forge re-check is
+added (deferred to a follow-up).
 
 Fixes #661, Fixes #663.

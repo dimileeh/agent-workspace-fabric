@@ -972,23 +972,27 @@ def _stale_merge_block_state(*, episode_start: datetime) -> MonitorState:
 
 
 @pytest.mark.unit
-async def test_resolved_branch_protection_marker_cleared_on_merge_queue_wait(
+async def test_resolved_branch_protection_marker_preserved_on_merge_queue_wait(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
-    """#663: a branch-protection block that RESOLVED externally between polls must
-    not keep surfacing "awaiting human" while the monitor only waits on the merge
-    queue.
+    """#663 PRESERVE-WHILE-QUEUED (operator decision): a branch-protection block
+    that RESOLVED externally between polls is PRESERVED behind a merge-queue
+    wait, NOT cleared by TTL age-out.
 
-    The prior poll's fallback set attention + a fresh marker, but the block
-    resolved before this poll (no fallback fired this cycle), so the marker is
-    STALE (age > TTL). ``decide()`` still returns ``Merge``; when this poll parks
-    behind an older merge-queue candidate, ``_clear_stale_merge_attention`` must
-    clear the stale marker and the surfaced flag instead of preserving it as a
-    still-active signal — only NON-human gates remain.
+    While queued there is no observable signal distinguishing "block still
+    active" from "block resolved externally between polls" — both yield
+    ``decide()=Merge`` + queue blocker + a marker no fallback has re-stamped
+    this poll — so ageing the marker out by TTL would falsely clear a
+    still-active branch-protection escalation. The marker persists until a
+    REAL signal confirms resolution (a merge re-stamp / success / new commit).
+    The bounded false-positive (a resolved block still shows "awaiting human"
+    until the queue clears) is an ACCEPTED limitation; no forge re-check is
+    added (deferred to a follow-up). This reverses the prior #663 test which
+    asserted the stale marker was cleared behind a queue.
     """
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     _older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
@@ -1045,25 +1049,33 @@ async def test_resolved_branch_protection_marker_cleared_on_merge_queue_wait(
     assert terminal is False
     assert sleep_fn.calls == [60]
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    # The stale marker was cleared, so the surfaced flag is gone — only
-    # NON-human gates remain and "awaiting human" must not stay up.
+    # PRESERVE-WHILE-QUEUED: the (stale) marker is PRESERVED behind the queue —
+    # the surfaced "awaiting human" signal stays up because resolution cannot be
+    # confirmed while queued. The bounded false-positive is accepted.
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
-    assert workspace.awaiting_human_since is None
-    assert workspace.awaiting_human_reason is None
-    # The stale marker was dropped from state.
-    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
+    assert workspace.awaiting_human_since == episode_start
+    assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
+    # The marker was re-stamped (current wall-clock) and preserved in state, NOT
+    # aged out by TTL.
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    preserved = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    assert preserved != "1"
+    # The re-stamp is a current wall-clock (within the real-now window around the
+    # queue clear), so the TTL clock resets against real time for the next wait.
+    assert (datetime.now(UTC) - datetime.fromisoformat(preserved)).total_seconds() < 30.0
 
 
 @pytest.mark.unit
-async def test_resolved_branch_protection_marker_cleared_on_reviewer_settle_wait(
+async def test_resolved_branch_protection_marker_preserved_on_reviewer_settle_wait(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
-    """#663 parity: a RESOLVED branch-protection marker is cleared when the poll
-    parks on the non-check reviewer-settle wait (not just the merge queue).
+    """#663 PRESERVE-WHILE-QUEUED parity: a RESOLVED branch-protection marker is
+    PRESERVED when the poll parks on the non-check reviewer-settle wait, NOT
+    cleared by TTL age-out (operator decision on #663).
     """
     pr_number = 323
     head_sha = "c" * 40
@@ -1132,22 +1144,27 @@ async def test_resolved_branch_protection_marker_cleared_on_reviewer_settle_wait
     assert len(settle_ops) == 1
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
-    # The stale marker was cleared, so the surfaced flag is gone.
-    assert workspace.awaiting_human_since is None
-    assert workspace.awaiting_human_reason is None
-    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
+    # PRESERVE-WHILE-QUEUED: the (stale) marker is PRESERVED behind the
+    # reviewer-settle wait — the surfaced signal stays up.
+    assert workspace.awaiting_human_since == episode_start
+    assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    preserved = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    assert preserved != "1"
+    assert (datetime.now(UTC) - datetime.fromisoformat(preserved)).total_seconds() < 30.0
 
 
 @pytest.mark.unit
-async def test_resolved_branch_protection_marker_cleared_on_initial_grace_wait(
+async def test_resolved_branch_protection_marker_preserved_on_initial_grace_wait(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
-    """#663 parity: a RESOLVED branch-protection marker is cleared when the poll
-    parks on the initial-review-grace wait (not just the merge queue).
+    """#663 PRESERVE-WHILE-QUEUED parity: a RESOLVED branch-protection marker is
+    PRESERVED when the poll parks on the initial-review-grace wait, NOT cleared
+    by TTL age-out (operator decision on #663).
     """
     pr_number = 324
     workspace_id = await seed_monitoring_workspace(factory, pr_number=pr_number)
@@ -1202,7 +1219,11 @@ async def test_resolved_branch_protection_marker_cleared_on_initial_grace_wait(
     assert len(grace_ops) == 1
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
-    # The stale marker was cleared, so the surfaced flag is gone.
-    assert workspace.awaiting_human_since is None
-    assert workspace.awaiting_human_reason is None
-    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
+    # PRESERVE-WHILE-QUEUED: the (stale) marker is PRESERVED behind the
+    # initial-grace wait — the surfaced signal stays up.
+    assert workspace.awaiting_human_since == episode_start
+    assert workspace.awaiting_human_reason == "GitHub rejected the merge attempt"
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    preserved = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    assert preserved != "1"
+    assert (datetime.now(UTC) - datetime.fromisoformat(preserved)).total_seconds() < 30.0
