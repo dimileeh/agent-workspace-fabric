@@ -1412,14 +1412,31 @@ async def handle_merge_action(
             # sticky blocker, so ``decide()`` keeps returning ``Merge`` and never
             # re-enters ``NotifyHuman``; without this set ``awaiting_human_since``
             # would stay NULL for the whole branch-protection wait.
-            await self._set_workspace_attention(workspace_id, reason=blocker_reason)
+            #
             # Mark this attention as merge-loop-owned and still active so the
             # non-human gate waits (merge queue, reviewer settle, initial review
             # grace) on a later ``Merge`` poll do NOT clear it as a resolved
             # ``NotifyHuman`` episode while the operator is still blocked
             # (PRRT_kwDOSJAM6s6LXscz). ``decide()`` returning a non-``Merge`` action
             # drops the marker via ``loop._execute``.
+            #
+            # Persist the marker BEFORE setting ``awaiting_human_since``: the
+            # attention flag commits in its own transaction inside
+            # ``_set_workspace_attention``, while the marker lives in the in-memory
+            # ``state`` that the outer ``run()`` loop persists only AFTER
+            # ``_execute`` returns. A monitor restart/cancel in that window would
+            # strand the DB with ``awaiting_human_since`` set but no marker, so the
+            # next poll's ``_clear_stale_merge_attention`` would see no marker, clear
+            # the flag, the deterministic rejection would re-stamp attention to
+            # ``now`` — resetting the operator-visible human-wait timer even though
+            # the block never resolved (PRRT_kwDOSJAM6s6LbY_X). Persisting first
+            # mirrors the merge-method preflight arm's ordering
+            # (``_persist_state`` then ``_set_workspace_attention``) and makes the
+            # marker durable so a restart between the two steps preserves the
+            # still-active signal.
             state.mark_merge_block_attention()
+            await self._persist_state(workspace_id, state)
+            await self._set_workspace_attention(workspace_id, reason=blocker_reason)
             try:
                 await self._post_human_notification_once(
                     repo=repo,

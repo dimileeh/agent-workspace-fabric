@@ -323,6 +323,104 @@ async def test_merge_blocker_fallback_keeps_attention_since_stable_across_polls(
 
 
 @pytest.mark.unit
+async def test_merge_blocker_fallback_persists_attention_marker_before_attention_set(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6LbY_X: the branch-protection fallback must durably persist
+    the ``merge_block_attention`` marker BEFORE it commits
+    ``awaiting_human_since``.
+
+    ``_set_workspace_attention`` commits the attention flag to the workspace row
+    inside its own transaction, while ``state.mark_merge_block_attention()`` only
+    mutates the in-memory ``MonitorState`` that the outer ``run()`` loop persists
+    AFTER ``_execute`` returns. A monitor restart/cancel in that window leaves the
+    DB with ``awaiting_human_since`` set but no marker, so the next poll's
+    ``_clear_stale_merge_attention`` sees no marker, clears the flag, the merge
+    retries, the deterministic rejection re-sets attention to ``now`` — resetting
+    the operator-visible human-wait timer even though the block never resolved.
+
+    The fix persists the marker (via ``_persist_state``) BEFORE setting the
+    attention flag, mirroring the merge-method preflight arm's ordering
+    (``_persist_state`` then ``_set_workspace_attention``). This test simulates the
+    crash window by reloading state from the DB immediately after the fallback
+    fires and asserting the marker is durable — i.e. ``_load_state`` reconstructs a
+    state whose ``merge_block_attention_active`` is True without relying on the
+    in-memory ``state`` that ``_execute`` returned.
+    """
+    from awf.runtime.pr_monitor import _MERGE_BLOCK_ATTENTION_STATE_KEY
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        # Deterministic branch-protection rejection.
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            ),
+        ],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    # The attention flag was set during the fallback.
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.awaiting_human_since is not None
+
+    # Simulate a restart that loses the in-memory ``state``: reload it from the DB.
+    # The marker MUST already be durable so a restart between the attention-set and
+    # the outer loop's persist does not strand ``awaiting_human_since`` without the
+    # marker that tells the next poll's clear to PRESERVE the still-active signal.
+    async with factory() as session:
+        ws_for_reload = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_for_reload is not None
+    reloaded_state = runner._load_state(ws_for_reload)
+    assert (
+        reloaded_state.merge_block_attention_active(
+            ttl_seconds=runner._config.merge_block_attention_ttl_seconds,
+        )
+        is True
+    )
+    # And the persisted marker key is present in the DB-stored threads_addressed.
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in (ws_for_reload.monitor_threads_addressed or {})
+
+
+@pytest.mark.unit
 async def test_merge_blocker_fallback_notification_transient_error_retries_then_clears(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
