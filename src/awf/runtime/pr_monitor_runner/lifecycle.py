@@ -602,7 +602,7 @@ async def _clear_stale_merge_attention(
     # at entry (the block resolved BEFORE the wait) is still cleared.
     if state.merge_block_attention_active(
         now=reference,
-        ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
+        ttl_seconds=ttl_seconds if ttl_seconds is not None and ttl_seconds > 0 else None,
     ):
         # Still-active block: refresh the marker's timestamp so the TTL clock
         # resets for the next non-human gate wait. Without this, consecutive
