@@ -25,6 +25,8 @@ from awf.common.github_client import GitHubClientError
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
+    _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION,
+    _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY,
     _MERGE_BLOCK_ATTENTION_STATE_KEY,
     Merge,
     MergeStateStatus,
@@ -591,6 +593,12 @@ async def test_github_clean_status_preserves_stale_merge_rejection_attention_at_
     assert (ws_after.monitor_threads_addressed or {})[
         _MERGE_BLOCK_ATTENTION_STATE_KEY
     ] == refreshed_stamp.isoformat()
+    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] == (
+        _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION
+    )
+    assert (ws_after.monitor_threads_addressed or {})[
+        _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY
+    ] == _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION
 
 
 @pytest.mark.unit

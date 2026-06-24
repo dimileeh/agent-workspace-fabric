@@ -260,7 +260,12 @@ async def _clear_stale_merge_attention(
         # the re-stamp while keeping the original entry reference for the
         # preserve/clear decision.
         stamp_now = _now(self)
-        state.mark_merge_block_attention(now=stamp_now)
+        state.mark_merge_block_attention(
+            now=stamp_now,
+            originated_from_merge_rejection=(
+                structured_rejection_origin or preserve_rejection_origin
+            ),
+        )
         # Persist the re-stamped marker DURABLY before returning. The outer
         # ``run()`` loop only flushes ``state`` after ``_execute`` returns
         # (``runner.py:455``); a cancel/restart before that flush would otherwise
