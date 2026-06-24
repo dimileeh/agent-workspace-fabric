@@ -470,6 +470,48 @@ def test_readiness_evidence_lines_omit_unknown_check_details() -> None:
 
 
 @pytest.mark.unit
+def test_cleanup_posture_allows_orphans_when_reaping_enabled() -> None:
+    check = readiness._cleanup_posture_check(  # noqa: SLF001
+        {
+            "checks": {
+                "workspace_cleanup": {"ok": True},
+                "orphan_resources": {
+                    "ok": True,
+                    "status": "ok",
+                    "reason": "ORPHANS_PRESENT_REAPING_ENABLED",
+                    "orphan_count": 1,
+                },
+                "stranded_workspaces": {"ok": True},
+            }
+        }
+    )
+
+    assert check.status == "ok"
+    assert check.reason_code == "CLEANUP_POSTURE_OK"
+
+
+@pytest.mark.unit
+def test_cleanup_posture_blocks_orphans_when_reaping_disabled() -> None:
+    check = readiness._cleanup_posture_check(  # noqa: SLF001
+        {
+            "checks": {
+                "workspace_cleanup": {"ok": True},
+                "orphan_resources": {
+                    "ok": False,
+                    "status": "fail",
+                    "reason": "ORPHAN_RESOURCES_PRESENT",
+                    "orphan_count": 1,
+                },
+                "stranded_workspaces": {"ok": True},
+            }
+        }
+    )
+
+    assert check.status == "fail"
+    assert check.reason_code == "CLEANUP_POSTURE_NOT_READY"
+
+
+@pytest.mark.unit
 def test_format_readiness_rate_handles_missing_and_non_numeric_values() -> None:
     assert readiness._format_readiness_rate(None) == "no data"
     assert readiness._format_readiness_rate("raw") == "raw"

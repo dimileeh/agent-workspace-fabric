@@ -16,6 +16,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -69,6 +70,70 @@ def _queue_all_ok(runner: FakeCommandRunner) -> None:
     runner.queue_result(stdout="27.0.3\n")
     runner.queue_result(stdout="v2.29.2\n")
     runner.queue_result(stdout="sha256:deadbeef\n")
+
+
+def _disable_auto_cleanup_orphans(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = health_route.get_settings()
+    monkeypatch.setattr(
+        health_route,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            host_home=settings.host_home,
+            work_dir=settings.work_dir,
+            auto_cleanup_orphans=False,
+        ),
+    )
+
+
+class _ReadyzDockerRunner:
+    """Command-aware Docker fake for /readyz's concurrent readiness checks."""
+
+    def __init__(
+        self,
+        *,
+        containers: str = "",
+        networks: str = "",
+        volumes: str = "",
+    ) -> None:
+        self.calls: list[Any] = []
+        self._containers = containers
+        self._networks = networks
+        self._volumes = volumes
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> CommandResult:
+        self.calls.append(
+            SimpleNamespace(
+                args=list(args),
+                input_bytes=input_bytes,
+                cwd=cwd,
+                env=None if env is None else dict(env),
+            )
+        )
+        if args[:2] == ["docker", "--version"]:
+            return CommandResult(
+                returncode=0, stdout="Docker version 27.0.3, build abc1234\n", stderr=""
+            )
+        if args[:2] == ["docker", "info"]:
+            return CommandResult(returncode=0, stdout="27.0.3\n", stderr="")
+        if args[:3] == ["docker", "compose", "version"]:
+            return CommandResult(returncode=0, stdout="v2.29.2\n", stderr="")
+        if args[:3] == ["docker", "image", "inspect"]:
+            return CommandResult(returncode=0, stdout="sha256:deadbeef\n", stderr="")
+        if args[:3] == ["docker", "ps", "-a"]:
+            return CommandResult(returncode=0, stdout=self._containers, stderr="")
+        if args[:3] == ["docker", "network", "ls"]:
+            return CommandResult(returncode=0, stdout=self._networks, stderr="")
+        if args[:3] == ["docker", "volume", "ls"]:
+            return CommandResult(returncode=0, stdout=self._volumes, stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
 
 
 @pytest.fixture
@@ -141,12 +206,8 @@ async def test_readyz_terminal_workspace_with_only_retained_worktree_stays_healt
     worktree = Path(settings.work_dir) / "git" / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
 
-    runner = FakeCommandRunner()
-    _queue_all_ok(runner)
-    runner.queue_result(stdout="")
-    runner.queue_result(stdout="")
-    runner.queue_result(
-        stdout=json.dumps(
+    runner = _ReadyzDockerRunner(
+        volumes=json.dumps(
             {
                 "name": f"awf_{workspace_id}_pgdata",
                 "project": f"awf_{workspace_id}",
@@ -154,7 +215,7 @@ async def test_readyz_terminal_workspace_with_only_retained_worktree_stays_healt
                 "scope": "local",
             }
         )
-        + "\n"
+        + "\n",
     )
     app.state.command_runner = runner
 
@@ -184,8 +245,7 @@ async def test_readyz_retains_recent_terminal_worktree_without_failing(
     worktree = Path(settings.work_dir) / "git" / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
 
-    runner = FakeCommandRunner()
-    _queue_all_ok(runner)
+    runner = _ReadyzDockerRunner()
     app.state.command_runner = runner
 
     response = await client.get("/readyz")
@@ -297,20 +357,20 @@ async def test_readyz_never_crashes_when_docker_completely_unavailable(
 
 
 @pytest.mark.unit
-async def test_readyz_terminal_workspace_with_live_container_reports_leak(
+async def test_readyz_terminal_workspace_with_live_container_reports_leak_without_auto_cleanup(
     ready_app_and_client: tuple[Any, AsyncClient],
     engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, client = ready_app_and_client
+    _disable_auto_cleanup_orphans(monkeypatch)
     workspace_id = await create_workspace(
         engine,
         status=WorkspaceStatus.failed,
         updated_at=datetime.now(UTC),
     )
-    runner = FakeCommandRunner()
-    _queue_all_ok(runner)
-    runner.queue_result(
-        stdout=json.dumps(
+    runner = _ReadyzDockerRunner(
+        containers=json.dumps(
             {
                 "id": "abc",
                 "name": f"awf_{workspace_id}-agent-1",
@@ -320,10 +380,8 @@ async def test_readyz_terminal_workspace_with_live_container_reports_leak(
                 "status": "Up 5 minutes",
             }
         )
-        + "\n"
+        + "\n",
     )
-    runner.queue_result(stdout="")
-    runner.queue_result(stdout="")
     app.state.command_runner = runner
 
     response = await client.get("/readyz")
@@ -409,20 +467,20 @@ async def test_readyz_docker_daemon_unreachable_returns_503(
 
 
 @pytest.mark.unit
-async def test_readyz_orphan_resources_present_returns_503(
+async def test_readyz_orphan_resources_present_without_auto_cleanup_returns_503(
     ready_app_and_client: tuple[Any, AsyncClient],
     engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, client = ready_app_and_client
+    _disable_auto_cleanup_orphans(monkeypatch)
     workspace_id = await create_workspace(
         engine,
         status=WorkspaceStatus.completed,
         updated_at=datetime.now(UTC) - timedelta(hours=200),
     )
-    runner = FakeCommandRunner()
-    _queue_all_ok(runner)
-    runner.queue_result(
-        stdout=json.dumps(
+    runner = _ReadyzDockerRunner(
+        containers=json.dumps(
             {
                 "id": "abc",
                 "name": f"awf_{workspace_id}-agent-1",
@@ -432,10 +490,8 @@ async def test_readyz_orphan_resources_present_returns_503(
                 "status": "Exited (0)",
             }
         )
-        + "\n"
+        + "\n",
     )
-    runner.queue_result(stdout="")
-    runner.queue_result(stdout="")
     app.state.command_runner = runner
 
     response = await client.get("/readyz")
@@ -476,10 +532,8 @@ async def test_readyz_orphan_resources_reflect_auto_cleanup_enabled(
         status=WorkspaceStatus.completed,
         updated_at=datetime.now(UTC) - timedelta(hours=200),
     )
-    runner = FakeCommandRunner()
-    _queue_all_ok(runner)
-    runner.queue_result(
-        stdout=json.dumps(
+    runner = _ReadyzDockerRunner(
+        containers=json.dumps(
             {
                 "id": "abc",
                 "name": f"awf_{workspace_id}-agent-1",
@@ -489,16 +543,14 @@ async def test_readyz_orphan_resources_reflect_auto_cleanup_enabled(
                 "status": "Exited (0)",
             }
         )
-        + "\n"
+        + "\n",
     )
-    runner.queue_result(stdout="")
-    runner.queue_result(stdout="")
     app.state.command_runner = runner
 
     response = await client.get("/readyz")
     body = response.json()
 
     orphan_check = body["checks"]["orphan_resources"]
-    assert orphan_check["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_check["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
     assert orphan_check["cleanup_readiness"]["dry_run_only"] is False
     assert "Reaping is enabled" in orphan_check["cleanup_readiness"]["action"]

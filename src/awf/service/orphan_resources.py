@@ -592,6 +592,16 @@ ORPHAN_REAPING_ACTION = (
     "listed orphaned AWF stacks and remove their worktrees automatically; no "
     "manual cleanup is required."
 )
+ORPHANS_PRESENT_REAPING_ENABLED = "ORPHANS_PRESENT_REAPING_ENABLED"
+
+
+def reaping_supersedes_orphan_failure(
+    *,
+    auto_cleanup_orphans: bool,
+    orphan_count: int,
+    scans_ok: bool,
+) -> bool:
+    return auto_cleanup_orphans and orphan_count > 0 and scans_ok
 
 
 def build_orphan_resource_summary(
@@ -690,26 +700,36 @@ def build_orphan_resource_summary(
         )
 
     if orphan_records:
+        reaping_enabled = reaping_supersedes_orphan_failure(
+            auto_cleanup_orphans=auto_cleanup_orphans,
+            orphan_count=len(orphan_records),
+            # The workspace and scanner availability guards above guarantee scans are usable.
+            scans_ok=True,
+        )
         examples = tuple(record.to_dict() for record in orphan_records[:example_limit])
         action = (
             ORPHAN_REAPING_ACTION
-            if auto_cleanup_orphans
+            if reaping_enabled
             else (
                 "Review the listed AWF resources and run a non-destructive cleanup plan; "
                 "this check does not remove containers, networks, volumes, or worktrees."
             )
         )
         readiness = CleanupReadiness(
-            ready=False,
-            status="blocked",
-            reason="ORPHAN_RESOURCES_PRESENT",
+            ready=reaping_enabled,
+            status="ready" if reaping_enabled else "blocked",
+            reason=(
+                ORPHANS_PRESENT_REAPING_ENABLED if reaping_enabled else "ORPHAN_RESOURCES_PRESENT"
+            ),
             action=action,
-            dry_run_only=not auto_cleanup_orphans,
+            dry_run_only=not reaping_enabled,
         )
         return OrphanResourceSummary(
-            ok=False,
-            status="fail",
-            reason="ORPHAN_RESOURCES_PRESENT",
+            ok=reaping_enabled,
+            status="ok" if reaping_enabled else "fail",
+            reason=(
+                ORPHANS_PRESENT_REAPING_ENABLED if reaping_enabled else "ORPHAN_RESOURCES_PRESENT"
+            ),
             detail="Orphan AWF resources remain on this node.",
             resource_count=len(records),
             expected_count=len(expected_records),
@@ -764,9 +784,9 @@ async def reap_classified_orphans(
 ) -> OrphanReapResult:
     """Reap ``terminal`` / aged ``missing`` classified orphans when ``enabled``.
 
-    Off by default: with ``enabled=False`` this is a pure no-op (report only),
-    preserving the historical ``dry_run_only`` behavior. With ``enabled=True``
-    it tears down each orphaned compose stack (containers/networks/volumes) via
+    With ``enabled=False`` this is a pure no-op (report only), preserving the
+    historical ``dry_run_only`` behavior. With ``enabled=True`` it tears down
+    each orphaned compose stack (containers/networks/volumes) via
     WS-B1's :meth:`ComposeManager.teardown_project` and removes orphaned worktree
     directories via WS-B1's :func:`build_and_delete_gc_path` (which keeps the
     recursive byte-estimate scan off the event loop). Records classified
@@ -790,6 +810,11 @@ async def reap_classified_orphans(
     have no status to scope on and are exactly what that path cannot see (#637).
     The periodic backstop reaps both classes under the global ``auto_cleanup_orphans``
     flag (no per-operator scope), so it leaves ``row_less_only`` at its default.
+    This deliberately uses a different evidence tier from terminal workspace GC:
+    the 168h classified reaper reclaims bulky per-workspace runtime
+    (dind/postgres volumes and worktrees) for all terminal workspaces, while
+    ``terminal_workspace_gc_enabled`` independently preserves failed-workspace
+    auth dirs/logs longer.
 
     ``limit`` bounds the reap to that many distinct, oldest-first workspaces
     (:func:`_limit_records_to_oldest_workspaces`) so the on-demand ``service gc`` path's

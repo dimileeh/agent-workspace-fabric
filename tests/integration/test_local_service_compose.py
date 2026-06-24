@@ -262,7 +262,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert environment["AWF_AGENT_IDLE_TIMEOUT_SECONDS"] == (
             "${AWF_AGENT_IDLE_TIMEOUT_SECONDS:-3600}"
         )
-        assert environment["AWF_AUTO_CLEANUP_ORPHANS"] == "${AWF_AUTO_CLEANUP_ORPHANS:-false}"
+        assert environment["AWF_AUTO_CLEANUP_ORPHANS"] == "${AWF_AUTO_CLEANUP_ORPHANS:-true}"
         # GC-B base reaper is default-on, so its kill-switch must be forwarded into
         # the API/worker containers or operators could never disable it.
         assert environment["AWF_CLAUDE_BASE_GC_ENABLED"] == ("${AWF_CLAUDE_BASE_GC_ENABLED:-true}")

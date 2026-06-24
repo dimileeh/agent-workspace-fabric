@@ -12,6 +12,20 @@ Core.
 The public curl installer lane is release-gated until the hosted installer URL,
 manifest, checksums, and release artifacts are published and verified.
 
+## Orphan Resource Cleanup
+
+`auto_cleanup_orphans` now defaults to enabled. After upgrade, the first worker
+sweep may perform a one-time catch-up reap of terminal or missing AWF Docker
+volumes and managed worktrees older than the 168h orphan retention window. Set
+`AWF_AUTO_CLEANUP_ORPHANS=false` before starting the service to keep orphan
+cleanup in report-only mode.
+
+If you reuse a `.env` from an earlier AWF install, check whether it already
+contains `AWF_AUTO_CLEANUP_ORPHANS=false`. That old seeded value overrides the
+new default; remove the line or change it to `AWF_AUTO_CLEANUP_ORPHANS=true`
+before `awf start` if you want the upgraded service to reap stale orphan
+resources automatically.
+
 ## uv tool
 
 ```bash

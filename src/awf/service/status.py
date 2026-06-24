@@ -31,6 +31,8 @@ from awf.service.environment import compose_env_file_values
 from awf.service.gc import plan_terminal_workspace_gc
 from awf.service.orphan_resources import (
     ORPHAN_REAPING_ACTION,
+    ORPHANS_PRESENT_REAPING_ENABLED,
+    reaping_supersedes_orphan_failure,
 )
 from awf.service.orphan_resources import (
     scan_docker_resources as scan_runtime_docker_resources,
@@ -263,17 +265,16 @@ async def collect_service_status(
         docker_host=settings.docker_host,
         run_subprocess=resolved_run,
     )
-    orphan_workspaces_check = orphan_summary.to_check_payload()
-    orphan_resources_check = _orphan_resources_check_payload(
+    raw_orphan_workspaces_check = orphan_summary.to_check_payload()
+    orphan_workspaces_check: CheckPayload = dict(raw_orphan_workspaces_check)
+    _apply_orphan_reaping_status(
         orphan_workspaces_check,
         auto_cleanup_orphans=settings.auto_cleanup_orphans,
     )
-    if settings.auto_cleanup_orphans and orphan_workspaces_check.get("orphan_count"):
-        # The legacy orphan_workspaces payload otherwise keeps its manual-cleanup
-        # action, which contradicts the reaping-aware orphan_resources action on the
-        # same response. Align it so a single status never tells operators both
-        # "the worker will reap this automatically" and "run manual cleanup".
-        orphan_workspaces_check["action"] = ORPHAN_REAPING_ACTION
+    orphan_resources_check = _orphan_resources_check_payload(
+        raw_orphan_workspaces_check,
+        auto_cleanup_orphans=settings.auto_cleanup_orphans,
+    )
     stranded_workspaces_check = _stranded_workspaces_check_payload(
         workspace_view,
         runtime_docker_scan,
@@ -513,14 +514,16 @@ def _orphan_resources_check_payload(
     payload["reason"] = _orphan_resources_reason(payload.get("reason"))
     if "resource_counts" in payload:
         payload.setdefault("counts_by_kind", payload["resource_counts"])
-    cleanup_readiness = _orphan_resources_cleanup_readiness(
+    reaping_enabled = _apply_orphan_reaping_status(
         payload,
         auto_cleanup_orphans=auto_cleanup_orphans,
     )
+    cleanup_readiness = _orphan_resources_cleanup_readiness(
+        payload,
+        auto_cleanup_orphans=reaping_enabled,
+    )
     payload["cleanup_readiness"] = cleanup_readiness
-    if auto_cleanup_orphans and payload.get("orphan_count"):
-        # Keep the top-level action consistent with the reaping-aware readiness
-        # action so the two never disagree on the same check payload.
+    if reaping_enabled:
         payload["action"] = cleanup_readiness["action"]
     return payload
 
@@ -635,6 +638,51 @@ def _orphan_resources_reason(reason: object) -> str:
     return str(reason or "UNKNOWN")
 
 
+def _apply_orphan_reaping_status(
+    payload: CheckPayload,
+    *,
+    auto_cleanup_orphans: bool,
+) -> bool:
+    reaping_enabled = reaping_supersedes_orphan_failure(
+        auto_cleanup_orphans=auto_cleanup_orphans,
+        orphan_count=_int_payload_value(payload.get("orphan_count")),
+        scans_ok=_orphan_scans_ok(payload),
+    )
+    if not reaping_enabled:
+        return False
+    payload["ok"] = True
+    payload["status"] = "ok"
+    payload["reason"] = ORPHANS_PRESENT_REAPING_ENABLED
+    payload["action"] = ORPHAN_REAPING_ACTION
+    return True
+
+
+def _orphan_scans_ok(payload: Mapping[str, object]) -> bool:
+    if _int_payload_value(payload.get("warning_count")) > 0:
+        return False
+    if payload.get("warnings"):
+        return False
+    status = str(payload.get("status") or "").lower()
+    if status in {"unknown", "unavailable", "warn"}:
+        return False
+    reason = _orphan_resources_reason(payload.get("reason"))
+    return reason not in {
+        "DB_UNAVAILABLE",
+        "DOCKER_CLI_NOT_FOUND",
+        "DOCKER_UNAVAILABLE",
+        "DOCKER_SCAN_SKIPPED",
+        "WORKTREE_SCAN_FAILED",
+    }
+
+
+def _int_payload_value(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    return 0
+
+
 def _orphan_resources_cleanup_readiness(
     payload: Mapping[str, object],
     *,
@@ -647,11 +695,15 @@ def _orphan_resources_cleanup_readiness(
     # worker will act when no orphans are present or detection degraded.
     if bool(payload.get("orphan_count")):
         if auto_cleanup_orphans:
-            # Do not forward the legacy "run manual cleanup" action: with reaping
-            # enabled the worker tears the orphans down itself, so a manual-cleanup
-            # action would contradict ``dry_run_only`` being False.
             orphan_action: str = ORPHAN_REAPING_ACTION
-        elif isinstance(action, str) and action:
+            return {
+                "ready": True,
+                "status": "ready",
+                "reason": ORPHANS_PRESENT_REAPING_ENABLED,
+                "action": orphan_action,
+                "dry_run_only": False,
+            }
+        if isinstance(action, str) and action:
             orphan_action = action
         else:
             orphan_action = "Review the listed AWF resources before running cleanup."
