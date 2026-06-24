@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -306,7 +305,7 @@ async def handle_merge_action(
         # human-wait timer though the block never resolved
         # (PRRT_kwDOSJAM6s6La_SZ). Use the entry timestamp so a fresh-at-entry
         # marker is preserved; a stale-at-entry marker is still cleared.
-        merge_critical_section_entered_at = datetime.now(UTC)
+        merge_critical_section_entered_at = self._deps.now()
         # #661: clear a resolved ``NotifyHuman`` flag BEFORE the non-human merge-
         # lock wait so it does not stay "awaiting human" once ``decide()`` resumes
         # to ``Merge``. The entry timestamp (above) preserves a FRESH marker and
@@ -474,7 +473,7 @@ async def handle_merge_action(
                     # so an unpersisted marker would re-read as absent forever and
                     # a genuine never-CI head would never escalate past the grace.
                     grace_active, grace_state_changed = _awaiting_required_checks_grace(
-                        checked_status, state, self._config, now=datetime.now(UTC)
+                        checked_status, state, self._config, now=self._deps.now()
                     )
                     if grace_state_changed:
                         pre_merge_state_changed = True
@@ -1079,7 +1078,10 @@ async def handle_merge_action(
             # surfacing the escalation (PRRT_kwDOSJAM6s6Lcgk0). One row, one
             # transaction; the outer ``run()`` loop flushes the rest of ``state``
             # after ``_execute`` returns.
-            state.mark_merge_block_attention()
+            state.mark_merge_block_attention(
+                now=self._deps.now(),
+                originated_from_merge_rejection=True,
+            )
             await self._set_workspace_attention_with_merge_block_marker(
                 workspace_id,
                 state,

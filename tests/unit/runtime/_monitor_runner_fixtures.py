@@ -13,7 +13,9 @@ surface.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -356,6 +358,7 @@ def make_runner(
     post_merge_target_reconciler: Any | None = None,
     provider_recovery_default_model: str | None = None,
     gh: Any | None = None,
+    now: Callable[[], datetime] | None = None,
 ) -> PullRequestMonitorRunner:
     """Construct a PullRequestMonitorRunner wired for integration-style unit tests."""
     kwargs: dict = {
@@ -389,4 +392,6 @@ def make_runner(
         kwargs["merge_coordinator"] = merge_coordinator
     if post_merge_target_reconciler is not None:
         kwargs["post_merge_target_reconciler"] = post_merge_target_reconciler
+    if now is not None:
+        kwargs["now"] = now
     return PullRequestMonitorRunner(**kwargs)
