@@ -164,6 +164,8 @@ def test_ambiguous_github_401_markers_stay_transient(stderr: str) -> None:
     [
         ("gh pr merge", "gh: Requires authentication (HTTP 401)"),
         ("gh pr comment", "HTTP 401"),
+        ("gh pr merge", "gh: Bad credentials (HTTP 401)"),
+        ("gh pr comment", "gh: Bad credentials (HTTP 401)"),
     ],
 )
 def test_ambiguous_github_401_markers_are_transient_for_pr_cli_operations(
