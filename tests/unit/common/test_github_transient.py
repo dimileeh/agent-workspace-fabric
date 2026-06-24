@@ -85,7 +85,10 @@ def test_pr_create_bad_credentials_401_with_graphql_stderr_context_is_not_transi
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("operation", ["gh api graphql", "gh pr create"])
+@pytest.mark.parametrize(
+    "operation",
+    ["gh api graphql", "gh pr create", "gh pr merge", "gh pr comment"],
+)
 def test_bad_credentials_with_resubmit_guidance_without_auth_form_is_not_transient(
     operation: str,
 ) -> None:
