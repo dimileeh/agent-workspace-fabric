@@ -681,7 +681,13 @@ class TestFindOrCreateReleasePr:
     async def test_deterministic_create_failure_reraises_without_recheck(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
-        fake.queue_result(returncode=1, stderr="Bad credentials")  # gh pr create -> fails
+        fake.queue_result(
+            returncode=1,
+            stderr=(
+                "https://api.github.com/graphql: Bad credentials (HTTP 401). "
+                "Please try resubmitting your request."
+            ),
+        )  # gh pr create -> fails
         gh = GitHubClient(fake)
 
         with pytest.raises(GitHubClientError) as exc:

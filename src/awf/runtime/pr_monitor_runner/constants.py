@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from awf.common.github_transient import (
+    AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS,
     NON_TRANSIENT_GITHUB_ERROR_MARKERS,
     TRANSIENT_GITHUB_ERROR_MARKERS,
 )
@@ -46,9 +47,10 @@ _TASK_TAG_UNSET = _TaskTagUnset()
 # ``Requires authentication (HTTP 401)`` is frequently a transient GraphQL blip
 # on a valid token (#515) and is handled as bounded-retryable below. These strong
 # markers are checked first in ``_is_transient_github_client_error`` and win, so a
-# 401 combined with e.g. ``Bad credentials`` still fails fast.
+# deterministic not-logged-in/not-found fault still fails fast.
 _NON_TRANSIENT_GITHUB_ERROR_MARKERS = NON_TRANSIENT_GITHUB_ERROR_MARKERS
 _TRANSIENT_GITHUB_ERROR_MARKERS = TRANSIENT_GITHUB_ERROR_MARKERS
+_AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS
 
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 
