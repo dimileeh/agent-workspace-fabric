@@ -692,6 +692,9 @@ def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> N
     assert _is_transient_base_fetch_error(
         BaseFetchError("git fetch origin main failed: gh: Bad credentials (HTTP 401)")
     )
+    assert _is_transient_base_fetch_error(
+        BaseFetchError("git fetch origin main failed: gh: Bad credentials; requires authentication")
+    )
     assert not _is_transient_base_fetch_error(
         BaseFetchError("git fetch origin main failed: gh: Bad credentials")
     )

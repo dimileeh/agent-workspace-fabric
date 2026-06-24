@@ -26,7 +26,10 @@ from awf.common.bitbucket_client import (
     BitbucketClientError,
 )
 from awf.common.github_client import GitHubClientError
-from awf.common.github_transient import is_transient_github_error_text
+from awf.common.github_transient import (
+    GITHUB_AUTH_TRANSIENT_EVIDENCE_MARKERS,
+    is_transient_github_error_text,
+)
 from awf.control.quality_gates import QualityGateViolation
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import (
@@ -840,7 +843,10 @@ def _is_transient_base_fetch_error(exc: BaseFetchError) -> bool:
         return False
     if _REMOTE_TRACKING_REF_LOCK_RACE_RE.search(str(exc)):
         return True
-    if "bad credentials" in text and "http 401" not in text:
+    has_auth_transient_evidence = any(
+        marker in text for marker in GITHUB_AUTH_TRANSIENT_EVIDENCE_MARKERS
+    )
+    if "bad credentials" in text and not has_auth_transient_evidence:
         return False
     if any(marker in text for marker in _AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS):
         return True
