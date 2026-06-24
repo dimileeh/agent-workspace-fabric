@@ -265,13 +265,14 @@ async def collect_service_status(
         docker_host=settings.docker_host,
         run_subprocess=resolved_run,
     )
-    orphan_workspaces_check = orphan_summary.to_check_payload()
+    raw_orphan_workspaces_check = orphan_summary.to_check_payload()
+    orphan_workspaces_check: CheckPayload = dict(raw_orphan_workspaces_check)
     _apply_orphan_reaping_status(
         orphan_workspaces_check,
         auto_cleanup_orphans=settings.auto_cleanup_orphans,
     )
     orphan_resources_check = _orphan_resources_check_payload(
-        orphan_workspaces_check,
+        raw_orphan_workspaces_check,
         auto_cleanup_orphans=settings.auto_cleanup_orphans,
     )
     stranded_workspaces_check = _stranded_workspaces_check_payload(

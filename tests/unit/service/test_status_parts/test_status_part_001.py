@@ -1202,6 +1202,65 @@ def test_service_status_orphan_workspaces_action_aligns_with_reaping(tmp_path: P
 
 
 @pytest.mark.unit
+def test_service_status_orphan_resources_uses_raw_payload_for_reaping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(_settings(tmp_path), auto_cleanup_orphans=True)
+    worktree = Path(settings.work_dir) / "git" / "worktrees" / "ws_ghost"
+    worktree.mkdir(parents=True)
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_ghost-agent-1",
+            state="exited",
+            status="Exited",
+            project="awf_ws_ghost",
+            service="agent",
+        )
+    )
+    original = status_mod._orphan_resources_check_payload
+    observed: dict[str, object] = {}
+
+    def _recording_orphan_resources_check(
+        orphan_workspaces_check: Mapping[str, object],
+        *,
+        auto_cleanup_orphans: bool = False,
+    ) -> dict[str, object]:
+        observed["status"] = orphan_workspaces_check.get("status")
+        observed["reason"] = orphan_workspaces_check.get("reason")
+        return original(
+            orphan_workspaces_check,
+            auto_cleanup_orphans=auto_cleanup_orphans,
+        )
+
+    monkeypatch.setattr(
+        status_mod,
+        "_orphan_resources_check_payload",
+        _recording_orphan_resources_check,
+    )
+
+    status = asyncio.run(
+        collect_service_status(
+            settings,
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
+        )
+    )
+
+    orphan_workspaces = status["checks"]["orphan_workspaces"]
+    orphan_resources = status["checks"]["orphan_resources"]
+    assert observed == {"status": "fail", "reason": "ORPHANS_PRESENT"}
+    assert orphan_workspaces["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
+    assert orphan_resources["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
+
+
+@pytest.mark.unit
 def test_orphan_resources_check_payload_threads_auto_cleanup_flag() -> None:
     payload = _orphan_resources_check_payload(
         {
