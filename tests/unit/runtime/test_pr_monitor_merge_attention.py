@@ -601,6 +601,78 @@ async def test_github_clean_status_preserves_stale_merge_rejection_attention_at_
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("forge_still_blocked", [False, True])
+async def test_critical_section_refresh_preserves_persisted_merge_rejection_origin(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    *,
+    forge_still_blocked: bool,
+) -> None:
+    """PRRT_kwDOSJAM6s6L2Znf: refresh must not erase DB-backed origin.
+
+    A restart can leave the marker in memory without the structured origin
+    while the workspace row still records merge-rejection origin. If the marker
+    is refreshed because it is fresh at entry, or because the forge still
+    reports branch protection active, the durable refresh must keep that
+    persisted origin so later GitHub ``CLEAN`` queue waits cannot clear the
+    active merge-rejection attention without a merge retry.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    if forge_still_blocked:
+        marker_time = datetime(2024, 1, 1, tzinfo=UTC)
+        reference = datetime(2024, 1, 2, tzinfo=UTC)
+        status = replace(_mergeable_status(), merge_state_status=MergeStateStatus.BLOCKED)
+    else:
+        marker_time = datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC)
+        reference = datetime(2026, 1, 1, 12, 0, 2, tzinfo=UTC)
+        status = _mergeable_status()
+    marker = marker_time.isoformat()
+    state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: marker})
+    persisted_state = {
+        _MERGE_BLOCK_ATTENTION_STATE_KEY: marker,
+        _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY: _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION,
+    }
+    episode_start = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = persisted_state
+        ws.awaiting_human_since = episode_start
+        ws.awaiting_human_reason = "GitHub merge was denied by branch actor restrictions"
+        await session.commit()
+
+    await runner._clear_stale_merge_attention(
+        workspace_id,
+        state,
+        now=reference,
+        status=status,
+        forge="github",
+    )
+
+    assert (
+        state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY]
+        == _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION
+    )
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert (ws_after.monitor_threads_addressed or {})[
+        _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY
+    ] == _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION
+    assert ws_after.awaiting_human_since == episode_start
+    assert ws_after.awaiting_human_reason == (
+        "GitHub merge was denied by branch actor restrictions"
+    )
+
+
+@pytest.mark.unit
 async def test_github_clean_status_clears_non_rejection_attention_during_queue_wait(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

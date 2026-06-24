@@ -229,21 +229,23 @@ async def _clear_stale_merge_attention(
     # cleared.
     forge_still_blocked = _merge_block_attention_queue_verdict(status, forge=forge) == "active"
     structured_rejection_origin = state.merge_block_attention_originated_from_merge_rejection()
+    explicit_origin_in_memory = _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY in (
+        state.threads_addressed_ids
+    )
     marker_fresh_at_entry = state.merge_block_attention_active(
         now=reference,
         ttl_seconds=ttl_seconds if ttl_seconds is not None and ttl_seconds > 0 else None,
     )
-    preserve_rejection_origin = (
-        not forge_still_blocked
-        and not marker_fresh_at_entry
-        and (
-            structured_rejection_origin
-            or await _merge_block_attention_originated_from_merge_rejection(
-                self,
-                workspace_id,
-                state,
-            )
+    if structured_rejection_origin or explicit_origin_in_memory:
+        merge_rejection_origin = structured_rejection_origin
+    else:
+        merge_rejection_origin = await _merge_block_attention_originated_from_merge_rejection(
+            self,
+            workspace_id,
+            state,
         )
+    preserve_rejection_origin = (
+        not forge_still_blocked and not marker_fresh_at_entry and merge_rejection_origin
     )
     if forge_still_blocked or marker_fresh_at_entry or preserve_rejection_origin:
         # Still-active block at merge critical-section entry: refresh the
@@ -264,9 +266,7 @@ async def _clear_stale_merge_attention(
         stamp_now = _now(self)
         state.mark_merge_block_attention(
             now=stamp_now,
-            originated_from_merge_rejection=(
-                structured_rejection_origin or preserve_rejection_origin
-            ),
+            originated_from_merge_rejection=merge_rejection_origin,
         )
         # Persist the re-stamped marker DURABLY before returning. The outer
         # ``run()`` loop only flushes ``state`` after ``_execute`` returns
