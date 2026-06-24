@@ -703,6 +703,7 @@ def build_orphan_resource_summary(
         reaping_enabled = reaping_supersedes_orphan_failure(
             auto_cleanup_orphans=auto_cleanup_orphans,
             orphan_count=len(orphan_records),
+            # The workspace and scanner availability guards above guarantee scans are usable.
             scans_ok=True,
         )
         examples = tuple(record.to_dict() for record in orphan_records[:example_limit])
