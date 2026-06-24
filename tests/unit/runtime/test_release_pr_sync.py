@@ -683,7 +683,10 @@ class TestFindOrCreateReleasePr:
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
         fake.queue_result(
             returncode=1,
-            stderr="Bad credentials (HTTP 401). Please try resubmitting your request.",
+            stderr=(
+                "https://api.github.com/graphql: Bad credentials (HTTP 401). "
+                "Please try resubmitting your request."
+            ),
         )  # gh pr create -> fails
         gh = GitHubClient(fake)
 

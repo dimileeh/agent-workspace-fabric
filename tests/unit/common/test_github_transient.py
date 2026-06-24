@@ -69,6 +69,14 @@ def test_pr_create_bad_credentials_401_without_api_context_is_not_transient() ->
 
 
 @pytest.mark.unit
+def test_pr_create_bad_credentials_401_with_graphql_stderr_context_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="gh pr create",
+        stderr="https://api.github.com/graphql: Bad credentials (HTTP 401)",
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("operation", ["gh api graphql", "gh pr create"])
 def test_bad_credentials_with_resubmit_guidance_without_auth_form_is_not_transient(
     operation: str,
@@ -91,7 +99,10 @@ def test_api_bad_credentials_with_resubmit_guidance_and_401_is_transient() -> No
 def test_pr_create_bad_credentials_with_resubmit_guidance_and_401_is_not_transient() -> None:
     assert not is_transient_github_error_text(
         operation="gh pr create",
-        stderr="Bad credentials (HTTP 401). Please try resubmitting your request.",
+        stderr=(
+            "https://api.github.com/graphql: Bad credentials (HTTP 401). "
+            "Please try resubmitting your request."
+        ),
     )
 
 

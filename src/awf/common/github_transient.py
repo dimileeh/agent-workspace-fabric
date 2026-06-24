@@ -95,8 +95,7 @@ def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
         marker in stderr_text for marker in GITHUB_AUTH_TRANSIENT_EVIDENCE_MARKERS
     )
     has_auth_transient_context = any(
-        marker in operation_text or marker in stderr_text
-        for marker in GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS
+        marker in operation_text for marker in GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS
     )
     if has_bad_credentials and not has_auth_transient_context:
         return False
