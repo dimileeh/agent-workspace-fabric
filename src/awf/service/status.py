@@ -17,7 +17,7 @@ from sqlalchemy import select, text
 
 from awf.common.audit import redact_audit_text
 from awf.db.models import Workspace
-from awf.db.repositories import EgressAuditRepository
+from awf.db.repositories import EgressAuditRepository, WorkerHeartbeatRepository
 from awf.db.resilience import db_connection_failure_reason
 from awf.db.session import make_engine, make_session_factory
 from awf.service.config import (
@@ -29,6 +29,7 @@ from awf.service.config import (
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.environment import compose_env_file_values
 from awf.service.gc import plan_terminal_workspace_gc
+from awf.service.node_identity import effective_service_node_id
 from awf.service.orphan_resources import (
     ORPHAN_REAPING_ACTION,
     ORPHANS_PRESENT_REAPING_ENABLED,
@@ -51,6 +52,15 @@ from awf.service.profile_metadata import (
 )
 from awf.service.provider_readiness import HttpGet as ProviderHttpGet
 from awf.service.provider_readiness import collect_agent_readiness
+from awf.service.worker_heartbeat import (
+    WORKER_HEARTBEAT_FRESH_REASON,
+    WORKER_HEARTBEAT_MISSING_REASON,
+    WORKER_HEARTBEAT_STALE_REASON,
+    WORKER_HEARTBEAT_UNAVAILABLE_REASON,
+    worker_heartbeat_age_seconds,
+    worker_heartbeat_is_fresh,
+    worker_heartbeat_stale_after_seconds,
+)
 from awf.service.workspace_runtime_health import (
     RuntimeWorkspace,
     summarize_runtime_health,
@@ -65,6 +75,7 @@ SocketExists = Callable[[Path], bool]
 
 WorkspaceIdLookup = Callable[[str], Awaitable[WorkspaceIdView]]
 EgressAuditSummaryLookup = Callable[[str], Awaitable[Mapping[str, int]]]
+WorkerReaperCheck = Callable[[ServiceSettings], Awaitable[CheckPayload]]
 
 
 class HttpResponse(Protocol):
@@ -170,6 +181,7 @@ async def collect_service_status(
     compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
     provider_http_get: ProviderHttpGet | None = None,
     egress_audit_summary_lookup: EgressAuditSummaryLookup | None = None,
+    worker_reaper_check: WorkerReaperCheck | None = None,
 ) -> dict[str, object]:
     """Collect service dependency status without requiring Docker in tests."""
 
@@ -177,6 +189,7 @@ async def collect_service_status(
     resolved_db_probe = db_probe or check_database
     resolved_run = run_subprocess or _run_subprocess
     resolved_socket_exists = socket_exists or Path.exists
+    resolved_worker_reaper_check = worker_reaper_check or _check_worker_reaper
     provider_environ = resolve_local_service_provider_environ(
         provider_environ=provider_environ,
         environ=os.environ if environ is None else environ,
@@ -264,14 +277,27 @@ async def collect_service_status(
         run_subprocess=resolved_run,
     )
     raw_orphan_workspaces_check = orphan_summary.to_check_payload()
+    reaper_readiness: CheckPayload | None = None
+    reaper_available = True
+    if _orphan_reaping_preconditions_met(
+        raw_orphan_workspaces_check,
+        auto_cleanup_orphans=settings.auto_cleanup_orphans,
+    ):
+        reaper_readiness = await resolved_worker_reaper_check(settings)
+        reaper_available = bool(reaper_readiness.get("ok"))
     orphan_workspaces_check: CheckPayload = dict(raw_orphan_workspaces_check)
     _apply_orphan_reaping_status(
         orphan_workspaces_check,
         auto_cleanup_orphans=settings.auto_cleanup_orphans,
+        reaper_available=reaper_available,
     )
+    if reaper_readiness is not None:
+        orphan_workspaces_check["reaper_readiness"] = reaper_readiness
     orphan_resources_check = _orphan_resources_check_payload(
         raw_orphan_workspaces_check,
         auto_cleanup_orphans=settings.auto_cleanup_orphans,
+        reaper_available=reaper_available,
+        reaper_readiness=reaper_readiness,
     )
     stranded_workspaces_check = _stranded_workspaces_check_payload(
         workspace_view,
@@ -354,6 +380,61 @@ async def _default_egress_audit_summary_counts(database_url: str) -> dict[str, i
     finally:
         if engine is not None:
             await engine.dispose()
+
+
+async def _check_worker_reaper(settings: ServiceSettings) -> CheckPayload:
+    """Return whether a live local worker can perform automatic orphan reaping."""
+
+    node_id = effective_service_node_id(settings)
+    engine = None
+    try:
+        engine = make_engine(settings.database_url)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            heartbeat = await asyncio.wait_for(
+                WorkerHeartbeatRepository(session).latest_for_node(node_id=node_id),
+                timeout=_CHECK_TIMEOUT_SECONDS,
+            )
+    except TimeoutError:
+        return _fail(
+            WORKER_HEARTBEAT_UNAVAILABLE_REASON,
+            f"Worker heartbeat lookup exceeded {_CHECK_TIMEOUT_SECONDS}s",
+        )
+    except Exception as exc:
+        return _fail(WORKER_HEARTBEAT_UNAVAILABLE_REASON, _redacted_truncated_exception_detail(exc))
+    finally:
+        if engine is not None:
+            await engine.dispose()
+
+    if heartbeat is None:
+        return _fail(
+            WORKER_HEARTBEAT_MISSING_REASON,
+            f"No worker heartbeat recorded for node {node_id!r}",
+        )
+
+    now = datetime.now(UTC)
+    if not worker_heartbeat_is_fresh(
+        heartbeat.last_heartbeat_at,
+        now=now,
+        poll_interval_seconds=heartbeat.poll_interval_seconds,
+    ):
+        age_seconds = worker_heartbeat_age_seconds(heartbeat.last_heartbeat_at, now=now)
+        stale_after_seconds = worker_heartbeat_stale_after_seconds(heartbeat.poll_interval_seconds)
+        return _fail(
+            WORKER_HEARTBEAT_STALE_REASON,
+            (
+                f"Latest worker heartbeat is {age_seconds:.1f}s old; "
+                f"stale after {stale_after_seconds:.1f}s"
+            ),
+        )
+
+    return {
+        "ok": True,
+        "status": "ok",
+        "reason": WORKER_HEARTBEAT_FRESH_REASON,
+        "detail": f"Latest worker heartbeat is fresh for node {node_id!r}",
+        "resource_count": 1,
+    }
 
 
 async def collect_workspace_cleanup_status(settings: ServiceSettings) -> CheckPayload:
@@ -507,14 +588,19 @@ def _orphan_resources_check_payload(
     orphan_workspaces_check: Mapping[str, object],
     *,
     auto_cleanup_orphans: bool = False,
+    reaper_available: bool = True,
+    reaper_readiness: Mapping[str, object] | None = None,
 ) -> CheckPayload:
     payload: CheckPayload = dict(orphan_workspaces_check)
     payload["reason"] = _orphan_resources_reason(payload.get("reason"))
     if "resource_counts" in payload:
         payload.setdefault("counts_by_kind", payload["resource_counts"])
+    if reaper_readiness is not None:
+        payload["reaper_readiness"] = dict(reaper_readiness)
     reaping_enabled = _apply_orphan_reaping_status(
         payload,
         auto_cleanup_orphans=auto_cleanup_orphans,
+        reaper_available=reaper_available,
     )
     cleanup_readiness = _orphan_resources_cleanup_readiness(
         payload,
@@ -640,11 +726,14 @@ def _apply_orphan_reaping_status(
     payload: CheckPayload,
     *,
     auto_cleanup_orphans: bool,
+    reaper_available: bool = True,
 ) -> bool:
-    reaping_enabled = reaping_supersedes_orphan_failure(
-        auto_cleanup_orphans=auto_cleanup_orphans,
-        orphan_count=_int_payload_value(payload.get("orphan_count")),
-        scans_ok=_orphan_scans_ok(payload),
+    reaping_enabled = (
+        _orphan_reaping_preconditions_met(
+            payload,
+            auto_cleanup_orphans=auto_cleanup_orphans,
+        )
+        and reaper_available
     )
     if not reaping_enabled:
         return False
@@ -653,6 +742,18 @@ def _apply_orphan_reaping_status(
     payload["reason"] = ORPHANS_PRESENT_REAPING_ENABLED
     payload["action"] = ORPHAN_REAPING_ACTION
     return True
+
+
+def _orphan_reaping_preconditions_met(
+    payload: Mapping[str, object],
+    *,
+    auto_cleanup_orphans: bool,
+) -> bool:
+    return reaping_supersedes_orphan_failure(
+        auto_cleanup_orphans=auto_cleanup_orphans,
+        orphan_count=_int_payload_value(payload.get("orphan_count")),
+        scans_ok=_orphan_scans_ok(payload),
+    )
 
 
 def _orphan_scans_ok(payload: Mapping[str, object]) -> bool:

@@ -119,6 +119,14 @@ async def _db_probe(_database_url: str) -> dict[str, Any]:
     return {"ok": True, "status": "ok"}
 
 
+async def _worker_reaper_ok(_settings: ServiceSettings) -> dict[str, Any]:
+    return {"ok": True, "status": "ok", "reason": "WORKER_HEARTBEAT_FRESH"}
+
+
+async def _worker_reaper_missing(_settings: ServiceSettings) -> dict[str, Any]:
+    return {"ok": False, "status": "fail", "reason": "WORKER_HEARTBEAT_MISSING"}
+
+
 def _docker_ps_payload(*containers: dict[str, str]) -> str:
     return "".join(json.dumps(container) + "\n" for container in containers)
 
@@ -1146,6 +1154,7 @@ def test_service_status_orphan_resources_reflect_auto_cleanup(tmp_path: Path) ->
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_empty_workspace_view,
             provider_environ={},
+            worker_reaper_check=_worker_reaper_ok,
         )
     )
 
@@ -1155,6 +1164,50 @@ def test_service_status_orphan_resources_reflect_auto_cleanup(tmp_path: Path) ->
     assert orphan_resources["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
     assert orphan_resources["action"] == status_mod.ORPHAN_REAPING_ACTION
     assert orphan_resources["cleanup_readiness"]["dry_run_only"] is False
+
+
+@pytest.mark.unit
+def test_service_status_orphan_resources_requires_live_reaper_for_auto_cleanup(
+    tmp_path: Path,
+) -> None:
+    settings = replace(_settings(tmp_path), auto_cleanup_orphans=True)
+    worktree = Path(settings.work_dir) / "git" / "worktrees" / "ws_ghost"
+    worktree.mkdir(parents=True)
+
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_ghost-agent-1",
+            state="exited",
+            status="Exited",
+            project="awf_ws_ghost",
+            service="agent",
+        )
+    )
+
+    status = asyncio.run(
+        collect_service_status(
+            settings,
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
+            worker_reaper_check=_worker_reaper_missing,
+        )
+    )
+
+    orphan_workspaces = status["checks"]["orphan_workspaces"]
+    orphan_resources = status["checks"]["orphan_resources"]
+    assert status["status"] == "fail"
+    assert orphan_workspaces["ok"] is False
+    assert orphan_workspaces["reason"] == "ORPHANS_PRESENT"
+    assert orphan_resources["ok"] is False
+    assert orphan_resources["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_resources["cleanup_readiness"]["dry_run_only"] is True
+    assert orphan_resources["reaper_readiness"]["reason"] == "WORKER_HEARTBEAT_MISSING"
 
 
 @pytest.mark.unit
@@ -1188,6 +1241,7 @@ def test_service_status_orphan_workspaces_action_aligns_with_reaping(tmp_path: P
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_empty_workspace_view,
             provider_environ={},
+            worker_reaper_check=_worker_reaper_ok,
         )
     )
 
@@ -1226,12 +1280,16 @@ def test_service_status_orphan_resources_uses_raw_payload_for_reaping(
         orphan_workspaces_check: Mapping[str, object],
         *,
         auto_cleanup_orphans: bool = False,
+        reaper_available: bool = True,
+        reaper_readiness: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         observed["status"] = orphan_workspaces_check.get("status")
         observed["reason"] = orphan_workspaces_check.get("reason")
         return original(
             orphan_workspaces_check,
             auto_cleanup_orphans=auto_cleanup_orphans,
+            reaper_available=reaper_available,
+            reaper_readiness=reaper_readiness,
         )
 
     monkeypatch.setattr(
@@ -1250,6 +1308,7 @@ def test_service_status_orphan_resources_uses_raw_payload_for_reaping(
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_empty_workspace_view,
             provider_environ={},
+            worker_reaper_check=_worker_reaper_ok,
         )
     )
 
