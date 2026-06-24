@@ -813,12 +813,11 @@ async def test_resource_saturation_orphan_provider_supports_async_and_db_failure
 
 
 @pytest.mark.unit
-async def test_default_orphan_resource_summary_propagates_auto_cleanup_setting(
+async def test_default_orphan_resource_summary_blocks_auto_cleanup_without_reaper_liveness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The default summary builder must honour ``auto_cleanup_orphans`` so that
-    operator dashboards stop rendering dry-run-only text once reaping is enabled."""
+    """Metrics cannot promote orphan resources unless reaper liveness is proven."""
 
     settings = Settings(_env_file=None, work_dir=str(tmp_path), auto_cleanup_orphans=True)
     (tmp_path / "git" / "worktrees" / "ws_done").mkdir(parents=True)
@@ -837,9 +836,11 @@ async def test_default_orphan_resource_summary_propagates_auto_cleanup_setting(
 
     summary = await metrics_route._default_orphan_resource_summary(settings, object())
 
-    assert summary.reason == "ORPHANS_PRESENT_REAPING_ENABLED"
-    assert summary.cleanup_readiness.dry_run_only is False
-    assert "Reaping is enabled" in summary.cleanup_readiness.action
+    assert summary.ok is False
+    assert summary.reason == "ORPHAN_RESOURCES_PRESENT"
+    assert summary.cleanup_readiness.ready is False
+    assert summary.cleanup_readiness.dry_run_only is True
+    assert "Reaping is enabled" not in summary.cleanup_readiness.action
 
 
 @pytest.mark.unit

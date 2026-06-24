@@ -611,6 +611,7 @@ def build_orphan_resource_summary(
     workspace_view: WorkspaceIdView,
     example_limit: int = ORPHAN_EXAMPLE_LIMIT,
     auto_cleanup_orphans: bool = False,
+    reaper_available: bool = False,
 ) -> OrphanResourceSummary:
     resources = (*docker_scan.resources, *worktree_scan.resources)
     records = tuple(_classify(resource, workspace_view=workspace_view) for resource in resources)
@@ -701,7 +702,7 @@ def build_orphan_resource_summary(
 
     if orphan_records:
         reaping_enabled = reaping_supersedes_orphan_failure(
-            auto_cleanup_orphans=auto_cleanup_orphans,
+            auto_cleanup_orphans=auto_cleanup_orphans and reaper_available,
             orphan_count=len(orphan_records),
             # The workspace and scanner availability guards above guarantee scans are usable.
             scans_ok=True,
@@ -1051,6 +1052,7 @@ async def sweep_classified_orphans(
         worktree_scan=worktree_scan,
         workspace_view=workspace_view,
         auto_cleanup_orphans=enabled,
+        reaper_available=True,
     )
     return await reap_classified_orphans(
         summary,

@@ -210,6 +210,7 @@ def test_orphan_summary_reports_reaping_enabled_as_ok(tmp_path: Path) -> None:
         worktree_scan=empty_worktree_scan(),
         workspace_view=_ok_view(terminal={"ws_dead"}),
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
     payload = summary.to_dict()
 
@@ -222,6 +223,40 @@ def test_orphan_summary_reports_reaping_enabled_as_ok(tmp_path: Path) -> None:
     assert payload["cleanup_readiness"]["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
     assert payload["cleanup_readiness"]["action"] == orphan_resources.ORPHAN_REAPING_ACTION
     assert payload["cleanup_readiness"]["dry_run_only"] is False
+
+
+@pytest.mark.unit
+def test_orphan_summary_auto_cleanup_without_reaper_liveness_stays_blocked(
+    tmp_path: Path,
+) -> None:
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_dead-agent-1",
+                    "project": "awf_ws_dead",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        ),
+    )
+
+    payload = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=empty_worktree_scan(),
+        workspace_view=_ok_view(terminal={"ws_dead"}),
+        auto_cleanup_orphans=True,
+    ).to_dict()
+
+    assert payload["ok"] is False
+    assert payload["status"] == "fail"
+    assert payload["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert payload["cleanup_readiness"]["ready"] is False
+    assert payload["cleanup_readiness"]["dry_run_only"] is True
 
 
 @pytest.mark.unit

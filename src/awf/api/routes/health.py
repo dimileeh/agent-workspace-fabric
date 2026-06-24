@@ -635,13 +635,14 @@ def _orphan_resources_check_result(
         workspace_view = unavailable_workspace_view()
     if not docker_check.ok:
         docker_scan = _docker_resource_scan_unavailable(docker_check)
-    reaper_available = worker_check is None or worker_check.ok
+    reaper_available = bool(worker_check.ok) if worker_check is not None else False
 
     summary = build_orphan_resource_summary(
         docker_scan=docker_scan,
         worktree_scan=worktree_scan,
         workspace_view=workspace_view,
-        auto_cleanup_orphans=auto_cleanup_orphans and reaper_available,
+        auto_cleanup_orphans=auto_cleanup_orphans,
+        reaper_available=reaper_available,
     )
     return CheckResult(**summary.to_dict())
 
