@@ -69,11 +69,22 @@ GITHUB_API_CONTEXT_MARKERS = (
     "gh pr create",
 )
 
+GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS = (
+    "api.github.com",
+    "github api",
+    "graphql",
+    "gh api",
+    "http 401",
+    "requires authentication",
+)
+
 
 def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
     """Return whether a GitHub CLI/API failure looks transient."""
 
-    text = f"{operation}\n{stderr}".lower()
+    operation_text = operation.lower()
+    stderr_text = stderr.lower()
+    text = f"{operation_text}\n{stderr_text}"
     if any(marker in text for marker in NON_TRANSIENT_GITHUB_ERROR_MARKERS):
         return False
     if any(marker in text for marker in GITHUB_RESUBMIT_TRANSIENT_MARKERS) and any(
@@ -82,4 +93,9 @@ def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
         return True
     if any(marker in text for marker in TRANSIENT_GITHUB_ERROR_MARKERS):
         return True
-    return any(marker in text for marker in AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS)
+    if not any(marker in stderr_text for marker in AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS):
+        return False
+    return any(
+        marker in operation_text or marker in stderr_text
+        for marker in GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS
+    )
