@@ -293,8 +293,12 @@ async def test_queue_wait_preserves_persisted_merge_rejection_origin_after_resta
         status=_mergeable_status(),
         forge="github",
     )
+    await runner._persist_state(workspace_id, state)
 
     assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == marker
+    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] == (
+        _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION
+    )
     async with factory() as session:
         ws_after = await WorkspaceRepository(session).get(workspace_id)
         assert ws_after is not None

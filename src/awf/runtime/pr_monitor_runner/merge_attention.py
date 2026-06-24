@@ -39,6 +39,12 @@ async def _merge_block_attention_originated_from_merge_rejection(
     covers ordinary branch-protection fallback. Treating that ambiguous text as
     merge-rejection origin would keep stale branch-protection attention surfaced
     even after GitHub reports the PR clean before a queue/reviewer wait.
+
+    When the origin is recovered from the workspace row, copy it into
+    ``MonitorState`` before returning. Queue/reviewer/grace preserve branches do
+    not re-stamp or durably persist the marker themselves; the outer monitor
+    loop's full-state flush must therefore carry the recovered origin forward
+    instead of overwriting ``monitor_threads_addressed`` without it.
     """
     if state.merge_block_attention_originated_from_merge_rejection():
         return True
@@ -51,6 +57,7 @@ async def _merge_block_attention_originated_from_merge_rejection(
         addressed = ws.monitor_threads_addressed or {}
         origin = addressed.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY)
         if origin == _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION:
+            state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] = origin
             return True
         if origin is not None:
             return False
