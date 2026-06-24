@@ -29,6 +29,22 @@ def test_generic_malformed_http_400_without_resubmit_guidance_is_not_transient()
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "HTTP 503 from GitHub",
+        "gateway timeout while contacting api.github.com",
+        "connection reset by peer",
+    ],
+)
+def test_github_server_and_network_markers_are_transient(stderr: str) -> None:
+    assert is_transient_github_error_text(
+        operation="gh api graphql",
+        stderr=stderr,
+    )
+
+
+@pytest.mark.unit
 def test_resubmit_wording_without_github_api_context_is_not_transient() -> None:
     assert not is_transient_github_error_text(
         operation="local validator",
@@ -72,6 +88,14 @@ def test_pr_create_bad_credentials_with_generic_try_again_is_not_transient() -> 
 def test_pr_create_bad_credentials_401_without_api_context_is_not_transient() -> None:
     assert not is_transient_github_error_text(
         operation="gh pr create",
+        stderr="gh: Bad credentials (HTTP 401)",
+    )
+
+
+@pytest.mark.unit
+def test_bad_credentials_401_without_github_operation_context_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="git push",
         stderr="gh: Bad credentials (HTTP 401)",
     )
 
