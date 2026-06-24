@@ -8,11 +8,13 @@ Behavior is unchanged: the functions are wired back onto the runner via
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Any, Literal
+from datetime import datetime
+from typing import Any, Literal, cast
 
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_monitor import (
+    _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION,
+    _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY,
     _MERGE_BLOCK_ATTENTION_STATE_KEY,
     MergeStateStatus,
     MonitorState,
@@ -20,6 +22,46 @@ from awf.runtime.pr_monitor import (
 )
 
 _MergeBlockAttentionQueueVerdict = Literal["active", "resolved", "indeterminate"]
+
+
+def _now(self: Any) -> datetime:
+    return cast(datetime, self._deps.now())
+
+
+async def _merge_block_attention_originated_from_merge_rejection(
+    self: Any,
+    workspace_id: str,
+    state: MonitorState,
+) -> bool:
+    """Whether structured state says the attention came from a merge rejection.
+
+    Generic legacy reason text such as "GitHub rejected the merge attempt" also
+    covers ordinary branch-protection fallback. Treating that ambiguous text as
+    merge-rejection origin would keep stale branch-protection attention surfaced
+    even after GitHub reports the PR clean before a queue/reviewer wait.
+
+    When the origin is recovered from the workspace row, copy it into
+    ``MonitorState`` before returning. Queue/reviewer/grace preserve branches do
+    not re-stamp or durably persist the marker themselves; the outer monitor
+    loop's full-state flush must therefore carry the recovered origin forward
+    instead of overwriting ``monitor_threads_addressed`` without it.
+    """
+    if state.merge_block_attention_originated_from_merge_rejection():
+        return True
+    if _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY in state.threads_addressed_ids:
+        return False
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        if ws is None:
+            return False
+        addressed = ws.monitor_threads_addressed or {}
+        origin = addressed.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY)
+        if origin == _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION:
+            state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] = origin
+            return True
+        if origin is not None:
+            return False
+    return False
 
 
 def _merge_block_attention_queue_verdict(
@@ -49,7 +91,7 @@ async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str)
         await WorkspaceRepository(s).set_workspace_attention(
             workspace_id,
             reason=reason,
-            now=datetime.now(UTC),
+            now=_now(self),
         )
         await s.commit()
 
@@ -93,6 +135,7 @@ async def _set_workspace_attention_with_merge_block_marker(
     are never reached for that head — the reciprocal window cannot form.
     """
     stamped = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
+    origin = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY)
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)
         if ws is None:
@@ -101,11 +144,15 @@ async def _set_workspace_attention_with_merge_block_marker(
             threads_addressed = dict(ws.monitor_threads_addressed or {})
             if threads_addressed.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) != stamped:
                 threads_addressed[_MERGE_BLOCK_ATTENTION_STATE_KEY] = stamped
-                ws.monitor_threads_addressed = threads_addressed
+            if origin is None:
+                threads_addressed.pop(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY, None)
+            elif threads_addressed.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY) != origin:
+                threads_addressed[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] = origin
+            ws.monitor_threads_addressed = threads_addressed
         await WorkspaceRepository(s).set_workspace_attention(
             workspace_id,
             reason=reason,
-            now=datetime.now(UTC),
+            now=_now(self),
         )
         await s.commit()
 
@@ -161,11 +208,14 @@ async def _clear_stale_merge_attention(
     later critical-section polls or restarts. When the current forge status
     explicitly reports branch protection still active, preserve and re-stamp
     even if a long queue wait aged the marker past the TTL without a fallback
-    re-stamp. A genuinely resolved marker (stale at entry with no active forge
-    signal) is still cleared below.
+    re-stamp. Also preserve stale markers whose surfaced attention came from a
+    prior merge rejection: actor/push restrictions may be invisible to GitHub
+    ``CLEAN`` and require an actual merge retry to confirm resolution. A
+    genuinely resolved marker (stale at entry with no active forge signal and no
+    merge-rejection origin) is still cleared below.
     """
     ttl_seconds = self._config.merge_block_attention_ttl_seconds
-    reference = now if now is not None else datetime.now(UTC)
+    reference = now if now is not None else _now(self)
     raw = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
     if not raw:
         # No marker: a resolved ``NotifyHuman`` episode (not branch-protection),
@@ -185,22 +235,46 @@ async def _clear_stale_merge_attention(
     # already stale at entry (the block resolved BEFORE the wait) is still
     # cleared.
     forge_still_blocked = _merge_block_attention_queue_verdict(status, forge=forge) == "active"
-    if forge_still_blocked or state.merge_block_attention_active(
+    structured_rejection_origin = state.merge_block_attention_originated_from_merge_rejection()
+    explicit_origin_in_memory = _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY in (
+        state.threads_addressed_ids
+    )
+    marker_fresh_at_entry = state.merge_block_attention_active(
         now=reference,
         ttl_seconds=ttl_seconds if ttl_seconds is not None and ttl_seconds > 0 else None,
-    ):
+    )
+    if structured_rejection_origin or explicit_origin_in_memory:
+        merge_rejection_origin = structured_rejection_origin
+    else:
+        merge_rejection_origin = await _merge_block_attention_originated_from_merge_rejection(
+            self,
+            workspace_id,
+            state,
+        )
+    preserve_rejection_origin = (
+        not forge_still_blocked and not marker_fresh_at_entry and merge_rejection_origin
+    )
+    if forge_still_blocked or marker_fresh_at_entry or preserve_rejection_origin:
         # Still-active block at merge critical-section entry: refresh the
         # marker's timestamp so the TTL clock for this critical-section path
         # stays current. Queue/reviewer/grace waits use forge-signal preserve
         # decisions and do not re-stamp.
+        #
+        # GitHub ``CLEAN`` is also not proof that actor/push restrictions have
+        # resolved after a prior merge rejection: those restrictions are only
+        # confirmed by retrying the merge. Queue waits preserve that marker
+        # without re-stamping, so it can legitimately be TTL-stale here.
         #
         # The durable re-stamp MUST use a CURRENT wall-clock rather than the
         # entry timestamp: ``reference`` may intentionally be older than real
         # time after a serialized coordinator wait. Use a fresh wall-clock for
         # the re-stamp while keeping the original entry reference for the
         # preserve/clear decision.
-        stamp_now = datetime.now(UTC)
-        state.mark_merge_block_attention(now=stamp_now)
+        stamp_now = _now(self)
+        state.mark_merge_block_attention(
+            now=stamp_now,
+            originated_from_merge_rejection=merge_rejection_origin,
+        )
         # Persist the re-stamped marker DURABLY before returning. The outer
         # ``run()`` loop only flushes ``state`` after ``_execute`` returns
         # (``runner.py:455``); a cancel/restart before that flush would otherwise
@@ -276,6 +350,15 @@ async def _clear_or_preserve_merge_attention_for_queue_wait(
     verdict = _merge_block_attention_queue_verdict(status, forge=forge)
     if verdict in ("active", "indeterminate"):
         return
+    # GitHub CLEAN proves ordinary mergeability signals resolved, but actor/push
+    # restrictions that rejected a merge attempt are invisible to mergeStateStatus.
+    # A later merge retry is the positive confirmation for that case.
+    if await _merge_block_attention_originated_from_merge_rejection(
+        self,
+        workspace_id,
+        state,
+    ):
+        return
     await _clear_merge_block_attention_and_workspace_attention_durably(
         self,
         workspace_id,
@@ -307,7 +390,11 @@ async def _clear_merge_block_attention_and_workspace_attention_row_durably(
         if ws is None:
             return
         threads_addressed = dict(ws.monitor_threads_addressed or {})
-        if threads_addressed.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None) is not None:
+        removed_marker = threads_addressed.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None) is not None
+        removed_origin = (
+            threads_addressed.pop(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY, None) is not None
+        )
+        if removed_marker or removed_origin:
             ws.monitor_threads_addressed = threads_addressed
         await repo.clear_workspace_attention(workspace_id)
         await s.commit()
@@ -368,13 +455,21 @@ async def _persist_merge_block_attention_durably(
     stamped = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
     if stamped is None:
         return
+    origin = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY)
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)
         if ws is None:
             return
         threads_addressed = dict(ws.monitor_threads_addressed or {})
-        if threads_addressed.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) == stamped:
+        if (
+            threads_addressed.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) == stamped
+            and threads_addressed.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY) == origin
+        ):
             return
         threads_addressed[_MERGE_BLOCK_ATTENTION_STATE_KEY] = stamped
+        if origin is None:
+            threads_addressed.pop(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY, None)
+        else:
+            threads_addressed[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] = origin
         ws.monitor_threads_addressed = threads_addressed
         await s.commit()

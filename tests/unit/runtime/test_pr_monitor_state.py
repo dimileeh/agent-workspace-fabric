@@ -41,6 +41,17 @@ def test_mark_merge_block_attention_stamps_wall_clock_timestamp() -> None:
 
 
 @pytest.mark.unit
+def test_mark_merge_block_attention_records_merge_rejection_origin() -> None:
+    """A structured marker, not the human-facing reason text, records origin."""
+    state = MonitorState()
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
+
+    state.mark_merge_block_attention(now=now, originated_from_merge_rejection=True)
+
+    assert state.merge_block_attention_originated_from_merge_rejection() is True
+
+
+@pytest.mark.unit
 def test_merge_block_attention_active_true_within_ttl() -> None:
     """A fresh marker (age <= TTL) reports active — still-blocked, preserved."""
     state = MonitorState()
@@ -58,13 +69,14 @@ def test_merge_block_attention_active_false_after_ttl_drops_marker() -> None:
     """A stale marker (age > TTL) reports inactive (RESOLVED) and is dropped."""
     state = MonitorState()
     stamped = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
-    state.mark_merge_block_attention(now=stamped)
+    state.mark_merge_block_attention(now=stamped, originated_from_merge_rejection=True)
 
     # 300s later with a 120s TTL: age 300 > TTL 120 → resolved.
     later = stamped + timedelta(seconds=300)
     assert state.merge_block_attention_active(now=later, ttl_seconds=120.0) is False
     # The stale marker is dropped so the next fresh poll re-stamps cleanly.
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
+    assert state.merge_block_attention_originated_from_merge_rejection() is False
 
 
 @pytest.mark.unit
@@ -141,15 +153,18 @@ def test_clear_merge_block_attention_drops_marker_idempotently() -> None:
     """``clear_merge_block_attention`` is an idempotent pop (unchanged behavior)."""
     state = MonitorState()
     now = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
-    state.mark_merge_block_attention(now=now)
+    state.mark_merge_block_attention(now=now, originated_from_merge_rejection=True)
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY in state.threads_addressed_ids
+    assert state.merge_block_attention_originated_from_merge_rejection() is True
 
     state.clear_merge_block_attention()
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
+    assert state.merge_block_attention_originated_from_merge_rejection() is False
 
     # Second clear is a no-op.
     state.clear_merge_block_attention()
     assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
+    assert state.merge_block_attention_originated_from_merge_rejection() is False
 
 
 @pytest.mark.unit
