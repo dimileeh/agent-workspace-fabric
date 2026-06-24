@@ -554,3 +554,68 @@ async def test_readyz_orphan_resources_reflect_auto_cleanup_enabled(
     assert orphan_check["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
     assert orphan_check["cleanup_readiness"]["dry_run_only"] is False
     assert "Reaping is enabled" in orphan_check["cleanup_readiness"]["action"]
+
+
+@pytest.mark.unit
+async def test_readyz_auto_cleanup_orphans_requires_worker_heartbeat(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = ready_app_and_client
+    monkeypatch.setattr(
+        health_route,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            host_home=str(tmp_path / "home"),
+            work_dir=str(tmp_path / "work"),
+            auto_cleanup_orphans=True,
+        ),
+    )
+
+    async def _worker_missing(
+        _factory: Any,
+        *,
+        node_id: str,
+    ) -> health_route.CheckResult:
+        return health_route.CheckResult(
+            ok=False,
+            status="fail",
+            reason="WORKER_HEARTBEAT_MISSING",
+            detail=f"No worker heartbeat recorded for node {node_id!r}",
+        )
+
+    monkeypatch.setattr(health_route, "_check_worker_heartbeat", _worker_missing)
+    workspace_id = await create_workspace(
+        engine,
+        status=WorkspaceStatus.completed,
+        updated_at=datetime.now(UTC) - timedelta(hours=200),
+    )
+    runner = _ReadyzDockerRunner(
+        containers=json.dumps(
+            {
+                "id": "abc",
+                "name": f"awf_{workspace_id}-agent-1",
+                "project": f"awf_{workspace_id}",
+                "service": "agent",
+                "state": "exited",
+                "status": "Exited (0)",
+            }
+        )
+        + "\n",
+    )
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 503
+    assert body["checks"]["worker"]["reason"] == "WORKER_HEARTBEAT_MISSING"
+    orphan_check = body["checks"]["orphan_resources"]
+    assert orphan_check["ok"] is False
+    assert orphan_check["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_check["cleanup_readiness"]["ready"] is False
+    assert orphan_check["cleanup_readiness"]["dry_run_only"] is True
+    assert "Reaping is enabled" not in orphan_check["cleanup_readiness"]["action"]

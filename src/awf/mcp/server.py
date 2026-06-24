@@ -467,6 +467,7 @@ async def _provided_readiness(
         _check_orphan_resources_with_concurrent_scans(
             db_check_task=db_check_task,
             docker_check_task=daemon_check_task,
+            worker_check_task=worker_check_task,
             workspace_view_task=workspace_view_task,
             docker_scan_task=docker_scan_task,
             worktree_scan_task=worktree_scan_task,
