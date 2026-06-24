@@ -21,6 +21,7 @@ from awf.runtime.pr_monitor import (
     _MERGE_BLOCK_ATTENTION_STATE_KEY,
     MergeStateStatus,
     MonitorState,
+    PRStatus,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._merge_methods_fixtures import _mergeable_status
@@ -306,6 +307,75 @@ async def test_queue_wait_preserves_persisted_merge_rejection_origin_after_resta
     assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] == (
         _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION
     )
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert (ws_after.monitor_threads_addressed or {}) == persisted_state
+    assert ws_after.awaiting_human_since == episode_start
+    assert ws_after.awaiting_human_reason == (
+        "GitHub merge was denied by branch actor restrictions"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "status",
+    [
+        pytest.param(
+            replace(_mergeable_status(), merge_state_status=MergeStateStatus.BLOCKED),
+            id="blocked-active",
+        ),
+        pytest.param(None, id="indeterminate"),
+    ],
+)
+async def test_queue_wait_recovers_persisted_origin_on_preserve(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    status: PRStatus | None,
+) -> None:
+    """A BLOCKED/unknown queue-wait preserve must still recover the persisted
+    merge-rejection origin into ``state``. Otherwise the outer ``_persist_state``
+    flush after the wait drops the DB-only origin, and a later GitHub ``CLEAN``
+    wait would clear a still-active actor/push restriction (PRRT_kwDOSJAM6s6L3TpA)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    marker = datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC).isoformat()
+    # Marker-without-companion-key in memory (e.g. a restarted/re-stamped state):
+    # the structured origin lives only on the persisted row.
+    state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: marker})
+    episode_start = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    persisted_state = {
+        _MERGE_BLOCK_ATTENTION_STATE_KEY: marker,
+        _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY: (_MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION),
+    }
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = persisted_state
+        ws.awaiting_human_since = episode_start
+        ws.awaiting_human_reason = "GitHub merge was denied by branch actor restrictions"
+        await session.commit()
+
+    await runner._clear_or_preserve_merge_attention_for_queue_wait(
+        workspace_id,
+        state,
+        status=status,
+        forge="github",
+    )
+    # The preserve branch must have copied the persisted origin into memory so the
+    # full-state flush below cannot drop it.
+    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] == (
+        _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION
+    )
+    await runner._persist_state(workspace_id, state)
+
+    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == marker
     async with factory() as session:
         ws_after = await WorkspaceRepository(session).get(workspace_id)
         assert ws_after is not None

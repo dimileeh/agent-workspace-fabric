@@ -339,6 +339,11 @@ async def _clear_or_preserve_merge_attention_for_queue_wait(
     - clean/mergeable -> clear on GitHub because it confirms resolution;
     - unknown/error -> preserve conservatively.
 
+    Every preserve path first recovers a persisted merge-rejection origin into
+    ``state`` (the recovery's documented side effect) so the outer
+    ``_persist_state`` flush after the wait carries it forward instead of
+    overwriting ``monitor_threads_addressed`` without it (PRRT_kwDOSJAM6s6L3TpA).
+
     Bitbucket open PRs map to ``CLEAN`` because Bitbucket Cloud does not expose a
     GitHub-style merge-state signal, so Bitbucket ``CLEAN`` is treated like an
     unknown signal and preserves conservatively.
@@ -348,16 +353,29 @@ async def _clear_or_preserve_merge_attention_for_queue_wait(
         await self._clear_workspace_attention(workspace_id)
         return
     verdict = _merge_block_attention_queue_verdict(status, forge=forge)
+    # Recover any persisted merge-rejection origin into ``state`` BEFORE every
+    # preserve return, not just the CLEAN branch below. The recovery has a side
+    # effect — copying the DB origin into ``state.threads_addressed_ids`` (see
+    # ``_merge_block_attention_originated_from_merge_rejection``) — and the outer
+    # ``run()`` loop's full-state ``_persist_state`` flush after this wait rebuilds
+    # ``monitor_threads_addressed`` from ``state``. In the marker-without-companion-key
+    # case this helper is meant to recover, returning on a BLOCKED/unknown verdict
+    # without recovering would let that flush overwrite the row WITHOUT the origin;
+    # a later GitHub CLEAN wait would then find no origin and clear a still-active
+    # actor/push restriction (PRRT_kwDOSJAM6s6L3TpA). The recovery short-circuits
+    # without a DB read when the origin is already in memory, so preserve paths with
+    # no merge-rejection origin pay nothing extra.
+    originated_from_merge_rejection = await _merge_block_attention_originated_from_merge_rejection(
+        self,
+        workspace_id,
+        state,
+    )
     if verdict in ("active", "indeterminate"):
         return
     # GitHub CLEAN proves ordinary mergeability signals resolved, but actor/push
     # restrictions that rejected a merge attempt are invisible to mergeStateStatus.
     # A later merge retry is the positive confirmation for that case.
-    if await _merge_block_attention_originated_from_merge_rejection(
-        self,
-        workspace_id,
-        state,
-    ):
+    if originated_from_merge_rejection:
         return
     await _clear_merge_block_attention_and_workspace_attention_durably(
         self,
