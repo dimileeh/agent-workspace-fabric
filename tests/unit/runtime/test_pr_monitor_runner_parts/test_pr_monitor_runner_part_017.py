@@ -65,6 +65,31 @@ class TestParseVerdict:
         assert result.reason == "maintainer review required"
 
     @pytest.mark.unit
+    def test_private_awf_no_reason_fixed_not_trumped_by_earlier_false_positive(self) -> None:
+        # A genuine final ``FIXED`` with no prose reason must remain the agent's
+        # last word: the placeholder-echo guard only blocks regressing past a
+        # hard block (needs_human/defer), so an earlier non-blocking
+        # ``false_positive`` must not override it (#676).
+        stdout = "AWF-VERDICT: FALSE POSITIVE: stale review boilerplate\nAWF-VERDICT: FIXED:"
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "fix_committed"
+        assert result.reason is None
+
+    @pytest.mark.unit
+    def test_private_awf_no_reason_fixed_preserves_earlier_defer(self) -> None:
+        # The hard-block half of the same guard: an earlier ``defer`` is blocking
+        # follow-up, so a no-reason final ``FIXED`` placeholder echo cannot clear
+        # it (#676).
+        stdout = "AWF-VERDICT: DEFER: out-of-scope follow-up\nAWF-VERDICT: FIXED:"
+
+        result = _parse_verdict_result(stdout)
+
+        assert result.verdict == "defer"
+        assert result.reason == "out-of-scope follow-up"
+
+    @pytest.mark.unit
     def test_private_awf_mixed_verdict_prefers_awf_over_bare_fallback(self) -> None:
         result = _parse_verdict_result(
             "AWF-VERDICT: NEEDS_HUMAN: maintainer decision required\nFALSE POSITIVE: maintainer later added a comment"
