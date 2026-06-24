@@ -13,6 +13,8 @@ from typing import Any, Literal, cast
 
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_monitor import (
+    _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION,
+    _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY,
     _MERGE_BLOCK_ATTENTION_STATE_KEY,
     MergeStateStatus,
     MonitorState,
@@ -35,8 +37,17 @@ async def _merge_block_attention_originated_from_merge_rejection(
         ws = await WorkspaceRepository(s).get(workspace_id)
         if ws is None:
             return False
+        addressed = ws.monitor_threads_addressed or {}
+        origin = addressed.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY)
+        if origin == _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION:
+            return True
+        if origin is not None:
+            return False
         reason = ws.awaiting_human_reason or ""
-    return "rejected the merge attempt" in reason
+    # Compatibility for rows created before merge-rejection origin was structured.
+    return reason.startswith(
+        ("GitHub rejected the merge attempt", "Bitbucket rejected the merge attempt")
+    )
 
 
 def _merge_block_attention_queue_verdict(
@@ -110,6 +121,7 @@ async def _set_workspace_attention_with_merge_block_marker(
     are never reached for that head — the reciprocal window cannot form.
     """
     stamped = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
+    origin = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY)
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)
         if ws is None:
@@ -118,7 +130,11 @@ async def _set_workspace_attention_with_merge_block_marker(
             threads_addressed = dict(ws.monitor_threads_addressed or {})
             if threads_addressed.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) != stamped:
                 threads_addressed[_MERGE_BLOCK_ATTENTION_STATE_KEY] = stamped
-                ws.monitor_threads_addressed = threads_addressed
+            if origin is None:
+                threads_addressed.pop(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY, None)
+            elif threads_addressed.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY) != origin:
+                threads_addressed[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] = origin
+            ws.monitor_threads_addressed = threads_addressed
         await WorkspaceRepository(s).set_workspace_attention(
             workspace_id,
             reason=reason,
@@ -343,7 +359,11 @@ async def _clear_merge_block_attention_and_workspace_attention_row_durably(
         if ws is None:
             return
         threads_addressed = dict(ws.monitor_threads_addressed or {})
-        if threads_addressed.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None) is not None:
+        removed_marker = threads_addressed.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None) is not None
+        removed_origin = (
+            threads_addressed.pop(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY, None) is not None
+        )
+        if removed_marker or removed_origin:
             ws.monitor_threads_addressed = threads_addressed
         await repo.clear_workspace_attention(workspace_id)
         await s.commit()
@@ -404,13 +424,21 @@ async def _persist_merge_block_attention_durably(
     stamped = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
     if stamped is None:
         return
+    origin = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY)
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)
         if ws is None:
             return
         threads_addressed = dict(ws.monitor_threads_addressed or {})
-        if threads_addressed.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) == stamped:
+        if (
+            threads_addressed.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) == stamped
+            and threads_addressed.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY) == origin
+        ):
             return
         threads_addressed[_MERGE_BLOCK_ATTENTION_STATE_KEY] = stamped
+        if origin is None:
+            threads_addressed.pop(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY, None)
+        else:
+            threads_addressed[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] = origin
         ws.monitor_threads_addressed = threads_addressed
         await s.commit()

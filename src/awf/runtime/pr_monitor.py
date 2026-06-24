@@ -308,6 +308,16 @@ decision core; it exists only so ``handle_merge_action``'s non-human gate waits
 human signal across polls instead of clearing it as a resolved ``NotifyHuman``
 episode (PRRT_kwDOSJAM6s6LXscz)."""
 
+_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY = "__awf_merge_block_attention_origin__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key carrying structured origin
+metadata for ``_MERGE_BLOCK_ATTENTION_STATE_KEY``.
+
+The merge-block marker itself stores the TTL timestamp. This companion key keeps
+machine decisions independent from the user-facing ``awaiting_human_reason``
+text while staying in the same persisted state map and row transaction."""
+
+_MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION = "merge_rejection"
+
 
 @dataclass
 class MonitorState:
@@ -436,10 +446,15 @@ class MonitorState:
             return True
         # Stale (resolved): drop the marker so the clear proceeds and the next
         # fresh poll re-stamps cleanly.
-        self.threads_addressed_ids.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None)
+        self.clear_merge_block_attention()
         return False
 
-    def mark_merge_block_attention(self, *, now: datetime | None = None) -> None:
+    def mark_merge_block_attention(
+        self,
+        *,
+        now: datetime | None = None,
+        originated_from_merge_rejection: bool = False,
+    ) -> None:
         """Flag that the merge loop set attention for an active branch-protection block.
 
         Stamps a wall-clock timestamp (default ``datetime.now(UTC)``) so a later
@@ -451,10 +466,22 @@ class MonitorState:
         """
         stamped = now if now is not None else datetime.now(UTC)
         self.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] = stamped.isoformat()
+        if originated_from_merge_rejection:
+            self.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY] = (
+                _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION
+            )
+
+    def merge_block_attention_originated_from_merge_rejection(self) -> bool:
+        """Whether the current merge-block marker came from a merge API rejection."""
+        return (
+            self.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY)
+            == _MERGE_BLOCK_ATTENTION_ORIGIN_MERGE_REJECTION
+        )
 
     def clear_merge_block_attention(self) -> None:
         """Drop the merge-block attention marker (idempotent)."""
         self.threads_addressed_ids.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None)
+        self.threads_addressed_ids.pop(_MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY, None)
 
     def changed_thread_ids(self) -> set[str]:
         return set(self._changed_thread_ids)

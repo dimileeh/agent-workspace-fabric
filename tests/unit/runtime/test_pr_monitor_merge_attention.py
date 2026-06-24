@@ -460,16 +460,18 @@ async def test_github_clean_status_preserves_merge_rejection_attention_during_qu
     )
     episode_start = datetime(2026, 1, 1, 12, tzinfo=UTC)
     state = MonitorState()
-    state.mark_merge_block_attention(now=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC))
-    marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    state.mark_merge_block_attention(
+        now=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
+        originated_from_merge_rejection=True,
+    )
+    marker_state = dict(state.threads_addressed_ids)
+    marker = marker_state[_MERGE_BLOCK_ATTENTION_STATE_KEY]
     async with factory() as session:
         ws = await WorkspaceRepository(session).get_for_update(workspace_id)
         assert ws is not None
-        ws.monitor_threads_addressed = {_MERGE_BLOCK_ATTENTION_STATE_KEY: marker}
+        ws.monitor_threads_addressed = marker_state
         ws.awaiting_human_since = episode_start
-        ws.awaiting_human_reason = (
-            "GitHub rejected the merge attempt: actor is not allowed to push to this branch"
-        )
+        ws.awaiting_human_reason = "GitHub merge was denied by branch actor restrictions"
         await session.commit()
 
     await runner._clear_or_preserve_merge_attention_for_queue_wait(
@@ -483,10 +485,9 @@ async def test_github_clean_status_preserves_merge_rejection_attention_during_qu
     async with factory() as session:
         ws_after = await WorkspaceRepository(session).get(workspace_id)
         assert ws_after is not None
-    assert (ws_after.monitor_threads_addressed or {})[_MERGE_BLOCK_ATTENTION_STATE_KEY] == marker
+    assert (ws_after.monitor_threads_addressed or {}) == marker_state
     assert ws_after.awaiting_human_since == episode_start
-    assert ws_after.awaiting_human_reason is not None
-    assert "GitHub rejected the merge attempt" in ws_after.awaiting_human_reason
+    assert ws_after.awaiting_human_reason == "GitHub merge was denied by branch actor restrictions"
 
 
 @pytest.mark.unit
@@ -511,16 +512,20 @@ async def test_github_clean_status_preserves_stale_merge_rejection_attention_at_
         worktrees_root=tmp_path,
     )
     stale_stamp = datetime(2024, 1, 1, tzinfo=UTC).isoformat()
-    state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp})
+    state = MonitorState()
+    state.mark_merge_block_attention(
+        now=datetime(2024, 1, 1, tzinfo=UTC),
+        originated_from_merge_rejection=True,
+    )
+    state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] = stale_stamp
+    marker_state = dict(state.threads_addressed_ids)
     episode_start = datetime(2024, 1, 1, 12, tzinfo=UTC)
     async with factory() as session:
         ws = await WorkspaceRepository(session).get_for_update(workspace_id)
         assert ws is not None
-        ws.monitor_threads_addressed = {_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp}
+        ws.monitor_threads_addressed = marker_state
         ws.awaiting_human_since = episode_start
-        ws.awaiting_human_reason = (
-            "GitHub rejected the merge attempt: actor is not allowed to push to this branch"
-        )
+        ws.awaiting_human_reason = "GitHub merge was denied by branch actor restrictions"
         await session.commit()
 
     before_call = datetime.now(UTC)
@@ -541,8 +546,7 @@ async def test_github_clean_status_preserves_stale_merge_rejection_attention_at_
         ws_after = await WorkspaceRepository(session).get(workspace_id)
         assert ws_after is not None
     assert ws_after.awaiting_human_since == episode_start
-    assert ws_after.awaiting_human_reason is not None
-    assert "GitHub rejected the merge attempt" in ws_after.awaiting_human_reason
+    assert ws_after.awaiting_human_reason == "GitHub merge was denied by branch actor restrictions"
     assert (ws_after.monitor_threads_addressed or {})[
         _MERGE_BLOCK_ATTENTION_STATE_KEY
     ] == refreshed_stamp.isoformat()

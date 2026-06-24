@@ -1078,7 +1078,10 @@ async def handle_merge_action(
             # surfacing the escalation (PRRT_kwDOSJAM6s6Lcgk0). One row, one
             # transaction; the outer ``run()`` loop flushes the rest of ``state``
             # after ``_execute`` returns.
-            state.mark_merge_block_attention(now=self._deps.now())
+            state.mark_merge_block_attention(
+                now=self._deps.now(),
+                originated_from_merge_rejection=True,
+            )
             await self._set_workspace_attention_with_merge_block_marker(
                 workspace_id,
                 state,
