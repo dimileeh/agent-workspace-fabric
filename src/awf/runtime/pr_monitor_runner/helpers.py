@@ -840,6 +840,8 @@ def _is_transient_base_fetch_error(exc: BaseFetchError) -> bool:
         return False
     if _REMOTE_TRACKING_REF_LOCK_RACE_RE.search(str(exc)):
         return True
+    if "bad credentials" in text and "http 401" not in text:
+        return False
     if any(marker in text for marker in _AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS):
         return True
     return any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS)

@@ -693,6 +693,9 @@ def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> N
         BaseFetchError("git fetch origin main failed: gh: Bad credentials (HTTP 401)")
     )
     assert not _is_transient_base_fetch_error(
+        BaseFetchError("git fetch origin main failed: gh: Bad credentials")
+    )
+    assert not _is_transient_base_fetch_error(
         BaseFetchError("git fetch origin development failed: repository not found")
     )
     # #515 regression: narrowing the GitHub non-transient markers (dropping the
