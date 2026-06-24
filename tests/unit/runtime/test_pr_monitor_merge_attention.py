@@ -490,6 +490,65 @@ async def test_github_clean_status_preserves_merge_rejection_attention_during_qu
 
 
 @pytest.mark.unit
+async def test_github_clean_status_preserves_stale_merge_rejection_attention_at_critical_section(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6L1FjH: critical-section entry must not clear a TTL-stale
+    marker when the surfaced attention came from a prior merge rejection.
+
+    Actor/push restrictions can reject the merge attempt while remaining
+    invisible to GitHub's ``mergeStateStatus``. Queue waits preserve that marker
+    without re-stamping, so it can be TTL-stale by the next critical-section
+    entry even though the operator block has not been confirmed resolved.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    stale_stamp = datetime(2024, 1, 1, tzinfo=UTC).isoformat()
+    state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp})
+    episode_start = datetime(2024, 1, 1, 12, tzinfo=UTC)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {_MERGE_BLOCK_ATTENTION_STATE_KEY: stale_stamp}
+        ws.awaiting_human_since = episode_start
+        ws.awaiting_human_reason = (
+            "GitHub rejected the merge attempt: actor is not allowed to push to this branch"
+        )
+        await session.commit()
+
+    before_call = datetime.now(UTC)
+    await runner._clear_stale_merge_attention(
+        workspace_id,
+        state,
+        now=datetime(2024, 1, 2, tzinfo=UTC),
+        status=_mergeable_status(),
+        forge="github",
+    )
+    after_call = datetime.now(UTC)
+
+    refreshed_stamp = datetime.fromisoformat(
+        state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    )
+    assert before_call <= refreshed_stamp <= after_call
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert ws_after.awaiting_human_since == episode_start
+    assert ws_after.awaiting_human_reason is not None
+    assert "GitHub rejected the merge attempt" in ws_after.awaiting_human_reason
+    assert (ws_after.monitor_threads_addressed or {})[
+        _MERGE_BLOCK_ATTENTION_STATE_KEY
+    ] == refreshed_stamp.isoformat()
+
+
+@pytest.mark.unit
 async def test_github_clean_status_clears_non_rejection_attention_during_queue_wait(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

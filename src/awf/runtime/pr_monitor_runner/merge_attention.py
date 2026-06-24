@@ -178,8 +178,11 @@ async def _clear_stale_merge_attention(
     later critical-section polls or restarts. When the current forge status
     explicitly reports branch protection still active, preserve and re-stamp
     even if a long queue wait aged the marker past the TTL without a fallback
-    re-stamp. A genuinely resolved marker (stale at entry with no active forge
-    signal) is still cleared below.
+    re-stamp. Also preserve stale markers whose surfaced attention came from a
+    prior merge rejection: actor/push restrictions may be invisible to GitHub
+    ``CLEAN`` and require an actual merge retry to confirm resolution. A
+    genuinely resolved marker (stale at entry with no active forge signal and no
+    merge-rejection origin) is still cleared below.
     """
     ttl_seconds = self._config.merge_block_attention_ttl_seconds
     reference = now if now is not None else _now(self)
@@ -202,14 +205,25 @@ async def _clear_stale_merge_attention(
     # already stale at entry (the block resolved BEFORE the wait) is still
     # cleared.
     forge_still_blocked = _merge_block_attention_queue_verdict(status, forge=forge) == "active"
-    if forge_still_blocked or state.merge_block_attention_active(
+    marker_fresh_at_entry = state.merge_block_attention_active(
         now=reference,
         ttl_seconds=ttl_seconds if ttl_seconds is not None and ttl_seconds > 0 else None,
-    ):
+    )
+    preserve_rejection_origin = (
+        not forge_still_blocked
+        and not marker_fresh_at_entry
+        and await _merge_block_attention_originated_from_merge_rejection(self, workspace_id)
+    )
+    if forge_still_blocked or marker_fresh_at_entry or preserve_rejection_origin:
         # Still-active block at merge critical-section entry: refresh the
         # marker's timestamp so the TTL clock for this critical-section path
         # stays current. Queue/reviewer/grace waits use forge-signal preserve
         # decisions and do not re-stamp.
+        #
+        # GitHub ``CLEAN`` is also not proof that actor/push restrictions have
+        # resolved after a prior merge rejection: those restrictions are only
+        # confirmed by retrying the merge. Queue waits preserve that marker
+        # without re-stamping, so it can legitimately be TTL-stale here.
         #
         # The durable re-stamp MUST use a CURRENT wall-clock rather than the
         # entry timestamp: ``reference`` may intentionally be older than real
