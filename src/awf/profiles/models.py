@@ -950,7 +950,12 @@ class WorkspaceProfile(BaseModel):
         )
 
 
-_MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT = 600.0
+# Derive the backfill default from the field itself so retuning the field default
+# (e.g. the CI-start lag observation window) keeps legacy inline-profile replays
+# idempotent automatically, instead of silently diverging from a hardcoded copy.
+_MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT: float = ProfileMonitor.model_fields[
+    "awaiting_required_checks_grace_seconds"
+].default
 
 
 def normalize_inline_profile_snapshot(
