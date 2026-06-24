@@ -179,6 +179,56 @@ def test_reaper_flag_on_reaps_compose_and_worktree(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_reaper_flag_on_reaps_terminal_volume_and_worktree_after_retention(
+    tmp_path: Path,
+) -> None:
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            volumes=_jsonl(
+                {
+                    "name": "awf_ws_dead_pgdata",
+                    "project": "awf_ws_dead",
+                    "driver": "local",
+                    "scope": "local",
+                }
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(terminal={"ws_dead"}),
+        auto_cleanup_orphans=True,
+    )
+
+    assert {record.kind: record.classification for record in summary.records} == {
+        "volume": "terminal",
+        "worktree": "terminal",
+    }
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=168.0,
+        )
+    )
+
+    assert result.status == "ok"
+    assert teardown.remove_volumes_calls == [True]
+    assert not worktree.exists()
+    assert sorted(outcome.kind for outcome in result.reaped) == ["compose", "worktree"]
+
+
+@pytest.mark.unit
 def test_reaper_leaves_expected_and_unknown_records(tmp_path: Path) -> None:
     from awf.service.orphan_resources import reap_classified_orphans
 

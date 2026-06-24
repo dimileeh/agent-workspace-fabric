@@ -360,10 +360,10 @@ def test_local_service_config_resolves_stable_worker_node_id_in_payload() -> Non
 
 
 @pytest.mark.unit
-def test_orphan_reconcile_defaults_are_off_and_sane() -> None:
+def test_orphan_reconcile_defaults_are_on_and_sane() -> None:
     settings = resolve_service_settings(Settings(_env_file=None), environ={})
 
-    assert settings.auto_cleanup_orphans is False
+    assert settings.auto_cleanup_orphans is True
     assert settings.orphan_reconcile_scan_interval_seconds == 3600.0
     assert (
         settings.classified_orphan_reap_scan_interval_seconds
@@ -375,6 +375,15 @@ def test_orphan_reconcile_defaults_are_off_and_sane() -> None:
     )
     assert settings.orphan_reconcile_max_per_scan == 50
     assert settings.orphan_reconcile_min_age_hours == 168.0
+
+
+@pytest.mark.unit
+def test_auto_cleanup_orphans_environment_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWF_AUTO_CLEANUP_ORPHANS", "false")
+
+    settings = resolve_service_settings(Settings(_env_file=None), environ=os.environ)
+
+    assert settings.auto_cleanup_orphans is False
 
 
 @pytest.mark.unit

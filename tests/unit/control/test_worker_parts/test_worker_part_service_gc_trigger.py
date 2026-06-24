@@ -123,7 +123,7 @@ async def test_consume_folds_classified_orphan_reaper_with_enabled_forced(
     ``awf service gc`` is DB-row-driven and never sees row-less ("no-DB-record") orphaned
     volumes/worktrees. After the DB-driven terminal reaper, the trigger consumer also drives
     the classification-driven orphan reaper with ``enabled=True`` forced (regardless of the
-    default-off ``auto_cleanup_orphans`` flag) and folds its report into the combined gc
+    ``auto_cleanup_orphans`` kill-switch) and folds its report into the combined gc
     result under ``classified_orphan_reap``.
     """
     from awf.service.orphan_resources import (

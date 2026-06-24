@@ -1150,7 +1150,10 @@ def test_service_status_orphan_resources_reflect_auto_cleanup(tmp_path: Path) ->
     )
 
     orphan_resources = status["checks"]["orphan_resources"]
-    assert orphan_resources["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_resources["ok"] is True
+    assert orphan_resources["status"] == "ok"
+    assert orphan_resources["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
+    assert orphan_resources["action"] == status_mod.ORPHAN_REAPING_ACTION
     assert orphan_resources["cleanup_readiness"]["dry_run_only"] is False
 
 
@@ -1190,6 +1193,9 @@ def test_service_status_orphan_workspaces_action_aligns_with_reaping(tmp_path: P
 
     orphan_workspaces = status["checks"]["orphan_workspaces"]
     orphan_resources = status["checks"]["orphan_resources"]
+    assert orphan_workspaces["ok"] is True
+    assert orphan_workspaces["status"] == "ok"
+    assert orphan_workspaces["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
     assert orphan_workspaces["action"] == status_mod.ORPHAN_REAPING_ACTION
     assert orphan_resources["action"] == status_mod.ORPHAN_REAPING_ACTION
     assert "Inspect the listed resources" not in orphan_workspaces["action"]
@@ -1207,6 +1213,9 @@ def test_orphan_resources_check_payload_threads_auto_cleanup_flag() -> None:
         auto_cleanup_orphans=True,
     )
 
+    assert payload["ok"] is True
+    assert payload["status"] == "ok"
+    assert payload["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
     assert payload["cleanup_readiness"]["dry_run_only"] is False
 
 
@@ -1232,6 +1241,9 @@ def test_orphan_resources_check_payload_aligns_action_with_reaping() -> None:
     )
 
     readiness = payload["cleanup_readiness"]
+    assert payload["ok"] is True
+    assert payload["status"] == "ok"
+    assert payload["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
     assert readiness["dry_run_only"] is False
     assert readiness["action"] != legacy_action
     assert "auto_cleanup_orphans" in readiness["action"]
@@ -1260,6 +1272,33 @@ def test_orphan_resources_check_payload_keeps_legacy_action_without_reaping() ->
     assert readiness["dry_run_only"] is True
     assert readiness["action"] == legacy_action
     assert payload["action"] == legacy_action
+
+
+@pytest.mark.unit
+def test_orphan_resources_check_payload_does_not_reap_with_scanner_warning() -> None:
+    legacy_action = (
+        "Inspect the listed resources, then use the existing explicit workspace "
+        "cleanup or service GC path after confirming no active workspace owns them."
+    )
+    payload = _orphan_resources_check_payload(
+        {
+            "ok": False,
+            "status": "fail",
+            "reason": "ORPHANS_PRESENT",
+            "orphan_count": 1,
+            "warning_count": 1,
+            "warnings": [{"reason": "DOCKER_UNAVAILABLE"}],
+            "action": legacy_action,
+        },
+        auto_cleanup_orphans=True,
+    )
+
+    readiness = payload["cleanup_readiness"]
+    assert payload["ok"] is False
+    assert payload["status"] == "fail"
+    assert payload["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert readiness["dry_run_only"] is True
+    assert readiness["action"] == legacy_action
 
 
 @pytest.mark.unit

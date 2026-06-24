@@ -325,9 +325,9 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         """Sweep classified orphan resources using the worker runtime dependencies.
 
         ``enabled`` defaults to the ``auto_cleanup_orphans`` flag so the periodic
-        backstop stays default-off. The on-demand ``service gc`` path passes
-        ``enabled=True`` to force a reap for the explicit operator request regardless
-        of the flag (#637); all other scope (retention, min-age) is unchanged.
+        backstop follows the operator kill-switch. The on-demand ``service gc`` path
+        passes ``enabled=True`` to force a reap for the explicit operator request
+        regardless of the flag (#637); all other scope (retention, min-age) is unchanged.
 
         ``row_less_only`` forwards to :func:`sweep_classified_orphans`. The on-demand
         ``service gc`` path passes ``True`` so its additive sweep reaps only

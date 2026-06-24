@@ -24,6 +24,7 @@ from awf.service.orphan_resources import (
     empty_worktree_scan,
     legacy_orphan_workspaces_payload,
     parse_docker_resource_rows,
+    reaping_supersedes_orphan_failure,
     scan_docker_resources,
     scan_docker_resources_async,
     scan_managed_worktrees,
@@ -64,6 +65,38 @@ def test_orphan_resource_to_utc_accepts_naive_datetime() -> None:
     naive = datetime(2026, 5, 7, 14, 15)
 
     assert orphan_resources._to_utc(naive) == naive.replace(tzinfo=orphan_resources.UTC)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    (
+        "auto_cleanup_orphans",
+        "orphan_count",
+        "scans_ok",
+        "expected",
+    ),
+    [
+        (True, 1, True, True),
+        (False, 1, True, False),
+        (True, 0, True, False),
+        (True, 1, False, False),
+        (False, 0, False, False),
+    ],
+)
+def test_reaping_supersedes_orphan_failure_truth_table(
+    auto_cleanup_orphans: bool,
+    orphan_count: int,
+    scans_ok: bool,
+    expected: bool,
+) -> None:
+    assert (
+        reaping_supersedes_orphan_failure(
+            auto_cleanup_orphans=auto_cleanup_orphans,
+            orphan_count=orphan_count,
+            scans_ok=scans_ok,
+        )
+        is expected
+    )
 
 
 def _run_for(
@@ -152,6 +185,43 @@ def test_orphan_summary_reports_all_resource_kinds(tmp_path: Path) -> None:
         "volume",
         "worktree",
     }
+
+
+@pytest.mark.unit
+def test_orphan_summary_reports_reaping_enabled_as_ok(tmp_path: Path) -> None:
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_dead-agent-1",
+                    "project": "awf_ws_dead",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            )
+        ),
+    )
+
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=empty_worktree_scan(),
+        workspace_view=_ok_view(terminal={"ws_dead"}),
+        auto_cleanup_orphans=True,
+    )
+    payload = summary.to_dict()
+
+    assert payload["ok"] is True
+    assert payload["status"] == "ok"
+    assert payload["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
+    assert payload["orphan_count"] == 1
+    assert payload["cleanup_readiness"]["ready"] is True
+    assert payload["cleanup_readiness"]["status"] == "ready"
+    assert payload["cleanup_readiness"]["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
+    assert payload["cleanup_readiness"]["action"] == orphan_resources.ORPHAN_REAPING_ACTION
+    assert payload["cleanup_readiness"]["dry_run_only"] is False
 
 
 @pytest.mark.unit
