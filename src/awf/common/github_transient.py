@@ -56,6 +56,11 @@ AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = (
     "requires authentication",
 )
 
+GITHUB_AUTH_TRANSIENT_EVIDENCE_MARKERS = (
+    "http 401",
+    "requires authentication",
+)
+
 GITHUB_RESUBMIT_TRANSIENT_MARKERS = (
     "please try resubmitting",
     "try resubmitting",
@@ -87,10 +92,14 @@ def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
     text = f"{operation_text}\n{stderr_text}"
     if any(marker in text for marker in NON_TRANSIENT_GITHUB_ERROR_MARKERS):
         return False
+    has_bad_credentials = "bad credentials" in stderr_text
+    has_auth_transient_evidence = any(
+        marker in stderr_text for marker in GITHUB_AUTH_TRANSIENT_EVIDENCE_MARKERS
+    )
     if any(marker in text for marker in GITHUB_RESUBMIT_TRANSIENT_MARKERS) and any(
         marker in text for marker in GITHUB_API_CONTEXT_MARKERS
     ):
-        return True
+        return not (has_bad_credentials and not has_auth_transient_evidence)
     if any(marker in text for marker in TRANSIENT_GITHUB_ERROR_MARKERS):
         return True
     if not any(marker in stderr_text for marker in AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS):

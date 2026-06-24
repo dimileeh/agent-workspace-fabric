@@ -61,10 +61,21 @@ def test_bare_pr_create_bad_credentials_without_auth_context_is_not_transient() 
 
 
 @pytest.mark.unit
-def test_github_api_bad_credentials_with_resubmit_guidance_is_transient() -> None:
-    assert is_transient_github_error_text(
-        operation="gh pr create",
+@pytest.mark.parametrize("operation", ["gh api graphql", "gh pr create"])
+def test_bad_credentials_with_resubmit_guidance_without_auth_form_is_not_transient(
+    operation: str,
+) -> None:
+    assert not is_transient_github_error_text(
+        operation=operation,
         stderr="Bad credentials. Please try resubmitting your request.",
+    )
+
+
+@pytest.mark.unit
+def test_bad_credentials_with_resubmit_guidance_and_401_is_transient() -> None:
+    assert is_transient_github_error_text(
+        operation="gh api graphql",
+        stderr="Bad credentials (HTTP 401). Please try resubmitting your request.",
     )
 
 
