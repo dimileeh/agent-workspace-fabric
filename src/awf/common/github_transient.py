@@ -79,8 +79,6 @@ GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS = (
     "github api",
     "graphql",
     "gh api",
-    "http 401",
-    "requires authentication",
 )
 
 
