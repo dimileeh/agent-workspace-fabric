@@ -48,9 +48,10 @@ TRANSIENT_GITHUB_ERROR_MARKERS = (
 )
 
 AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = (
-    # #515 symmetry with Bitbucket: 401/bad-credentials can be a transient auth
-    # blip and is bounded-retried; deterministic not-logged-in/not-configured
-    # markers above still win first and remain terminal.
+    # #515 symmetry with Bitbucket: 401 auth failures can be transient auth
+    # blips and are bounded-retried; deterministic not-logged-in/not-configured
+    # markers above still win first and remain terminal. Bare bad-credentials
+    # errors still need 401/requires-authentication evidence before retrying.
     "bad credentials",
     "http 401",
     "requires authentication",
@@ -105,6 +106,8 @@ def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
     has_ambiguous_auth_transient_context = any(
         marker in operation_text for marker in GITHUB_AMBIGUOUS_AUTH_TRANSIENT_CONTEXT_MARKERS
     )
+    if has_bad_credentials and not has_auth_transient_evidence:
+        return False
     if has_bad_credentials and not has_ambiguous_auth_transient_context:
         return False
     has_resubmit_guidance = any(marker in text for marker in GITHUB_RESUBMIT_TRANSIENT_MARKERS)

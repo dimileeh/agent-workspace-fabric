@@ -45,8 +45,8 @@ def test_github_bad_credentials_401_is_ambiguous_transient() -> None:
 
 
 @pytest.mark.unit
-def test_bare_github_api_bad_credentials_is_ambiguous_transient() -> None:
-    assert is_transient_github_error_text(
+def test_bare_github_api_bad_credentials_is_not_transient_without_401_evidence() -> None:
+    assert not is_transient_github_error_text(
         operation="gh api graphql",
         stderr="Bad credentials",
     )
