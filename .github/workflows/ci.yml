@@ -93,7 +93,23 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --python 3.12 --extra dev
+        run: |
+          set -euo pipefail
+          last_rc=1
+          for attempt in 1 2 3; do
+            echo "uv sync attempt ${attempt}/3"
+            if uv sync --python 3.12 --extra dev; then
+              exit 0
+            else
+              last_rc=$?
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "uv sync failed; retrying in 10s"
+              sleep 10
+            fi
+          done
+          echo "uv sync failed after 3 attempts"
+          exit "${last_rc}"
 
       - name: Verify Docker and Compose
         run: |
@@ -157,7 +173,23 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --python 3.12 --extra dev
+        run: |
+          set -euo pipefail
+          last_rc=1
+          for attempt in 1 2 3; do
+            echo "uv sync attempt ${attempt}/3"
+            if uv sync --python 3.12 --extra dev; then
+              exit 0
+            else
+              last_rc=$?
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "uv sync failed; retrying in 10s"
+              sleep 10
+            fi
+          done
+          echo "uv sync failed after 3 attempts"
+          exit "${last_rc}"
 
       - name: Download coverage shards
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1

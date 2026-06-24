@@ -29,6 +29,22 @@ def test_generic_malformed_http_400_without_resubmit_guidance_is_not_transient()
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "HTTP 503 from GitHub",
+        "gateway timeout while contacting api.github.com",
+        "connection reset by peer",
+    ],
+)
+def test_github_server_and_network_markers_are_transient(stderr: str) -> None:
+    assert is_transient_github_error_text(
+        operation="gh api graphql",
+        stderr=stderr,
+    )
+
+
+@pytest.mark.unit
 def test_resubmit_wording_without_github_api_context_is_not_transient() -> None:
     assert not is_transient_github_error_text(
         operation="local validator",
@@ -37,8 +53,205 @@ def test_resubmit_wording_without_github_api_context_is_not_transient() -> None:
 
 
 @pytest.mark.unit
-def test_deterministic_github_auth_error_wins_over_resubmit_wording() -> None:
+def test_github_bad_credentials_401_is_ambiguous_transient() -> None:
+    assert is_transient_github_error_text(
+        operation="gh api graphql",
+        stderr="gh api graphql failed (exit=1): gh: Bad credentials (HTTP 401)",
+    )
+
+
+@pytest.mark.unit
+def test_bare_github_api_bad_credentials_is_not_transient_without_401_evidence() -> None:
     assert not is_transient_github_error_text(
         operation="gh api graphql",
+        stderr="Bad credentials",
+    )
+
+
+@pytest.mark.unit
+def test_bare_pr_create_bad_credentials_without_auth_context_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="gh pr create",
+        stderr="Bad credentials",
+    )
+
+
+@pytest.mark.unit
+def test_pr_create_bad_credentials_with_generic_try_again_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="gh pr create",
+        stderr="Bad credentials. Please try again.",
+    )
+
+
+@pytest.mark.unit
+def test_pr_create_bad_credentials_401_without_api_context_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="gh pr create",
+        stderr="gh: Bad credentials (HTTP 401)",
+    )
+
+
+@pytest.mark.unit
+def test_bad_credentials_401_without_github_operation_context_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="git push",
+        stderr="gh: Bad credentials (HTTP 401)",
+    )
+
+
+@pytest.mark.unit
+def test_pr_create_bad_credentials_401_with_graphql_stderr_context_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="gh pr create",
+        stderr="https://api.github.com/graphql: Bad credentials (HTTP 401)",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "operation",
+    ["gh api graphql", "gh pr create", "gh pr merge", "gh pr comment"],
+)
+def test_bad_credentials_with_resubmit_guidance_without_auth_form_is_not_transient(
+    operation: str,
+) -> None:
+    assert not is_transient_github_error_text(
+        operation=operation,
         stderr="Bad credentials. Please try resubmitting your request.",
+    )
+
+
+@pytest.mark.unit
+def test_api_bad_credentials_with_resubmit_guidance_and_401_is_transient() -> None:
+    assert is_transient_github_error_text(
+        operation="gh api graphql",
+        stderr="Bad credentials (HTTP 401). Please try resubmitting your request.",
+    )
+
+
+@pytest.mark.unit
+def test_pr_create_bad_credentials_with_resubmit_guidance_and_401_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="gh pr create",
+        stderr=(
+            "https://api.github.com/graphql: Bad credentials (HTTP 401). "
+            "Please try resubmitting your request."
+        ),
+    )
+
+
+@pytest.mark.unit
+def test_pr_create_requires_authentication_resubmit_guidance_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="gh pr create",
+        stderr=("gh: Requires authentication (HTTP 401). Please try resubmitting your request."),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["gh pr merge", "gh pr comment"])
+def test_pr_cli_requires_authentication_resubmit_guidance_is_transient(operation: str) -> None:
+    assert is_transient_github_error_text(
+        operation=operation,
+        stderr=(
+            "https://api.github.com/graphql: Requires authentication (HTTP 401). "
+            "Please try resubmitting your request."
+        ),
+    )
+
+
+@pytest.mark.unit
+def test_pr_create_requires_authentication_without_resubmit_guidance_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="gh pr create",
+        stderr="gh: Requires authentication (HTTP 401)",
+    )
+
+
+@pytest.mark.unit
+def test_pr_create_requires_authentication_with_generic_try_again_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="gh pr create",
+        stderr="gh: Requires authentication (HTTP 401). Please try again.",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "not logged in to any GitHub hosts",
+        "To get started with GitHub CLI, please run gh auth login",
+        "repository not found",
+        "could not resolve to a Repository with the name 'org/repo'",
+        "could not resolve to a node",
+    ],
+)
+def test_deterministic_github_auth_and_not_found_markers_stay_non_transient(
+    stderr: str,
+) -> None:
+    assert not is_transient_github_error_text(
+        operation="gh api graphql",
+        stderr=stderr,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "HTTP 401",
+        "Requires authentication",
+        "gh: Requires authentication (HTTP 401)",
+    ],
+)
+def test_ambiguous_github_401_markers_stay_transient(stderr: str) -> None:
+    assert is_transient_github_error_text(
+        operation="gh api graphql",
+        stderr=stderr,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("operation", "stderr"),
+    [
+        ("gh pr merge", "gh: Requires authentication (HTTP 401)"),
+        ("gh pr comment", "HTTP 401"),
+        ("gh pr merge", "gh: Bad credentials (HTTP 401)"),
+        ("gh pr comment", "gh: Bad credentials (HTTP 401)"),
+    ],
+)
+def test_ambiguous_github_401_markers_are_transient_for_pr_cli_operations(
+    operation: str,
+    stderr: str,
+) -> None:
+    assert is_transient_github_error_text(
+        operation=operation,
+        stderr=stderr,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["list_runs_for_sha", "view_run_log"])
+def test_failed_ci_log_fetch_ambiguous_401_markers_are_transient(operation: str) -> None:
+    assert is_transient_github_error_text(
+        operation=operation,
+        stderr="gh: Requires authentication (HTTP 401)",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "gh: Requires authentication (HTTP 401)",
+        "gh: Bad credentials (HTTP 401)",
+    ],
+)
+def test_deferred_issue_create_ambiguous_401_markers_are_transient(stderr: str) -> None:
+    assert is_transient_github_error_text(
+        operation="gh issue create",
+        stderr=stderr,
     )
