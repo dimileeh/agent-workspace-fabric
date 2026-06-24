@@ -33,7 +33,13 @@ async def _merge_block_attention_originated_from_merge_rejection(
     workspace_id: str,
     state: MonitorState,
 ) -> bool:
-    """Whether the surfaced attention came from a rejected merge attempt."""
+    """Whether structured state says the attention came from a merge rejection.
+
+    Generic legacy reason text such as "GitHub rejected the merge attempt" also
+    covers ordinary branch-protection fallback. Treating that ambiguous text as
+    merge-rejection origin would keep stale branch-protection attention surfaced
+    even after GitHub reports the PR clean before a queue/reviewer wait.
+    """
     if state.merge_block_attention_originated_from_merge_rejection():
         return True
     if _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY in state.threads_addressed_ids:
@@ -48,11 +54,7 @@ async def _merge_block_attention_originated_from_merge_rejection(
             return True
         if origin is not None:
             return False
-        reason = ws.awaiting_human_reason or ""
-    # Compatibility for rows created before merge-rejection origin was structured.
-    return reason.startswith(
-        ("GitHub rejected the merge attempt", "Bitbucket rejected the merge attempt")
-    )
+    return False
 
 
 def _merge_block_attention_queue_verdict(
