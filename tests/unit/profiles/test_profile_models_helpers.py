@@ -192,3 +192,71 @@ def test_normalize_inline_profile_snapshot_preserves_present_forge() -> None:
 
     assert normalized == {"name": "inline", "forge": "github"}
     assert normalized is not explicit
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_backfills_missing_monitor_grace() -> None:
+    """A pre-#655 legacy snapshot's ``monitor`` lacks the grace key; normalization
+    adds the input default so it compares equal to a fresh replay that dumps
+    ``awaiting_required_checks_grace_seconds=600.0``."""
+    legacy = {"name": "inline", "forge": "auto", "monitor": {"require_ci": True}}
+
+    normalized = normalize_inline_profile_snapshot(legacy)
+
+    assert normalized == {
+        "name": "inline",
+        "forge": "auto",
+        "monitor": {
+            "require_ci": True,
+            "awaiting_required_checks_grace_seconds": 600.0,
+        },
+    }
+    # The input snapshot (a live ORM attribute at the call sites) must not mutate.
+    assert legacy == {"name": "inline", "forge": "auto", "monitor": {"require_ci": True}}
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_preserves_present_monitor_grace() -> None:
+    """A snapshot whose ``monitor`` already carries the grace value is unchanged
+    by normalization (other than a shallow copy)."""
+    explicit = {
+        "name": "inline",
+        "forge": "auto",
+        "monitor": {"awaiting_required_checks_grace_seconds": 120.0, "require_ci": True},
+    }
+
+    normalized = normalize_inline_profile_snapshot(explicit)
+
+    assert normalized == explicit
+    assert normalized is not explicit
+    assert normalized["monitor"] == explicit["monitor"]
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_backfills_both_forge_and_monitor_grace() -> None:
+    """A truly legacy snapshot (pre-forge AND pre-#655) gets both backfills so it
+    compares equal to a fresh replay."""
+    legacy = {"name": "inline", "monitor": {"require_ci": True}}
+
+    normalized = normalize_inline_profile_snapshot(legacy)
+
+    assert normalized == {
+        "name": "inline",
+        "forge": "auto",
+        "monitor": {
+            "require_ci": True,
+            "awaiting_required_checks_grace_seconds": 600.0,
+        },
+    }
+    assert legacy == {"name": "inline", "monitor": {"require_ci": True}}
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_skips_monitor_when_not_a_dict() -> None:
+    """A malformed ``monitor`` that is not a dict must not crash normalization; it
+    is passed through untouched so downstream validation surfaces the problem."""
+    malformed = {"name": "inline", "forge": "auto", "monitor": "not-a-dict"}
+
+    normalized = normalize_inline_profile_snapshot(malformed)
+
+    assert normalized == malformed

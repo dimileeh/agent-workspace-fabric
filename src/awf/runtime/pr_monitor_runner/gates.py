@@ -10,15 +10,20 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import inspect
 
+from awf.common.forge_errors import ForgeClientError
 from awf.common.logging import get_logger
 from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceEventCreate
-from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor import _MERGE_BLOCK_ATTENTION_STATE_KEY, MonitorState
+from awf.runtime.pr_monitor_runner.merge_attention import (
+    _merge_block_attention_queue_verdict,
+)
 from awf.runtime.pr_monitor_runner.recovery_payloads import (
     _is_active_pr_monitor_recovery_operation,
     _monitor_recovery_conformance_payload,
 )
+from awf.runtime.pr_monitor_runner.types import BaseBehindCountError, BaseFetchError
 
 if TYPE_CHECKING:
     from awf.common.github_client import RepoRef
@@ -384,16 +389,25 @@ async def _handle_merge_gate_blocker(
         )
     )
     if grace_wait_seconds > 0:
-        # Resolve any stale awaiting-human flag before this non-human grace wait so
-        # a resolved ``NotifyHuman`` episode does not keep surfacing "awaiting human"
-        # while the monitor merely waits out the initial-review grace (whether the
-        # grace is deferring stale recovery or just gating an otherwise-clean merge).
-        # ``loop._execute`` excludes ``Merge`` and the manual-ready ``NotifyHuman``
-        # handoff from its general clear, so — like the other non-human gate waits in
-        # ``handle_merge_action`` — clear it here before parking (#659). An active
-        # branch-protection escalation is preserved by the helper
-        # (PRRT_kwDOSJAM6s6LXscz).
-        await runner._clear_stale_merge_attention(workspace_id, state)
+        attention_status: PRStatus | None = status
+        if state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY) and (
+            _merge_block_attention_queue_verdict(status, forge=repo.forge) == "indeterminate"
+        ):
+            try:
+                attention_status = await runner._fetch_status_for_decision(
+                    repo=repo,
+                    pr_number=pr_number,
+                    workspace_id=workspace_id,
+                    base_branch=base_branch,
+                )
+            except (ForgeClientError, BaseFetchError, BaseBehindCountError):
+                attention_status = None
+        await runner._clear_or_preserve_merge_attention_for_queue_wait(
+            workspace_id,
+            state,
+            status=attention_status,
+            forge=repo.forge,
+        )
         if stale_reason is not None:
             grace_defer_payload: dict[str, object] = {
                 "stale_reason": stale_reason,

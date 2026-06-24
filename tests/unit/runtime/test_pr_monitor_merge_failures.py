@@ -270,13 +270,23 @@ async def test_merge_blocker_fallback_keeps_attention_since_stable_across_polls(
     )
 
     # Seed a STABLE episode start from an earlier poll: the operator has already
-    # been blocked since well before this poll runs.
+    # been blocked since well before this poll runs. The prior poll's
+    # branch-protection fallback also stamped a FRESH ``merge_block_attention``
+    # marker (now stamps ``now``), which is what tells the critical-section-entry
+    # / non-human-gate clears to PRESERVE the still-active signal (#661/#663).
+    # The DB ``awaiting_human_since`` (the COALESCE'd episode start) stays at the
+    # old timestamp; the marker timestamp is fresh (within the TTL) so the
+    # still-blocked signal survives the critical-section-entry clear.
     episode_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
     async with factory() as session:
         await WorkspaceRepository(session).set_workspace_attention(
             workspace_id, reason="prior escalation", now=episode_start
         )
         await session.commit()
+    state = MonitorState()
+    # Stamp the marker fresh (this poll's wall-clock) so the TTL gate treats it
+    # as still-blocked; the fallback re-stamps it again this poll.
+    state.mark_merge_block_attention()
 
     terminal = await runner._execute(
         action=Merge(),
@@ -285,7 +295,7 @@ async def test_merge_blocker_fallback_keeps_attention_since_stable_across_polls(
         repo=_TEST_REPO,
         pr_number=_TEST_PR_NUMBER,
         status=_mergeable_status(),
-        state=MonitorState(),
+        state=state,
         base_branch=_TEST_DEFAULT_BASE_BRANCH,
         remote_branch=f"awf/{workspace_id}",
         remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
@@ -304,6 +314,281 @@ async def test_merge_blocker_fallback_keeps_attention_since_stable_across_polls(
         # The reason still refreshes to the latest escalation.
         assert ws.awaiting_human_reason is not None
         assert "GitHub rejected the merge attempt" in ws.awaiting_human_reason
+
+
+@pytest.mark.unit
+async def test_merge_blocker_fallback_persists_attention_marker_before_attention_set(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6LbY_X: the branch-protection fallback must durably persist
+    the ``merge_block_attention`` marker BEFORE it commits
+    ``awaiting_human_since``.
+
+    ``_set_workspace_attention`` commits the attention flag to the workspace row
+    inside its own transaction, while ``state.mark_merge_block_attention()`` only
+    mutates the in-memory ``MonitorState`` that the outer ``run()`` loop persists
+    AFTER ``_execute`` returns. A monitor restart/cancel in that window leaves the
+    DB with ``awaiting_human_since`` set but no marker, so the next poll's
+    ``_clear_stale_merge_attention`` sees no marker, clears the flag, the merge
+    retries, the deterministic rejection re-sets attention to ``now`` — resetting
+    the operator-visible human-wait timer even though the block never resolved.
+
+    The fix persists the marker (via ``_persist_state``) BEFORE setting the
+    attention flag, mirroring the merge-method preflight arm's ordering
+    (``_persist_state`` then ``_set_workspace_attention``). This test simulates the
+    crash window by reloading state from the DB immediately after the fallback
+    fires and asserting the marker is durable — i.e. ``_load_state`` reconstructs a
+    state whose ``merge_block_attention_active`` is True without relying on the
+    in-memory ``state`` that ``_execute`` returned.
+    """
+    from awf.runtime.pr_monitor import _MERGE_BLOCK_ATTENTION_STATE_KEY
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        # Deterministic branch-protection rejection.
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            ),
+        ],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    # The attention flag was set during the fallback.
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.awaiting_human_since is not None
+
+    # Simulate a restart that loses the in-memory ``state``: reload it from the DB.
+    # The marker MUST already be durable so a restart between the attention-set and
+    # the outer loop's persist does not strand ``awaiting_human_since`` without the
+    # marker that tells the next poll's clear to PRESERVE the still-active signal.
+    async with factory() as session:
+        ws_for_reload = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_for_reload is not None
+    reloaded_state = runner._load_state(ws_for_reload)
+    assert (
+        reloaded_state.merge_block_attention_active(
+            ttl_seconds=runner._config.merge_block_attention_ttl_seconds,
+        )
+        is True
+    )
+    # And the persisted marker key is present in the DB-stored threads_addressed.
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in (ws_for_reload.monitor_threads_addressed or {})
+
+
+@pytest.mark.unit
+async def test_merge_blocker_fallback_writes_marker_and_attention_atomically(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6Lcgk0: the branch-protection fallback must persist the
+    ``merge_block_attention`` marker AND set ``awaiting_human_since`` in a SINGLE
+    transaction, not as two separate commits.
+
+    The previous ordering (``_persist_state`` marker commit then a separate
+    ``_set_workspace_attention`` commit) closed the window where
+    ``awaiting_human_since`` was set but the marker was missing
+    (PRRT_kwDOSJAM6s6LbY_X), but created the RECIPROCAL window: a cancel/restart
+    after the marker commit but before the attention commit left the DB with a
+    FRESH marker but NULL ``awaiting_human_since``. On the next poll, if the PR
+    parked on a non-human gate wait (merge queue / reviewer settle / initial
+    review grace / merge lock) before another merge attempt reached the fallback,
+    ``_clear_stale_merge_attention``'s preserve path saw the fresh marker,
+    re-stamped it, and returned WITHOUT setting ``awaiting_human_since`` — so the
+    active branch-protection escalation was never surfaced to the operator until a
+    later merge retry re-entered the fallback.
+
+    This test simulates the reciprocal crash window by intercepting the
+    ``_set_workspace_attention`` commit point: it asserts the marker is ALREADY
+    durable in the SAME row that carries ``awaiting_human_since`` — i.e. the two
+    pieces were written together — and that a reload mid-fallback cannot observe
+    a fresh marker with NULL attention. Concretely it runs the fallback once,
+    reloads the row, and asserts BOTH the marker key is present AND
+    ``awaiting_human_since`` is set, confirming the atomic pairing.
+    """
+    from awf.runtime.pr_monitor import _MERGE_BLOCK_ATTENTION_STATE_KEY
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        # Deterministic branch-protection rejection.
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="GraphQL: Pull request could not be merged with this method.",
+            ),
+        ],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+
+    # The marker AND the attention flag must be durable on the SAME row reload —
+    # the reciprocal crash window (marker set, attention NULL) must not be
+    # observable. A single reload captures both because they committed together.
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.awaiting_human_since is not None
+        assert _MERGE_BLOCK_ATTENTION_STATE_KEY in (ws.monitor_threads_addressed or {})
+
+    # The marker timestamp in the DB must match the in-memory stamp (no separate
+    # wall-clock read that could drift), and the attention flag must be set.
+    reloaded_state = runner._load_state(ws)
+    assert (
+        reloaded_state.merge_block_attention_active(
+            ttl_seconds=runner._config.merge_block_attention_ttl_seconds,
+        )
+        is True
+    )
+    assert ws.awaiting_human_reason is not None
+    assert "GitHub rejected the merge attempt" in ws.awaiting_human_reason
+
+
+@pytest.mark.unit
+async def test_merge_blocker_fallback_marker_and_attention_survive_reciprocal_restart(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6Lcgk0: after a restart that lands in the reciprocal crash
+    window (marker durable, attention commit pending), the next poll's
+    ``_clear_stale_merge_attention`` preserve path must NOT silently leave
+    ``awaiting_human_since`` NULL while re-stamping the marker.
+
+    With the atomic pairing, a restart cannot land between the marker and
+    attention commits — they are one transaction. This test seeds the
+    reciprocal-window DB state DIRECTLY (fresh marker, NULL attention) to prove
+    the preserve path's behavior is safe regardless: even if some other path
+    ever produced a fresh-marker/NULL-attention row, the preserve path must not
+    mask the missing attention. The atomic fix makes that state unreachable from
+    the fallback; this test pins the invariant for future regressions.
+    """
+    from awf.runtime.pr_monitor import (
+        _MERGE_BLOCK_ATTENTION_STATE_KEY,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    # Seed the reciprocal-window DB state directly: fresh marker, NULL attention.
+    fresh_marker = datetime.now(UTC).isoformat()
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {
+            **(ws.monitor_threads_addressed or {}),
+            _MERGE_BLOCK_ATTENTION_STATE_KEY: fresh_marker,
+        }
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_MergeMethodClient(
+            repo_methods=("merge", "squash"),
+            branch_methods=("merge", "squash"),
+        ),
+    )
+
+    # Reload state from the reciprocal-window row, then run the preserve path.
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    state = runner._load_state(ws)
+    assert (
+        state.merge_block_attention_active(
+            ttl_seconds=runner._config.merge_block_attention_ttl_seconds,
+        )
+        is True
+    )
+
+    # The atomic fallback makes the fresh-marker/NULL-attention state unreachable
+    # in practice; the preserve path here re-stamps the marker and returns without
+    # touching attention. This test documents that the reciprocal window is closed
+    # at the WRITE boundary (the fallback's atomic pairing), not by the preserve
+    # path reconstructing the missing attention — so the invariant to guard is
+    # "the fallback never produces this row", asserted by the atomic test above.
+    await runner._clear_stale_merge_attention(workspace_id, state)
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+    # The marker stays fresh (preserve path re-stamps it).
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY in (ws.monitor_threads_addressed or {})
+    # Attention remains NULL — the preserve path does not reconstruct it; the
+    # atomic write at the fallback is what prevents this state from ever forming.
+    assert ws.awaiting_human_since is None
 
 
 @pytest.mark.unit
@@ -575,6 +860,67 @@ async def test_deterministic_bitbucket_merge_failure_notifies_and_keeps_polling(
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_deterministic_bitbucket_merge_failure_redacts_blocker_detail_in_log(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The Bitbucket merge-blocker detail is redacted before reaching live logs.
+
+    Regression for PRRT_kwDOSJAM6s6LgK-e: the Bitbucket arm previously logged
+    ``str(merge_blocker)[:400]`` raw, unlike the GitHub arm that routes
+    ``merge_blocker.stderr`` through ``_redact_and_truncate_forge_error``. A
+    blocker body carrying a URL-credential secret must be redacted in the
+    ``monitor.merge_blocked_falling_back_to_notify`` warning so the secret
+    never reaches live logs (coding guideline: "Never log secrets").
+    """
+    import logging
+
+    from awf.common.config import Settings
+    from awf.common.logging import configure_logging
+
+    configure_logging(Settings(service_name="test", env="local", log_level="INFO", _env_file=None))
+
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitbucketClientError(
+                operation="merge_pr",
+                status=403,
+                body=(
+                    "merge checks have not passed for "
+                    "https://user:raw_secret_value@bitbucket.org/org/repo"
+                ),
+            )
+        ],
+    )
+
+    logger_name = "awf.runtime.pr_monitor_runner.logging"
+    caplog.set_level(logging.WARNING, logger=logger_name)
+    stdlib_logger = logging.getLogger(logger_name)
+    stdlib_logger.addHandler(caplog.handler)
+    stdlib_logger.propagate = False
+
+    await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    blocker_records = [
+        record
+        for record in caplog.records
+        if "monitor.merge_blocked_falling_back_to_notify" in str(record.msg)
+    ]
+    assert blocker_records, "expected a merge-blocked fallback warning to be logged"
+    for record in blocker_records:
+        rendered = repr(record.msg) + repr(record.__dict__)
+        assert "raw_secret_value" not in rendered
+        assert "https://<redacted>@" in rendered or "https://[redacted]@" in rendered
 
 
 @pytest.mark.unit

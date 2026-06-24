@@ -481,6 +481,21 @@ class ProfileMonitor(BaseModel):
         default_factory=lambda: ["greptile-apps", "chatgpt-codex-connector"],
         max_length=64,
     )
+    awaiting_required_checks_grace_seconds: float = Field(default=600.0, le=86400)
+    """Grace window for required CI that is expected but absent on the current
+    head before the monitor escalates ``NotifyHuman`` (#655 / #662).
+
+    Right after a monitor push the forge has not started CI on the new head yet,
+    so the head shows an empty check set while branch protection reports
+    ``BLOCKED`` (the required context is absent). Within this window the monitor
+    defers to a bounded ``WaitForCI`` instead of a premature ``NotifyHuman``; once
+    it expires a head that genuinely never gets CI escalates as before. The
+    default (``600.0``) preserves today's hard-coded behavior and covers the
+    observed ≈5.5-min CI-start lag with margin. Set ``<= 0`` to disable the grace
+    (escalate immediately, pre-#655 behavior). The upper bound (``86400``) mirrors
+    the other monitor knobs; there is deliberately no lower bound so the
+    documented ``<= 0`` disable escape hatch is reachable from operator
+    configuration."""
 
     @field_validator("non_check_reviewer_logins")
     @classmethod
@@ -935,6 +950,14 @@ class WorkspaceProfile(BaseModel):
         )
 
 
+# Derive the backfill default from the field itself so retuning the field default
+# (e.g. the CI-start lag observation window) keeps legacy inline-profile replays
+# idempotent automatically, instead of silently diverging from a hardcoded copy.
+_MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT: float = ProfileMonitor.model_fields[
+    "awaiting_required_checks_grace_seconds"
+].default
+
+
 def normalize_inline_profile_snapshot(
     profile: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -948,13 +971,29 @@ def normalize_inline_profile_snapshot(
     an otherwise-identical replay now dumps ``"forge": "auto"`` (the unresolved
     input default). Default a missing ``forge`` to ``"auto"`` so replays of
     pre-forge inline profiles stay idempotent instead of raising a spurious
-    conflict. Returns a shallow copy; the input is never mutated.
+    conflict.
+
+    Likewise ``monitor.awaiting_required_checks_grace_seconds`` (#655 / #662) was
+    added after some inline-profile workspaces were persisted, so their stored
+    ``monitor`` sub-dict lacks the key while an otherwise-identical replay now
+    dumps the ``600.0`` default. Backfill a missing value there too so legacy
+    inline-profile replays stay idempotent. Returns a shallow copy; the input is
+    never mutated (the ``monitor`` sub-dict is copied only when backfilled).
     """
     if profile is None:
         return None
-    if "forge" in profile:
-        return dict(profile)
-    return {**profile, "forge": "auto"}
+    result = dict(profile)
+    if "forge" not in result:
+        result["forge"] = "auto"
+    monitor = result.get("monitor")
+    if isinstance(monitor, dict) and "awaiting_required_checks_grace_seconds" not in monitor:
+        result["monitor"] = {
+            **monitor,
+            "awaiting_required_checks_grace_seconds": (
+                _MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT
+            ),
+        }
+    return result
 
 
 def _normalized_endpoint_env_name(name: str) -> str:

@@ -56,6 +56,8 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
+_GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
+
 
 async def _address_thread(
     runner: PullRequestMonitorRunner,
@@ -398,9 +400,20 @@ async def _post_human_notification_once(
     swallowing, best-effort skip on missing monitor context) and so posts via its
     own ``_post_protected_block_notification`` rather than through this helper.
     """
-    from awf.runtime.pr_monitor_runner.helpers import _notification_key, _notify_human_reason
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _notification_key,
+        _notify_human_reason,
+        _sanitize_verdict_reason,
+    )
 
-    reason = blocker_reason if blocker_reason is not None else _notify_human_reason(status, state)
+    raw_reason = (
+        blocker_reason if blocker_reason is not None else _notify_human_reason(status, state)
+    )
+    reason = _sanitize_verdict_reason(raw_reason)
+    if reason is None and blocker_reason is not None:
+        reason = _sanitize_verdict_reason(_notify_human_reason(status, state))
+    if reason is None and blocker_reason is not None:
+        reason = _GENERIC_HUMAN_BLOCKER_REASON
     key = _notification_key(head_sha=status.head_sha, blocker_reason=reason)
     if state.threads_addressed_ids.get(key) == "notified":
         _log.info(

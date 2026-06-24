@@ -1378,3 +1378,25 @@ def test_notify_human_reason_prefers_stored_needs_human_reason() -> None:
         "GitHub rejected the workflow-file push because the token lacks "
         "`workflow` scope for .github/workflows/publish.yml."
     )
+
+
+@pytest.mark.unit
+def test_notify_human_reason_ignores_stored_placeholder_reason() -> None:
+    """Verify stale placeholder reasons fall back to generic human guidance."""
+    thread = ReviewThread(
+        thread_id="T_checkout",
+        path="apps/api/checkout_policy.py",
+        line=102,
+        body_excerpt="policy tradeoff still needs a decision",
+        author="cursor[bot]",
+    )
+    state = MonitorState(
+        threads_addressed_ids={
+            "T_checkout": "needs_human",
+            "__needs_human_reason__:T_checkout": '<what you need> and exit."',
+        }
+    )
+
+    assert _notify_human_reason(_status(inline=(thread,)), state) == (
+        "review feedback needs human input and remains unresolved on GitHub"
+    )
