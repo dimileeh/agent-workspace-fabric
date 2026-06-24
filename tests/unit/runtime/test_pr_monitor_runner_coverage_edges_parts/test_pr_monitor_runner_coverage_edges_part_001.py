@@ -709,7 +709,9 @@ def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> N
         )
     )
     # Full #515 symmetry: ambiguous GitHub 401 text is bounded-retryable on the
-    # base-fetch path too.
+    # base-fetch path too. This deliberately accepts the slower failure path for
+    # genuine expired-token smart-HTTP failures so intermittent GitHub auth blips
+    # get the same bounded retry budget as the API client path.
     assert _is_transient_base_fetch_error(
         BaseFetchError("error: RPC failed; HTTP 401 curl 22 The requested URL returned error: 401")
     )
