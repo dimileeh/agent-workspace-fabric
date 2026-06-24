@@ -415,15 +415,15 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Orphan filesystem reconcile (WS-B2). Default OFF: the sweep runs in
-    # report-only mode (visibility into the leak) until an operator opts into
-    # actual deletion via ``auto_cleanup_orphans``.
+    # Orphan filesystem reconcile (WS-B2). Enabled by default so accumulated
+    # orphan workspaces are reaped automatically; ``AWF_AUTO_CLEANUP_ORPHANS=false``
+    # keeps the sweep in report-only mode as an operator kill-switch.
     auto_cleanup_orphans: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Kill-switch gating ACTUAL deletion for both the worker orphan-dir "
-            "reconcile sweep and the readiness-driven orphan reaper. Off (default) "
-            "leaves both report-only."
+            "reconcile sweep and the readiness-driven orphan reaper. Set false "
+            "to leave both report-only."
         ),
     )
     orphan_reconcile_scan_interval_seconds: float = Field(

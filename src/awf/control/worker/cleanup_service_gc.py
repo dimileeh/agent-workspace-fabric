@@ -195,7 +195,7 @@ async def _run_claimed_service_gc_trigger(
 
     After the DB-row-driven terminal reaper, the same guarded run also drives the
     classification-driven orphan reaper with ``enabled=True`` *forced* (regardless of the
-    default-off ``auto_cleanup_orphans`` flag) and ``row_less_only=True`` so this
+    ``auto_cleanup_orphans`` kill-switch) and ``row_less_only=True`` so this
     operator-requested ``gc`` reclaims only no-DB-record ("row-less") orphaned
     volumes/worktrees the DB-row-driven candidate set can never see (#637). ``row_less_only``
     keeps the additive sweep from tearing down a terminal workspace the operator scoped out

@@ -121,6 +121,7 @@ def _orphan_summary_with_compose_and_worktree(tmp_path: Path, *, auto_cleanup_or
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(),  # no rows -> both records are "missing" orphans
         auto_cleanup_orphans=auto_cleanup_orphans,
+        reaper_available=auto_cleanup_orphans,
     )
 
 
@@ -179,6 +180,57 @@ def test_reaper_flag_on_reaps_compose_and_worktree(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_reaper_flag_on_reaps_terminal_volume_and_worktree(
+    tmp_path: Path,
+) -> None:
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            volumes=_jsonl(
+                {
+                    "name": "awf_ws_dead_pgdata",
+                    "project": "awf_ws_dead",
+                    "driver": "local",
+                    "scope": "local",
+                }
+            )
+        ),
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(terminal={"ws_dead"}),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+
+    assert {record.kind: record.classification for record in summary.records} == {
+        "volume": "terminal",
+        "worktree": "terminal",
+    }
+
+    teardown = _RecordingComposeTeardown()
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=teardown,
+            enabled=True,
+            min_age_hours=168.0,
+        )
+    )
+
+    assert result.status == "ok"
+    assert teardown.remove_volumes_calls == [True]
+    assert not worktree.exists()
+    assert sorted(outcome.kind for outcome in result.reaped) == ["compose", "worktree"]
+
+
+@pytest.mark.unit
 def test_reaper_leaves_expected_and_unknown_records(tmp_path: Path) -> None:
     from awf.service.orphan_resources import reap_classified_orphans
 
@@ -188,6 +240,7 @@ def test_reaper_leaves_expected_and_unknown_records(tmp_path: Path) -> None:
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(active={"ws_live"}),
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     teardown = _RecordingComposeTeardown()
@@ -219,6 +272,7 @@ def test_reaper_skips_when_classification_unknown(tmp_path: Path) -> None:
             available=False,
         ),
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     teardown = _RecordingComposeTeardown()
@@ -274,6 +328,7 @@ def test_reaper_skips_when_scanner_unavailable_with_partial_orphans(tmp_path: Pa
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(),  # no rows -> the listed container is a "missing" orphan
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
     # The degraded scan is reported as report-only/unknown -- not blocked with
     # reaping advertised -- so operators are never told deletion is enabled for
@@ -310,6 +365,7 @@ def test_reaper_permission_denied_is_loud(tmp_path: Path, monkeypatch: pytest.Mo
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(),
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     def _denied(kind: str, path: Path, *, work_dir: Path) -> tuple[bool, str | None, str | None]:
@@ -347,6 +403,7 @@ def test_reaper_worktree_already_removed_is_idempotent_success(
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(),
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     def _vanished(kind: str, path: Path, *, work_dir: Path) -> tuple[bool, str | None, str | None]:
@@ -466,6 +523,7 @@ def _retained_terminal_runtime_summary(*, retained: bool) -> Any:
         worktree_scan=empty_worktree_scan(),
         workspace_view=view,
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
 
@@ -556,6 +614,7 @@ def test_reaper_row_less_only_skips_terminal_db_record_resources(tmp_path: Path)
         # ws_done carries a terminal row (-> "terminal"); ws_dead has no row (-> "missing").
         workspace_view=_ok_view(terminal={"ws_done"}),
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
     container_record = next(record for record in summary.records if record.kind == "container")
     assert container_record.classification == "terminal"
@@ -634,6 +693,7 @@ def test_superseded_workspace_db_row_is_protected_from_row_less_sweep(tmp_path: 
         worktree_scan=empty_worktree_scan(),
         workspace_view=view,
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
     container_record = next(record for record in summary.records if record.kind == "container")
     assert container_record.classification == "terminal"  # not "missing"
@@ -690,6 +750,7 @@ def test_reaper_reaps_missing_volume_via_name_fallback_and_leaves_expected(
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(active={"ws_live"}),  # ws_dead has no row -> missing
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
     dead_volume = next(
         record
@@ -773,6 +834,7 @@ def test_reaper_skips_young_missing_worktree(tmp_path: Path) -> None:
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(),  # no rows -> the worktree is classified "missing"
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     teardown = _RecordingComposeTeardown()
@@ -806,6 +868,7 @@ def test_reaper_reaps_aged_missing_worktree(tmp_path: Path) -> None:
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(),
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     teardown = _RecordingComposeTeardown()
@@ -850,6 +913,7 @@ def test_reaper_limit_bounds_to_oldest_workspaces_first(tmp_path: Path) -> None:
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(),  # no rows -> both worktrees classify "missing"
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     teardown = _RecordingComposeTeardown()
@@ -908,6 +972,7 @@ def test_reaper_limit_reaps_selected_workspace_records_together(tmp_path: Path) 
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(),  # no rows -> every record is a "missing" orphan
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     teardown = _RecordingComposeTeardown()
@@ -945,6 +1010,7 @@ def test_reaper_limit_above_workspace_count_reaps_all(tmp_path: Path) -> None:
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(),
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     teardown = _RecordingComposeTeardown()
@@ -1263,6 +1329,7 @@ def test_reaper_reaps_terminal_worktree_without_age_guard(tmp_path: Path) -> Non
         worktree_scan=scan_managed_worktrees(tmp_path),
         workspace_view=_ok_view(terminal={"ws_dead"}),  # terminal row -> not gated
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     teardown = _RecordingComposeTeardown()
@@ -1307,6 +1374,7 @@ def test_reaper_skips_young_missing_compose_when_dir_present(tmp_path: Path) -> 
         worktree_scan=empty_worktree_scan(),
         workspace_view=_ok_view(),  # no rows -> the container is classified "missing"
         auto_cleanup_orphans=True,
+        reaper_available=True,
     )
 
     teardown = _RecordingComposeTeardown()

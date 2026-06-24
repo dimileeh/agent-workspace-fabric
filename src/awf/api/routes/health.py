@@ -580,6 +580,7 @@ async def _check_orphan_resources(
     work_dir: str,
     db_check: CheckResult,
     docker_check: CheckResult,
+    worker_check: CheckResult | None = None,
     min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
     auto_cleanup_orphans: bool = False,
 ) -> CheckResult:
@@ -606,6 +607,7 @@ async def _check_orphan_resources(
         workspace_view=workspace_view,
         docker_scan=docker_scan,
         worktree_scan=worktree_scan,
+        worker_check=worker_check,
         auto_cleanup_orphans=auto_cleanup_orphans,
     )
 
@@ -626,18 +628,21 @@ def _orphan_resources_check_result(
     workspace_view: WorkspaceIdView,
     docker_scan: ResourceScan,
     worktree_scan: ResourceScan,
+    worker_check: CheckResult | None = None,
     auto_cleanup_orphans: bool = False,
 ) -> CheckResult:
     if not db_check.ok:
         workspace_view = unavailable_workspace_view()
     if not docker_check.ok:
         docker_scan = _docker_resource_scan_unavailable(docker_check)
+    reaper_available = bool(worker_check.ok) if worker_check is not None else False
 
     summary = build_orphan_resource_summary(
         docker_scan=docker_scan,
         worktree_scan=worktree_scan,
         workspace_view=workspace_view,
         auto_cleanup_orphans=auto_cleanup_orphans,
+        reaper_available=reaper_available,
     )
     return CheckResult(**summary.to_dict())
 
@@ -653,6 +658,7 @@ async def _check_orphan_resources_with_concurrent_scans(
     *,
     db_check_task: asyncio.Task[CheckResult],
     docker_check_task: asyncio.Task[CheckResult],
+    worker_check_task: asyncio.Task[CheckResult] | None = None,
     workspace_view_task: asyncio.Task[WorkspaceIdView],
     docker_scan_task: asyncio.Task[ResourceScan],
     worktree_scan_task: asyncio.Task[ResourceScan],
@@ -673,12 +679,14 @@ async def _check_orphan_resources_with_concurrent_scans(
         await _cancel_unneeded_task(docker_scan_task)
 
     worktree_scan = await worktree_scan_task
+    worker_check = await worker_check_task if worker_check_task is not None else None
     return _orphan_resources_check_result(
         db_check=db_check,
         docker_check=docker_check,
         workspace_view=workspace_view,
         docker_scan=docker_scan,
         worktree_scan=worktree_scan,
+        worker_check=worker_check,
         auto_cleanup_orphans=auto_cleanup_orphans,
     )
 
@@ -784,6 +792,7 @@ async def readyz(
         _check_orphan_resources_with_concurrent_scans(
             db_check_task=db_check_task,
             docker_check_task=daemon_check_task,
+            worker_check_task=worker_check_task,
             workspace_view_task=workspace_view_task,
             docker_scan_task=docker_scan_task,
             worktree_scan_task=worktree_scan_task,
