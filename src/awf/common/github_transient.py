@@ -107,10 +107,12 @@ def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
     )
     if has_bad_credentials and not has_auth_transient_context:
         return False
-    if any(marker in text for marker in GITHUB_RESUBMIT_TRANSIENT_MARKERS) and any(
-        marker in text for marker in GITHUB_API_CONTEXT_MARKERS
-    ):
-        return not (has_bad_credentials and not has_auth_transient_evidence)
+    has_resubmit_guidance = any(marker in text for marker in GITHUB_RESUBMIT_TRANSIENT_MARKERS)
+    has_api_context = any(marker in text for marker in GITHUB_API_CONTEXT_MARKERS)
+    if has_resubmit_guidance and has_api_context:
+        if has_bad_credentials and not has_auth_transient_evidence:
+            return False
+        return not (has_auth_transient_evidence and not has_auth_transient_context)
     if any(marker in text for marker in TRANSIENT_GITHUB_ERROR_MARKERS):
         return True
     if not any(marker in stderr_text for marker in AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS):
