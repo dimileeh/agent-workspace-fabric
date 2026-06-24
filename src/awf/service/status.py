@@ -33,9 +33,7 @@ from awf.service.orphan_resources import (
     ORPHAN_REAPING_ACTION,
     ORPHANS_PRESENT_REAPING_ENABLED,
     reaping_supersedes_orphan_failure,
-)
-from awf.service.orphan_resources import (
-    scan_docker_resources as scan_runtime_docker_resources,
+    scan_docker_resources,
 )
 from awf.service.orphans import (
     ACTIVE_WORKSPACE_STATUSES,
@@ -261,7 +259,7 @@ async def collect_service_status(
         run_subprocess=resolved_run,
     )
     runtime_docker_scan = await asyncio.to_thread(
-        scan_runtime_docker_resources,
+        scan_docker_resources,
         docker_host=settings.docker_host,
         run_subprocess=resolved_run,
     )
