@@ -140,3 +140,21 @@ def test_ambiguous_github_401_markers_stay_transient(stderr: str) -> None:
         operation="gh api graphql",
         stderr=stderr,
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("operation", "stderr"),
+    [
+        ("gh pr merge", "gh: Requires authentication (HTTP 401)"),
+        ("gh pr comment", "HTTP 401"),
+    ],
+)
+def test_ambiguous_github_401_markers_are_transient_for_pr_cli_operations(
+    operation: str,
+    stderr: str,
+) -> None:
+    assert is_transient_github_error_text(
+        operation=operation,
+        stderr=stderr,
+    )

@@ -81,6 +81,11 @@ GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS = (
     "gh api",
 )
 
+GITHUB_AMBIGUOUS_AUTH_TRANSIENT_CONTEXT_MARKERS = (
+    *GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS,
+    "gh pr ",
+)
+
 
 def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
     """Return whether a GitHub CLI/API failure looks transient."""
@@ -97,6 +102,9 @@ def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
     has_auth_transient_context = any(
         marker in operation_text for marker in GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS
     )
+    has_ambiguous_auth_transient_context = any(
+        marker in operation_text for marker in GITHUB_AMBIGUOUS_AUTH_TRANSIENT_CONTEXT_MARKERS
+    )
     if has_bad_credentials and not has_auth_transient_context:
         return False
     if any(marker in text for marker in GITHUB_RESUBMIT_TRANSIENT_MARKERS) and any(
@@ -107,4 +115,4 @@ def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
         return True
     if not any(marker in stderr_text for marker in AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS):
         return False
-    return has_auth_transient_context
+    return has_ambiguous_auth_transient_context
