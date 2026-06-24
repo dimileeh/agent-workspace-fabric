@@ -216,3 +216,18 @@ def test_failed_ci_log_fetch_ambiguous_401_markers_are_transient(operation: str)
         operation=operation,
         stderr="gh: Requires authentication (HTTP 401)",
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "gh: Requires authentication (HTTP 401)",
+        "gh: Bad credentials (HTTP 401)",
+    ],
+)
+def test_deferred_issue_create_ambiguous_401_markers_are_transient(stderr: str) -> None:
+    assert is_transient_github_error_text(
+        operation="gh issue create",
+        stderr=stderr,
+    )

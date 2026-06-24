@@ -84,6 +84,7 @@ GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS = (
 GITHUB_AMBIGUOUS_AUTH_TRANSIENT_CONTEXT_MARKERS = (
     *GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS,
     "gh pr ",
+    "gh issue create",
     "list_runs_for_sha",
     "view_run_log",
 )
