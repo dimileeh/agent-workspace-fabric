@@ -108,6 +108,13 @@ query.json
 **/docs/awf-plans/*
 !docs/awf-plans/README.md
 /TODO/
-# NOTE: `plans/` is intentionally NOT ignored — the Plan-and-Validate protocol
-# (AGENTS.md) requires committing `plans/<TOPIC>_PLAN.md` and
-# `plans/<TOPIC>_VALIDATION.md` for non-trivial work.
+# `plans/` holds the Plan-and-Validate protocol's working docs (AGENTS.md): the
+# generated `<TOPIC>_PLAN.md` / `<TOPIC>_VALIDATION.md` are LOCAL working
+# artifacts and are NOT committed (they had accumulated to 600+ tracked files,
+# one PLAN+VALIDATION pair per task incl. every review-comment fix). Mirror the
+# awf-plans rule above: ignore the directory *contents*, keep the protocol
+# definition and this folder's README tracked. Agents must NOT `git add -f` the
+# generated docs — keep the planning discipline, not the files.
+/plans/*
+!/plans/README.md
+!/plans/PLAN_EXECUTION_PROTOCOL.md

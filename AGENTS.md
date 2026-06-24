@@ -63,6 +63,12 @@ Required:
 - Validate implementation against the original plan in `plans/<TOPIC>_VALIDATION.md`.
 - If gaps are found, run another iteration focused on the highest-impact gap and update the validation doc
 
+`plans/<TOPIC>_PLAN.md` and `plans/<TOPIC>_VALIDATION.md` are LOCAL working
+artifacts: `plans/` is gitignored except for its `README.md` and
+`PLAN_EXECUTION_PROTOCOL.md`. Do NOT commit them and do NOT `git add -f` them —
+keep the planning discipline, not the files. Summarize the plan and validation
+outcome in the PR description (and commit messages) instead.
+
 ## Validation Commands
 
 Use the narrowest commands that prove the change, then run the broader surface
