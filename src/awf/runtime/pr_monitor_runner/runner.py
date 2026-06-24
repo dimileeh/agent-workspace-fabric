@@ -71,6 +71,10 @@ from awf.runtime.validation import ValidationRunner
 from awf.service.provider_recovery import PROVIDER_AUTH_FAILED
 
 
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
 class PullRequestMonitorRunner(RunnerDelegatesMixin):
     """Drives the ``monitoring_pr`` stage for a single workspace."""
 
@@ -92,6 +96,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
         workspace_runtime_context: str = "",
         provider_recovery_default_model: str | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self._deps = _RunnerDeps(
             session_factory=session_factory,
@@ -100,6 +105,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
             gh=gh,
             validation=validation,
             sleep=sleep,
+            now=now or _utcnow,
             provider_recovery_default_model=provider_recovery_default_model,
             log_store=log_store,
             post_merge_target_reconciler=post_merge_target_reconciler,
@@ -363,7 +369,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 # unpersisted marker would re-read as absent forever and a genuine
                 # never-CI head would never escalate past the grace.
                 grace_active, grace_state_changed = _awaiting_required_checks_grace(
-                    status, state, self._config, now=datetime.now(UTC)
+                    status, state, self._config, now=self._deps.now()
                 )
                 if grace_state_changed:
                     await self._persist_state(workspace_id, state)

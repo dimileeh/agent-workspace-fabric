@@ -10,11 +10,10 @@ poll, so the branch-protection fallback cannot re-stamp during it).
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -221,10 +220,28 @@ async def test_resolved_human_wait_clears_attention_on_fast_path_into_merge(
         assert ws.awaiting_human_reason is None
 
 
+class _FakeClock:
+    """Deterministic wall clock for merge-attention TTL regressions."""
+
+    def __init__(self, current: datetime, *, tick_seconds: float = 0.0) -> None:
+        self._current = current
+        self._tick = timedelta(seconds=tick_seconds)
+
+    def now(self) -> datetime:
+        current = self._current
+        self._current += self._tick
+        return current
+
+    def advance(self, seconds: float) -> datetime:
+        self._current += timedelta(seconds=seconds)
+        return self._current
+
+
 class _LongWaitMergeCoordinator:
-    """A merge coordinator that actually sleeps before yielding, advancing the
-    wall-clock past a tiny TTL so a marker stamped fresh at entry ages out
-    during the serialized wait.
+    """A merge coordinator that advances a fake clock before yielding.
+
+    The clock moves past a tiny TTL so a marker stamped fresh at entry ages out
+    during the serialized wait without depending on scheduler timing.
 
     Models the real Postgres/InProcess coordinators blocking behind another
     merge in the same repo/base lane: no branch-protection fallback fires
@@ -232,8 +249,9 @@ class _LongWaitMergeCoordinator:
     reproduce the flicker described in PRRT_kwDOSJAM6s6La_SZ.
     """
 
-    def __init__(self, wait_seconds: float) -> None:
+    def __init__(self, *, wait_seconds: float, clock: _FakeClock) -> None:
         self._wait_seconds = wait_seconds
+        self._clock = clock
         self.entries: list[tuple[str, str]] = []
         self.yielded_at: datetime | None = None
 
@@ -245,9 +263,7 @@ class _LongWaitMergeCoordinator:
         base_branch: str,
     ) -> AsyncIterator[None]:
         self.entries.append((repo_url, base_branch))
-        # Real sleep so datetime.now(UTC) advances past the TTL inside the wait.
-        await asyncio.sleep(self._wait_seconds)
-        self.yielded_at = datetime.now(UTC)
+        self.yielded_at = self._clock.advance(self._wait_seconds)
         yield
 
 
@@ -294,17 +310,10 @@ async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
         pr_number=_TEST_PR_NUMBER,
         base_branch=_TEST_DEFAULT_BASE_BRANCH,
     )
-    # TTL large enough that the marker stays FRESH at coordinator entry
-    # regardless of how long the pre-coordinator setup (DB loads, gate checks)
-    # takes inside ``_execute`` — the production entry-time fix measures the
-    # marker's age against the coordinator-ENTRY clock, so the marker only has
-    # to be fresh *then*, not survive the whole setup gap. A 1.0s TTL is too
-    # tight under CI load (the setup gap can exceed it, making the marker stale
-    # at entry and clearing ``awaiting_human_since`` — a flaky false failure,
-    # not the regression under test). 30s absorbs any plausible setup gap while
-    # still exercising the long-wait path; the during-wait aging only mattered
-    # for the pre-fix post-wait clock behavior, which is already fixed
-    # (PRRT_kwDOSJAM6s6La_SZ).
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC), tick_seconds=0.01)
+    # The fake clock makes the marker fresh at coordinator entry, then stale
+    # after the coordinator advances past the tight TTL. This fails if the
+    # preserve decision accidentally uses the post-wait wall clock.
     monitor_config = MonitorConfig(
         auto_merge=True,
         poll_interval_seconds=60,
@@ -312,9 +321,9 @@ async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
         initial_review_grace_period_seconds=0,
         non_check_reviewer_settle_seconds=0,
         non_check_reviewer_logins=(),
-        merge_block_attention_ttl_seconds=30.0,
+        merge_block_attention_ttl_seconds=1.0,
     )
-    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5)
+    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5, clock=clock)
     runner = PullRequestMonitorRunner(
         session_factory=factory,
         runner=FakeCommandRunner(),
@@ -329,6 +338,7 @@ async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
         sleep=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
         merge_coordinator=coordinator,
+        now=clock.now,
     )
 
     # Seed a stable episode start from an earlier poll (COALESCE'd start). The
@@ -346,7 +356,7 @@ async def test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention(
     # fix preserves the marker across the wait; without that fix the
     # critical-section-entry clear would measure age against the post-wait
     # clock and (with a tight TTL) wipe the signal.
-    state.mark_merge_block_attention()
+    state.mark_merge_block_attention(now=clock.now())
 
     terminal = await runner._execute(
         action=Merge(),
@@ -388,7 +398,8 @@ async def test_bitbucket_clean_status_preserves_merge_block_attention_during_que
 
     Bitbucket maps open PRs to ``CLEAN`` because it does not expose GitHub's
     branch-protection merge-state signal. Preserve active operator attention for
-    that forge while GitHub ``CLEAN`` clears as a confirmed resolution.
+    that forge while GitHub ``CLEAN`` remains allowed to clear ordinary
+    non-rejection markers as a confirmed resolution.
     """
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
@@ -427,6 +438,101 @@ async def test_bitbucket_clean_status_preserves_merge_block_attention_during_que
 
 
 @pytest.mark.unit
+async def test_github_clean_status_preserves_merge_rejection_attention_during_queue_wait(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """#677: GitHub ``CLEAN`` is not proof that an actor/push restriction which
+    rejected the previous merge attempt has resolved.
+
+    Actor and push restrictions are invisible to ``mergeStateStatus``. A queue,
+    reviewer-settle, or grace wait does not retry the merge, so it must preserve
+    rejection-origin attention until a later merge attempt confirms success or
+    re-stamps the rejection.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    episode_start = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    state = MonitorState()
+    state.mark_merge_block_attention(now=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC))
+    marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {_MERGE_BLOCK_ATTENTION_STATE_KEY: marker}
+        ws.awaiting_human_since = episode_start
+        ws.awaiting_human_reason = (
+            "GitHub rejected the merge attempt: actor is not allowed to push to this branch"
+        )
+        await session.commit()
+
+    await runner._clear_or_preserve_merge_attention_for_queue_wait(
+        workspace_id,
+        state,
+        status=_mergeable_status(),
+        forge="github",
+    )
+
+    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == marker
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert (ws_after.monitor_threads_addressed or {})[_MERGE_BLOCK_ATTENTION_STATE_KEY] == marker
+    assert ws_after.awaiting_human_since == episode_start
+    assert ws_after.awaiting_human_reason is not None
+    assert "GitHub rejected the merge attempt" in ws_after.awaiting_human_reason
+
+
+@pytest.mark.unit
+async def test_github_clean_status_clears_non_rejection_attention_during_queue_wait(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """#671: GitHub ``CLEAN`` still clears an ordinary merge-block marker when no
+    prior merge rejection is the source of the surfaced attention.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    state = MonitorState()
+    state.mark_merge_block_attention(now=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC))
+    marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert ws is not None
+        ws.monitor_threads_addressed = {_MERGE_BLOCK_ATTENTION_STATE_KEY: marker}
+        ws.awaiting_human_since = datetime(2026, 1, 1, 12, tzinfo=UTC)
+        ws.awaiting_human_reason = "prior non-rejection escalation"
+        await session.commit()
+
+    await runner._clear_or_preserve_merge_attention_for_queue_wait(
+        workspace_id,
+        state,
+        status=_mergeable_status(),
+        forge="github",
+    )
+
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in state.threads_addressed_ids
+    async with factory() as session:
+        ws_after = await WorkspaceRepository(session).get(workspace_id)
+        assert ws_after is not None
+    assert _MERGE_BLOCK_ATTENTION_STATE_KEY not in (ws_after.monitor_threads_addressed or {})
+    assert ws_after.awaiting_human_since is None
+    assert ws_after.awaiting_human_reason is None
+
+
+@pytest.mark.unit
 async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -460,17 +566,9 @@ async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
         status="open",
         blocker_state="ready",
     )
-    # TTL large enough that the marker stays FRESH at the critical-section-entry
-    # clear regardless of how long the pre-coordinator setup (DB loads, gate
-    # checks, status fetch) takes inside ``_execute`` — the production entry-time
-    # fix measures the marker's age against the coordinator-ENTRY clock, so the
-    # marker only has to be fresh *then*, not survive the whole setup gap. A 1.0s
-    # TTL is too tight under CI load (the setup gap can exceed it, making the
-    # marker stale at entry and clearing ``awaiting_human_since`` — a flaky false
-    # failure, not the regression under test). 30s absorbs any plausible setup
-    # gap. The post-lock queue wait is now forge-signal-driven; this setup only
-    # needs the critical-section-entry clear to preserve the marker before the
-    # serialized wait.
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC), tick_seconds=0.01)
+    # The fake clock keeps the setup gap out of the assertion while still making
+    # the marker stale by the time the post-lock queue wait runs.
     monitor_config = MonitorConfig(
         auto_merge=True,
         poll_interval_seconds=60,
@@ -478,9 +576,9 @@ async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
         initial_review_grace_period_seconds=0,
         non_check_reviewer_settle_seconds=0,
         non_check_reviewer_logins=(),
-        merge_block_attention_ttl_seconds=30.0,
+        merge_block_attention_ttl_seconds=1.0,
     )
-    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5)
+    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5, clock=clock)
     runner = _QueueAfterLockRunner(
         blocker=blocker,
         session_factory=factory,
@@ -496,6 +594,7 @@ async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
         sleep=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
         merge_coordinator=coordinator,
+        now=clock.now,
     )
 
     # Seed a stable episode start from an earlier poll's branch-protection
@@ -510,7 +609,7 @@ async def test_post_lock_gate_preserves_blocked_marker_without_restamping(
     state = MonitorState()
     # Stamp the marker FRESH at this poll's entry so the #661 critical-section
     # entry clear preserves it. The later post-lock queue wait must not re-stamp.
-    state.mark_merge_block_attention()
+    state.mark_merge_block_attention(now=clock.now())
     original_marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
 
     terminal = await runner._execute(
@@ -588,7 +687,8 @@ async def test_stale_at_coordinator_entry_marker_still_cleared_after_long_wait(
         non_check_reviewer_logins=(),
         merge_block_attention_ttl_seconds=1.0,
     )
-    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5)
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC), tick_seconds=0.01)
+    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5, clock=clock)
     runner = PullRequestMonitorRunner(
         session_factory=factory,
         runner=FakeCommandRunner(),
@@ -603,6 +703,7 @@ async def test_stale_at_coordinator_entry_marker_still_cleared_after_long_wait(
         sleep=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
         merge_coordinator=coordinator,
+        now=clock.now,
     )
 
     # Seed the surfaced attention from a prior, now-resolved poll. The marker is
@@ -699,24 +800,9 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
         status="open",
         blocker_state="ready",
     )
-    # TTL large enough that the marker stays FRESH at the critical-section-entry
-    # clear regardless of how long the pre-coordinator setup (DB loads, gate
-    # checks, status fetch) takes inside ``_execute`` — the production entry-time
-    # fix measures the marker's age against the coordinator-ENTRY clock, so the
-    # marker only has to be fresh *then*, not survive the whole setup gap. A 1.0s
-    # TTL is too tight under CI load (the setup gap can exceed it, making the
-    # marker stale at entry and clearing ``awaiting_human_since`` — a flaky false
-    # failure, not the regression under test). 30s absorbs any plausible setup
-    # gap. The regression under test (post-wait wall-clock measurement
-    # reclassifying a fresh-at-entry marker as stale) is exercised by the 1.5s
-    # coordinator wait advancing real time past the entry window — the production
-    # fix already passes the entry timestamp to the post-lock clears, so the
-    # small-TTL "post-wait reclassification" rationale only described the
-    # PRE-FIX behavior and is TTL-independent here now; the 1.5s wait still
-    # drives the post-lock preserve path. Mirrors the sibling
-    # ``test_post_lock_gate_restamp_uses_current_wall_clock_not_entry_timestamp``
-    # (PRRT_kwDOSJAM6s6LdM4X) and ``test_long_merge_coordinator_wait_preserves_fresh_at_entry_attention``
-    # (PRRT_kwDOSJAM6s6La_SZ) TTL bumps.
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC), tick_seconds=0.01)
+    # The fake clock makes the marker fresh at entry and stale after the
+    # serialized wait, without depending on real elapsed time in CI.
     monitor_config = MonitorConfig(
         auto_merge=True,
         poll_interval_seconds=60,
@@ -724,9 +810,9 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
         initial_review_grace_period_seconds=0,
         non_check_reviewer_settle_seconds=0,
         non_check_reviewer_logins=(),
-        merge_block_attention_ttl_seconds=30.0,
+        merge_block_attention_ttl_seconds=1.0,
     )
-    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5)
+    coordinator = _LongWaitMergeCoordinator(wait_seconds=1.5, clock=clock)
     runner = _QueueAfterLockRunner(
         blocker=blocker,
         session_factory=factory,
@@ -742,6 +828,7 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
         sleep=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
         merge_coordinator=coordinator,
+        now=clock.now,
     )
 
     # Seed a stable episode start from an earlier poll's branch-protection
@@ -757,7 +844,7 @@ async def test_long_coordinator_wait_preserves_fresh_at_entry_attention_across_p
     # Stamp the marker FRESH at this poll's entry so the #661 critical-section
     # entry clear preserves it. The later post-lock queue wait is decided by the
     # forge ``BLOCKED`` signal, not marker age.
-    state.mark_merge_block_attention()
+    state.mark_merge_block_attention(now=clock.now())
     original_marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
 
     terminal = await runner._execute(

@@ -8,8 +8,8 @@ Behavior is unchanged: the functions are wired back onto the runner via
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Any, Literal
+from datetime import datetime
+from typing import Any, Literal, cast
 
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_monitor import (
@@ -20,6 +20,23 @@ from awf.runtime.pr_monitor import (
 )
 
 _MergeBlockAttentionQueueVerdict = Literal["active", "resolved", "indeterminate"]
+
+
+def _now(self: Any) -> datetime:
+    return cast(datetime, self._deps.now())
+
+
+async def _merge_block_attention_originated_from_merge_rejection(
+    self: Any,
+    workspace_id: str,
+) -> bool:
+    """Whether the surfaced attention came from a rejected merge attempt."""
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        if ws is None:
+            return False
+        reason = ws.awaiting_human_reason or ""
+    return "rejected the merge attempt" in reason
 
 
 def _merge_block_attention_queue_verdict(
@@ -49,7 +66,7 @@ async def _set_workspace_attention(self: Any, workspace_id: str, *, reason: str)
         await WorkspaceRepository(s).set_workspace_attention(
             workspace_id,
             reason=reason,
-            now=datetime.now(UTC),
+            now=_now(self),
         )
         await s.commit()
 
@@ -105,7 +122,7 @@ async def _set_workspace_attention_with_merge_block_marker(
         await WorkspaceRepository(s).set_workspace_attention(
             workspace_id,
             reason=reason,
-            now=datetime.now(UTC),
+            now=_now(self),
         )
         await s.commit()
 
@@ -165,7 +182,7 @@ async def _clear_stale_merge_attention(
     signal) is still cleared below.
     """
     ttl_seconds = self._config.merge_block_attention_ttl_seconds
-    reference = now if now is not None else datetime.now(UTC)
+    reference = now if now is not None else _now(self)
     raw = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
     if not raw:
         # No marker: a resolved ``NotifyHuman`` episode (not branch-protection),
@@ -199,7 +216,7 @@ async def _clear_stale_merge_attention(
         # time after a serialized coordinator wait. Use a fresh wall-clock for
         # the re-stamp while keeping the original entry reference for the
         # preserve/clear decision.
-        stamp_now = datetime.now(UTC)
+        stamp_now = _now(self)
         state.mark_merge_block_attention(now=stamp_now)
         # Persist the re-stamped marker DURABLY before returning. The outer
         # ``run()`` loop only flushes ``state`` after ``_execute`` returns
@@ -275,6 +292,11 @@ async def _clear_or_preserve_merge_attention_for_queue_wait(
         return
     verdict = _merge_block_attention_queue_verdict(status, forge=forge)
     if verdict in ("active", "indeterminate"):
+        return
+    # GitHub CLEAN proves ordinary mergeability signals resolved, but actor/push
+    # restrictions that rejected a merge attempt are invisible to mergeStateStatus.
+    # A later merge retry is the positive confirmation for that case.
+    if await _merge_block_attention_originated_from_merge_rejection(self, workspace_id):
         return
     await _clear_merge_block_attention_and_workspace_attention_durably(
         self,

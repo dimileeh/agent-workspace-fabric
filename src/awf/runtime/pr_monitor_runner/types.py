@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -55,6 +56,7 @@ class _RunnerDeps:
     adapter: AgentAdapter
     gh: ForgeClient
     sleep: Callable[[float], Awaitable[None]]
+    now: Callable[[], datetime]
     validation: ValidationRunner | None = None
     provider_recovery_default_model: str | None = None
     log_store: LogStore | None = None
