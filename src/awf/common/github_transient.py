@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 NON_TRANSIENT_GITHUB_ERROR_MARKERS = (
-    "bad credentials",
     "not logged in",
     "please run gh auth login",
     "not found",
@@ -49,6 +48,10 @@ TRANSIENT_GITHUB_ERROR_MARKERS = (
 )
 
 AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = (
+    # #515 symmetry with Bitbucket: 401/bad-credentials can be a transient auth
+    # blip and is bounded-retried; deterministic not-logged-in/not-configured
+    # markers above still win first and remain terminal.
+    "bad credentials",
     "http 401",
     "requires authentication",
 )

@@ -627,15 +627,15 @@ def test_transient_github_error_classifier_keeps_auth_errors_terminal() -> None:
             stderr="gh api graphql failed (exit=1): gh: Requires authentication (HTTP 401)",
         )
     )
-    # Strong, unambiguous permanent markers still fail fast — including when
-    # combined with a 401 (the strong marker is checked first and wins).
-    assert not _is_transient_github_client_error(
+    # GitHub can also spell the ambiguous 401 blip as ``Bad credentials``.
+    assert _is_transient_github_client_error(
         GitHubClientError(
             operation="gh api graphql",
             returncode=1,
-            stderr="Bad credentials",
+            stderr="gh api graphql failed (exit=1): gh: Bad credentials (HTTP 401)",
         )
     )
+    # Strong, unambiguous permanent markers still fail fast.
     assert not _is_transient_github_client_error(
         GitHubClientError(
             operation="gh api graphql",
@@ -661,7 +661,7 @@ def test_transient_github_error_classifier_keeps_auth_errors_terminal() -> None:
         GitHubClientError(
             operation="gh api graphql",
             returncode=1,
-            stderr="Bad credentials; Requires authentication (HTTP 401)",
+            stderr="repository not found",
         )
     )
     assert not _is_transient_github_client_error(
@@ -689,6 +689,9 @@ def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> N
             "origin/codex/awf-post-merge-fixes  (unable to update local ref)"
         )
     )
+    assert _is_transient_base_fetch_error(
+        BaseFetchError("git fetch origin main failed: gh: Bad credentials (HTTP 401)")
+    )
     assert not _is_transient_base_fetch_error(
         BaseFetchError("git fetch origin development failed: repository not found")
     )
@@ -705,13 +708,16 @@ def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> N
             "The requested URL returned error: 401"
         )
     )
-    # #516 (PRRT_kwDOSJAM6s6InGJP) regression: git smart-HTTP surfaces genuine
-    # credential failures as ``error: RPC failed; HTTP 401`` — a contiguous
-    # ``HTTP 401`` substring. The ambiguous-auth markers are scoped to the GitHub
-    # API client path only, so this base-fetch auth failure must still fail fast
-    # rather than be bounded-retried as a transient blip.
-    assert not _is_transient_base_fetch_error(
+    # Full #515 symmetry: ambiguous GitHub 401 text is bounded-retryable on the
+    # base-fetch path too.
+    assert _is_transient_base_fetch_error(
         BaseFetchError("error: RPC failed; HTTP 401 curl 22 The requested URL returned error: 401")
+    )
+    assert not _is_transient_base_fetch_error(
+        BaseFetchError("fatal: not logged in to any GitHub hosts")
+    )
+    assert not _is_transient_base_fetch_error(
+        BaseFetchError("To get started with GitHub CLI, please run gh auth login")
     )
     retry_key = "__awf_base_fetch_retry_count:sync_base"
     state = MonitorState(threads_addressed_ids={retry_key: "not-an-integer"})

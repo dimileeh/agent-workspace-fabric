@@ -115,11 +115,11 @@ async def test_github_transient_401_retries_with_backoff_then_exhausts(
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
     )
-    # The exact #515 failure string — a bare 401 with no strong permanent marker.
+    # GitHub can spell the ambiguous #515 401 blip as "Bad credentials".
     exc = GitHubClientError(
         operation="gh api graphql",
         returncode=1,
-        stderr="gh: Requires authentication (HTTP 401)",
+        stderr="gh api graphql failed (exit=1): gh: Bad credentials (HTTP 401)",
     )
     state = MonitorState()
 
@@ -162,6 +162,7 @@ async def test_github_transient_401_retries_with_backoff_then_exhausts(
         assert exhausted_events[0].reason_code == "GITHUB_TRANSIENT_RETRY_EXHAUSTED"
         assert exhausted_events[0].payload["retry_number"] == 6
         assert exhausted_events[0].payload["max_retries"] == 5
+        assert "Bad credentials (HTTP 401)" in exhausted_events[0].payload["stderr"]
 
 
 @pytest.mark.unit
@@ -649,12 +650,12 @@ async def test_deterministic_fault_clears_stale_prior_transient_counter(
         returncode=1,
         stderr="gh: Requires authentication (HTTP 401)",
     )
-    # A strong permanent marker ("bad credentials") => deterministic, never retried,
-    # even though the same string also carries the ambiguous ``HTTP 401`` token.
+    # A deterministic CLI-not-authed marker is never retried, even though a
+    # separate bad-credentials 401 can now be bounded-retryable.
     deterministic_exc = GitHubClientError(
         operation="gh api graphql",
         returncode=1,
-        stderr="gh: Bad credentials (HTTP 401)",
+        stderr="gh: not logged in to any GitHub hosts",
     )
     state = MonitorState()
 

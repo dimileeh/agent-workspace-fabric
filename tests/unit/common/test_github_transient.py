@@ -37,8 +37,44 @@ def test_resubmit_wording_without_github_api_context_is_not_transient() -> None:
 
 
 @pytest.mark.unit
-def test_deterministic_github_auth_error_wins_over_resubmit_wording() -> None:
+def test_github_bad_credentials_401_is_ambiguous_transient() -> None:
+    assert is_transient_github_error_text(
+        operation="gh api graphql",
+        stderr="gh api graphql failed (exit=1): gh: Bad credentials (HTTP 401)",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "not logged in to any GitHub hosts",
+        "To get started with GitHub CLI, please run gh auth login",
+        "repository not found",
+        "could not resolve to a Repository with the name 'org/repo'",
+        "could not resolve to a node",
+    ],
+)
+def test_deterministic_github_auth_and_not_found_markers_stay_non_transient(
+    stderr: str,
+) -> None:
     assert not is_transient_github_error_text(
         operation="gh api graphql",
-        stderr="Bad credentials. Please try resubmitting your request.",
+        stderr=stderr,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "HTTP 401",
+        "Requires authentication",
+        "gh: Requires authentication (HTTP 401)",
+    ],
+)
+def test_ambiguous_github_401_markers_stay_transient(stderr: str) -> None:
+    assert is_transient_github_error_text(
+        operation="gh api graphql",
+        stderr=stderr,
     )
