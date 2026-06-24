@@ -22,6 +22,7 @@ from awf.service.config import ServiceSettings
 from awf.service.status import (
     WorkspaceIdView,
     WorkspaceLifecycleSnapshot,
+    _check_worker_reaper,
     _default_workspace_id_lookup,
     _is_legacy_open_default_workspace,
     _orphan_resources_check_payload,
@@ -208,6 +209,46 @@ async def _empty_workspace_view(_database_url: str) -> WorkspaceIdView:
         terminal_ids=frozenset(),
         available=True,
     )
+
+
+class _WorkerReaperSessionContext:
+    async def __aenter__(self) -> object:
+        return object()
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+class _WorkerReaperEngine:
+    def __init__(self) -> None:
+        self.disposed = False
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
+def _patch_worker_reaper_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    latest_for_node: Any,
+) -> _WorkerReaperEngine:
+    engine = _WorkerReaperEngine()
+
+    class _WorkerHeartbeatRepository:
+        def __init__(self, _session: object) -> None:
+            return None
+
+        async def latest_for_node(self, *, node_id: str) -> object:
+            return await latest_for_node(node_id=node_id)
+
+    monkeypatch.setattr(status_mod, "make_engine", lambda _database_url: engine)
+    monkeypatch.setattr(
+        status_mod,
+        "make_session_factory",
+        lambda _engine: lambda: _WorkerReaperSessionContext(),
+    )
+    monkeypatch.setattr(status_mod, "WorkerHeartbeatRepository", _WorkerHeartbeatRepository)
+    return engine
 
 
 async def _seed_cleanup_status_workspace(
@@ -676,6 +717,172 @@ def test_orphan_resources_check_payload_handles_missing_resource_counts() -> Non
     assert payload["cleanup_readiness"]["ready"] is True
     assert payload["cleanup_readiness"]["reason"] == "NO_ORPHANS"
     assert "counts_by_kind" not in payload
+
+
+@pytest.mark.unit
+def test_orphan_resources_check_payload_blocks_reaping_when_scans_warn() -> None:
+    payload = _orphan_resources_check_payload(
+        {
+            "ok": False,
+            "status": "fail",
+            "reason": "ORPHANS_PRESENT",
+            "orphan_count": 1,
+            "warning_count": 0,
+            "warnings": [{"resource_kind": "network", "reason": "partial_scan"}],
+        },
+        auto_cleanup_orphans=True,
+    )
+
+    assert payload["ok"] is False
+    assert payload["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert payload["cleanup_readiness"] == {
+        "ready": False,
+        "status": "blocked",
+        "reason": "ORPHAN_RESOURCES_PRESENT",
+        "action": "Review the listed AWF resources before running cleanup.",
+        "dry_run_only": True,
+    }
+
+
+@pytest.mark.unit
+def test_orphan_resources_check_payload_enables_reaping_for_boolean_orphan_count() -> None:
+    payload = _orphan_resources_check_payload(
+        {
+            "ok": False,
+            "status": "fail",
+            "reason": "ORPHANS_PRESENT",
+            "orphan_count": True,
+        },
+        auto_cleanup_orphans=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
+    assert payload["cleanup_readiness"] == {
+        "ready": True,
+        "status": "ready",
+        "reason": "ORPHANS_PRESENT_REAPING_ENABLED",
+        "action": status_mod.ORPHAN_REAPING_ACTION,
+        "dry_run_only": False,
+    }
+
+
+@pytest.mark.unit
+async def test_worker_reaper_check_reports_fresh_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seen: dict[str, str] = {}
+
+    async def latest_for_node(*, node_id: str) -> object:
+        seen["node_id"] = node_id
+        return SimpleNamespace(
+            last_heartbeat_at=datetime.now(UTC),
+            poll_interval_seconds=0.1,
+        )
+
+    engine = _patch_worker_reaper_lookup(monkeypatch, latest_for_node=latest_for_node)
+
+    result = await _check_worker_reaper(_settings(tmp_path))
+
+    assert result == {
+        "ok": True,
+        "status": "ok",
+        "reason": "WORKER_HEARTBEAT_FRESH",
+        "detail": "Latest worker heartbeat is fresh for node 'local'",
+        "resource_count": 1,
+    }
+    assert seen == {"node_id": "local"}
+    assert engine.disposed is True
+
+
+@pytest.mark.unit
+async def test_worker_reaper_check_reports_missing_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def latest_for_node(*, node_id: str) -> object:
+        assert node_id == "local"
+        return None
+
+    engine = _patch_worker_reaper_lookup(monkeypatch, latest_for_node=latest_for_node)
+
+    result = await _check_worker_reaper(_settings(tmp_path))
+
+    assert result == {
+        "ok": False,
+        "status": "fail",
+        "reason": "WORKER_HEARTBEAT_MISSING",
+        "detail": "No worker heartbeat recorded for node 'local'",
+    }
+    assert engine.disposed is True
+
+
+@pytest.mark.unit
+async def test_worker_reaper_check_reports_stale_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def latest_for_node(*, node_id: str) -> object:
+        assert node_id == "local"
+        return SimpleNamespace(
+            last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=30),
+            poll_interval_seconds=0.1,
+        )
+
+    engine = _patch_worker_reaper_lookup(monkeypatch, latest_for_node=latest_for_node)
+
+    result = await _check_worker_reaper(_settings(tmp_path))
+
+    assert result["ok"] is False
+    assert result["status"] == "fail"
+    assert result["reason"] == "WORKER_HEARTBEAT_STALE"
+    assert "stale after 15.0s" in str(result["detail"])
+    assert engine.disposed is True
+
+
+@pytest.mark.unit
+async def test_worker_reaper_check_reports_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def latest_for_node(*, node_id: str) -> object:
+        assert node_id == "local"
+        await asyncio.sleep(0.01)
+        return None
+
+    monkeypatch.setattr(status_mod, "_CHECK_TIMEOUT_SECONDS", 0.001)
+    engine = _patch_worker_reaper_lookup(monkeypatch, latest_for_node=latest_for_node)
+
+    result = await _check_worker_reaper(_settings(tmp_path))
+
+    assert result == {
+        "ok": False,
+        "status": "fail",
+        "reason": "WORKER_HEARTBEAT_UNAVAILABLE",
+        "detail": "Worker heartbeat lookup exceeded 0.001s",
+    }
+    assert engine.disposed is True
+
+
+@pytest.mark.unit
+async def test_worker_reaper_check_reports_repository_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def latest_for_node(*, node_id: str) -> object:
+        assert node_id == "local"
+        raise RuntimeError("heartbeat query failed")
+
+    engine = _patch_worker_reaper_lookup(monkeypatch, latest_for_node=latest_for_node)
+
+    result = await _check_worker_reaper(_settings(tmp_path))
+
+    assert result["ok"] is False
+    assert result["status"] == "fail"
+    assert result["reason"] == "WORKER_HEARTBEAT_UNAVAILABLE"
+    assert "heartbeat query failed" in str(result["detail"])
+    assert engine.disposed is True
 
 
 @pytest.mark.unit
