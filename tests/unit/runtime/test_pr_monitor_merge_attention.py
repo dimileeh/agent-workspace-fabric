@@ -546,12 +546,21 @@ async def test_github_clean_status_preserves_stale_merge_rejection_attention_at_
     entry even though the operator block has not been confirmed resolved.
     """
     workspace_id = await seed_monitoring_workspace(factory)
+    # Inject a deterministic re-stamp clock distinct from BOTH the TTL
+    # ``reference`` below (2024-01-02) and real wall-clock time. The durable
+    # re-stamp routes through the runner clock (``_now`` → ``self._deps.now``),
+    # never the ``reference`` used only for the preserve/clear decision, so the
+    # exact-value assertion pins the re-stamp source and catches a misrouted
+    # ``now()`` the way the coordinator-wait tests do — wall-clock bounds could
+    # not.
+    restamp_clock = datetime(2025, 7, 1, 8, 30, tzinfo=UTC)
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path,
+        now=lambda: restamp_clock,
     )
     stale_stamp = datetime(2024, 1, 1, tzinfo=UTC).isoformat()
     state = MonitorState()
@@ -570,7 +579,6 @@ async def test_github_clean_status_preserves_stale_merge_rejection_attention_at_
         ws.awaiting_human_reason = "GitHub merge was denied by branch actor restrictions"
         await session.commit()
 
-    before_call = datetime.now(UTC)
     await runner._clear_stale_merge_attention(
         workspace_id,
         state,
@@ -578,12 +586,11 @@ async def test_github_clean_status_preserves_stale_merge_rejection_attention_at_
         status=_mergeable_status(),
         forge="github",
     )
-    after_call = datetime.now(UTC)
 
     refreshed_stamp = datetime.fromisoformat(
         state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
     )
-    assert before_call <= refreshed_stamp <= after_call
+    assert refreshed_stamp == restamp_clock
     async with factory() as session:
         ws_after = await WorkspaceRepository(session).get(workspace_id)
         assert ws_after is not None

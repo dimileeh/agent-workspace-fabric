@@ -215,12 +215,21 @@ async def test_clear_stale_merge_attention_preserves_stale_marker_when_forge_sti
     ``awaiting_human_since``.
     """
     workspace_id = await seed_monitoring_workspace(factory)
+    # Inject a deterministic re-stamp clock distinct from BOTH the TTL
+    # ``reference`` below (2024-01-02) and real wall-clock time. The durable
+    # re-stamp routes through the runner clock (``_now`` → ``self._deps.now``),
+    # never the ``reference`` used only for the preserve/clear decision, so the
+    # exact-value assertion pins the re-stamp source and catches a misrouted
+    # ``now()`` (e.g. accidentally re-stamping from ``reference``) the way the
+    # coordinator-wait tests do — wall-clock bounds could not.
+    restamp_clock = datetime(2025, 7, 1, 8, 30, tzinfo=UTC)
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path,
+        now=lambda: restamp_clock,
     )
     old_stamp = datetime(2024, 1, 1, tzinfo=UTC).isoformat()
     state = MonitorState(threads_addressed_ids={_MERGE_BLOCK_ATTENTION_STATE_KEY: old_stamp})
@@ -233,7 +242,6 @@ async def test_clear_stale_merge_attention_preserves_stale_marker_when_forge_sti
         ws.awaiting_human_reason = "GitHub rejected the merge attempt"
         await session.commit()
 
-    before_call = datetime.now(UTC)
     await runner._clear_stale_merge_attention(
         workspace_id,
         state,
@@ -241,12 +249,11 @@ async def test_clear_stale_merge_attention_preserves_stale_marker_when_forge_sti
         status=replace(_mergeable_status(), merge_state_status=MergeStateStatus.BLOCKED),
         forge="github",
     )
-    after_call = datetime.now(UTC)
 
     refreshed_stamp = datetime.fromisoformat(
         state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
     )
-    assert before_call <= refreshed_stamp <= after_call
+    assert refreshed_stamp == restamp_clock
     async with factory() as session:
         ws_after = await WorkspaceRepository(session).get(workspace_id)
         assert ws_after is not None
