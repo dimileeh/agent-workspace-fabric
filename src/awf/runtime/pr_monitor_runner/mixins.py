@@ -75,7 +75,6 @@ class RunnerDelegatesMixin:
         _merge_attention._clear_or_preserve_merge_attention_for_queue_wait
     )
     _persist_merge_block_attention_durably = _merge_attention._persist_merge_block_attention_durably
-    _clear_merge_block_attention_durably = _merge_attention._clear_merge_block_attention_durably
     _persist_forge_transient_retry_count = _lifecycle._persist_forge_transient_retry_count
     _remove_forge_transient_retry_count = _lifecycle._remove_forge_transient_retry_count
     _clear_preserved_head_marker_durably = _lifecycle._clear_preserved_head_marker_durably

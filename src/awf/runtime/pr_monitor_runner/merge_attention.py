@@ -223,7 +223,7 @@ async def _clear_stale_merge_attention(
     # the ``awaiting_human_since`` clear MUST land in a SINGLE transaction: the
     # outer ``run()`` loop only flushes ``state`` after ``_execute`` returns
     # (``runner.py:455``), and the prior two-commit sequence
-    # (``_clear_workspace_attention`` then ``_clear_merge_block_attention_durably``)
+    # (``_clear_workspace_attention`` then a separate single-key marker clear)
     # left a cancel/restart window where ``awaiting_human_since`` was already
     # nulled but the STALE marker still sat on the DB row. A later poll could then
     # reload one side without the other, losing the invariant that marker and
@@ -310,39 +310,6 @@ async def _clear_merge_block_attention_and_workspace_attention_row_durably(
         if threads_addressed.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None) is not None:
             ws.monitor_threads_addressed = threads_addressed
         await repo.clear_workspace_attention(workspace_id)
-        await s.commit()
-
-
-async def _clear_merge_block_attention_durably(self: Any, workspace_id: str) -> None:
-    """Remove ONLY the merge-block attention marker from the persisted row.
-
-    Symmetric counterpart to :func:`_persist_merge_block_attention_durably`
-    and companion to the in-memory :func:`MonitorState.clear_merge_block_attention`.
-    ``_clear_stale_merge_attention``'s stale (resolved) branch drops the marker
-    in-memory and clears ``awaiting_human_since`` in the DB, but the outer
-    ``run()`` loop only flushes ``state`` after ``_execute`` returns
-    (``runner.py:455``). A cancel/restart before that full ``_persist_state``
-    would otherwise reload the STALE marker from the persisted row while
-    ``awaiting_human_since`` is already null — a later poll could then reload
-    one side without the other, losing the
-    invariant that marker and surfaced attention move together
-    (PRRT_kwDOSJAM6s6Lf_37).
-
-    Mirrors the established single-key durable-clear pattern
-    (``_clear_preserved_head_marker_durably``): touch ONLY the
-    ``_MERGE_BLOCK_ATTENTION_STATE_KEY``, merged off the DB-persisted
-    ``monitor_threads_addressed``, and NEVER flush the whole in-memory
-    ``MonitorState``. No-op when the workspace row is gone (a GC/destroy race)
-    or the marker is already absent.
-    """
-    async with self._deps.session_factory() as s:
-        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
-        if ws is None:
-            return
-        threads_addressed = dict(ws.monitor_threads_addressed or {})
-        if threads_addressed.pop(_MERGE_BLOCK_ATTENTION_STATE_KEY, None) is None:
-            return
-        ws.monitor_threads_addressed = threads_addressed
         await s.commit()
 
 
