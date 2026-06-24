@@ -99,9 +99,6 @@ def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
     has_auth_transient_evidence = any(
         marker in stderr_text for marker in GITHUB_AUTH_TRANSIENT_EVIDENCE_MARKERS
     )
-    has_auth_transient_context = any(
-        marker in operation_text for marker in GITHUB_AUTH_TRANSIENT_CONTEXT_MARKERS
-    )
     has_ambiguous_auth_transient_context = any(
         marker in operation_text for marker in GITHUB_AMBIGUOUS_AUTH_TRANSIENT_CONTEXT_MARKERS
     )
@@ -112,7 +109,9 @@ def is_transient_github_error_text(*, operation: str, stderr: str) -> bool:
     if has_resubmit_guidance and has_api_context:
         if has_bad_credentials and not has_auth_transient_evidence:
             return False
-        return not (has_auth_transient_evidence and not has_auth_transient_context)
+        if has_auth_transient_evidence and operation_text.startswith("gh pr create"):
+            return False
+        return not (has_auth_transient_evidence and not has_ambiguous_auth_transient_context)
     if any(marker in text for marker in TRANSIENT_GITHUB_ERROR_MARKERS):
         return True
     if not any(marker in stderr_text for marker in AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS):
