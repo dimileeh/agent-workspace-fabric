@@ -491,6 +491,47 @@ async def test_github_clean_status_preserves_merge_rejection_attention_during_qu
 
 
 @pytest.mark.unit
+async def test_github_clean_structured_merge_rejection_preserve_uses_state_not_db(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structured merge-rejection origin is already in ``MonitorState``.
+
+    A GitHub ``CLEAN`` queue wait must preserve from that in-memory marker
+    without opening a second workspace session; legacy rows without structured
+    origin keep the DB-backed compatibility fallback.
+    """
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    state = MonitorState()
+    state.mark_merge_block_attention(
+        now=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
+        originated_from_merge_rejection=True,
+    )
+    marker = state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY]
+
+    def _forbidden_session_factory() -> None:
+        raise AssertionError("structured merge-rejection origin should not read the DB")
+
+    monkeypatch.setattr(runner._deps, "session_factory", _forbidden_session_factory)
+
+    await runner._clear_or_preserve_merge_attention_for_queue_wait(
+        "unused-workspace-id",
+        state,
+        status=_mergeable_status(),
+        forge="github",
+    )
+
+    assert state.threads_addressed_ids[_MERGE_BLOCK_ATTENTION_STATE_KEY] == marker
+
+
+@pytest.mark.unit
 async def test_github_clean_status_preserves_stale_merge_rejection_attention_at_critical_section(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

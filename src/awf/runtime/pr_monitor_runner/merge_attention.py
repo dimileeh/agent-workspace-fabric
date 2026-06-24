@@ -31,8 +31,13 @@ def _now(self: Any) -> datetime:
 async def _merge_block_attention_originated_from_merge_rejection(
     self: Any,
     workspace_id: str,
+    state: MonitorState,
 ) -> bool:
     """Whether the surfaced attention came from a rejected merge attempt."""
+    if state.merge_block_attention_originated_from_merge_rejection():
+        return True
+    if _MERGE_BLOCK_ATTENTION_ORIGIN_STATE_KEY in state.threads_addressed_ids:
+        return False
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         if ws is None:
@@ -221,6 +226,7 @@ async def _clear_stale_merge_attention(
     # already stale at entry (the block resolved BEFORE the wait) is still
     # cleared.
     forge_still_blocked = _merge_block_attention_queue_verdict(status, forge=forge) == "active"
+    structured_rejection_origin = state.merge_block_attention_originated_from_merge_rejection()
     marker_fresh_at_entry = state.merge_block_attention_active(
         now=reference,
         ttl_seconds=ttl_seconds if ttl_seconds is not None and ttl_seconds > 0 else None,
@@ -228,7 +234,14 @@ async def _clear_stale_merge_attention(
     preserve_rejection_origin = (
         not forge_still_blocked
         and not marker_fresh_at_entry
-        and await _merge_block_attention_originated_from_merge_rejection(self, workspace_id)
+        and (
+            structured_rejection_origin
+            or await _merge_block_attention_originated_from_merge_rejection(
+                self,
+                workspace_id,
+                state,
+            )
+        )
     )
     if forge_still_blocked or marker_fresh_at_entry or preserve_rejection_origin:
         # Still-active block at merge critical-section entry: refresh the
@@ -326,7 +339,11 @@ async def _clear_or_preserve_merge_attention_for_queue_wait(
     # GitHub CLEAN proves ordinary mergeability signals resolved, but actor/push
     # restrictions that rejected a merge attempt are invisible to mergeStateStatus.
     # A later merge retry is the positive confirmation for that case.
-    if await _merge_block_attention_originated_from_merge_rejection(self, workspace_id):
+    if await _merge_block_attention_originated_from_merge_rejection(
+        self,
+        workspace_id,
+        state,
+    ):
         return
     await _clear_merge_block_attention_and_workspace_attention_durably(
         self,
