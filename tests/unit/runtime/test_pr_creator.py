@@ -659,7 +659,10 @@ class TestPushAndOpen:
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)
         runner.queue_result(returncode=0)  # push succeeds
-        runner.queue_result(returncode=1, stderr="Bad credentials")
+        runner.queue_result(
+            returncode=1,
+            stderr="Bad credentials (HTTP 401). Please try resubmitting your request.",
+        )
 
         creator = PullRequestCreator(
             runner,
