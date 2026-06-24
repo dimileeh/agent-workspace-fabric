@@ -179,7 +179,7 @@ def test_reaper_flag_on_reaps_compose_and_worktree(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_reaper_flag_on_reaps_terminal_volume_and_worktree_after_retention(
+def test_reaper_flag_on_reaps_terminal_volume_and_worktree(
     tmp_path: Path,
 ) -> None:
     from awf.service.orphan_resources import reap_classified_orphans
