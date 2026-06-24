@@ -204,3 +204,12 @@ def test_ambiguous_github_401_markers_are_transient_for_pr_cli_operations(
         operation=operation,
         stderr=stderr,
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["list_runs_for_sha", "view_run_log"])
+def test_failed_ci_log_fetch_ambiguous_401_markers_are_transient(operation: str) -> None:
+    assert is_transient_github_error_text(
+        operation=operation,
+        stderr="gh: Requires authentication (HTTP 401)",
+    )
