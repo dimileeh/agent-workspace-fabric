@@ -837,7 +837,7 @@ async def test_default_orphan_resource_summary_propagates_auto_cleanup_setting(
 
     summary = await metrics_route._default_orphan_resource_summary(settings, object())
 
-    assert summary.reason == "ORPHAN_RESOURCES_PRESENT"
+    assert summary.reason == "ORPHANS_PRESENT_REAPING_ENABLED"
     assert summary.cleanup_readiness.dry_run_only is False
     assert "Reaping is enabled" in summary.cleanup_readiness.action
 

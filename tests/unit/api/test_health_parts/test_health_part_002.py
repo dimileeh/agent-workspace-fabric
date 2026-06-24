@@ -499,6 +499,6 @@ async def test_readyz_orphan_resources_reflect_auto_cleanup_enabled(
     body = response.json()
 
     orphan_check = body["checks"]["orphan_resources"]
-    assert orphan_check["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_check["reason"] == "ORPHANS_PRESENT_REAPING_ENABLED"
     assert orphan_check["cleanup_readiness"]["dry_run_only"] is False
     assert "Reaping is enabled" in orphan_check["cleanup_readiness"]["action"]
