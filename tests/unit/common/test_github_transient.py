@@ -115,6 +115,14 @@ def test_pr_create_requires_authentication_resubmit_guidance_is_not_transient() 
 
 
 @pytest.mark.unit
+def test_pr_create_requires_authentication_without_resubmit_guidance_is_not_transient() -> None:
+    assert not is_transient_github_error_text(
+        operation="gh pr create",
+        stderr="gh: Requires authentication (HTTP 401)",
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "stderr",
     [
