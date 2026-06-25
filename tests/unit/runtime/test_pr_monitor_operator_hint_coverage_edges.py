@@ -266,7 +266,9 @@ def test_processed_operator_guide_keeps_unreferenced_needs_human_blocking() -> N
         },
     )
 
-    _finalize_processed_operator_hint(state)
+    _finalize_processed_operator_hint(
+        state, acted_feedback_text="operator answered issue:4788370423 only"
+    )
 
     assert state.threads_addressed_ids["issue:4788370423"] == "false_positive"
     assert state.threads_addressed_ids["issue:4788406681"] == "needs_human"
