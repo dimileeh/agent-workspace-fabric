@@ -1053,9 +1053,10 @@ def _mark_referenced_needs_human_feedback_answered(
 
     Operator guides are the sanctioned path for resolving a monitor HUMAN_WAIT.
     For review-level comments there is no GitHub thread to resolve, so a consumed
-    guide that names the original issue/review feedback id must also update the
-    persisted verdict. Otherwise the hint is marked processed and the next
-    ``decide()`` poll immediately re-enters the same stale HUMAN_WAIT.
+    guide that names the original issue/review feedback id in the acted-on text
+    must also update the persisted verdict. Otherwise the hint is marked
+    processed and the next ``decide()`` poll immediately re-enters the same stale
+    HUMAN_WAIT.
 
     This helper intentionally leaves any stored ``__review_comment_body_hash__``
     marker unchanged because it does not receive the live ``ReviewComment`` needed
@@ -1066,7 +1067,7 @@ def _mark_referenced_needs_human_feedback_answered(
     """
     if hint is None:
         return
-    text = "\n".join(part for part in (hint.directive, hint.reason) if part)
+    text = hint.directive or hint.reason
     if not text:
         return
     for referenced_id in _operator_hint_feedback_id_candidates(text):

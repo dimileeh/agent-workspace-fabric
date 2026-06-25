@@ -1045,3 +1045,29 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_revie
     assert "__needs_human_reason__:issue:7654321" not in state.threads_addressed_ids
     assert state.threads_addressed_ids["9999999"] == "needs_human"
     assert state.threads_addressed_ids["__needs_human_reason__:9999999"] == "still blocking"
+
+
+def test_operator_hint_retire_referenced_needs_human_feedback_uses_acted_text() -> None:
+    state = MonitorState(
+        threads_addressed_ids={
+            "issue:111111": "needs_human",
+            "__needs_human_reason__:issue:111111": "audit-only blocker",
+            "issue:222222": "needs_human",
+            "__needs_human_reason__:issue:222222": "directive blocker",
+        }
+    )
+    hint = OperatorHint(
+        reason="Audit context mentions issue:111111 for operator traceability.",
+        directive="Resolve the feedback in issue:222222.",
+        operation_id="op_referenced_feedback_directive",
+        requested_at="2026-06-25T18:20:00+00:00",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids["issue:111111"] == "needs_human"
+    assert (
+        state.threads_addressed_ids["__needs_human_reason__:issue:111111"] == "audit-only blocker"
+    )
+    assert state.threads_addressed_ids["issue:222222"] == "false_positive"
+    assert "__needs_human_reason__:issue:222222" not in state.threads_addressed_ids
