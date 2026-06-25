@@ -1053,7 +1053,7 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_revie
         requested_at="2026-06-25T18:20:00+00:00",
     )
 
-    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint, acted_text=hint.reason)
 
     assert state.threads_addressed_ids["1234567"] == "false_positive"
     assert "__needs_human_reason__:1234567" not in state.threads_addressed_ids
@@ -1081,7 +1081,7 @@ def test_operator_hint_retire_referenced_needs_human_feedback_requires_body_hash
         requested_at="2026-06-25T18:20:00+00:00",
     )
 
-    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint, acted_text=hint.reason)
 
     assert state.threads_addressed_ids["1234567"] == "needs_human"
     assert state.threads_addressed_ids["__needs_human_reason__:1234567"] == (

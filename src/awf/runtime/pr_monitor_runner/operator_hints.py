@@ -132,7 +132,11 @@ async def _run_operator_hint_cycle(
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
         await _finalize_operator_hint_resume(
-            self, workspace_id=workspace_id, state=state, hint=hint
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            hint=hint,
+            acted_feedback_text=hint.directive,
         )
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     # Restart-after-consume recovery for a DIRECTIVE that DROPPED the preserved
@@ -174,10 +178,17 @@ async def _run_operator_hint_cycle(
         ):
             state.last_push_sha = local_head_sha
             await _finalize_operator_hint_resume(
-                self, workspace_id=workspace_id, state=state, hint=hint
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                hint=hint,
+                acted_feedback_text=hint.directive,
             )
             return _GitPushResult(pushed=False, failed=False, returncode=0)
+    acted_feedback_text = hint.directive
     if hint.directive or not active_grant_specs:
+        if not hint.directive:
+            acted_feedback_text = hint.reason
         prompt = operator_hint_prompt(
             pr_number=pr_number,
             repo_slug=repo.slug(),
@@ -483,7 +494,11 @@ async def _run_operator_hint_cycle(
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
         await _finalize_operator_hint_resume(
-            self, workspace_id=workspace_id, state=state, hint=hint
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            hint=hint,
+            acted_feedback_text=acted_feedback_text,
         )
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     push_result = (
@@ -649,7 +664,11 @@ async def _run_operator_hint_cycle(
             mark_operator_hint_needs_human(state, reason)
             return cast(_GitPushResult, push_result)
         await _finalize_operator_hint_resume(
-            self, workspace_id=workspace_id, state=state, hint=hint
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            hint=hint,
+            acted_feedback_text=acted_feedback_text,
         )
         return cast(_GitPushResult, push_result)
 
@@ -658,7 +677,13 @@ async def _run_operator_hint_cycle(
         state.last_push_sha = pushed_head_sha
     # Single-use: consume the operator grants now that the resumed change pushed,
     # so a later DIFFERENT protected change re-blocks and must be granted again.
-    await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state, hint=hint)
+    await _finalize_operator_hint_resume(
+        self,
+        workspace_id=workspace_id,
+        state=state,
+        hint=hint,
+        acted_feedback_text=acted_feedback_text,
+    )
     return cast(_GitPushResult, push_result)
 
 
@@ -993,7 +1018,12 @@ async def _clear_dropped_preserved_marker_after_terminal_directive(
 
 
 async def _finalize_operator_hint_resume(
-    self: Any, *, workspace_id: str, state: MonitorState, hint: OperatorHint | None = None
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    hint: OperatorHint | None = None,
+    acted_feedback_text: str | None = None,
 ) -> None:
     """Close out a settled protected-block resume so the next cycle starts clean.
 
@@ -1020,11 +1050,14 @@ async def _finalize_operator_hint_resume(
     hint processed for the remainder of this cycle."""
     await self._clear_preserved_marker_and_consume_grants_durably(workspace_id)
     await self._clear_block_resume_phase(workspace_id)
-    _finalize_processed_operator_hint(state, hint=hint)
+    _finalize_processed_operator_hint(state, hint=hint, acted_feedback_text=acted_feedback_text)
 
 
 def _finalize_processed_operator_hint(
-    state: MonitorState, *, hint: OperatorHint | None = None
+    state: MonitorState,
+    *,
+    hint: OperatorHint | None = None,
+    acted_feedback_text: str | None = None,
 ) -> None:
     """Mark the operator hint processed and drop the protected-block preserved-head
     marker.
@@ -1039,7 +1072,9 @@ def _finalize_processed_operator_hint(
     """
     pending_hint = getattr(state, "pending_operator_hint", None)
     active_hint = pending_hint or hint
-    _mark_referenced_needs_human_feedback_answered(state, hint=active_hint)
+    _mark_referenced_needs_human_feedback_answered(
+        state, hint=active_hint, acted_text=acted_feedback_text
+    )
     state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
     if hasattr(state, "pending_operator_hint") and pending_hint is None and active_hint is not None:
         state.pending_operator_hint = active_hint
@@ -1047,7 +1082,10 @@ def _finalize_processed_operator_hint(
 
 
 def _mark_referenced_needs_human_feedback_answered(
-    state: MonitorState, *, hint: OperatorHint | None = None
+    state: MonitorState,
+    *,
+    hint: OperatorHint | None = None,
+    acted_text: str | None = None,
 ) -> None:
     """Retire review-level ``needs_human`` verdicts a guide explicitly answered.
 
@@ -1058,6 +1096,10 @@ def _mark_referenced_needs_human_feedback_answered(
     processed and the next ``decide()`` poll immediately re-enters the same stale
     HUMAN_WAIT.
 
+    ``hint.reason`` can be audit context for approve-and-keep grant-only resumes,
+    which skip the CLI entirely. Callers pass ``acted_text`` when a directiveless
+    reason was actually presented to the agent; otherwise only a directive counts.
+
     This helper intentionally leaves any stored ``__review_comment_body_hash__``
     marker unchanged because it does not receive the live ``ReviewComment`` needed
     to recompute the hash. To keep the retirement durable across the next
@@ -1067,7 +1109,7 @@ def _mark_referenced_needs_human_feedback_answered(
     """
     if hint is None:
         return
-    text = hint.directive or hint.reason
+    text = acted_text if acted_text is not None else hint.directive
     if not text:
         return
     for referenced_id in _operator_hint_feedback_id_candidates(text):

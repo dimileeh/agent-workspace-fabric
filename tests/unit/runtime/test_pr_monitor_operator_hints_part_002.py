@@ -28,6 +28,9 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.operator_hints import (
+    _mark_referenced_needs_human_feedback_answered,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -38,6 +41,9 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 REPO_URL = "git@github.com:dimileeh/aira-web.git"
+REVIEW_COMMENT_ID = "issue:3476977020"
+REVIEW_COMMENT_BODY_HASH_KEY = f"__review_comment_body_hash__:{REVIEW_COMMENT_ID}"
+REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY = f"__needs_human_reason__:{REVIEW_COMMENT_ID}"
 
 
 @pytest.fixture
@@ -89,6 +95,63 @@ async def _seed_active_grant(
         )
         await session.commit()
     return grant_id
+
+
+@pytest.mark.unit
+def test_directiveless_operator_hint_reason_does_not_retire_referenced_needs_human() -> None:
+    """Grant-only audit reasons are not acted-on review-feedback text.
+
+    Approve-and-keep resumes skip the CLI, so mentioning a review id in the audit
+    reason must not convert a stored ``needs_human`` review verdict to
+    ``false_positive``.
+    """
+    state = MonitorState(
+        threads_addressed_ids={
+            REVIEW_COMMENT_ID: "needs_human",
+            REVIEW_COMMENT_BODY_HASH_KEY: "body-hash",
+            REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY: "review still needs a human",
+        }
+    )
+    hint = OperatorHint(
+        reason=f"approved protected path; related review feedback {REVIEW_COMMENT_ID}",
+        operation_id="op_grant_only_mentions_review",
+        requested_at="2026-06-25T19:30:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids[REVIEW_COMMENT_ID] == "needs_human"
+    assert state.threads_addressed_ids[REVIEW_COMMENT_BODY_HASH_KEY] == "body-hash"
+    assert (
+        state.threads_addressed_ids[REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY]
+        == "review still needs a human"
+    )
+
+
+@pytest.mark.unit
+def test_operator_hint_directive_retires_referenced_needs_human() -> None:
+    """A directive is acted-on text and may retire the referenced review verdict."""
+    state = MonitorState(
+        threads_addressed_ids={
+            REVIEW_COMMENT_ID: "needs_human",
+            REVIEW_COMMENT_BODY_HASH_KEY: "body-hash",
+            REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY: "review still needs a human",
+        }
+    )
+    hint = OperatorHint(
+        reason="operator guide audit note",
+        directive=f"Resolve {REVIEW_COMMENT_ID} as false positive after checking the code.",
+        operation_id="op_directive_mentions_review",
+        requested_at="2026-06-25T19:35:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids[REVIEW_COMMENT_ID] == "false_positive"
+    assert state.threads_addressed_ids[REVIEW_COMMENT_BODY_HASH_KEY] == "body-hash"
+    assert REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
