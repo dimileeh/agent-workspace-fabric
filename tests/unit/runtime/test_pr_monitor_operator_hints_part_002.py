@@ -155,6 +155,61 @@ def test_operator_hint_directive_retires_referenced_needs_human() -> None:
 
 
 @pytest.mark.unit
+def test_operator_hint_directive_retires_issue_feedback_from_bare_id() -> None:
+    """Contextual bare feedback ids also match GitHub ``issue:<databaseId>`` keys."""
+    bare_comment_id = REVIEW_COMMENT_ID.removeprefix("issue:")
+    state = MonitorState(
+        threads_addressed_ids={
+            REVIEW_COMMENT_ID: "needs_human",
+            REVIEW_COMMENT_BODY_HASH_KEY: "body-hash",
+            REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY: "review still needs a human",
+        }
+    )
+    hint = OperatorHint(
+        reason="operator guide audit note",
+        directive=f"Resolve feedback id {bare_comment_id} as false positive.",
+        operation_id="op_directive_mentions_bare_review_id",
+        requested_at="2026-06-25T20:25:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids[REVIEW_COMMENT_ID] == "false_positive"
+    assert state.threads_addressed_ids[REVIEW_COMMENT_BODY_HASH_KEY] == "body-hash"
+    assert REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_operator_hint_directive_ignores_uncontextualized_long_number() -> None:
+    """Bare long numbers need feedback/comment-id context before matching."""
+    bare_comment_id = REVIEW_COMMENT_ID.removeprefix("issue:")
+    state = MonitorState(
+        threads_addressed_ids={
+            REVIEW_COMMENT_ID: "needs_human",
+            REVIEW_COMMENT_BODY_HASH_KEY: "body-hash",
+            REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY: "review still needs a human",
+        }
+    )
+    hint = OperatorHint(
+        reason="operator guide audit note",
+        directive=f"Investigated build {bare_comment_id} and found no code issue.",
+        operation_id="op_directive_mentions_uncontextualized_number",
+        requested_at="2026-06-25T20:30:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids[REVIEW_COMMENT_ID] == "needs_human"
+    assert state.threads_addressed_ids[REVIEW_COMMENT_BODY_HASH_KEY] == "body-hash"
+    assert (
+        state.threads_addressed_ids[REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY]
+        == "review still needs a human"
+    )
+
+
+@pytest.mark.unit
 async def test_operator_hint_grant_only_resume_skips_cli_and_consumes_grant(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
