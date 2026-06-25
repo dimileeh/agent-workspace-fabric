@@ -290,14 +290,17 @@ jobs:
         run: |
           set -euo pipefail
           uv venv --python 3.12
+          last_rc=1
           for attempt in 1 2 3; do
             echo "uv pip install build attempt ${attempt}/3"
             if uv pip install build; then
               break
+            else
+              last_rc=$?
             fi
             if [ "${attempt}" -eq 3 ]; then
               echo "uv pip install build failed after 3 attempts"
-              exit 1
+              exit "${last_rc}"
             fi
             echo "uv pip install build failed; retrying in 10s"
             sleep 10
@@ -309,14 +312,17 @@ jobs:
           set -euo pipefail
           uv venv --python 3.12 /tmp/awf-wheel-smoke
           cd /tmp
+          last_rc=1
           for attempt in 1 2 3; do
             echo "uv pip install wheel attempt ${attempt}/3"
             if uv pip install --python /tmp/awf-wheel-smoke/bin/python "$GITHUB_WORKSPACE"/dist/*.whl; then
               break
+            else
+              last_rc=$?
             fi
             if [ "${attempt}" -eq 3 ]; then
               echo "uv pip install wheel failed after 3 attempts"
-              exit 1
+              exit "${last_rc}"
             fi
             echo "uv pip install wheel failed; retrying in 10s"
             sleep 10
