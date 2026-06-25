@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.repositories import pr_feedback_body_hash
 from awf.db.session import make_session_factory
 from awf.runtime.monitor_state_keys import (
     _non_check_reviewer_settle_done_key,
@@ -35,6 +36,7 @@ from awf.runtime.operator_hints import (
 )
 from awf.runtime.pr_monitor import (
     CheckState,
+    Merge,
     MergeableState,
     MergeStateStatus,
     MonitorConfig,
@@ -43,12 +45,14 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
     PRStatus,
     ReviewComment,
+    decide,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import (
     _is_manual_ready_handoff,
     _is_protected_manual_ready_handoff,
     _non_check_reviewer_activity_freeze_elapsed_seconds,
+    _review_comment_body_state_key,
 )
 from awf.runtime.pr_monitor_runner.lifecycle import (
     _merge_concurrent_operator_freeze_state,
@@ -56,7 +60,12 @@ from awf.runtime.pr_monitor_runner.lifecycle import (
     _operator_hint_matches,
     _refresh_operator_state_from_workspace,
 )
-from awf.runtime.pr_monitor_runner.operator_hints import _operator_hint_block_reason
+from awf.runtime.pr_monitor_runner.operator_hints import (
+    _finalize_processed_operator_hint,
+    _mark_referenced_needs_human_feedback_answered,
+    _operator_hint_block_reason,
+    _operator_hint_feedback_id_candidates,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -93,6 +102,7 @@ def _ready_status(
     *,
     merge_state_status: MergeStateStatus = MergeStateStatus.CLEAN,
     blocking_reviews: tuple[ReviewComment, ...] = (),
+    review_comments: tuple[ReviewComment, ...] = (),
 ) -> PRStatus:
     return PRStatus(
         number=42,
@@ -100,7 +110,7 @@ def _ready_status(
         mergeable=MergeableState.MERGEABLE,
         check_state=CheckState.SUCCESS,
         unresolved_inline_threads=(),
-        unresolved_review_comments=(),
+        unresolved_review_comments=review_comments,
         blocking_reviews=blocking_reviews,
         base_behind_count=0,
         merge_state_status=merge_state_status,
@@ -150,6 +160,164 @@ def test_operator_hint_markers_noop_without_pending_hint_or_operation_id() -> No
     assert state.pending_operator_hint.status_reason == "provider unavailable"
 
 
+def test_processed_operator_guide_retires_referenced_review_needs_human() -> None:
+    """A consumed guide that names a review feedback id must clear that stale wait."""
+    comment = ReviewComment(
+        comment_id="issue:4788370423",
+        body_excerpt="old review-level summary",
+        body="old review-level summary",
+        author="coderabbitai",
+        source_kind="issue",
+    )
+    state = MonitorState(
+        pending_operator_hint=OperatorHint(
+            reason="operator said issue:4788370423 is stale and non-blocking",
+            directive="Reply AWF-VERDICT: FALSE POSITIVE for issue:4788370423.",
+            operation_id="op_answered_review",
+            reason_code="OPERATOR_GUIDE",
+        ),
+        threads_addressed_ids={
+            "issue:4788370423": "needs_human",
+            "__needs_human_reason__:issue:4788370423": "maintainer must choose",
+            "__review_comment_body_hash__:issue:4788370423": pr_feedback_body_hash(comment.body),
+        },
+    )
+
+    _finalize_processed_operator_hint(state)
+
+    assert state.pending_operator_hint is None
+    assert state.threads_addressed_ids["issue:4788370423"] == "false_positive"
+    assert "__needs_human_reason__:issue:4788370423" not in state.threads_addressed_ids
+    assert (
+        state.threads_addressed_ids[operator_hint_processed_key("op_answered_review")]
+        == "processed"
+    )
+    action = decide(
+        _ready_status(review_comments=(comment,)),
+        state,
+        MonitorConfig(auto_merge=True),
+    )
+    assert isinstance(action, Merge)
+
+
+def test_processed_operator_guide_uses_action_hint_when_pending_hint_was_cleared() -> None:
+    """Finalization can receive the action hint after pending storage was cleared."""
+    comment = ReviewComment(
+        comment_id="issue:4788406681",
+        body_excerpt="old review-level summary",
+        body="old review-level summary",
+        author="coderabbitai",
+        source_kind="issue",
+    )
+    state = MonitorState(
+        threads_addressed_ids={
+            "issue:4788406681": "needs_human",
+            "__needs_human_reason__:issue:4788406681": "maintainer must choose",
+            _review_comment_body_state_key("issue:4788406681"): pr_feedback_body_hash(comment.body),
+        },
+    )
+    hint = OperatorHint(
+        reason=None,
+        directive="Treat issue:4788406681 as already answered by the operator.",
+        operation_id="op_action_hint",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    _finalize_processed_operator_hint(state, hint=hint)
+
+    assert state.pending_operator_hint is None
+    assert state.threads_addressed_ids["issue:4788406681"] == "false_positive"
+    assert "__needs_human_reason__:issue:4788406681" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[operator_hint_processed_key("op_action_hint")] == "processed"
+    action = decide(
+        _ready_status(review_comments=(comment,)),
+        state,
+        MonitorConfig(auto_merge=True),
+    )
+    assert isinstance(action, Merge)
+
+
+def test_processed_operator_guide_keeps_unreferenced_needs_human_blocking() -> None:
+    """A guide must not clear unrelated review comments that still need humans."""
+    mentioned = ReviewComment(
+        comment_id="issue:4788370423",
+        body_excerpt="operator answered this one",
+        author="coderabbitai",
+        source_kind="issue",
+    )
+    unmentioned = ReviewComment(
+        comment_id="issue:4788406681",
+        body_excerpt="different human decision",
+        author="coderabbitai",
+        source_kind="issue",
+    )
+    state = MonitorState(
+        pending_operator_hint=OperatorHint(
+            reason="operator answered issue:4788370423 only",
+            operation_id="op_partial_answer",
+            reason_code="OPERATOR_GUIDE",
+        ),
+        threads_addressed_ids={
+            "issue:4788370423": "needs_human",
+            _review_comment_body_state_key("issue:4788370423"): pr_feedback_body_hash(
+                mentioned.body_excerpt
+            ),
+            "issue:4788406681": "needs_human",
+        },
+    )
+
+    _finalize_processed_operator_hint(
+        state, acted_feedback_text="operator answered issue:4788370423 only"
+    )
+
+    assert state.threads_addressed_ids["issue:4788370423"] == "false_positive"
+    assert state.threads_addressed_ids["issue:4788406681"] == "needs_human"
+    action = decide(
+        _ready_status(review_comments=(mentioned, unmentioned)),
+        state,
+        MonitorConfig(auto_merge=True),
+    )
+    assert isinstance(action, NotifyHuman)
+
+
+def test_processed_operator_guide_ignores_bare_number_without_issue_prefix() -> None:
+    """A bare 6+ digit number (no ``issue:`` prefix) must NOT clear a needs_human
+    verdict: an unrelated number in the directive/reason (a PR number, a line
+    count, a pasted id) must not coincidentally retire the wrong review wait on
+    this merge-gating path."""
+    comment = ReviewComment(
+        comment_id="issue:4788370423",
+        body_excerpt="needs a human decision",
+        author="coderabbitai",
+        source_kind="issue",
+    )
+    state = MonitorState(
+        pending_operator_hint=OperatorHint(
+            reason="reverted the change touching 4788370423 lines in the log",
+            directive="Closed PR 4788370423; proceed with the merge.",
+            operation_id="op_bare_number",
+            reason_code="OPERATOR_GUIDE",
+        ),
+        threads_addressed_ids={
+            "issue:4788370423": "needs_human",
+            "__needs_human_reason__:issue:4788370423": "maintainer must choose",
+        },
+    )
+
+    _finalize_processed_operator_hint(state)
+
+    # The bare number is not the prefixed key form, so the verdict survives and
+    # the review wait keeps blocking the merge.
+    assert state.threads_addressed_ids["issue:4788370423"] == "needs_human"
+    assert "__needs_human_reason__:issue:4788370423" in state.threads_addressed_ids
+    action = decide(
+        _ready_status(review_comments=(comment,)),
+        state,
+        MonitorConfig(auto_merge=True),
+    )
+    assert isinstance(action, NotifyHuman)
+
+
 def test_remonitor_elapsed_settle_helpers_filter_current_head() -> None:
     done_current = _non_check_reviewer_settle_done_key(
         pr_number=42,
@@ -168,6 +336,15 @@ def test_remonitor_elapsed_settle_helpers_filter_current_head() -> None:
         threads_addressed,
         pr_number=None,
         head_sha="current",
+    )
+    assert (
+        remonitor_elapsed_settle_head_shas(
+            threads_addressed,
+            pr_number=None,
+            preferred_head_sha="other",
+            current_head_sha="current",
+        )
+        == ()
     )
     assert remonitor_elapsed_settle_head_shas(
         threads_addressed,
@@ -854,3 +1031,143 @@ async def test_operator_hint_cycle_marks_pushed_hint_processed_without_empty_hea
         state.threads_addressed_ids[operator_hint_processed_key("op_pushed_without_head")]
         == "processed"
     )
+
+
+def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_review_id() -> None:
+    state = MonitorState(
+        threads_addressed_ids={
+            "1234567": "needs_human",
+            _review_comment_body_state_key("1234567"): pr_feedback_body_hash("bare review body"),
+            "__needs_human_reason__:1234567": "operator asked for help",
+            "2345678": "needs_human",
+            _review_comment_body_state_key("2345678"): pr_feedback_body_hash("prefixed key body"),
+            "__needs_human_reason__:2345678": "operator cited prefixed key",
+            "issue:7654321": "needs_human",
+            _review_comment_body_state_key("issue:7654321"): pr_feedback_body_hash("issue body"),
+            "__needs_human_reason__:issue:7654321": "operator asked for help",
+            "9999999": "needs_human",
+            "__needs_human_reason__:9999999": "still blocking",
+        }
+    )
+    hint = OperatorHint(
+        reason=(
+            "Operator confirmed feedback id 1234567, issue:2345678, "
+            "and issue:7654321 are non-blocking."
+        ),
+        operation_id="op_referenced_feedback",
+        requested_at="2026-06-25T18:20:00+00:00",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint, acted_text=hint.reason)
+
+    assert state.threads_addressed_ids["1234567"] == "false_positive"
+    assert "__needs_human_reason__:1234567" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["2345678"] == "false_positive"
+    assert "__needs_human_reason__:2345678" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["issue:7654321"] == "false_positive"
+    assert "__needs_human_reason__:issue:7654321" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["9999999"] == "needs_human"
+    assert state.threads_addressed_ids["__needs_human_reason__:9999999"] == "still blocking"
+
+
+def test_operator_hint_retire_referenced_needs_human_feedback_rejects_uncontextual_bare_id() -> (
+    None
+):
+    state = MonitorState(
+        threads_addressed_ids={
+            "1234567": "needs_human",
+            _review_comment_body_state_key("1234567"): pr_feedback_body_hash("bare review body"),
+            "__needs_human_reason__:1234567": "operator asked for help",
+        }
+    )
+    hint = OperatorHint(
+        reason="Operator closed ticket 1234567; proceed.",
+        operation_id="op_uncontextual_bare_feedback",
+        requested_at="2026-06-25T18:20:00+00:00",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint, acted_text=hint.reason)
+
+    assert state.threads_addressed_ids["1234567"] == "needs_human"
+    assert state.threads_addressed_ids["__needs_human_reason__:1234567"] == (
+        "operator asked for help"
+    )
+
+
+def test_operator_hint_retire_referenced_needs_human_feedback_requires_body_hash() -> None:
+    state = MonitorState(
+        threads_addressed_ids={
+            "1234567": "needs_human",
+            "__needs_human_reason__:1234567": "legacy row without hash",
+            "issue:7654321": "needs_human",
+            _review_comment_body_state_key("issue:7654321"): pr_feedback_body_hash("known body"),
+            "__needs_human_reason__:issue:7654321": "operator asked for help",
+        }
+    )
+    hint = OperatorHint(
+        reason="Operator confirmed 1234567 and issue:7654321 are non-blocking.",
+        operation_id="op_referenced_feedback_missing_hash",
+        requested_at="2026-06-25T18:20:00+00:00",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint, acted_text=hint.reason)
+
+    assert state.threads_addressed_ids["1234567"] == "needs_human"
+    assert state.threads_addressed_ids["__needs_human_reason__:1234567"] == (
+        "legacy row without hash"
+    )
+    assert state.threads_addressed_ids["issue:7654321"] == "false_positive"
+    assert "__needs_human_reason__:issue:7654321" not in state.threads_addressed_ids
+
+
+def test_operator_hint_retire_referenced_needs_human_feedback_uses_acted_text() -> None:
+    state = MonitorState(
+        threads_addressed_ids={
+            "issue:111111": "needs_human",
+            _review_comment_body_state_key("issue:111111"): pr_feedback_body_hash("audit body"),
+            "__needs_human_reason__:issue:111111": "audit-only blocker",
+            "issue:222222": "needs_human",
+            _review_comment_body_state_key("issue:222222"): pr_feedback_body_hash("directive body"),
+            "__needs_human_reason__:issue:222222": "directive blocker",
+        }
+    )
+    hint = OperatorHint(
+        reason="Audit context mentions issue:111111 for operator traceability.",
+        directive="Resolve the feedback in issue:222222.",
+        operation_id="op_referenced_feedback_directive",
+        requested_at="2026-06-25T18:20:00+00:00",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids["issue:111111"] == "needs_human"
+    assert (
+        state.threads_addressed_ids["__needs_human_reason__:issue:111111"] == "audit-only blocker"
+    )
+    assert state.threads_addressed_ids["issue:222222"] == "false_positive"
+    assert "__needs_human_reason__:issue:222222" not in state.threads_addressed_ids
+
+
+def test_operator_hint_retire_referenced_needs_human_feedback_noops_without_acted_text() -> None:
+    state = MonitorState(
+        threads_addressed_ids={
+            "issue:111111": "needs_human",
+            _review_comment_body_state_key("issue:111111"): pr_feedback_body_hash("audit body"),
+            "__needs_human_reason__:issue:111111": "still blocking",
+        }
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=None)
+    _mark_referenced_needs_human_feedback_answered(
+        state,
+        hint=OperatorHint(reason=None, directive=None, operation_id="op_empty_hint"),
+    )
+
+    assert state.threads_addressed_ids["issue:111111"] == "needs_human"
+    assert state.threads_addressed_ids["__needs_human_reason__:issue:111111"] == ("still blocking")
+
+
+def test_operator_hint_feedback_id_candidates_preserve_first_unique_ids() -> None:
+    assert _operator_hint_feedback_id_candidates(
+        "issue:111111 issue:111111 feedback id 222222 feedback id 222222 issue:333333"
+    ) == ("issue:111111", "222222", "issue:333333")
