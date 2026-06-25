@@ -35,6 +35,7 @@ from awf.runtime.operator_hints import (
 )
 from awf.runtime.pr_monitor import (
     CheckState,
+    Merge,
     MergeableState,
     MergeStateStatus,
     MonitorConfig,
@@ -43,6 +44,7 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
     PRStatus,
     ReviewComment,
+    decide,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import (
@@ -56,7 +58,10 @@ from awf.runtime.pr_monitor_runner.lifecycle import (
     _operator_hint_matches,
     _refresh_operator_state_from_workspace,
 )
-from awf.runtime.pr_monitor_runner.operator_hints import _operator_hint_block_reason
+from awf.runtime.pr_monitor_runner.operator_hints import (
+    _finalize_processed_operator_hint,
+    _operator_hint_block_reason,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -93,6 +98,7 @@ def _ready_status(
     *,
     merge_state_status: MergeStateStatus = MergeStateStatus.CLEAN,
     blocking_reviews: tuple[ReviewComment, ...] = (),
+    review_comments: tuple[ReviewComment, ...] = (),
 ) -> PRStatus:
     return PRStatus(
         number=42,
@@ -100,7 +106,7 @@ def _ready_status(
         mergeable=MergeableState.MERGEABLE,
         check_state=CheckState.SUCCESS,
         unresolved_inline_threads=(),
-        unresolved_review_comments=(),
+        unresolved_review_comments=review_comments,
         blocking_reviews=blocking_reviews,
         base_behind_count=0,
         merge_state_status=merge_state_status,
@@ -148,6 +154,120 @@ def test_operator_hint_markers_noop_without_pending_hint_or_operation_id() -> No
     assert state.pending_operator_hint is not None
     assert state.pending_operator_hint.status == "agent_failed"
     assert state.pending_operator_hint.status_reason == "provider unavailable"
+
+
+def test_processed_operator_guide_retires_referenced_review_needs_human() -> None:
+    """A consumed guide that names a review feedback id must clear that stale wait."""
+    comment = ReviewComment(
+        comment_id="issue:4788370423",
+        body_excerpt="old review-level summary",
+        body="old review-level summary",
+        author="coderabbitai",
+        source_kind="issue",
+    )
+    state = MonitorState(
+        pending_operator_hint=OperatorHint(
+            reason="operator said issue:4788370423 is stale and non-blocking",
+            directive="Reply AWF-VERDICT: FALSE POSITIVE for issue:4788370423.",
+            operation_id="op_answered_review",
+            reason_code="OPERATOR_GUIDE",
+        ),
+        threads_addressed_ids={
+            "issue:4788370423": "needs_human",
+            "__needs_human_reason__:issue:4788370423": "maintainer must choose",
+            "__review_comment_body_hash__:issue:4788370423": "old-hash",
+        },
+    )
+
+    _finalize_processed_operator_hint(state)
+
+    assert state.pending_operator_hint is None
+    assert state.threads_addressed_ids["issue:4788370423"] == "false_positive"
+    assert "__needs_human_reason__:issue:4788370423" not in state.threads_addressed_ids
+    assert (
+        state.threads_addressed_ids[operator_hint_processed_key("op_answered_review")]
+        == "processed"
+    )
+    action = decide(
+        _ready_status(review_comments=(comment,)),
+        state,
+        MonitorConfig(auto_merge=True),
+    )
+    assert isinstance(action, Merge)
+
+
+def test_processed_operator_guide_uses_action_hint_when_pending_hint_was_cleared() -> None:
+    """Finalization can receive the action hint after pending storage was cleared."""
+    comment = ReviewComment(
+        comment_id="issue:4788406681",
+        body_excerpt="old review-level summary",
+        body="old review-level summary",
+        author="coderabbitai",
+        source_kind="issue",
+    )
+    state = MonitorState(
+        threads_addressed_ids={
+            "issue:4788406681": "needs_human",
+            "__needs_human_reason__:issue:4788406681": "maintainer must choose",
+        },
+    )
+    hint = OperatorHint(
+        reason=None,
+        directive="Treat issue:4788406681 as already answered by the operator.",
+        operation_id="op_action_hint",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    _finalize_processed_operator_hint(state, hint=hint)
+
+    assert state.pending_operator_hint is None
+    assert state.threads_addressed_ids["issue:4788406681"] == "false_positive"
+    assert "__needs_human_reason__:issue:4788406681" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[operator_hint_processed_key("op_action_hint")] == "processed"
+    action = decide(
+        _ready_status(review_comments=(comment,)),
+        state,
+        MonitorConfig(auto_merge=True),
+    )
+    assert isinstance(action, Merge)
+
+
+def test_processed_operator_guide_keeps_unreferenced_needs_human_blocking() -> None:
+    """A guide must not clear unrelated review comments that still need humans."""
+    mentioned = ReviewComment(
+        comment_id="issue:4788370423",
+        body_excerpt="operator answered this one",
+        author="coderabbitai",
+        source_kind="issue",
+    )
+    unmentioned = ReviewComment(
+        comment_id="issue:4788406681",
+        body_excerpt="different human decision",
+        author="coderabbitai",
+        source_kind="issue",
+    )
+    state = MonitorState(
+        pending_operator_hint=OperatorHint(
+            reason="operator answered issue:4788370423 only",
+            operation_id="op_partial_answer",
+            reason_code="OPERATOR_GUIDE",
+        ),
+        threads_addressed_ids={
+            "issue:4788370423": "needs_human",
+            "issue:4788406681": "needs_human",
+        },
+    )
+
+    _finalize_processed_operator_hint(state)
+
+    assert state.threads_addressed_ids["issue:4788370423"] == "false_positive"
+    assert state.threads_addressed_ids["issue:4788406681"] == "needs_human"
+    action = decide(
+        _ready_status(review_comments=(mentioned, unmentioned)),
+        state,
+        MonitorConfig(auto_merge=True),
+    )
+    assert isinstance(action, NotifyHuman)
 
 
 def test_remonitor_elapsed_settle_helpers_filter_current_head() -> None:

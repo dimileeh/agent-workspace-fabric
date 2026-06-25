@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -40,6 +41,8 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+
+_OPERATOR_HINT_FEEDBACK_ID_RE = re.compile(r"\b(?:issue:)?\d{6,}\b")
 
 
 async def _run_operator_hint_cycle(
@@ -123,7 +126,9 @@ async def _run_operator_hint_cycle(
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
-        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+        await _finalize_operator_hint_resume(
+            self, workspace_id=workspace_id, state=state, hint=hint
+        )
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     # Restart-after-consume recovery for a DIRECTIVE that DROPPED the preserved
     # commit. A directive-only resume can resolve the block by dropping the preserved
@@ -163,7 +168,9 @@ async def _run_operator_hint_cycle(
             preserved_head_sha=local_head_sha,
         ):
             state.last_push_sha = local_head_sha
-            await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+            await _finalize_operator_hint_resume(
+                self, workspace_id=workspace_id, state=state, hint=hint
+            )
             return _GitPushResult(pushed=False, failed=False, returncode=0)
     if hint.directive or not active_grant_specs:
         prompt = operator_hint_prompt(
@@ -470,7 +477,9 @@ async def _run_operator_hint_cycle(
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
-        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+        await _finalize_operator_hint_resume(
+            self, workspace_id=workspace_id, state=state, hint=hint
+        )
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     push_result = (
         await self._repair_protected_scope_commits_before_push(
@@ -634,7 +643,9 @@ async def _run_operator_hint_cycle(
             )
             mark_operator_hint_needs_human(state, reason)
             return cast(_GitPushResult, push_result)
-        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+        await _finalize_operator_hint_resume(
+            self, workspace_id=workspace_id, state=state, hint=hint
+        )
         return cast(_GitPushResult, push_result)
 
     pushed_head_sha = await self._rev_parse_head(worktree_path)
@@ -642,7 +653,7 @@ async def _run_operator_hint_cycle(
         state.last_push_sha = pushed_head_sha
     # Single-use: consume the operator grants now that the resumed change pushed,
     # so a later DIFFERENT protected change re-blocks and must be granted again.
-    await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+    await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state, hint=hint)
     return cast(_GitPushResult, push_result)
 
 
@@ -977,7 +988,7 @@ async def _clear_dropped_preserved_marker_after_terminal_directive(
 
 
 async def _finalize_operator_hint_resume(
-    self: Any, *, workspace_id: str, state: MonitorState
+    self: Any, *, workspace_id: str, state: MonitorState, hint: OperatorHint | None = None
 ) -> None:
     """Close out a settled protected-block resume so the next cycle starts clean.
 
@@ -1004,10 +1015,12 @@ async def _finalize_operator_hint_resume(
     hint processed for the remainder of this cycle."""
     await self._clear_preserved_marker_and_consume_grants_durably(workspace_id)
     await self._clear_block_resume_phase(workspace_id)
-    _finalize_processed_operator_hint(state)
+    _finalize_processed_operator_hint(state, hint=hint)
 
 
-def _finalize_processed_operator_hint(state: MonitorState) -> None:
+def _finalize_processed_operator_hint(
+    state: MonitorState, *, hint: OperatorHint | None = None
+) -> None:
     """Mark the operator hint processed and drop the protected-block preserved-head
     marker.
 
@@ -1019,8 +1032,52 @@ def _finalize_processed_operator_hint(state: MonitorState) -> None:
     restart-recovery shortcut and skip the CLI — silently ignoring the operator's
     new repair request (PRRT_kwDOSJAM6s6KE2BX). A fresh block re-records the marker.
     """
+    pending_hint = getattr(state, "pending_operator_hint", None)
+    active_hint = pending_hint or hint
+    _mark_referenced_needs_human_feedback_answered(state, hint=active_hint)
     state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
+    if hasattr(state, "pending_operator_hint") and pending_hint is None and active_hint is not None:
+        state.pending_operator_hint = active_hint
     mark_operator_hint_processed(state)
+
+
+def _mark_referenced_needs_human_feedback_answered(
+    state: MonitorState, *, hint: OperatorHint | None = None
+) -> None:
+    """Retire review-level ``needs_human`` verdicts a guide explicitly answered.
+
+    Operator guides are the sanctioned path for resolving a monitor HUMAN_WAIT.
+    For review-level comments there is no GitHub thread to resolve, so a consumed
+    guide that names the original issue/review feedback id must also update the
+    persisted verdict. Otherwise the hint is marked processed and the next
+    ``decide()`` poll immediately re-enters the same stale HUMAN_WAIT.
+    """
+    if hint is None:
+        return
+    text = "\n".join(part for part in (hint.directive, hint.reason) if part)
+    if not text:
+        return
+    for item_id in _operator_hint_feedback_id_candidates(text):
+        if state.threads_addressed_ids.get(item_id) != "needs_human":
+            continue
+        state.mark_addressed(item_id, "false_positive")
+        state.threads_addressed_ids.pop(f"__needs_human_reason__:{item_id}", None)
+
+
+def _operator_hint_feedback_id_candidates(text: str) -> tuple[str, ...]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for match in _OPERATOR_HINT_FEEDBACK_ID_RE.finditer(text):
+        raw = match.group(0)
+        forms = (
+            (raw, raw.removeprefix("issue:")) if raw.startswith("issue:") else (raw, f"issue:{raw}")
+        )
+        for item_id in forms:
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            candidates.append(item_id)
+    return tuple(candidates)
 
 
 def _operator_hint_block_reason(verdict: VerdictResult) -> str:
