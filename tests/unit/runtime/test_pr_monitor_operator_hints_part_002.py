@@ -1273,6 +1273,91 @@ async def test_operator_hint_grant_consumed_restart_skips_cli_when_commit_on_rem
 
 
 @pytest.mark.unit
+async def test_operator_hint_remonitor_preserved_head_shortcut_keeps_review_wait(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale preserved-head shortcut must not retire review feedback.
+
+    A directiveless remonitor whose reason names a review id has not acted on that
+    feedback when the restart shortcut skips the CLI, so the review-level
+    ``needs_human`` verdict must remain blocking.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason=f"please re-check {REVIEW_COMMENT_ID}",
+        operation_id="op_stale_marker_remonitor_mentions_review",
+        requested_at="2026-06-25T20:30:00+00:00",
+        reason_code="OPERATOR_REMONITOR",
+    )
+    state = MonitorState(
+        pending_operator_hint=hint,
+        threads_addressed_ids={
+            REVIEW_COMMENT_ID: "needs_human",
+            REVIEW_COMMENT_BODY_HASH_KEY: "body-hash",
+            REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY: "review still needs a human",
+        },
+    )
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "recorded-preserved-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("recorded-preserved-sha", None)
+
+    async def _cli_must_not_run(**_kwargs: object) -> object:
+        pytest.fail("the stale preserved-head shortcut should skip the CLI")
+
+    async def _already_on_remote(**_kwargs: object) -> bool:
+        return True
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("an already-pushed preserved commit must NOT be re-pushed")
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "recorded-preserved-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _already_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert state.pending_operator_hint is None
+    assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[REVIEW_COMMENT_ID] == "needs_human"
+    assert state.threads_addressed_ids[REVIEW_COMMENT_BODY_HASH_KEY] == "body-hash"
+    assert (
+        state.threads_addressed_ids[REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY]
+        == "review still needs a human"
+    )
+
+
+@pytest.mark.unit
 async def test_operator_hint_directive_grant_consumed_restart_skips_cli_when_commit_on_remote(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

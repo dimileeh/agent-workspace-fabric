@@ -151,11 +151,9 @@ async def _run_operator_hint_cycle(
             workspace_id=workspace_id,
             state=state,
             hint=hint,
-            acted_feedback_text=(
-                hint.reason
-                if hint.directive is None and hint.reason_code == "OPERATOR_REMONITOR"
-                else hint.directive
-            ),
+            # This recovery shortcut skips the CLI, so a directiveless remonitor
+            # reason is audit context, not acted-on feedback text.
+            acted_feedback_text=hint.directive,
         )
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     # Restart-after-consume recovery for a DIRECTIVE that DROPPED the preserved
