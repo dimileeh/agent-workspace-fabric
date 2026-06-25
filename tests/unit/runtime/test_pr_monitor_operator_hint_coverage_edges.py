@@ -1070,6 +1070,33 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_revie
     assert state.threads_addressed_ids["__needs_human_reason__:9999999"] == "still blocking"
 
 
+def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bitbucket_id() -> None:
+    state = MonitorState(
+        threads_addressed_ids={
+            "bbcomment:42": "needs_human",
+            _review_comment_body_state_key("bbcomment:42"): pr_feedback_body_hash(
+                "bitbucket review body"
+            ),
+            "__needs_human_reason__:bbcomment:42": "operator asked for help",
+            "42": "needs_human",
+            _review_comment_body_state_key("42"): pr_feedback_body_hash("unrelated numeric body"),
+            "__needs_human_reason__:42": "still blocking",
+        }
+    )
+    hint = OperatorHint(
+        reason="Operator confirmed comment id bbcomment:42 is non-blocking.",
+        operation_id="op_referenced_bitbucket_feedback",
+        requested_at="2026-06-25T20:20:00+00:00",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint, acted_text=hint.reason)
+
+    assert state.threads_addressed_ids["bbcomment:42"] == "false_positive"
+    assert "__needs_human_reason__:bbcomment:42" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["42"] == "needs_human"
+    assert state.threads_addressed_ids["__needs_human_reason__:42"] == "still blocking"
+
+
 def test_operator_hint_retire_referenced_needs_human_feedback_rejects_uncontextual_bare_id() -> (
     None
 ):
