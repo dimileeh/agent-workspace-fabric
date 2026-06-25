@@ -1050,7 +1050,10 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_revie
         }
     )
     hint = OperatorHint(
-        reason=("Operator confirmed 1234567, issue:2345678, and issue:7654321 are non-blocking."),
+        reason=(
+            "Operator confirmed feedback id 1234567, issue:2345678, "
+            "and issue:7654321 are non-blocking."
+        ),
         operation_id="op_referenced_feedback",
         requested_at="2026-06-25T18:20:00+00:00",
     )
@@ -1065,6 +1068,30 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_revie
     assert "__needs_human_reason__:issue:7654321" not in state.threads_addressed_ids
     assert state.threads_addressed_ids["9999999"] == "needs_human"
     assert state.threads_addressed_ids["__needs_human_reason__:9999999"] == "still blocking"
+
+
+def test_operator_hint_retire_referenced_needs_human_feedback_rejects_uncontextual_bare_id() -> (
+    None
+):
+    state = MonitorState(
+        threads_addressed_ids={
+            "1234567": "needs_human",
+            _review_comment_body_state_key("1234567"): pr_feedback_body_hash("bare review body"),
+            "__needs_human_reason__:1234567": "operator asked for help",
+        }
+    )
+    hint = OperatorHint(
+        reason="Operator closed ticket 1234567; proceed.",
+        operation_id="op_uncontextual_bare_feedback",
+        requested_at="2026-06-25T18:20:00+00:00",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint, acted_text=hint.reason)
+
+    assert state.threads_addressed_ids["1234567"] == "needs_human"
+    assert state.threads_addressed_ids["__needs_human_reason__:1234567"] == (
+        "operator asked for help"
+    )
 
 
 def test_operator_hint_retire_referenced_needs_human_feedback_requires_body_hash() -> None:
@@ -1142,5 +1169,5 @@ def test_operator_hint_retire_referenced_needs_human_feedback_noops_without_acte
 
 def test_operator_hint_feedback_id_candidates_preserve_first_unique_ids() -> None:
     assert _operator_hint_feedback_id_candidates(
-        "issue:111111 issue:111111 222222 222222 issue:333333"
+        "issue:111111 issue:111111 feedback id 222222 feedback id 222222 issue:333333"
     ) == ("issue:111111", "222222", "issue:333333")

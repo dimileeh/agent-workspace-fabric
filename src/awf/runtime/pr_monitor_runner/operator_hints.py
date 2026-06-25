@@ -42,12 +42,25 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorPolicyBlockedError,
 )
 
-# Recognize the persisted review-comment key forms surfaced back to operators:
-# GitHub review bodies may be bare databaseIds, while issue/review comments use
-# ``issue:<databaseId>``. Retirement still requires a stale ``needs_human``
-# storage-key match before clearing anything, which preserves the over-clear
-# guard for unrelated numbers in guide text.
-_OPERATOR_HINT_FEEDBACK_ID_RE = re.compile(r"\bissue:\d{6,}\b|\b\d{6,}\b")
+# Recognize the persisted review-comment key forms surfaced back to operators.
+# ``issue:<databaseId>`` is already an explicit feedback key; bare databaseIds
+# must appear with feedback/comment id context so unrelated long numbers do not
+# retire stale review waits.
+_OPERATOR_HINT_ISSUE_FEEDBACK_ID_RE = re.compile(r"\bissue:\d{6,}\b", re.IGNORECASE)
+_OPERATOR_HINT_BARE_FEEDBACK_ID_RE = re.compile(
+    r"""
+    \b
+    (?:
+        feedback
+        | review(?:[\s_-]+comment)?
+        | comment
+    )
+    [\s_-]*id[\s:#-]*
+    (?P<id>\d{6,})
+    \b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
 async def _run_operator_hint_cycle(
@@ -1134,8 +1147,16 @@ def _operator_hint_feedback_body_hash_key(item_id: str) -> str:
 def _operator_hint_feedback_id_candidates(text: str) -> tuple[str, ...]:
     candidates: list[str] = []
     seen: set[str] = set()
-    for match in _OPERATOR_HINT_FEEDBACK_ID_RE.finditer(text):
-        item_id = match.group(0)
+    matches: list[tuple[int, str]] = []
+    matches.extend(
+        (match.start(), match.group(0).lower())
+        for match in _OPERATOR_HINT_ISSUE_FEEDBACK_ID_RE.finditer(text)
+    )
+    matches.extend(
+        (match.start("id"), match.group("id"))
+        for match in _OPERATOR_HINT_BARE_FEEDBACK_ID_RE.finditer(text)
+    )
+    for _, item_id in sorted(matches, key=lambda candidate: candidate[0]):
         if item_id in seen:
             continue
         seen.add(item_id)
