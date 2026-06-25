@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.repositories import pr_feedback_body_hash
 from awf.db.session import make_session_factory
 from awf.runtime.monitor_state_keys import (
     _non_check_reviewer_settle_done_key,
@@ -175,7 +176,7 @@ def test_processed_operator_guide_retires_referenced_review_needs_human() -> Non
         threads_addressed_ids={
             "issue:4788370423": "needs_human",
             "__needs_human_reason__:issue:4788370423": "maintainer must choose",
-            "__review_comment_body_hash__:issue:4788370423": "old-hash",
+            "__review_comment_body_hash__:issue:4788370423": pr_feedback_body_hash(comment.body),
         },
     )
 
