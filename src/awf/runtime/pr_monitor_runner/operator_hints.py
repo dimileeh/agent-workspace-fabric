@@ -1057,6 +1057,13 @@ def _mark_referenced_needs_human_feedback_answered(
     guide that names the original issue/review feedback id must also update the
     persisted verdict. Otherwise the hint is marked processed and the next
     ``decide()`` poll immediately re-enters the same stale HUMAN_WAIT.
+
+    This helper intentionally leaves any stored ``__review_comment_body_hash__``
+    marker unchanged because it does not receive the live ``ReviewComment`` needed
+    to recompute the hash. A caller that retires the verdict while holding that
+    object should refresh the marker at the same time; otherwise a concurrent
+    reviewer edit can make the next stale-state sweep clear this false-positive
+    retirement and requeue the comment for triage.
     """
     if hint is None:
         return
