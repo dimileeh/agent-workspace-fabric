@@ -64,6 +64,7 @@ from awf.runtime.pr_monitor_runner.operator_hints import (
     _finalize_processed_operator_hint,
     _mark_referenced_needs_human_feedback_answered,
     _operator_hint_block_reason,
+    _operator_hint_feedback_id_candidates,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from tests.postgres import postgres_test_engine
@@ -333,6 +334,15 @@ def test_remonitor_elapsed_settle_helpers_filter_current_head() -> None:
         threads_addressed,
         pr_number=None,
         head_sha="current",
+    )
+    assert (
+        remonitor_elapsed_settle_head_shas(
+            threads_addressed,
+            pr_number=None,
+            preferred_head_sha="other",
+            current_head_sha="current",
+        )
+        == ()
     )
     assert remonitor_elapsed_settle_head_shas(
         threads_addressed,
@@ -1107,3 +1117,28 @@ def test_operator_hint_retire_referenced_needs_human_feedback_uses_acted_text() 
     )
     assert state.threads_addressed_ids["issue:222222"] == "false_positive"
     assert "__needs_human_reason__:issue:222222" not in state.threads_addressed_ids
+
+
+def test_operator_hint_retire_referenced_needs_human_feedback_noops_without_acted_text() -> None:
+    state = MonitorState(
+        threads_addressed_ids={
+            "issue:111111": "needs_human",
+            _review_comment_body_state_key("issue:111111"): pr_feedback_body_hash("audit body"),
+            "__needs_human_reason__:issue:111111": "still blocking",
+        }
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=None)
+    _mark_referenced_needs_human_feedback_answered(
+        state,
+        hint=OperatorHint(reason=None, directive=None, operation_id="op_empty_hint"),
+    )
+
+    assert state.threads_addressed_ids["issue:111111"] == "needs_human"
+    assert state.threads_addressed_ids["__needs_human_reason__:issue:111111"] == ("still blocking")
+
+
+def test_operator_hint_feedback_id_candidates_preserve_first_unique_ids() -> None:
+    assert _operator_hint_feedback_id_candidates(
+        "issue:111111 issue:111111 222222 222222 issue:333333"
+    ) == ("issue:111111", "222222", "issue:333333")
