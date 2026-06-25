@@ -350,15 +350,13 @@ async def test_operator_hint_directive_drop_restart_finalizes_without_rerunning_
 
 
 @pytest.mark.unit
-async def test_operator_hint_remonitor_restart_shortcut_uses_reason_as_acted_text(
+async def test_operator_hint_remonitor_restart_shortcut_keeps_review_wait(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A plain remonitor has no directive; its reason is the prompt text the agent
-    acted on. If the restart-after-consume shortcut finalizes with only
-    ``hint.directive`` it leaves referenced review-level ``needs_human`` rows stale
-    even though the remonitor was processed."""
+    """The preserved-head shortcut skips the CLI, so remonitor reason text is not
+    acted-on feedback and must not retire review-level ``needs_human`` rows."""
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
         factory=factory,
@@ -421,8 +419,8 @@ async def test_operator_hint_remonitor_restart_shortcut_uses_reason_as_acted_tex
 
     assert result.pushed is False
     assert result.failed is False
-    assert state.threads_addressed_ids["issue:4788370423"] == "false_positive"
-    assert "__needs_human_reason__:issue:4788370423" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["issue:4788370423"] == "needs_human"
+    assert "__needs_human_reason__:issue:4788370423" in state.threads_addressed_ids
     assert state.pending_operator_hint is None
 
 
