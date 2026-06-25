@@ -44,9 +44,9 @@ from awf.runtime.pr_monitor_runner.types import (
 
 # Recognize the persisted review-comment key forms surfaced back to operators:
 # GitHub review bodies may be bare databaseIds, while issue/review comments use
-# ``issue:<databaseId>``. The caller still requires an exact stale
-# ``needs_human`` key match before retiring anything, which preserves the
-# over-clear guard for unrelated numbers in guide text.
+# ``issue:<databaseId>``. Retirement still requires a stale ``needs_human``
+# storage-key match before clearing anything, which preserves the over-clear
+# guard for unrelated numbers in guide text.
 _OPERATOR_HINT_FEEDBACK_ID_RE = re.compile(r"\bissue:\d{6,}\b|\b\d{6,}\b")
 
 
@@ -1069,11 +1069,13 @@ def _mark_referenced_needs_human_feedback_answered(
     text = "\n".join(part for part in (hint.directive, hint.reason) if part)
     if not text:
         return
-    for item_id in _operator_hint_feedback_id_candidates(text):
-        if state.threads_addressed_ids.get(item_id) != "needs_human":
-            continue
-        state.mark_addressed(item_id, "false_positive")
-        state.threads_addressed_ids.pop(f"__needs_human_reason__:{item_id}", None)
+    for referenced_id in _operator_hint_feedback_id_candidates(text):
+        for item_id in _operator_hint_feedback_storage_key_candidates(referenced_id):
+            if state.threads_addressed_ids.get(item_id) != "needs_human":
+                continue
+            state.mark_addressed(item_id, "false_positive")
+            state.threads_addressed_ids.pop(f"__needs_human_reason__:{item_id}", None)
+            break
 
 
 def _operator_hint_feedback_id_candidates(text: str) -> tuple[str, ...]:
@@ -1086,6 +1088,12 @@ def _operator_hint_feedback_id_candidates(text: str) -> tuple[str, ...]:
         seen.add(item_id)
         candidates.append(item_id)
     return tuple(candidates)
+
+
+def _operator_hint_feedback_storage_key_candidates(referenced_id: str) -> tuple[str, ...]:
+    if referenced_id.startswith("issue:"):
+        return (referenced_id, referenced_id.removeprefix("issue:"))
+    return (referenced_id,)
 
 
 def _operator_hint_block_reason(verdict: VerdictResult) -> str:

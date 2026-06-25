@@ -1021,6 +1021,8 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_revie
         threads_addressed_ids={
             "1234567": "needs_human",
             "__needs_human_reason__:1234567": "operator asked for help",
+            "2345678": "needs_human",
+            "__needs_human_reason__:2345678": "operator cited prefixed key",
             "issue:7654321": "needs_human",
             "__needs_human_reason__:issue:7654321": "operator asked for help",
             "9999999": "needs_human",
@@ -1028,7 +1030,7 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_revie
         }
     )
     hint = OperatorHint(
-        reason="Operator confirmed 1234567 and issue:7654321 are non-blocking.",
+        reason=("Operator confirmed 1234567, issue:2345678, and issue:7654321 are non-blocking."),
         operation_id="op_referenced_feedback",
         requested_at="2026-06-25T18:20:00+00:00",
     )
@@ -1037,6 +1039,8 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_revie
 
     assert state.threads_addressed_ids["1234567"] == "false_positive"
     assert "__needs_human_reason__:1234567" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["2345678"] == "false_positive"
+    assert "__needs_human_reason__:2345678" not in state.threads_addressed_ids
     assert state.threads_addressed_ids["issue:7654321"] == "false_positive"
     assert "__needs_human_reason__:issue:7654321" not in state.threads_addressed_ids
     assert state.threads_addressed_ids["9999999"] == "needs_human"
