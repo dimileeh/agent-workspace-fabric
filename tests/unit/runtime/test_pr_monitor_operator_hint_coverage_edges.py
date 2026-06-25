@@ -61,6 +61,7 @@ from awf.runtime.pr_monitor_runner.lifecycle import (
 )
 from awf.runtime.pr_monitor_runner.operator_hints import (
     _finalize_processed_operator_hint,
+    _mark_referenced_needs_human_feedback_answered,
     _operator_hint_block_reason,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
@@ -1013,3 +1014,30 @@ async def test_operator_hint_cycle_marks_pushed_hint_processed_without_empty_hea
         state.threads_addressed_ids[operator_hint_processed_key("op_pushed_without_head")]
         == "processed"
     )
+
+
+def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_review_id() -> None:
+    state = MonitorState(
+        threads_addressed_ids={
+            "1234567": "needs_human",
+            "__needs_human_reason__:1234567": "operator asked for help",
+            "issue:7654321": "needs_human",
+            "__needs_human_reason__:issue:7654321": "operator asked for help",
+            "9999999": "needs_human",
+            "__needs_human_reason__:9999999": "still blocking",
+        }
+    )
+    hint = OperatorHint(
+        reason="Operator confirmed 1234567 and issue:7654321 are non-blocking.",
+        operation_id="op_referenced_feedback",
+        requested_at="2026-06-25T18:20:00+00:00",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids["1234567"] == "false_positive"
+    assert "__needs_human_reason__:1234567" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["issue:7654321"] == "false_positive"
+    assert "__needs_human_reason__:issue:7654321" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["9999999"] == "needs_human"
+    assert state.threads_addressed_ids["__needs_human_reason__:9999999"] == "still blocking"
