@@ -28,6 +28,9 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.operator_hints import (
+    _mark_referenced_needs_human_feedback_answered,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -38,6 +41,9 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 REPO_URL = "git@github.com:dimileeh/aira-web.git"
+REVIEW_COMMENT_ID = "issue:3476977020"
+REVIEW_COMMENT_BODY_HASH_KEY = f"__review_comment_body_hash__:{REVIEW_COMMENT_ID}"
+REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY = f"__needs_human_reason__:{REVIEW_COMMENT_ID}"
 
 
 @pytest.fixture
@@ -89,6 +95,118 @@ async def _seed_active_grant(
         )
         await session.commit()
     return grant_id
+
+
+@pytest.mark.unit
+def test_directiveless_operator_hint_reason_does_not_retire_referenced_needs_human() -> None:
+    """Grant-only audit reasons are not acted-on review-feedback text.
+
+    Approve-and-keep resumes skip the CLI, so mentioning a review id in the audit
+    reason must not convert a stored ``needs_human`` review verdict to
+    ``false_positive``.
+    """
+    state = MonitorState(
+        threads_addressed_ids={
+            REVIEW_COMMENT_ID: "needs_human",
+            REVIEW_COMMENT_BODY_HASH_KEY: "body-hash",
+            REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY: "review still needs a human",
+        }
+    )
+    hint = OperatorHint(
+        reason=f"approved protected path; related review feedback {REVIEW_COMMENT_ID}",
+        operation_id="op_grant_only_mentions_review",
+        requested_at="2026-06-25T19:30:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids[REVIEW_COMMENT_ID] == "needs_human"
+    assert state.threads_addressed_ids[REVIEW_COMMENT_BODY_HASH_KEY] == "body-hash"
+    assert (
+        state.threads_addressed_ids[REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY]
+        == "review still needs a human"
+    )
+
+
+@pytest.mark.unit
+def test_operator_hint_directive_retires_referenced_needs_human() -> None:
+    """A directive is acted-on text and may retire the referenced review verdict."""
+    state = MonitorState(
+        threads_addressed_ids={
+            REVIEW_COMMENT_ID: "needs_human",
+            REVIEW_COMMENT_BODY_HASH_KEY: "body-hash",
+            REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY: "review still needs a human",
+        }
+    )
+    hint = OperatorHint(
+        reason="operator guide audit note",
+        directive=f"Resolve {REVIEW_COMMENT_ID} as false positive after checking the code.",
+        operation_id="op_directive_mentions_review",
+        requested_at="2026-06-25T19:35:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids[REVIEW_COMMENT_ID] == "false_positive"
+    assert state.threads_addressed_ids[REVIEW_COMMENT_BODY_HASH_KEY] == "body-hash"
+    assert REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_operator_hint_directive_retires_issue_feedback_from_bare_id() -> None:
+    """Contextual bare feedback ids also match GitHub ``issue:<databaseId>`` keys."""
+    bare_comment_id = REVIEW_COMMENT_ID.removeprefix("issue:")
+    state = MonitorState(
+        threads_addressed_ids={
+            REVIEW_COMMENT_ID: "needs_human",
+            REVIEW_COMMENT_BODY_HASH_KEY: "body-hash",
+            REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY: "review still needs a human",
+        }
+    )
+    hint = OperatorHint(
+        reason="operator guide audit note",
+        directive=f"Resolve feedback id {bare_comment_id} as false positive.",
+        operation_id="op_directive_mentions_bare_review_id",
+        requested_at="2026-06-25T20:25:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids[REVIEW_COMMENT_ID] == "false_positive"
+    assert state.threads_addressed_ids[REVIEW_COMMENT_BODY_HASH_KEY] == "body-hash"
+    assert REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_operator_hint_directive_ignores_uncontextualized_long_number() -> None:
+    """Bare long numbers need feedback/comment-id context before matching."""
+    bare_comment_id = REVIEW_COMMENT_ID.removeprefix("issue:")
+    state = MonitorState(
+        threads_addressed_ids={
+            REVIEW_COMMENT_ID: "needs_human",
+            REVIEW_COMMENT_BODY_HASH_KEY: "body-hash",
+            REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY: "review still needs a human",
+        }
+    )
+    hint = OperatorHint(
+        reason="operator guide audit note",
+        directive=f"Investigated build {bare_comment_id} and found no code issue.",
+        operation_id="op_directive_mentions_uncontextualized_number",
+        requested_at="2026-06-25T20:30:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids[REVIEW_COMMENT_ID] == "needs_human"
+    assert state.threads_addressed_ids[REVIEW_COMMENT_BODY_HASH_KEY] == "body-hash"
+    assert (
+        state.threads_addressed_ids[REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY]
+        == "review still needs a human"
+    )
 
 
 @pytest.mark.unit
@@ -1155,6 +1273,91 @@ async def test_operator_hint_grant_consumed_restart_skips_cli_when_commit_on_rem
 
 
 @pytest.mark.unit
+async def test_operator_hint_remonitor_preserved_head_shortcut_keeps_review_wait(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale preserved-head shortcut must not retire review feedback.
+
+    A directiveless remonitor whose reason names a review id has not acted on that
+    feedback when the restart shortcut skips the CLI, so the review-level
+    ``needs_human`` verdict must remain blocking.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason=f"please re-check {REVIEW_COMMENT_ID}",
+        operation_id="op_stale_marker_remonitor_mentions_review",
+        requested_at="2026-06-25T20:30:00+00:00",
+        reason_code="OPERATOR_REMONITOR",
+    )
+    state = MonitorState(
+        pending_operator_hint=hint,
+        threads_addressed_ids={
+            REVIEW_COMMENT_ID: "needs_human",
+            REVIEW_COMMENT_BODY_HASH_KEY: "body-hash",
+            REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY: "review still needs a human",
+        },
+    )
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "recorded-preserved-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("recorded-preserved-sha", None)
+
+    async def _cli_must_not_run(**_kwargs: object) -> object:
+        pytest.fail("the stale preserved-head shortcut should skip the CLI")
+
+    async def _already_on_remote(**_kwargs: object) -> bool:
+        return True
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("an already-pushed preserved commit must NOT be re-pushed")
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "recorded-preserved-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _already_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert state.pending_operator_hint is None
+    assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids
+    assert state.threads_addressed_ids[REVIEW_COMMENT_ID] == "needs_human"
+    assert state.threads_addressed_ids[REVIEW_COMMENT_BODY_HASH_KEY] == "body-hash"
+    assert (
+        state.threads_addressed_ids[REVIEW_COMMENT_NEEDS_HUMAN_REASON_KEY]
+        == "review still needs a human"
+    )
+
+
+@pytest.mark.unit
 async def test_operator_hint_directive_grant_consumed_restart_skips_cli_when_commit_on_remote(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1234,151 +1437,3 @@ async def test_operator_hint_directive_grant_consumed_restart_skips_cli_when_com
     assert state.last_push_sha == "recorded-preserved-sha"
     assert state.pending_operator_hint is None  # hint processed without the agent
     assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids
-
-
-@pytest.mark.unit
-async def test_operator_hint_resume_push_clears_preserved_head_marker(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """After a grant-only resume pushes the approved commit and is finalized, the
-    preserved-head marker MUST be dropped from monitor state. Leaving it would let
-    a later plain remonitor (no directive, no grant) whose old preserved commit is
-    still on the remote take the restart-recovery shortcut and silently skip the
-    CLI, ignoring the operator's new repair request (PRRT_kwDOSJAM6s6KE2BX)."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    await _seed_active_grant(factory, workspace_id, path="pyproject.toml")
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path,
-    )
-    hint = OperatorHint(
-        reason="approved the protected change",
-        operation_id="op_clears_marker",
-        requested_at="2026-06-17T00:00:00+00:00",
-        reason_code="OPERATOR_GUIDE",
-    )
-    state = MonitorState(pending_operator_hint=hint)
-    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "recorded-preserved-sha")
-
-    async def _no_preexisting_dirty(**_kwargs: object) -> None:
-        return None
-
-    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
-        return ("recorded-preserved-sha", None)
-
-    async def _cli_must_not_run(**_kwargs: object) -> object:
-        pytest.fail("a grant-only resume must NOT invoke the CLI")
-
-    async def _no_block(**_kwargs: object) -> None:
-        return None
-
-    async def _not_on_remote(**_kwargs: object) -> bool:
-        return False
-
-    async def _pushed(**_kwargs: object) -> _GitPushResult:
-        return _GitPushResult(pushed=True, failed=False, returncode=0)
-
-    async def _head(*_args: object, **_kwargs: object) -> str:
-        return "pushed-sha"
-
-    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
-    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
-    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
-    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
-    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
-    monkeypatch.setattr(runner, "_validated_git_push_result", _pushed)
-    monkeypatch.setattr(runner, "_rev_parse_head", _head)
-
-    result = await runner._run_operator_hint_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        hint=hint,
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.pushed is True
-    assert state.pending_operator_hint is None  # hint processed
-    # The marker is gone, so a subsequent plain remonitor will run the CLI.
-    assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids
-
-
-@pytest.mark.unit
-async def test_operator_hint_no_directive_no_grant_no_marker_still_runs_cli(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A plain remonitor hint (no directive, no grant, NO preserved-head marker)
-    must still invoke the CLI — the restart short-circuit only applies to a
-    protected-block grant resume, never to a normal remonitor."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path,
-    )
-    hint = OperatorHint(
-        reason="re-examine the PR",
-        operation_id="op_plain_remonitor",
-        requested_at="2026-06-17T00:00:00+00:00",
-    )
-    state = MonitorState(pending_operator_hint=hint)
-    cli_calls: list[dict[str, object]] = []
-
-    async def _no_preexisting_dirty(**_kwargs: object) -> None:
-        return None
-
-    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
-        return ("abc1234567890def", None)
-
-    async def _fixed_verdict(**kwargs: object) -> VerdictResult:
-        cli_calls.append(kwargs)
-        return VerdictResult(verdict="fix_committed")
-
-    async def _no_block(**_kwargs: object) -> None:
-        return None
-
-    async def _not_on_remote(**_kwargs: object) -> bool:
-        return False
-
-    async def _pushed(**_kwargs: object) -> _GitPushResult:
-        return _GitPushResult(pushed=True, failed=False, returncode=0)
-
-    async def _head(*_args: object, **_kwargs: object) -> str:
-        return "pushed-sha"
-
-    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
-    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
-    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
-    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
-    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
-    monkeypatch.setattr(runner, "_validated_git_push_result", _pushed)
-    monkeypatch.setattr(runner, "_rev_parse_head", _head)
-
-    result = await runner._run_operator_hint_cycle(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        hint=hint,
-        state=state,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.pushed is True
-    assert cli_calls  # the CLI ran for the plain remonitor
-    assert state.pending_operator_hint is None

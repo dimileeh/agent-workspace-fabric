@@ -350,6 +350,81 @@ async def test_operator_hint_directive_drop_restart_finalizes_without_rerunning_
 
 
 @pytest.mark.unit
+async def test_operator_hint_remonitor_restart_shortcut_keeps_review_wait(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preserved-head shortcut skips the CLI, so remonitor reason text is not
+    acted-on feedback and must not retire review-level ``needs_human`` rows."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="remonitor after addressing issue:4788370423 in the PR discussion",
+        operation_id="op_remonitor_restart",
+        requested_at="2026-06-25T00:00:00+00:00",
+    )
+    state = MonitorState(
+        pending_operator_hint=hint,
+        threads_addressed_ids={
+            _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "preserved-sha",
+            "issue:4788370423": "needs_human",
+            "__review_comment_body_hash__:issue:4788370423": "body-hash",
+            "__needs_human_reason__:issue:4788370423": "operator needs to answer",
+        },
+    )
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-sha", None)
+
+    async def _already_on_remote(**_kwargs: object) -> bool:
+        return True
+
+    async def _cli_must_not_run(**_kwargs: object) -> object:
+        pytest.fail("restart finalization must not re-invoke the CLI")
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("an already-pushed preserved commit must NOT be re-pushed")
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "preserved-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _already_on_remote)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert state.threads_addressed_ids["issue:4788370423"] == "needs_human"
+    assert "__needs_human_reason__:issue:4788370423" in state.threads_addressed_ids
+    assert state.pending_operator_hint is None
+
+
+@pytest.mark.unit
 async def test_operator_hint_directive_drop_restart_skips_shortcut_for_revert_on_top_marker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

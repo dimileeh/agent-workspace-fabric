@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -39,6 +40,28 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
+)
+
+# Recognize the persisted review-comment key forms surfaced back to operators.
+# ``issue:<databaseId>`` is already an explicit feedback key; bare databaseIds
+# and Bitbucket ``bbcomment:<id>`` keys are already explicit feedback keys; bare
+# databaseIds must appear with feedback/comment id context so unrelated numbers
+# do not retire stale review waits.
+_OPERATOR_HINT_ISSUE_FEEDBACK_ID_RE = re.compile(r"\bissue:\d+\b", re.IGNORECASE)
+_OPERATOR_HINT_BITBUCKET_FEEDBACK_ID_RE = re.compile(r"\bbbcomment:\d+\b", re.IGNORECASE)
+_OPERATOR_HINT_BARE_FEEDBACK_ID_RE = re.compile(
+    r"""
+    \b
+    (?:
+        feedback
+        | review(?:[\s_-]+comment)?
+        | comment
+    )
+    [\s_-]*id[\s:#-]*
+    (?P<id>\d+)
+    \b
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
@@ -123,7 +146,15 @@ async def _run_operator_hint_cycle(
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
-        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+        await _finalize_operator_hint_resume(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            hint=hint,
+            # This recovery shortcut skips the CLI, so a directiveless remonitor
+            # reason is audit context, not acted-on feedback text.
+            acted_feedback_text=hint.directive,
+        )
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     # Restart-after-consume recovery for a DIRECTIVE that DROPPED the preserved
     # commit. A directive-only resume can resolve the block by dropping the preserved
@@ -163,9 +194,18 @@ async def _run_operator_hint_cycle(
             preserved_head_sha=local_head_sha,
         ):
             state.last_push_sha = local_head_sha
-            await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+            await _finalize_operator_hint_resume(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                hint=hint,
+                acted_feedback_text=hint.directive,
+            )
             return _GitPushResult(pushed=False, failed=False, returncode=0)
+    acted_feedback_text = hint.directive
     if hint.directive or not active_grant_specs:
+        if not hint.directive:
+            acted_feedback_text = hint.reason
         prompt = operator_hint_prompt(
             pr_number=pr_number,
             repo_slug=repo.slug(),
@@ -470,7 +510,13 @@ async def _run_operator_hint_cycle(
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
-        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+        await _finalize_operator_hint_resume(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            hint=hint,
+            acted_feedback_text=acted_feedback_text,
+        )
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     push_result = (
         await self._repair_protected_scope_commits_before_push(
@@ -634,7 +680,13 @@ async def _run_operator_hint_cycle(
             )
             mark_operator_hint_needs_human(state, reason)
             return cast(_GitPushResult, push_result)
-        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+        await _finalize_operator_hint_resume(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            hint=hint,
+            acted_feedback_text=acted_feedback_text,
+        )
         return cast(_GitPushResult, push_result)
 
     pushed_head_sha = await self._rev_parse_head(worktree_path)
@@ -642,7 +694,13 @@ async def _run_operator_hint_cycle(
         state.last_push_sha = pushed_head_sha
     # Single-use: consume the operator grants now that the resumed change pushed,
     # so a later DIFFERENT protected change re-blocks and must be granted again.
-    await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+    await _finalize_operator_hint_resume(
+        self,
+        workspace_id=workspace_id,
+        state=state,
+        hint=hint,
+        acted_feedback_text=acted_feedback_text,
+    )
     return cast(_GitPushResult, push_result)
 
 
@@ -977,7 +1035,12 @@ async def _clear_dropped_preserved_marker_after_terminal_directive(
 
 
 async def _finalize_operator_hint_resume(
-    self: Any, *, workspace_id: str, state: MonitorState
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    hint: OperatorHint | None = None,
+    acted_feedback_text: str | None = None,
 ) -> None:
     """Close out a settled protected-block resume so the next cycle starts clean.
 
@@ -1004,10 +1067,15 @@ async def _finalize_operator_hint_resume(
     hint processed for the remainder of this cycle."""
     await self._clear_preserved_marker_and_consume_grants_durably(workspace_id)
     await self._clear_block_resume_phase(workspace_id)
-    _finalize_processed_operator_hint(state)
+    _finalize_processed_operator_hint(state, hint=hint, acted_feedback_text=acted_feedback_text)
 
 
-def _finalize_processed_operator_hint(state: MonitorState) -> None:
+def _finalize_processed_operator_hint(
+    state: MonitorState,
+    *,
+    hint: OperatorHint | None = None,
+    acted_feedback_text: str | None = None,
+) -> None:
     """Mark the operator hint processed and drop the protected-block preserved-head
     marker.
 
@@ -1019,8 +1087,93 @@ def _finalize_processed_operator_hint(state: MonitorState) -> None:
     restart-recovery shortcut and skip the CLI — silently ignoring the operator's
     new repair request (PRRT_kwDOSJAM6s6KE2BX). A fresh block re-records the marker.
     """
+    pending_hint = getattr(state, "pending_operator_hint", None)
+    active_hint = pending_hint or hint
+    _mark_referenced_needs_human_feedback_answered(
+        state, hint=active_hint, acted_text=acted_feedback_text
+    )
     state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
+    if hasattr(state, "pending_operator_hint") and pending_hint is None and active_hint is not None:
+        state.pending_operator_hint = active_hint
     mark_operator_hint_processed(state)
+
+
+def _mark_referenced_needs_human_feedback_answered(
+    state: MonitorState,
+    *,
+    hint: OperatorHint | None = None,
+    acted_text: str | None = None,
+) -> None:
+    """Retire review-level ``needs_human`` verdicts a guide explicitly answered.
+
+    Operator guides are the sanctioned path for resolving a monitor HUMAN_WAIT.
+    For review-level comments there is no GitHub thread to resolve, so a consumed
+    guide that names the original issue/review feedback id in the acted-on text
+    must also update the persisted verdict. Otherwise the hint is marked
+    processed and the next ``decide()`` poll immediately re-enters the same stale
+    HUMAN_WAIT.
+
+    ``hint.reason`` can be audit context for approve-and-keep grant-only resumes,
+    which skip the CLI entirely. Callers pass ``acted_text`` when a directiveless
+    reason was actually presented to the agent; otherwise only a directive counts.
+
+    This helper intentionally leaves any stored ``__review_comment_body_hash__``
+    marker unchanged because it does not receive the live ``ReviewComment`` needed
+    to recompute the hash. To keep the retirement durable across the next
+    stale-state sweep, it only retires rows that already have body-hash sidecar
+    state. Legacy rows without that marker remain ``needs_human`` until a path
+    holding the live comment can snapshot the body.
+    """
+    if hint is None:
+        return
+    text = acted_text if acted_text is not None else hint.directive
+    if not text:
+        return
+    for referenced_id in _operator_hint_feedback_id_candidates(text):
+        for item_id in _operator_hint_feedback_storage_key_candidates(referenced_id):
+            if state.threads_addressed_ids.get(item_id) != "needs_human":
+                continue
+            if not state.threads_addressed_ids.get(_operator_hint_feedback_body_hash_key(item_id)):
+                continue
+            state.mark_addressed(item_id, "false_positive")
+            state.threads_addressed_ids.pop(f"__needs_human_reason__:{item_id}", None)
+            break
+
+
+def _operator_hint_feedback_body_hash_key(item_id: str) -> str:
+    return f"__review_comment_body_hash__:{item_id}"
+
+
+def _operator_hint_feedback_id_candidates(text: str) -> tuple[str, ...]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    matches: list[tuple[int, str]] = []
+    matches.extend(
+        (match.start(), match.group(0).lower())
+        for match in _OPERATOR_HINT_ISSUE_FEEDBACK_ID_RE.finditer(text)
+    )
+    matches.extend(
+        (match.start(), match.group(0).lower())
+        for match in _OPERATOR_HINT_BITBUCKET_FEEDBACK_ID_RE.finditer(text)
+    )
+    matches.extend(
+        (match.start("id"), match.group("id"))
+        for match in _OPERATOR_HINT_BARE_FEEDBACK_ID_RE.finditer(text)
+    )
+    for _, item_id in sorted(matches, key=lambda candidate: candidate[0]):
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        candidates.append(item_id)
+    return tuple(candidates)
+
+
+def _operator_hint_feedback_storage_key_candidates(referenced_id: str) -> tuple[str, ...]:
+    if referenced_id.isdigit():
+        if len(referenced_id) < 6:
+            return (referenced_id,)
+        return (referenced_id, f"issue:{referenced_id}")
+    return (referenced_id,)
 
 
 def _operator_hint_block_reason(verdict: VerdictResult) -> str:

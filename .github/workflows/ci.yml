@@ -40,8 +40,22 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv venv --python 3.12
-          uv pip install -e ".[dev]"
+          set -euo pipefail
+          last_rc=1
+          for attempt in 1 2 3; do
+            echo "uv sync attempt ${attempt}/3"
+            if uv sync --python 3.12 --extra dev; then
+              exit 0
+            else
+              last_rc=$?
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "uv sync failed; retrying in 10s"
+              sleep 10
+            fi
+          done
+          echo "uv sync failed after 3 attempts"
+          exit "${last_rc}"
 
       - name: Check Jinja2 template escaping
         run: .venv/bin/python scripts/ci/check_j2_tojson.py
