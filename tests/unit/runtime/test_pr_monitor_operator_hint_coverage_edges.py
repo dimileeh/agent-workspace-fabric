@@ -1095,6 +1095,35 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_short_issu
     assert state.threads_addressed_ids["__needs_human_reason__:55"] == "still blocking"
 
 
+def test_operator_hint_retire_referenced_needs_human_feedback_accepts_short_bare_id() -> None:
+    state = MonitorState(
+        threads_addressed_ids={
+            "55": "needs_human",
+            _review_comment_body_state_key("55"): pr_feedback_body_hash("short bare body"),
+            "__needs_human_reason__:55": "operator asked for help",
+            "issue:55": "needs_human",
+            _review_comment_body_state_key("issue:55"): pr_feedback_body_hash(
+                "unrelated issue body"
+            ),
+            "__needs_human_reason__:issue:55": "issue item still blocking",
+        }
+    )
+    hint = OperatorHint(
+        reason="Operator confirmed comment id 55 is non-blocking.",
+        operation_id="op_referenced_short_bare_feedback",
+        requested_at="2026-06-25T21:15:00+00:00",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint, acted_text=hint.reason)
+
+    assert state.threads_addressed_ids["55"] == "false_positive"
+    assert "__needs_human_reason__:55" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["issue:55"] == "needs_human"
+    assert state.threads_addressed_ids["__needs_human_reason__:issue:55"] == (
+        "issue item still blocking"
+    )
+
+
 def test_operator_hint_retire_referenced_needs_human_feedback_does_not_cross_map_issue_ids() -> (
     None
 ):

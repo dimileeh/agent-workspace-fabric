@@ -45,8 +45,8 @@ from awf.runtime.pr_monitor_runner.types import (
 # Recognize the persisted review-comment key forms surfaced back to operators.
 # ``issue:<databaseId>`` is already an explicit feedback key; bare databaseIds
 # and Bitbucket ``bbcomment:<id>`` keys are already explicit feedback keys; bare
-# databaseIds must appear with feedback/comment id context so unrelated long
-# numbers do not retire stale review waits.
+# databaseIds must appear with feedback/comment id context so unrelated numbers
+# do not retire stale review waits.
 _OPERATOR_HINT_ISSUE_FEEDBACK_ID_RE = re.compile(r"\bissue:\d+\b", re.IGNORECASE)
 _OPERATOR_HINT_BITBUCKET_FEEDBACK_ID_RE = re.compile(r"\bbbcomment:\d+\b", re.IGNORECASE)
 _OPERATOR_HINT_BARE_FEEDBACK_ID_RE = re.compile(
@@ -58,7 +58,7 @@ _OPERATOR_HINT_BARE_FEEDBACK_ID_RE = re.compile(
         | comment
     )
     [\s_-]*id[\s:#-]*
-    (?P<id>\d{6,})
+    (?P<id>\d+)
     \b
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -1170,6 +1170,8 @@ def _operator_hint_feedback_id_candidates(text: str) -> tuple[str, ...]:
 
 def _operator_hint_feedback_storage_key_candidates(referenced_id: str) -> tuple[str, ...]:
     if referenced_id.isdigit():
+        if len(referenced_id) < 6:
+            return (referenced_id,)
         return (referenced_id, f"issue:{referenced_id}")
     return (referenced_id,)
 
