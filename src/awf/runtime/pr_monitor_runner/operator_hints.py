@@ -42,7 +42,13 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorPolicyBlockedError,
 )
 
-_OPERATOR_HINT_FEEDBACK_ID_RE = re.compile(r"\b(?:issue:)?\d{6,}\b")
+# Require the ``issue:`` prefix: review-comment ids are stored as
+# ``issue:<numeric databaseId>`` (see ``github_client``), so the prefixed form is
+# the only key in ``threads_addressed_ids``. Matching a bare 6+ digit number would
+# let an unrelated number in free-text directive/reason (a PR number, a line
+# count, a pasted id) coincidentally clear the WRONG ``needs_human`` verdict on
+# this merge-gating path. Requiring the prefix removes that over-clear window.
+_OPERATOR_HINT_FEEDBACK_ID_RE = re.compile(r"\bissue:\d{6,}\b")
 
 
 async def _run_operator_hint_cycle(
@@ -1068,15 +1074,11 @@ def _operator_hint_feedback_id_candidates(text: str) -> tuple[str, ...]:
     candidates: list[str] = []
     seen: set[str] = set()
     for match in _OPERATOR_HINT_FEEDBACK_ID_RE.finditer(text):
-        raw = match.group(0)
-        forms = (
-            (raw, raw.removeprefix("issue:")) if raw.startswith("issue:") else (raw, f"issue:{raw}")
-        )
-        for item_id in forms:
-            if item_id in seen:
-                continue
-            seen.add(item_id)
-            candidates.append(item_id)
+        item_id = match.group(0)  # always ``issue:<databaseId>`` — the stored key form
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        candidates.append(item_id)
     return tuple(candidates)
 
 

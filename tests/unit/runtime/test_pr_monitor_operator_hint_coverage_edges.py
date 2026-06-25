@@ -270,6 +270,44 @@ def test_processed_operator_guide_keeps_unreferenced_needs_human_blocking() -> N
     assert isinstance(action, NotifyHuman)
 
 
+def test_processed_operator_guide_ignores_bare_number_without_issue_prefix() -> None:
+    """A bare 6+ digit number (no ``issue:`` prefix) must NOT clear a needs_human
+    verdict: an unrelated number in the directive/reason (a PR number, a line
+    count, a pasted id) must not coincidentally retire the wrong review wait on
+    this merge-gating path."""
+    comment = ReviewComment(
+        comment_id="issue:4788370423",
+        body_excerpt="needs a human decision",
+        author="coderabbitai",
+        source_kind="issue",
+    )
+    state = MonitorState(
+        pending_operator_hint=OperatorHint(
+            reason="reverted the change touching 4788370423 lines in the log",
+            directive="Closed PR 4788370423; proceed with the merge.",
+            operation_id="op_bare_number",
+            reason_code="OPERATOR_GUIDE",
+        ),
+        threads_addressed_ids={
+            "issue:4788370423": "needs_human",
+            "__needs_human_reason__:issue:4788370423": "maintainer must choose",
+        },
+    )
+
+    _finalize_processed_operator_hint(state)
+
+    # The bare number is not the prefixed key form, so the verdict survives and
+    # the review wait keeps blocking the merge.
+    assert state.threads_addressed_ids["issue:4788370423"] == "needs_human"
+    assert "__needs_human_reason__:issue:4788370423" in state.threads_addressed_ids
+    action = decide(
+        _ready_status(review_comments=(comment,)),
+        state,
+        MonitorConfig(auto_merge=True),
+    )
+    assert isinstance(action, NotifyHuman)
+
+
 def test_remonitor_elapsed_settle_helpers_filter_current_head() -> None:
     done_current = _non_check_reviewer_settle_done_key(
         pr_number=42,
