@@ -1060,10 +1060,10 @@ def _mark_referenced_needs_human_feedback_answered(
 
     This helper intentionally leaves any stored ``__review_comment_body_hash__``
     marker unchanged because it does not receive the live ``ReviewComment`` needed
-    to recompute the hash. A caller that retires the verdict while holding that
-    object should refresh the marker at the same time; otherwise a concurrent
-    reviewer edit can make the next stale-state sweep clear this false-positive
-    retirement and requeue the comment for triage.
+    to recompute the hash. To keep the retirement durable across the next
+    stale-state sweep, it only retires rows that already have body-hash sidecar
+    state. Legacy rows without that marker remain ``needs_human`` until a path
+    holding the live comment can snapshot the body.
     """
     if hint is None:
         return
@@ -1074,9 +1074,15 @@ def _mark_referenced_needs_human_feedback_answered(
         for item_id in _operator_hint_feedback_storage_key_candidates(referenced_id):
             if state.threads_addressed_ids.get(item_id) != "needs_human":
                 continue
+            if not state.threads_addressed_ids.get(_operator_hint_feedback_body_hash_key(item_id)):
+                continue
             state.mark_addressed(item_id, "false_positive")
             state.threads_addressed_ids.pop(f"__needs_human_reason__:{item_id}", None)
             break
+
+
+def _operator_hint_feedback_body_hash_key(item_id: str) -> str:
+    return f"__review_comment_body_hash__:{item_id}"
 
 
 def _operator_hint_feedback_id_candidates(text: str) -> tuple[str, ...]:

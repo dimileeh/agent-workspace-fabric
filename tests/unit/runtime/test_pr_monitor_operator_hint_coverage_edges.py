@@ -52,6 +52,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _is_manual_ready_handoff,
     _is_protected_manual_ready_handoff,
     _non_check_reviewer_activity_freeze_elapsed_seconds,
+    _review_comment_body_state_key,
 )
 from awf.runtime.pr_monitor_runner.lifecycle import (
     _merge_concurrent_operator_freeze_state,
@@ -211,6 +212,7 @@ def test_processed_operator_guide_uses_action_hint_when_pending_hint_was_cleared
         threads_addressed_ids={
             "issue:4788406681": "needs_human",
             "__needs_human_reason__:issue:4788406681": "maintainer must choose",
+            _review_comment_body_state_key("issue:4788406681"): pr_feedback_body_hash(comment.body),
         },
     )
     hint = OperatorHint(
@@ -256,6 +258,9 @@ def test_processed_operator_guide_keeps_unreferenced_needs_human_blocking() -> N
         ),
         threads_addressed_ids={
             "issue:4788370423": "needs_human",
+            _review_comment_body_state_key("issue:4788370423"): pr_feedback_body_hash(
+                mentioned.body_excerpt
+            ),
             "issue:4788406681": "needs_human",
         },
     )
@@ -1020,10 +1025,13 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_revie
     state = MonitorState(
         threads_addressed_ids={
             "1234567": "needs_human",
+            _review_comment_body_state_key("1234567"): pr_feedback_body_hash("bare review body"),
             "__needs_human_reason__:1234567": "operator asked for help",
             "2345678": "needs_human",
+            _review_comment_body_state_key("2345678"): pr_feedback_body_hash("prefixed key body"),
             "__needs_human_reason__:2345678": "operator cited prefixed key",
             "issue:7654321": "needs_human",
+            _review_comment_body_state_key("issue:7654321"): pr_feedback_body_hash("issue body"),
             "__needs_human_reason__:issue:7654321": "operator asked for help",
             "9999999": "needs_human",
             "__needs_human_reason__:9999999": "still blocking",
@@ -1047,12 +1055,40 @@ def test_operator_hint_retire_referenced_needs_human_feedback_accepts_bare_revie
     assert state.threads_addressed_ids["__needs_human_reason__:9999999"] == "still blocking"
 
 
+def test_operator_hint_retire_referenced_needs_human_feedback_requires_body_hash() -> None:
+    state = MonitorState(
+        threads_addressed_ids={
+            "1234567": "needs_human",
+            "__needs_human_reason__:1234567": "legacy row without hash",
+            "issue:7654321": "needs_human",
+            _review_comment_body_state_key("issue:7654321"): pr_feedback_body_hash("known body"),
+            "__needs_human_reason__:issue:7654321": "operator asked for help",
+        }
+    )
+    hint = OperatorHint(
+        reason="Operator confirmed 1234567 and issue:7654321 are non-blocking.",
+        operation_id="op_referenced_feedback_missing_hash",
+        requested_at="2026-06-25T18:20:00+00:00",
+    )
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=hint)
+
+    assert state.threads_addressed_ids["1234567"] == "needs_human"
+    assert state.threads_addressed_ids["__needs_human_reason__:1234567"] == (
+        "legacy row without hash"
+    )
+    assert state.threads_addressed_ids["issue:7654321"] == "false_positive"
+    assert "__needs_human_reason__:issue:7654321" not in state.threads_addressed_ids
+
+
 def test_operator_hint_retire_referenced_needs_human_feedback_uses_acted_text() -> None:
     state = MonitorState(
         threads_addressed_ids={
             "issue:111111": "needs_human",
+            _review_comment_body_state_key("issue:111111"): pr_feedback_body_hash("audit body"),
             "__needs_human_reason__:issue:111111": "audit-only blocker",
             "issue:222222": "needs_human",
+            _review_comment_body_state_key("issue:222222"): pr_feedback_body_hash("directive body"),
             "__needs_human_reason__:issue:222222": "directive blocker",
         }
     )
