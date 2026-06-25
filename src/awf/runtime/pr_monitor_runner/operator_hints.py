@@ -1169,6 +1169,8 @@ def _operator_hint_feedback_id_candidates(text: str) -> tuple[str, ...]:
 
 
 def _operator_hint_feedback_storage_key_candidates(referenced_id: str) -> tuple[str, ...]:
+    if referenced_id.isdigit():
+        return (referenced_id, f"issue:{referenced_id}")
     return (referenced_id,)
 
 
