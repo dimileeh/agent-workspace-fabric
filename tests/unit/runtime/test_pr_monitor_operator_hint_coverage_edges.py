@@ -217,7 +217,7 @@ def test_processed_operator_guide_uses_action_hint_when_pending_hint_was_cleared
         },
     )
     hint = OperatorHint(
-        reason=None,
+        reason="",
         directive="Treat issue:4788406681 as already answered by the operator.",
         operation_id="op_action_hint",
         reason_code="OPERATOR_GUIDE",
@@ -1187,7 +1187,7 @@ def test_operator_hint_retire_referenced_needs_human_feedback_noops_without_acte
     _mark_referenced_needs_human_feedback_answered(state, hint=None)
     _mark_referenced_needs_human_feedback_answered(
         state,
-        hint=OperatorHint(reason=None, directive=None, operation_id="op_empty_hint"),
+        hint=OperatorHint(reason="", directive=None, operation_id="op_empty_hint"),
     )
 
     assert state.threads_addressed_ids["issue:111111"] == "needs_human"
