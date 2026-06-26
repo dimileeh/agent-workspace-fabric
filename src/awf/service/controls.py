@@ -495,6 +495,17 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
+        # Operator remonitor is explicit operator re-engagement: the persisted
+        # HUMAN_WAIT attention episode (set by the monitor's ``NotifyHuman``)
+        # has been superseded by this operator decision. Clear the out-of-band
+        # ``awaiting_human_since`` / ``awaiting_human_reason`` columns now,
+        # mirroring the in-process monitor resume clear, so the row does not
+        # stay stuck with ``attention_required=true`` after the operator has
+        # acted. ``clear_workspace_attention`` is guarded by
+        # ``awaiting_human_since IS NOT NULL`` so it is a DB-level no-op (no row
+        # churn, no spurious ``updated_at`` bump) when there is no episode — safe
+        # to call unconditionally here and on the ``failed`` path.
+        await repo.clear_workspace_attention(workspace_id)
         if state_reset is None and (claims_will_reset or monitor_state_changed):
             await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {
