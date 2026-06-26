@@ -25,7 +25,16 @@ _FIXTURE_ROOT = (
 )
 _VALIDATOR_SERVER = _FIXTURE_ROOT / "browser" / "validator-server.mjs"
 _BROWSER_DOCKERFILE = _FIXTURE_ROOT / "Dockerfile.playwright"
-_HEALTHCHECK_PROCESS_TIMEOUT_SECONDS = 10
+# The process guard must stay comfortably above the healthcheck script's own
+# fetch budget (DEFAULT_FETCH_TIMEOUT_MS = 5000ms) plus a cold ``node`` startup
+# under heavy CI parallelism (8 coverage shards). A 10s guard left only ~5s of
+# headroom and the harness SIGKILL'd legitimately-running healthchecks under
+# runner contention (live PR #688 shard 4 flake). 30s preserves the contract
+# asserted by ``test_healthcheck_process_timeout_allows_script_fetch_budget``
+# (harness never preempts the script's own timeout) while the script-level
+# fetch timeout remains the real liveness assertion (e.g. the 50ms hung-service
+# case still fails fast and well within budget).
+_HEALTHCHECK_PROCESS_TIMEOUT_SECONDS = 30
 _VALIDATOR_START_ATTEMPTS = 10
 
 pytestmark = pytest.mark.unit
@@ -279,6 +288,32 @@ def test_healthcheck_process_timeout_allows_script_fetch_budget() -> None:
 
     assert result.returncode == 0
     assert result.stdout == b"ok\r\n  "
+
+
+def _healthcheck_default_fetch_timeout_ms() -> int:
+    """Parse the script's DEFAULT_FETCH_TIMEOUT_MS so the harness guard tracks it."""
+    import re
+
+    source = (_FIXTURE_ROOT / "scripts" / "healthcheck.mjs").read_text(encoding="utf-8")
+    match = re.search(r"DEFAULT_FETCH_TIMEOUT_MS\s*=\s*(\d+)", source)
+    assert match is not None, "DEFAULT_FETCH_TIMEOUT_MS not found in healthcheck.mjs"
+    return int(match.group(1))
+
+
+def test_healthcheck_process_guard_exceeds_script_fetch_budget() -> None:
+    """The harness process timeout must never preempt the script's own fetch timeout.
+
+    The healthcheck script enforces its own fetch liveness (default 5000ms); the
+    harness ``subprocess`` guard exists only to reclaim a wedged process and must
+    stay comfortably above that budget plus cold ``node`` startup under CI
+    parallelism. Regression for the PR #688 shard-4 flake where a 10s guard
+    SIGKILL'd a legitimately-running healthcheck under 8-way coverage contention.
+    """
+    script_default_ms = _healthcheck_default_fetch_timeout_ms()
+    # The harness guard (seconds) must exceed the script fetch budget (ms) plus a
+    # generous cold-startup headroom; 2x the fetch budget keeps the guard honest
+    # if the script default is ever raised.
+    assert script_default_ms * 2 < _HEALTHCHECK_PROCESS_TIMEOUT_SECONDS * 1000
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
