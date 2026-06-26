@@ -159,3 +159,31 @@ async def test_remonitor_no_attention_episode_is_unchanged(session: AsyncSession
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
     assert workspace.awaiting_human_since is None
     assert workspace.awaiting_human_reason is None
+
+
+@pytest.mark.unit
+async def test_guide_no_attention_episode_is_unchanged(session: AsyncSession) -> None:
+    """A workspace with no HUMAN_WAIT episode is untouched by the guarded clear."""
+    workspace, _candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+        title="guide no episode",
+    )
+    await session.refresh(workspace)
+    assert workspace.awaiting_human_since is None
+    assert workspace.awaiting_human_reason is None
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="implement the forge-neutral fix, do not defer",
+        reason="operator decision recorded",
+        idempotency_key="guide-no-episode",
+        expected_version=workspace.version,
+    )
+    await session.refresh(workspace)
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.awaiting_human_since is None
+    assert workspace.awaiting_human_reason is None
