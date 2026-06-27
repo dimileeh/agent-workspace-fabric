@@ -258,6 +258,52 @@ class TestCiFailure:
         assert action.failures == (transient_failure, mixed_failure)
 
     @pytest.mark.unit
+    def test_default_budget_transient_sibling_does_not_mask_actionable_code_evidence(
+        self,
+    ) -> None:
+        """With the default rerun budget still available, a transient flake sibling
+        must not trigger ``RerunTransientCI`` while a separate rollup-marked,
+        code-bearing failure (filtered out of the rerun set) still carries fixable
+        pytest/mypy/ruff evidence. The repair agent must be dispatched instead of
+        burning reruns on the flake until the budget clears.
+
+        Regression for PRRT_kwDOSJAM6s6MtSBI."""
+        transient_failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "error: Failed to install cpython-3.12.9-linux-x86_64-gnu\n"
+                "Caused by: HTTP status server error (503 Service Unavailable)"
+            ),
+            run_id="25897584271",
+        )
+        mixed_failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "src/awf/foo.py:12: error: Incompatible return value type "
+                "[return-value]\n"
+                "Found type errors\n"
+                "A required CI job did not pass.\n"
+                "python-full-coverage: failure\n"
+                "console: success"
+            ),
+            run_id="25897584299",
+        )
+
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(transient_failure, mixed_failure),
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (transient_failure, mixed_failure)
+
+    @pytest.mark.unit
     def test_transient_tool_download_failure_dispatches_rerun(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",

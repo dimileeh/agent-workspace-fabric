@@ -948,6 +948,13 @@ def _should_rerun_transient_ci(
     rerun_failures = _ci_transient_rerun_failures(status)
     if not rerun_failures:
         return False
+    # A mixed run can fail a real job *and* the ci-required rollup step, yielding a
+    # code-bearing rollup failure that ``_ci_transient_rerun_failures`` filters out
+    # and leaving only a transient sibling here. Never burn reruns while any failure
+    # in the full set carries actionable pytest/mypy/ruff evidence — surface it to
+    # the repair agent (``ReportCiFailure``) instead of waiting for the flake to clear.
+    if any(_has_actionable_ci_failure_evidence(failure) for failure in status.ci_failures):
+        return False
     if any(not failure.run_id for failure in rerun_failures):
         return False
     if any(not _supports_failed_job_rerun(failure) for failure in rerun_failures):
