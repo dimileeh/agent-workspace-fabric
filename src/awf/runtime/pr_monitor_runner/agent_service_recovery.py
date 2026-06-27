@@ -19,11 +19,27 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import companion_specs_from_task_policy
 from awf.node.compose_manager import ComposeManager
+from awf.node.git_manager import (
+    GitOperationError,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+)
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
+from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_REASON
 from awf.runtime.pr_monitor_runner.logging import _log
-from awf.runtime.pr_monitor_runner.types import _MonitorAgentServiceRecoveryFailedError
+from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.types import (
+    ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorMirrorHooksPathRepairFailedError,
+)
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
@@ -63,6 +79,7 @@ async def _run_monitor_agent_with_service_recovery(
             if recovered is None:
                 raise
             restart_attempts = recovered
+            await _rerun_monitor_agent_pre_launch_guards(self, workspace_id=workspace_id)
             continue
         except ComposeExecCleanupError as exc:
             recovered = await _recover_monitor_agent_service_after_cleanup_error(
@@ -77,9 +94,48 @@ async def _run_monitor_agent_with_service_recovery(
             if recovered is None:
                 raise
             restart_attempts = recovered
+            await _rerun_monitor_agent_pre_launch_guards(self, workspace_id=workspace_id)
             continue
         append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
         return cast(AgentRunResult, result)
+
+
+async def _rerun_monitor_agent_pre_launch_guards(
+    self: Any,
+    *,
+    workspace_id: str,
+) -> None:
+    if await self._provider_recovery_suppresses_cli(workspace_id):
+        raise ProviderRecoveryRetryError()
+    worktree_path = self._worktrees_root / workspace_id
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="monitor_agent_pre_launch",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+        )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is None:
+        return
+    try:
+        await repair_mirror_hooks_path(mirror_path)
+    except (GitOperationError, OSError) as exc:
+        repair_details = mirror_hooks_repair_failure_details(
+            exc,
+            repair_stage="before_recovered_monitor_agent_retry",
+            mirror_path=mirror_path,
+        )
+        _log.warning(
+            "monitor.agent_service_recovery_mirror_hooks_path_repair_failed",
+            workspace_id=workspace_id,
+            reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            **repair_details,
+        )
+        raise _MonitorMirrorHooksPathRepairFailedError() from exc
 
 
 async def _recover_monitor_agent_service_after_error(

@@ -38,6 +38,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.node.git_manager import GitOperationError
 from awf.profiles.models import ProfileDocker, WorkspaceProfile
 from awf.runtime.planning import CONFORMANCE_REQUIRES_AWF_VALIDATION
 from awf.runtime.pr_monitor import (
@@ -53,6 +54,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
+    agent_service_recovery,
 )
 from awf.runtime.pr_monitor_runner.gates import _MergeGateResult
 from awf.runtime.pr_monitor_runner.helpers import (
@@ -61,7 +63,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorMirrorHooksPathRepairFailedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -936,6 +940,182 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
         wait=True,
         compose_up_timeout_seconds=300,
     )
+
+
+@pytest.mark.unit
+async def test_monitor_agent_service_recovery_reruns_pre_launch_guards_before_retry(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    calls: list[str] = []
+
+    class RecordingAdapter(FakeAdapter):
+        async def run(self, **kwargs: object):  # type: ignore[no-untyped-def,override]
+            calls.append("adapter.run")
+            return await super().run(**kwargs)  # type: ignore[arg-type]
+
+    adapter = RecordingAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="monitor idle timeout while agent service was down",
+            ),
+            reason_code=AGENT_IDLE_TIMEOUT,
+            details={"provider": "google", "model": "gemini-2.5-pro"},
+        )
+    )
+    adapter.queue(stdout="AWF-VERDICT: FIXED: restarted")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mirror_path = tmp_path / "mirror.git"
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        calls.append("provider_suppression")
+        return False
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        calls.append("ownership_repair")
+        return True
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        calls.append("mirror_hooks_repair")
+        return True
+
+    async def _ensure_project_up(**_kwargs: object) -> None:
+        calls.append("ensure_project_up")
+
+    runner._provider_recovery_suppresses_cli = _provider_recovery_suppresses_cli  # type: ignore[method-assign]
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        side_effect=_ensure_project_up,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.mirror_path_for_worktree",
+        return_value=mirror_path,
+        create=True,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_agent_runtime_ownership",
+        side_effect=_repair_agent_runtime_ownership,
+        create=True,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_mirror_hooks_path",
+        side_effect=_repair_mirror_hooks_path,
+        create=True,
+    )
+
+    result = await runner._run_monitor_agent_with_service_recovery(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        prompt="fix the comment",
+        log_source="recovery",
+        command_evidence=[],
+    )
+
+    assert result.stdout == "AWF-VERDICT: FIXED: restarted"
+    assert calls == [
+        "adapter.run",
+        "ensure_project_up",
+        "provider_suppression",
+        "ownership_repair",
+        "mirror_hooks_repair",
+        "adapter.run",
+    ]
+
+
+@pytest.mark.unit
+async def test_monitor_agent_service_recovery_pre_retry_guard_respects_provider_suppression(
+    tmp_path: Path,
+) -> None:
+    class Runner:
+        _worktrees_root = tmp_path / "worktrees"
+
+        async def _provider_recovery_suppresses_cli(self, _workspace_id: str) -> bool:
+            return True
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await agent_service_recovery._rerun_monitor_agent_pre_launch_guards(
+            Runner(),
+            workspace_id="ws-provider-suppressed",
+        )
+
+
+@pytest.mark.unit
+async def test_monitor_agent_service_recovery_pre_retry_guard_fails_closed_on_ownership_repair(
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    class Runner:
+        _worktrees_root = tmp_path / "worktrees"
+
+        async def _provider_recovery_suppresses_cli(self, _workspace_id: str) -> bool:
+            return False
+
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_agent_runtime_ownership",
+        return_value=False,
+    )
+
+    with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError):
+        await agent_service_recovery._rerun_monitor_agent_pre_launch_guards(
+            Runner(),
+            workspace_id="ws-ownership-failed",
+        )
+
+
+@pytest.mark.unit
+async def test_monitor_agent_service_recovery_pre_retry_guard_fails_closed_on_mirror_repair(
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    class Runner:
+        _worktrees_root = tmp_path / "worktrees"
+
+        async def _provider_recovery_suppresses_cli(self, _workspace_id: str) -> bool:
+            return False
+
+    mirror_path = tmp_path / "mirror.git"
+    repair_error = GitOperationError(
+        operation="mirror.hooks_path_repair",
+        returncode=1,
+        stdout="",
+        stderr="fatal: config unset failed",
+        reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_agent_runtime_ownership",
+        return_value=True,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.mirror_path_for_worktree",
+        return_value=mirror_path,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_mirror_hooks_path",
+        side_effect=repair_error,
+    )
+
+    with pytest.raises(_MonitorMirrorHooksPathRepairFailedError):
+        await agent_service_recovery._rerun_monitor_agent_pre_launch_guards(
+            Runner(),
+            workspace_id="ws-mirror-failed",
+        )
 
 
 @pytest.mark.unit
