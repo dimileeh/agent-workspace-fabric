@@ -14,7 +14,12 @@ from awf.adapters.provider_failures import (
     classify_provider_failure,
 )
 from awf.common.command_evidence import append_command_evidence
-from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
+from awf.common.compose_exec import (
+    EXEC_PROCESS_CLEANUP_FAILED,
+    ComposeExecCleanupError,
+    cleanup_failure_message,
+)
+from awf.control.executor.quality_gates import _log
 from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.node.companion_services import companion_specs_from_task_policy
@@ -141,6 +146,46 @@ async def _run_agent_task_with_service_recovery(
             )
             if not restarted:
                 return False, None
+
+
+async def _repair_after_recoverable_agent_cleanup_failure(
+    self: Any,
+    exc: ComposeExecCleanupError,
+    *,
+    workspace_id: str,
+    owned_paths: list[str],
+    execution_owner_id: str | None,
+    repair_hooks_after_agent_cleanup_failure: Callable[[], Awaitable[bool]],
+    recover_missing_head_after_cleanup_failure: Callable[..., Awaitable[bool]],
+    deposit_planning_artifacts: Callable[[], None],
+) -> bool:
+    if not await repair_hooks_after_agent_cleanup_failure():
+        return False
+    if await recover_missing_head_after_cleanup_failure(
+        exc,
+        stage="agent_run_cleanup_failure",
+        owned_paths=owned_paths,
+        execution_owner_id=execution_owner_id,
+        verify_post_agent_commit=True,
+    ):
+        return True
+    _log.error(
+        "executor.exec_process_cleanup_failed",
+        workspace_id=workspace_id,
+        source=exc.source,
+        label=exc.label,
+        invocation_id=exc.invocation_id,
+        reason_code=exc.reason_code,
+    )
+    deposit_planning_artifacts()
+    await self._mark_failed(
+        workspace_id=workspace_id,
+        from_status=WorkspaceStatus.running,
+        failure_reason=FailureReason.infrastructure_failure,
+        message=cleanup_failure_message(exc),
+        reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+    )
+    return False
 
 
 def _agent_service_restart_timeout_seconds(

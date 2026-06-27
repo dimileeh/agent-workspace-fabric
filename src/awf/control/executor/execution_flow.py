@@ -32,7 +32,10 @@ from awf.common.task_tag import (
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor import pr_open_step as _pr_open_step
-from awf.control.executor.agent_service_recovery import _run_agent_task_with_service_recovery
+from awf.control.executor.agent_service_recovery import (
+    _repair_after_recoverable_agent_cleanup_failure,
+    _run_agent_task_with_service_recovery,
+)
 from awf.control.executor.constants import GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
 from awf.control.executor.execution_pr_handoff import persist_pr_and_handoff
 from awf.control.executor.forge_gate import (
@@ -260,74 +263,25 @@ async def execute(
     mirror_path = mirror_path_for_worktree(worktree_path)
     recovery_active = recovery is not None
 
-    async def _repair_mirror_hooks_path_or_mark_failed(
-        *,
-        failure_stage: str,
-        failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
-        before_mark_failed: Any = None,
-    ) -> bool:
-        return await repair_mirror_hooks_path_or_mark_failed(
-            executor=self,
-            workspace_id=workspace_id,
-            mirror_path=mirror_path,
-            repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
-            recovery_active=recovery_active,
-            failure_stage=failure_stage,
-            failure_from_status=failure_from_status,
-            before_mark_failed=before_mark_failed,
-        )
+    _repair_mirror_hooks_path_or_mark_failed = partial(
+        repair_mirror_hooks_path_or_mark_failed,
+        executor=self,
+        workspace_id=workspace_id,
+        mirror_path=mirror_path,
+        repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+        recovery_active=recovery_active,
+    )
+    _repair_mirror_hooks_path_after_cleanup_failure = partial(
+        repair_mirror_hooks_path_after_agent_cleanup_failure,
+        executor=self,
+        workspace_id=workspace_id,
+        mirror_path=mirror_path,
+        repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
+        recovery_active=recovery_active,
+        before_mark_failed=_deposit_planning_artifacts,
+    )
 
-    async def _repair_mirror_hooks_path_after_cleanup_failure(
-        *, failure_stage: str = "after agent cleanup failure"
-    ) -> bool:
-        return await repair_mirror_hooks_path_after_agent_cleanup_failure(
-            executor=self,
-            workspace_id=workspace_id,
-            mirror_path=mirror_path,
-            repair_mirror_hooks_path_fn=repair_mirror_hooks_path,
-            recovery_active=recovery_active,
-            failure_stage=failure_stage,
-            before_mark_failed=_deposit_planning_artifacts,
-        )
-
-    async def _repair_hooks_after_agent_cleanup_failure() -> bool:
-        return await _repair_mirror_hooks_path_after_cleanup_failure()
-
-    async def _repair_after_recoverable_agent_cleanup_failure(
-        exc: ComposeExecCleanupError,
-    ) -> bool:
-        if not await _repair_hooks_after_agent_cleanup_failure():
-            return False
-        if await _recover_missing_head_after_cleanup_failure(
-            exc,
-            stage="agent_run_cleanup_failure",
-            owned_paths=list(ws.owned_paths),
-            execution_owner_id=execution_owner_id,
-            verify_post_agent_commit=True,
-        ):
-            return True
-        _log.error(
-            "executor.exec_process_cleanup_failed",
-            workspace_id=workspace_id,
-            source=exc.source,
-            label=exc.label,
-            invocation_id=exc.invocation_id,
-            reason_code=exc.reason_code,
-        )
-        _deposit_planning_artifacts()
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=cleanup_failure_message(exc),
-            reason_code=EXEC_PROCESS_CLEANUP_FAILED,
-        )
-        return False
-
-    # Bind the worktree-scoped recovery args once; each cleanup-failure path
-    # supplies only its ``stage`` (plus the post-agent commit re-verify for the
-    # agent-run path). ``verify_head_object_exists`` is captured here so test
-    # monkeypatches on this module's name still apply.
+    # Capture ``verify_head_object_exists`` here so test monkeypatches still apply.
     _recover_missing_head_after_cleanup_failure = partial(
         recover_missing_head_after_cleanup_failure,
         executor=self,
@@ -594,6 +548,20 @@ async def execute(
             ):
                 return
             try:
+                cleanup_repair = partial(
+                    _repair_after_recoverable_agent_cleanup_failure,
+                    self,
+                    workspace_id=workspace_id,
+                    owned_paths=list(ws.owned_paths),
+                    execution_owner_id=execution_owner_id,
+                    repair_hooks_after_agent_cleanup_failure=(
+                        _repair_mirror_hooks_path_after_cleanup_failure
+                    ),
+                    recover_missing_head_after_cleanup_failure=(
+                        _recover_missing_head_after_cleanup_failure
+                    ),
+                    deposit_planning_artifacts=_deposit_planning_artifacts,
+                )
                 (
                     agent_service_recovered,
                     planning_failure,
@@ -609,9 +577,7 @@ async def execute(
                     command_evidence=agent_command_evidence,
                     workspace_id=workspace_id,
                     before_mark_failed=_deposit_planning_artifacts,
-                    after_agent_cleanup_failure_repair=(
-                        _repair_after_recoverable_agent_cleanup_failure
-                    ),
+                    after_agent_cleanup_failure_repair=cleanup_repair,
                 )
                 if not agent_service_recovered:
                     return
@@ -622,7 +588,7 @@ async def execute(
                     return
                 post_agent_mirror_repair_done = True
             except ComposeExecCleanupError as exc:
-                if not await _repair_hooks_after_agent_cleanup_failure():
+                if not await _repair_mirror_hooks_path_after_cleanup_failure():
                     return
                 if not await _recover_missing_head_after_cleanup_failure(
                     exc,
