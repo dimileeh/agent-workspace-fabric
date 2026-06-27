@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
+
+from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.adapters.provider_failures import (
@@ -18,7 +21,7 @@ from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecClea
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import companion_specs_from_task_policy
-from awf.node.compose_manager import ComposeManager
+from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.node.git_manager import (
     GitOperationError,
     mirror_path_for_worktree,
@@ -243,7 +246,7 @@ async def _restart_monitor_agent_service_or_fail(
             wait=True,
             compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
-    except Exception as restart_exc:
+    except ComposeOperationError as restart_exc:
         await _terminate_monitor_for_unhealthy_agent_service(
             self,
             workspace_id=workspace_id,
@@ -327,7 +330,7 @@ async def _monitor_agent_service_restart_timeout_seconds(
                 profile=profile,
                 companions=companion_specs_from_task_policy(task_policy),
             )
-    except Exception:
+    except (SQLAlchemyError, ValidationError):
         _log.exception(
             "monitor.agent_service_restart_timeout_resolution_failed",
             workspace_id=workspace_id,
@@ -343,7 +346,7 @@ async def _terminate_monitor_for_unhealthy_agent_service(
     service_healthy: bool | None,
     restart_attempts: int,
     message: str,
-) -> None:
+) -> NoReturn:
     exc_details = getattr(exc, "details", None)
     details = dict(exc_details) if isinstance(exc_details, dict) else {}
     details["provider_recovery"] = {

@@ -38,6 +38,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.node.compose_manager import ComposeOperationError
 from awf.node.git_manager import GitOperationError
 from awf.profiles.models import ProfileDocker, WorkspaceProfile
 from awf.runtime.planning import CONFORMANCE_REQUIRES_AWF_VALIDATION
@@ -1200,6 +1201,34 @@ async def test_monitor_agent_idle_timeout_uses_workspace_compose_timeout_for_res
 
 
 @pytest.mark.unit
+async def test_monitor_agent_restart_timeout_invalid_profile_uses_default(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.resolved_profile = {"name": ""}
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    timeout = await agent_service_recovery._monitor_agent_service_restart_timeout_seconds(
+        runner,
+        workspace_id=workspace_id,
+    )
+
+    assert timeout == 300
+
+
+@pytest.mark.unit
 async def test_monitor_agent_cleanup_service_down_restarts_service_and_retries(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1476,7 +1505,12 @@ async def test_monitor_agent_service_restart_failure_terminates_without_provider
     )
     mocker.patch(
         "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
-        side_effect=RuntimeError("compose unavailable"),
+        side_effect=ComposeOperationError(
+            operation="up",
+            returncode=1,
+            stdout="",
+            stderr="compose unavailable",
+        ),
     )
 
     with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
@@ -1508,6 +1542,59 @@ async def test_monitor_agent_service_restart_failure_terminates_without_provider
         "service_healthy": False,
         "restart_attempts": 1,
     }
+
+
+@pytest.mark.unit
+async def test_monitor_agent_service_restart_unexpected_error_propagates(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="monitor idle timeout while agent service was down",
+            ),
+            reason_code=AGENT_IDLE_TIMEOUT,
+            details={"provider": "google", "model": "gemini-2.5-pro"},
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        side_effect=RuntimeError("unexpected bug"),
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected bug"):
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    ensure_project_up.assert_awaited_once()
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.monitoring_pr.value
 
 
 @pytest.mark.unit
