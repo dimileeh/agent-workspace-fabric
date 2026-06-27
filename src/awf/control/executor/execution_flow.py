@@ -484,6 +484,8 @@ async def execute(
                 )[:2000],
             )
             return
+        before_agent_retry = None
+        cleanup_repair = None
         if recovery is None and not resume_skip_agent:
             if not await self._run_agent_git_writability_preflight(
                 workspace_id=workspace_id,
@@ -977,7 +979,7 @@ async def execute(
                     else:
                         classification = _classify_post_agent_commit_failure(commit_result)
                         if classification.repair_strategy in {"deterministic", "agent"}:
-                            await self._run_post_agent_commit_repair(
+                            repair_completed = await self._run_post_agent_commit_repair(
                                 workspace_id=workspace_id,
                                 worktree_path=worktree_path,
                                 base_commit=base_commit,
@@ -1002,8 +1004,15 @@ async def execute(
                                     and not resume_disable_fix_passes
                                 ),
                                 ws=ws,
+                                profile=profile,
                                 command_evidence=agent_command_evidence,
+                                execution_owner_id=execution_owner_id,
+                                before_mark_failed=_deposit_planning_artifacts,
+                                before_agent_retry=before_agent_retry,
+                                after_agent_cleanup_failure_repair=cleanup_repair,
                             )
+                            if not repair_completed:
+                                return
                         else:
                             raise _PostAgentCommitStepError(
                                 stage="git commit",

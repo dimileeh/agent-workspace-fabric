@@ -37,6 +37,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
+from awf.control.executor import quality_methods as executor_quality_methods
 from awf.control.executor.constants import (
     POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
     POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
@@ -661,6 +662,7 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws_id = await _seed_ready(factory)
     fake.queue_result(returncode=0, stdout="adapter ok")  # agent
@@ -679,6 +681,19 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
     fake.queue_result(returncode=0, stdout="src/awf/mcp.py\n")  # cached diff after repair
     fake.queue_result(returncode=0)  # git commit retry ok
     fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    recovery_calls: list[dict[str, Any]] = []
+
+    async def _record_service_recovery(self: Any, **kwargs: Any) -> tuple[bool, Any]:
+        recovery_calls.append(kwargs)
+        result = await kwargs["run_agent"](False)
+        return True, result
+
+    monkeypatch.setattr(
+        executor_quality_methods,
+        "_run_agent_callable_with_service_recovery",
+        _record_service_recovery,
+    )
 
     executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
     await executor.execute(ws_id)
@@ -714,12 +729,58 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
     assert "run_debug.py" in prompt
     assert "Normalizer-rewritten paths, if any:" in prompt
     assert "docs/awf-plans/ws_89.conformance.json" in prompt
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0]["workspace_id"] == ws_id
+    assert recovery_calls[0]["before_agent_retry"] is not None
+    assert recovery_calls[0]["after_agent_cleanup_failure_repair"] is not None
 
     ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
     assert not ruff_calls
     assert _git_add_suffixes(fake).count(["add", "-A"]) == 2
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_repair_stops_when_service_recovery_stops(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(
+        returncode=0,
+        stdout="fix_test.py\nrun_debug.py\nsrc/awf/mcp.py\n",
+    )  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("run_debug.py"),
+    )  # semantic pre-commit failure
+
+    recovery_calls = 0
+
+    async def _stop_after_service_recovery(self: Any, **kwargs: Any) -> tuple[bool, Any]:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return False, None
+
+    monkeypatch.setattr(
+        executor_quality_methods,
+        "_run_agent_callable_with_service_recovery",
+        _stop_after_service_recovery,
+    )
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    assert recovery_calls == 1
+    assert _git_add_suffixes(fake).count(["add", "-A"]) == 1
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
 
 
 @pytest.mark.unit
