@@ -93,6 +93,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _ProtectedScopeRollbackDeltaEvidence,
@@ -931,7 +932,10 @@ async def _repair_protected_scope_changes_before_commit(
         )
     except AgentRunError as exc:
         agent_run_err = exc
-    except _MonitorAgentServiceRecoveryFailedError:
+    except (
+        _MonitorAgentServiceRecoveryFailedError,
+        _MonitorAgentServiceRecoverySupersededError,
+    ):
         raise
     except Exception:
         await _repair_recovery_mirror_hooks_path()

@@ -9,6 +9,7 @@ import pytest
 import pytest_mock
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.base import AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.quality_gates_common import QualityGateViolation
@@ -26,6 +27,7 @@ from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
@@ -471,8 +473,9 @@ async def test_protected_scope_repair_repairs_mirror_before_launch(
         events.append("mirror-repair")
         return True
 
-    async def _adapter_run(**_kwargs: object) -> None:
+    async def _adapter_run(**_kwargs: object) -> AgentRunResult:
         events.append("adapter.run")
+        return AgentRunResult(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
     monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
@@ -918,6 +921,93 @@ async def test_protected_scope_repair_cleans_mirror_after_cleanup_failure(
         )
 
     assert events == ["mirror-repair", "adapter.run", "mirror-repair"]
+
+
+@pytest.mark.unit
+async def test_protected_scope_repair_superseded_recovery_reraises_without_cleanup(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    violation = _protected_workflow_violation()
+    events: list[str] = []
+
+    async def _violations_for_status(**_kwargs: object) -> tuple[QualityGateViolation, ...]:
+        return (violation,)
+
+    async def _prompt(**_kwargs: object) -> str:
+        return "repair protected scope"
+
+    async def _suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    def _mirror_path_for_worktree(_worktree_path: Path) -> Path:
+        return tmp_path / "mirrors" / "repo.git"
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        events.append("mirror-repair")
+        return True
+
+    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> None:
+        events.append("service-recovery")
+        raise _MonitorAgentServiceRecoverySupersededError("agent service recovery superseded")
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        events.append("verify-head")
+        return True
+
+    monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
+    monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
+    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _suppresses_cli)
+    monkeypatch.setattr(
+        runner,
+        "_run_monitor_agent_with_service_recovery",
+        _run_monitor_agent_with_service_recovery,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_agent_runtime_ownership",
+        _repair_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "mirror_path_for_worktree",
+        _mirror_path_for_worktree,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+
+    with pytest.raises(
+        _MonitorAgentServiceRecoverySupersededError,
+        match="agent service recovery superseded",
+    ):
+        await runner._repair_protected_scope_changes_before_commit(
+            workspace_id="ws_delta",
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="awf_ws_delta",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
+
+    assert events == ["mirror-repair", "service-recovery"]
 
 
 @pytest.mark.unit
