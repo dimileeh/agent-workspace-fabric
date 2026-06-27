@@ -409,6 +409,48 @@ async def test_planning_recovery_retry_accepts_existing_required_plan(
 
 
 @pytest.mark.unit
+async def test_planning_recovery_retry_rejects_committed_source_delta_from_initial_baseline(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = worktree / "docs" / "awf-plans" / "ws_retry_dirty.md"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# Plan\n\nResume implementation.\n", encoding="utf-8")
+
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # current retry before_plan
+    runner.queue_result(returncode=0, stdout="retry_sha\n")  # current retry HEAD
+    runner.queue_result(returncode=0, stdout="")  # current retry dirty_paths
+    runner.queue_result(returncode=0, stdout="src/illegal.py\n")  # diff from original baseline
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter("plan already exists")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_retry_dirty", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-dirty-initial-baseline"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+        planning_retry_scope_baseline={"dirty_paths": set(), "head_sha": "base_sha"},
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["offending_paths"] == ["src/illegal.py"]
+    diff_calls = [
+        call for call in runner.calls if "diff" in call.args and "--name-only" in call.args
+    ]
+    assert diff_calls
+    assert "base_sha..HEAD" in diff_calls[-1].args
+
+
+@pytest.mark.unit
 async def test_planning_required_accepts_ignored_plan_file_written_by_agent(
     tmp_path: Path,
 ) -> None:

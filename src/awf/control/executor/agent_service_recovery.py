@@ -145,6 +145,8 @@ async def _run_agent_task_with_service_recovery(
         Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
     ) = None,
 ) -> tuple[bool, Any]:
+    planning_retry_scope_baseline: dict[str, object] = {}
+
     async def _run_initial_agent(accept_existing_plan: bool) -> Any:
         return await self._run_agent_task_with_optional_planning(
             adapter=adapter,
@@ -156,6 +158,7 @@ async def _run_agent_task_with_service_recovery(
             model=model,
             command_evidence=command_evidence,
             accept_existing_plan=accept_existing_plan,
+            planning_retry_scope_baseline=planning_retry_scope_baseline,
         )
 
     return await _run_agent_callable_with_service_recovery(

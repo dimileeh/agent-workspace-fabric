@@ -171,6 +171,7 @@ class TestAgentServiceRecoveryPlanningArtifactDeposits:
         ws_id = await _seed_ready_workspace(factory)
         calls: list[str] = []
         accept_existing_plan_values: list[bool] = []
+        planning_retry_scope_baselines: list[object] = []
 
         async def _git_preflight(**_kwargs: Any) -> bool:
             calls.append("git_preflight")
@@ -202,6 +203,7 @@ class TestAgentServiceRecoveryPlanningArtifactDeposits:
         async def _agent_run(**_kwargs: Any) -> object:
             calls.append("agent_run")
             accept_existing_plan_values.append(bool(_kwargs["accept_existing_plan"]))
+            planning_retry_scope_baselines.append(_kwargs["planning_retry_scope_baseline"])
             if calls.count("agent_run") == 1:
                 raise AgentRunError(
                     agent=AgentRuntime.codex,
@@ -253,3 +255,5 @@ class TestAgentServiceRecoveryPlanningArtifactDeposits:
             "mirror:before agent retry",
         ]
         assert accept_existing_plan_values == [False, True]
+        assert len(planning_retry_scope_baselines) == 2
+        assert planning_retry_scope_baselines[0] is planning_retry_scope_baselines[1]

@@ -762,6 +762,7 @@ async def _run_agent_task_with_optional_planning(
     model: str | None,
     command_evidence: list[str] | None = None,
     accept_existing_plan: bool = False,
+    planning_retry_scope_baseline: dict[str, object] | None = None,
 ) -> str | _PlanningRunFailure | _PlanningValidationHandoff | None:
     planning = profile.planning
     coordination_warnings = coordination_warnings_from_task_policy(
@@ -822,6 +823,17 @@ async def _run_agent_task_with_optional_planning(
     )
     if rev_r.ok and rev_r.stdout.strip():
         baseline_sha = rev_r.stdout.strip()
+    if planning_retry_scope_baseline is not None:
+        if "dirty_paths" not in planning_retry_scope_baseline:
+            planning_retry_scope_baseline["dirty_paths"] = set(before_plan)
+            planning_retry_scope_baseline["head_sha"] = baseline_sha
+        elif accept_existing_plan:
+            preserved_dirty_paths = planning_retry_scope_baseline.get("dirty_paths")
+            if isinstance(preserved_dirty_paths, set):
+                before_plan = {path for path in preserved_dirty_paths if isinstance(path, Path)}
+            preserved_head_sha = planning_retry_scope_baseline.get("head_sha")
+            if isinstance(preserved_head_sha, str) and preserved_head_sha:
+                baseline_sha = preserved_head_sha
     await self._update_subphase(workspace.id, "planning")
     plan_result = await adapter.run(
         compose_project=compose_project,
