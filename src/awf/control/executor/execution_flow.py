@@ -33,14 +33,12 @@ from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor import pr_open_step as _pr_open_step
 from awf.control.executor.agent_service_recovery import (
-    _repair_after_recoverable_agent_cleanup_failure,
+    _build_agent_service_recovery_callbacks,
     _run_agent_task_with_service_recovery,
 )
 from awf.control.executor.constants import GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
 from awf.control.executor.execution_pr_handoff import persist_pr_and_handoff
-from awf.control.executor.forge_gate import (
-    unsupported_forge_error,
-)
+from awf.control.executor.forge_gate import unsupported_forge_error
 from awf.control.executor.git_ops import (
     _git_error_indicates_missing_head_object,
     _git_name_lines,
@@ -63,9 +61,7 @@ from awf.control.executor.mirror_hooks_repair import (
     repair_mirror_hooks_path_after_agent_cleanup_failure,
     repair_mirror_hooks_path_or_mark_failed,
 )
-from awf.control.executor.missing_head_recovery import (
-    recover_missing_head_after_cleanup_failure,
-)
+from awf.control.executor.missing_head_recovery import recover_missing_head_after_cleanup_failure
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
@@ -88,9 +84,7 @@ from awf.control.executor.types import (
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
 )
-from awf.control.quality_gates import (
-    find_protected_quality_gate_changes,
-)
+from awf.control.quality_gates import find_protected_quality_gate_changes
 from awf.db.enums import (
     AgentRuntime,
     FailureReason,
@@ -548,12 +542,15 @@ async def execute(
             ):
                 return
             try:
-                cleanup_repair = partial(
-                    _repair_after_recoverable_agent_cleanup_failure,
+                before_agent_retry, cleanup_repair = _build_agent_service_recovery_callbacks(
                     self,
                     workspace_id=workspace_id,
-                    owned_paths=list(ws.owned_paths),
+                    workspace=ws,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    worktree_path=worktree_path,
                     execution_owner_id=execution_owner_id,
+                    repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
                     repair_hooks_after_agent_cleanup_failure=(
                         _repair_mirror_hooks_path_after_cleanup_failure
                     ),
@@ -562,32 +559,6 @@ async def execute(
                     ),
                     deposit_planning_artifacts=_deposit_planning_artifacts,
                 )
-
-                async def _rerun_agent_pre_launch_guards() -> bool:
-                    if not await self._run_agent_git_writability_preflight(
-                        workspace_id=workspace_id,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        worktree_path=worktree_path,
-                    ):
-                        return False
-                    if not await self._ensure_ollama_model_or_mark_failed(
-                        workspace_id=workspace_id,
-                        ws=ws,
-                    ):
-                        return False
-                    if not await self._recheck_status(
-                        workspace_id,
-                        expected=WorkspaceStatus.running,
-                        action="agent_run",
-                        owner_id=execution_owner_id,
-                    ):
-                        return False
-                    return await _repair_mirror_hooks_path_or_mark_failed(
-                        failure_stage="before agent retry",
-                        before_mark_failed=_deposit_planning_artifacts,
-                    )
-
                 (
                     agent_service_recovered,
                     planning_failure,
@@ -604,7 +575,7 @@ async def execute(
                     workspace_id=workspace_id,
                     execution_owner_id=execution_owner_id,
                     before_mark_failed=_deposit_planning_artifacts,
-                    before_agent_retry=_rerun_agent_pre_launch_guards,
+                    before_agent_retry=before_agent_retry,
                     after_agent_cleanup_failure_repair=cleanup_repair,
                 )
                 if not agent_service_recovered:

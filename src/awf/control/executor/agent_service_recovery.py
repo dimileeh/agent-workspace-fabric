@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,82 @@ from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
+
+
+def _build_agent_service_recovery_callbacks(
+    self: Any,
+    *,
+    workspace_id: str,
+    workspace: Any,
+    compose_project: str,
+    compose_file: Path,
+    worktree_path: Path,
+    execution_owner_id: str | None,
+    repair_mirror_hooks_path_or_mark_failed: Callable[..., Awaitable[bool]],
+    repair_hooks_after_agent_cleanup_failure: Callable[..., Awaitable[bool]],
+    recover_missing_head_after_cleanup_failure: Callable[..., Awaitable[bool]],
+    deposit_planning_artifacts: Callable[[], None],
+) -> tuple[Callable[[], Awaitable[bool]], Callable[[ComposeExecCleanupError], Awaitable[bool]]]:
+    before_agent_retry = partial(
+        _rerun_agent_pre_launch_guards,
+        self,
+        workspace_id=workspace_id,
+        workspace=workspace,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        worktree_path=worktree_path,
+        execution_owner_id=execution_owner_id,
+        repair_mirror_hooks_path_or_mark_failed=repair_mirror_hooks_path_or_mark_failed,
+        deposit_planning_artifacts=deposit_planning_artifacts,
+    )
+    cleanup_repair = partial(
+        _repair_after_recoverable_agent_cleanup_failure,
+        self,
+        workspace_id=workspace_id,
+        owned_paths=list(workspace.owned_paths),
+        execution_owner_id=execution_owner_id,
+        repair_hooks_after_agent_cleanup_failure=repair_hooks_after_agent_cleanup_failure,
+        recover_missing_head_after_cleanup_failure=recover_missing_head_after_cleanup_failure,
+        deposit_planning_artifacts=deposit_planning_artifacts,
+    )
+    return before_agent_retry, cleanup_repair
+
+
+async def _rerun_agent_pre_launch_guards(
+    self: Any,
+    *,
+    workspace_id: str,
+    workspace: Any,
+    compose_project: str,
+    compose_file: Path,
+    worktree_path: Path,
+    execution_owner_id: str | None,
+    repair_mirror_hooks_path_or_mark_failed: Callable[..., Awaitable[bool]],
+    deposit_planning_artifacts: Callable[[], None],
+) -> bool:
+    if not await self._run_agent_git_writability_preflight(
+        workspace_id=workspace_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        worktree_path=worktree_path,
+    ):
+        return False
+    if not await self._ensure_ollama_model_or_mark_failed(
+        workspace_id=workspace_id,
+        ws=workspace,
+    ):
+        return False
+    if not await self._recheck_status(
+        workspace_id,
+        expected=WorkspaceStatus.running,
+        action="agent_run",
+        owner_id=execution_owner_id,
+    ):
+        return False
+    return await repair_mirror_hooks_path_or_mark_failed(
+        failure_stage="before agent retry",
+        before_mark_failed=deposit_planning_artifacts,
+    )
 
 
 async def _run_agent_task_with_service_recovery(
