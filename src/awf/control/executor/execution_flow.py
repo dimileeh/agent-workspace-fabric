@@ -123,19 +123,8 @@ async def execute(
     workspace that is not currently in ``ready`` — useful when a poll
     loop races with a manual invocation.
 
-    ``resume_reason == "blocked"`` re-enters a workspace the worker already moved
-    ``blocked -> running`` after an operator resolved a protected quality-gate
-    violation; ``_begin_execution`` decides whether to re-run the agent (a
-    revert/redo directive) or skip it (an approve-and-keep grant). Active
-    operator grants are honored by every gate and consumed once the gate passes;
-    if a protected violation still stands the gate re-blocks (bumping
-    ``block_epoch``, invalidating the now-stale grants).
-
-    ``resume_reason == "recovering"`` re-enters a workspace the worker moved
-    ``recovering -> running`` after the provider cooldown elapsed (#612): a fresh
-    agent re-run on the worker-reset worktree with no operator-grant/baseline
-    replay. Only the ``blocked`` resume consumes grants and reuses the persisted
-    baseline, so those are gated on ``resume_from_blocked`` below.
+    ``blocked`` resumes may skip the agent and reuse the persisted baseline;
+    ``recovering`` resumes re-run after provider cooldown and do not consume grants.
     """
     # ``blocked`` is the only resume that reuses the persisted baseline
     # (``skip_measure``) and consumes operator grants after the push CAS; the
@@ -170,15 +159,9 @@ async def execute(
             worktree_path=worktree_path,
         )
 
-    # Deprecated/unsupported task kinds must fail fast unconditionally,
-    # BEFORE branching on recovery. The recovery branch below skips
-    # ``_dispatch_non_feature_task_kind``, so a ``monitor_release_pr`` or
-    # unknown kind that re-entered the executor with an active validate /
-    # rebase recovery (e.g. a worker-restart salvage of a stale ``running``
-    # claim) would otherwise bypass the guard and resume the validation
-    # path — the "silently run as feature work" scenario this is meant to
-    # forbid. ``sync_feature_pr`` / ``sync_release_pr`` are NOT rejected
-    # here so their recovery resumption stays intact.
+    # Recovery paths skip non-feature dispatch, so deprecated/unsupported task
+    # kinds must fail fast here instead of silently resuming validation as
+    # feature work. Sync task recovery is intentionally allowed through.
     if await self._reject_unsupported_task_kind(
         workspace_id=workspace_id,
         workspace=ws,
@@ -301,12 +284,8 @@ async def execute(
             agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
             usage_sampler=self._usage_sampler,
         )
-        # Make the agent runtime's checkout-local scratch dirs (e.g.
-        # claude_code's ``.claude/worktrees/``) git-ignored in this worktree
-        # before the agent can create them, so AWF's validation-cleanliness
-        # guard treats them as ignored agent-runtime state rather than a dirty
-        # tree. No-op for agents that declare no scratch paths; runs on both the
-        # initial and recovery paths since each later runs validation.
+        # Ignore checkout-local agent scratch dirs before validation cleanliness
+        # can treat them as dirty worktree state.
         await apply_agent_scratch_excludes(
             run_git=lambda args: self._runner.run(
                 [
@@ -333,15 +312,8 @@ async def execute(
                 profile=profile,
                 planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
-            # Re-run the forge gate on the just-resolved profile. The
-            # pre-resolution gate above only saw the *absent* snapshot plus
-            # repo_url, so an explicit ``forge: bitbucket`` carried by the
-            # requested/repo-local profile (with a GitHub or undetectable
-            # repo_url that detects as github) slipped past it. Resolution
-            # has now stamped + persisted the concrete forge onto
-            # ``ws.resolved_profile``, so fail fast here — before profile
-            # setup, the agent run, and push — instead of letting an
-            # unsupported forge reach the push/PR-open step.
+            # Re-run the forge gate after profile resolution stamps the concrete
+            # forge onto ``ws.resolved_profile``.
             resolved_forge_error = unsupported_forge_error(ws)
             if resolved_forge_error is not None:
                 await self._mark_failed(

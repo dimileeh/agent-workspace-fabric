@@ -196,46 +196,13 @@ async def _execute(
         },
     )
 
-    # Clear the awaiting-human attention flag the moment the monitor resumes with
-    # a resuming action: ``decide()`` returns exactly one action per poll, so
-    # WaitForCI / AddressComments / SyncBase / terminal completes+aborts each mean
-    # the external blocker is gone. ``NotifyHuman`` is excluded because it IS the
-    # human-block action. ``Merge`` is excluded too: ``handle_merge_action`` owns
-    # the attention flag for that arm because a deterministic merge rejection
-    # (branch protection / restrictions) falls back to notifying a human *without*
-    # recording a sticky blocker, so ``decide()`` keeps returning ``Merge`` every
-    # poll. Clearing here first would null the persisted episode start before the
-    # merge loop re-sets it, defeating the repo-side COALESCE and resetting
-    # ``awaiting_human_since`` to ``now`` each cycle — the operator's "awaiting
-    # human for N" timer would never age (#659). ``handle_merge_action`` (for
-    # ``Merge``) and the manual-ready ``NotifyHuman`` handoff below instead clear
-    # any stale flag themselves right before each of their non-human gate waits
-    # (merge queue, reviewer settle, initial review grace) so a *resolved*
-    # ``NotifyHuman`` episode does not keep surfacing "awaiting human" while the
-    # monitor merely waits on a non-human gate; their deterministic-rejection arms
-    # re-set attention directly, and the pre-merge settle is deliberately left
-    # untouched so a branch-protection rejection that re-sets attention every poll
-    # does not flicker the signal. The ``IS NOT NULL`` guard makes
-    # the repo update a no-op when the flag is already clear, so this per-poll clear
-    # never churns the row — but the guarded ``UPDATE`` still round-trips once per
-    # poll. We keep it unconditional rather than inferring "already clear" from
-    # in-process state: ``awaiting_human_since`` is persisted, so a monitor restart
-    # between the ``NotifyHuman`` set and this clear would otherwise strand a stale
-    # attention signal. The round-trip is negligible beside the operation/state/
-    # audit writes each poll already performs.
+    # Clear awaiting-human attention as soon as the monitor resumes with a
+    # non-human action. ``Merge`` owns its own attention handling because branch
+    # protection can deterministically re-enter that arm every poll (#659).
     #
-    # ``AddressComments`` is the one resuming action that can itself be a human
-    # wait: a comment-repair push rejected for a missing ``workflow`` token scope
-    # requeues ``AddressComments`` and keeps the row in ``monitoring_pr`` (it does
-    # NOT terminally fail like the sync-base / CI-repair workflow-scope arms),
-    # waiting on an operator to grant the scope. That arm persists
-    # ``awaiting_workflow_scope`` so this poll knows the previous one ended on that
-    # wait; honor it by skipping the clear (the attention set by the prior poll
-    # survives — ``set_workspace_attention`` COALESCEs the episode start, so it
-    # stays stable across the requeued polls). Reset the marker first so the moment
-    # a poll is no longer workflow-scope-blocked (push succeeds, or ``decide``
-    # returns a different action) we fall back to the normal resume clear next
-    # cycle — at most one extra poll of "awaiting human" after the block resolves.
+    # Comment repair may requeue ``AddressComments`` while waiting for an
+    # operator-granted workflow token scope. The persisted marker skips this clear
+    # for that one blocked poll, then resets so the next non-blocked poll clears.
     awaiting_workflow_scope = state.awaiting_workflow_scope
     state.clear_awaiting_workflow_scope()
     # The merge-block attention marker only makes sense while ``decide()`` stays on
