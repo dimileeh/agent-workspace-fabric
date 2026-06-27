@@ -158,6 +158,39 @@ class TestCiFailure:
         assert action.failures == (transient_failure,)
 
     @pytest.mark.unit
+    def test_mixed_run_with_rollup_marker_and_transient_evidence_dispatches_rerun(
+        self,
+    ) -> None:
+        """A single workflow run can fail a transient job *and* the ci-required
+        rollup step. ``gh run view --log-failed`` then emits one combined log
+        carrying a retryable 503/timeout marker alongside the rollup marker;
+        the monitor must still rerun the run rather than parking the flake on
+        ``NotifyHuman`` just because the excerpt also names the required-CI marker.
+
+        Regression for PRRT_kwDOSJAM6s6MtULO."""
+        mixed_failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "error: Failed to install cpython-3.12.9-linux-x86_64-gnu\n"
+                "Caused by: HTTP status server error (503 Service Unavailable)\n"
+                "A required CI job did not pass.\n"
+                "python-full-coverage: failure\n"
+                "console: success"
+            ),
+            run_id="25897584271",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(mixed_failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (mixed_failure,)
+
+    @pytest.mark.unit
     def test_required_rollup_without_underlying_transient_job_notifies_human(
         self,
     ) -> None:

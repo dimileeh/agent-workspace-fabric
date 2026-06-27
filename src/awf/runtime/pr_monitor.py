@@ -999,10 +999,17 @@ def _looks_like_required_ci_rollup_failure(failure: CheckFailure) -> bool:
 
 
 def _ci_transient_rerun_failures(status: PRStatus) -> tuple[CheckFailure, ...]:
+    # A mixed run can fail a transient job *and* the ci-required rollup step,
+    # yielding one ``--log-failed`` excerpt that carries both a retryable
+    # 503/timeout marker and the rollup marker. Such a failure still owns real
+    # transient evidence plus a rerunnable run id, so keep it; only drop a *pure*
+    # rollup failure with no transient evidence of its own (rerunning the rollup
+    # job alone would not clear the underlying dependency failure).
     return tuple(
         failure
         for failure in status.ci_failures
-        if not _looks_like_required_ci_rollup_failure(failure)
+        if _looks_like_transient_ci_failure(failure)
+        or not _looks_like_required_ci_rollup_failure(failure)
     )
 
 
