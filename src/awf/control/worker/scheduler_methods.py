@@ -110,17 +110,25 @@ async def _list_scheduler_dispatchable_ids_from_pages(
     ordered_workspaces: list[Workspace] = []
     repo = WorkspaceRepository(session)
     while True:
-        workspaces = await repo.list_schedulable_workspaces(
-            status=status,
-            limit=candidate_limit,
-            exclude_ids=exclude_ids,
-            node_id=node_id,
-            after=candidate_after,
-            scoring_at=scoring_at,
-            execution_claim_owner_id=(
-                self._worker_id if status == WorkspaceStatus.monitoring_pr else None
-            ),
-        )
+        if status == WorkspaceStatus.monitoring_pr:
+            workspaces = await repo.list_schedulable_workspaces(
+                status=status,
+                limit=candidate_limit,
+                exclude_ids=exclude_ids,
+                node_id=node_id,
+                after=candidate_after,
+                scoring_at=scoring_at,
+                execution_claim_owner_id=self._worker_id,
+            )
+        else:
+            workspaces = await repo.list_schedulable_workspaces(
+                status=status,
+                limit=candidate_limit,
+                exclude_ids=exclude_ids,
+                node_id=node_id,
+                after=candidate_after,
+                scoring_at=scoring_at,
+            )
         if not workspaces:
             break
         remaining_dispatch_slots = limit - len(dispatchable_workspaces_by_id)

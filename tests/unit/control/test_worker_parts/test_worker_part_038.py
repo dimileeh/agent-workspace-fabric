@@ -1024,6 +1024,52 @@ async def test_scheduler_page_filter_limit_uses_remaining_dispatch_slots(
 
 
 @pytest.mark.unit
+async def test_scheduler_owner_kwarg_is_limited_to_monitoring_pr(
+    worker: ControlWorker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def _list_schedulable_workspaces(
+        self: WorkspaceRepository,
+        **kwargs: object,
+    ) -> list[Workspace]:
+        del self
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "list_schedulable_workspaces",
+        _list_schedulable_workspaces,
+        raising=False,
+    )
+
+    for status in (
+        WorkspaceStatus.requested,
+        WorkspaceStatus.ready,
+        WorkspaceStatus.monitoring_pr,
+    ):
+        assert (
+            await worker._list_scheduler_dispatchable_ids_from_pages(  # noqa: SLF001
+                SimpleNamespace(info={}),  # type: ignore[arg-type]
+                status=status,
+                limit=1,
+            )
+            == []
+        )
+
+    assert [call["status"] for call in calls] == [
+        WorkspaceStatus.requested,
+        WorkspaceStatus.ready,
+        WorkspaceStatus.monitoring_pr,
+    ]
+    assert "execution_claim_owner_id" not in calls[0]
+    assert "execution_claim_owner_id" not in calls[1]
+    assert calls[2]["execution_claim_owner_id"] == worker._worker_id  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_scheduler_candidate_filter_requires_scoring_timestamp(
     worker: ControlWorker,
 ) -> None:
