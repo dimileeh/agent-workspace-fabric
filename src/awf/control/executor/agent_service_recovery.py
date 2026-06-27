@@ -66,6 +66,7 @@ def _build_agent_service_recovery_callbacks(
         repair_mirror_hooks_path_or_mark_failed=repair_mirror_hooks_path_or_mark_failed,
         deposit_planning_artifacts=deposit_planning_artifacts,
         expected_status=expected_status,
+        failure_from_status=cleanup_failure_from_status,
     )
     cleanup_repair = partial(
         _repair_after_recoverable_agent_cleanup_failure,
@@ -95,12 +96,14 @@ async def _rerun_agent_pre_launch_guards(
     repair_mirror_hooks_path_or_mark_failed: Callable[..., Awaitable[bool]],
     deposit_planning_artifacts: Callable[[], None],
     expected_status: WorkspaceStatus,
+    failure_from_status: WorkspaceStatus,
 ) -> bool:
     if not await self._run_agent_git_writability_preflight(
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=compose_file,
         worktree_path=worktree_path,
+        from_status=failure_from_status,
     ):
         return False
     if not await self._ensure_ollama_model_or_mark_failed(
@@ -200,6 +203,7 @@ async def _run_agent_callable_with_service_recovery(
         if run_before_retry:
             run_before_retry = False
             if before_agent_retry is not None and not await before_agent_retry():
+                await _run_before_mark_failed(before_mark_failed)
                 return False, None
         try:
             planning_result = await run_agent(restart_attempts > 0)

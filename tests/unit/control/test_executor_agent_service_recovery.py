@@ -295,6 +295,7 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
             ),
             deposit_planning_artifacts=lambda: None,
             expected_status=WorkspaceStatus.validating,
+            cleanup_failure_from_status=WorkspaceStatus.validating,
         )
     )
 
@@ -304,6 +305,7 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
         compose_project="awf_ws_agent_service",
         compose_file=tmp_path / "compose.yml",
         worktree_path=tmp_path,
+        from_status=WorkspaceStatus.validating,
     )
     executor._ensure_ollama_model_or_mark_failed.assert_awaited_once()
     executor._recheck_status.assert_awaited_once_with(
@@ -315,6 +317,50 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
     assert len(repair_calls) == 1
     assert repair_calls[0]["failure_stage"] == "before agent retry"
     assert repair_calls[0]["before_mark_failed"] is not None
+
+
+@pytest.mark.unit
+async def test_agent_service_retry_guard_failure_runs_terminal_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[])
+    run_agent = AsyncMock(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT"), "validation-ok"])
+    callback_calls: list[str] = []
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _before_agent_retry() -> bool:
+        return False
+
+    async def _before_mark_failed() -> None:
+        callback_calls.append("finish-validation")
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, result = await agent_service_recovery._run_agent_callable_with_service_recovery(
+        executor,
+        run_agent=run_agent,
+        workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=tmp_path / "compose.yml",
+        model="gpt-5.3-codex",
+        command_evidence=[],
+        workspace_id="ws_agent_service",
+        before_mark_failed=_before_mark_failed,
+        before_agent_retry=_before_agent_retry,
+        expected_status=WorkspaceStatus.validating,
+        failure_from_status=WorkspaceStatus.validating,
+    )
+
+    assert recovered is False
+    assert result is None
+    assert callback_calls == ["finish-validation"]
+    assert run_agent.await_count == 1
+    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._mark_failed.assert_not_awaited()
 
 
 @pytest.mark.unit
