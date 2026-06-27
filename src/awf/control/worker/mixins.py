@@ -21,6 +21,9 @@ class WorkerDelegatesMixin:
     _log_stale_requested_claims = _claims._log_stale_requested_claims
     _claim_requested_for_provisioning = _claims._claim_requested_for_provisioning
     _claim_monitoring_pr_ids = _claims._claim_monitoring_pr_ids
+    _record_monitor_recovery_deferred_active_execution_claims = (
+        _claims._record_monitor_recovery_deferred_active_execution_claims
+    )
     _claim_monitoring_pr = _claims._claim_monitoring_pr
     _claim_paused_for_resume = _claims._claim_paused_for_resume
     _claim_blocked_for_resume = _claims._claim_blocked_for_resume

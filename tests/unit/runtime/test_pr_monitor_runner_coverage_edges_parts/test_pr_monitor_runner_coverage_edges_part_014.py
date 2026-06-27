@@ -658,6 +658,71 @@ async def test_terminate_failed_with_matching_monitor_owner_still_fails(
 
 
 @pytest.mark.unit
+async def test_terminate_failed_redacts_terminal_failure_details(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6MtVvs: terminal push evidence details are persisted on
+    the ``workspace.state_changed`` event and exposed by the events API, so raw
+    stderr/token fields must pass through audit redaction before storage."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="push failed for https://x-access-token:ghp_top_level@git.example/repo",
+        reason_code="PUSH_REJECTED",
+        details={
+            "operation": "git push",
+            "returncode": 128,
+            "error_message": "remote rejected GITHUB_TOKEN=ghp_error_message_secret",
+            "status_stderr": (
+                "fatal: could not read from "
+                "https://user:ghp_status_stderr_secret@github.com/org/repo"
+            ),
+            "provider_error_stderr": "Authorization: Bearer provider-secret-token",
+            "provider_token": "ghp_key_value_secret",
+            "nested": {
+                "api_key": "sk-proj-nested-secret",
+                "stderr_lines": ["Bearer nested-bearer-secret"],
+            },
+        },
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        state_event = ws.events[-1]
+
+    payload = state_event.payload
+    assert isinstance(payload, dict)
+    assert payload["message"] == "push failed for https://[redacted]@git.example/repo"
+    details = payload["details"]
+    assert isinstance(details, dict)
+    assert details["operation"] == "git push"
+    assert details["returncode"] == 128
+    assert details["error_message"] == "remote rejected GITHUB_TOKEN=[redacted]"
+    assert details["status_stderr"] == (
+        "fatal: could not read from https://[redacted]@github.com/org/repo"
+    )
+    assert details["provider_error_stderr"] == "Authorization: Bearer [redacted]"
+    assert details["provider_token"] == "[redacted]"
+    assert details["nested"] == {
+        "api_key": "[redacted]",
+        "stderr_lines": ["Bearer [redacted]"],
+    }
+    assert "ghp_" not in repr(payload)
+    assert "provider-secret-token" not in repr(payload)
+    assert "nested-bearer-secret" not in repr(payload)
+
+
+@pytest.mark.unit
 async def test_terminate_failed_fences_inline_handoff_after_recovery_claim(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

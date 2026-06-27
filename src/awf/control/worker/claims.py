@@ -12,6 +12,7 @@ import json as json
 import re as re
 import subprocess as subprocess
 import uuid as uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any, cast
@@ -29,8 +30,12 @@ from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
     _BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE,
     _BLOCKED_RESUME_REASON_CODE,
+    _MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM_REASON_CODE,
+    _MONITOR_RECOVERY_DEFERRED_EVENT_TYPE,
     _MONITOR_RECOVERY_EVENT_TYPE,
+    _MONITOR_RECOVERY_OWNER,
     _MONITOR_RECOVERY_REASON_CODE,
+    _MONITOR_RECOVERY_SOURCE,
     _RECOVERING_RESUME_NO_EXECUTOR_REASON_CODE,
     _RECOVERING_RESUME_REASON_CODE,
     _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL,
@@ -83,6 +88,7 @@ from awf.db.repositories import (
     QueueDecisionRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
+    WorkerHeartbeatRepository,
     WorkspaceRepository,
 )
 from awf.db.repositories._scheduler import _scheduler_node_scope_condition
@@ -501,6 +507,130 @@ async def _claim_monitoring_pr_ids(self: Any, workspace_ids: list[str], *, limit
     return claimed
 
 
+async def _record_monitor_recovery_deferred_active_execution_claims(
+    self: Any,
+    *,
+    limit: int,
+    exclude_ids: set[str] | None = None,
+) -> None:
+    if limit <= 0:
+        return
+
+    claim_cutoff = datetime.now(UTC)
+    row_limit = _scheduler_candidate_fetch_limit(limit)
+
+    async def _operation(session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        fresh_execution_claim_owner_ids = await WorkerHeartbeatRepository(
+            session
+        ).list_fresh_worker_ids(now=claim_cutoff)
+        workspaces = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            limit=row_limit,
+            claim_cutoff=claim_cutoff,
+            owner_id=self._worker_id,
+            exclude_ids=exclude_ids,
+            scoring_at=claim_cutoff,
+        )
+        for ws in workspaces:
+            await _record_monitor_recovery_deferred_active_execution_claim(
+                self,
+                repo,
+                ws,
+                previous_claim=_workspace_claim_snapshot(ws),
+                runtime_stranding_reason=_latest_runtime_stranding_reason(ws.events),
+                claim_cutoff=claim_cutoff,
+                fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
+                execution_claim_owner_id=self._worker_id,
+            )
+
+    await run_db_operation_with_retry(
+        self._session_factory,
+        _operation,
+        commit=True,
+        retry_commit_failures=False,
+        on_retry=self._log_transient_db_retry,
+    )
+
+
+def _monitor_recovery_deferred_event_seen(
+    events: list[Any],
+    *,
+    execution_claim_cleanup: dict[str, Any],
+) -> bool:
+    for event in reversed(events):
+        if (
+            event.event_type != _MONITOR_RECOVERY_DEFERRED_EVENT_TYPE
+            or event.reason_code != _MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM_REASON_CODE
+        ):
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        prior_execution_claim = payload.get("execution_claim")
+        if not isinstance(prior_execution_claim, dict):
+            continue
+        if prior_execution_claim.get("previous_claimed_by") == execution_claim_cleanup.get(
+            "previous_claimed_by"
+        ):
+            return True
+    return False
+
+
+async def _record_monitor_recovery_deferred_active_execution_claim(
+    self: Any,
+    repo: WorkspaceRepository,
+    ws: Workspace,
+    *,
+    previous_claim: Mapping[str, object],
+    runtime_stranding_reason: str | None,
+    claim_cutoff: datetime,
+    fresh_execution_claim_owner_ids: set[str] | None = None,
+    execution_claim_owner_id: str | None = None,
+) -> None:
+    execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
+        ws,
+        claim_cutoff=claim_cutoff,
+        fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
+        execution_claim_owner_id=execution_claim_owner_id,
+    )
+    if (
+        execution_claim_cleanup.get("action") != "preserved_unexpired"
+        or execution_claim_cleanup.get("previous_claimed_by") == self._worker_id
+        or _monitor_recovery_deferred_event_seen(
+            ws.events,
+            execution_claim_cleanup=execution_claim_cleanup,
+        )
+    ):
+        return
+    await repo.add_event(
+        ws,
+        event_type=_MONITOR_RECOVERY_DEFERRED_EVENT_TYPE,
+        reason_code=_MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM_REASON_CODE,
+        payload={
+            "source": _MONITOR_RECOVERY_SOURCE,
+            "owner": _MONITOR_RECOVERY_OWNER,
+            "reason_code": _MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM_REASON_CODE,
+            "message": (
+                "AWF deferred monitor recovery because another unexpired execution "
+                "claim still owns the workspace."
+            ),
+            "worker_id": self._worker_id,
+            "workspace_status": ws.status,
+            "previous_claim": dict(previous_claim),
+            "runtime_stranding_reason": runtime_stranding_reason,
+            "execution_claim": execution_claim_cleanup,
+            "monitor_claim": {
+                "action": "deferred",
+                "reason_code": _MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM_REASON_CODE,
+                "claimed_by": ws.monitor_claimed_by,
+                "expires_at": (
+                    _utc_datetime(ws.monitor_claim_expires_at).isoformat()
+                    if ws.monitor_claim_expires_at is not None
+                    else None
+                ),
+            },
+        },
+    )
+
+
 async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
     now = datetime.now(UTC)
     lease_expires_at = now + timedelta(seconds=self._config.monitor_claim_lease_seconds)
@@ -512,9 +642,14 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
             return False
         previous_claim = _workspace_claim_snapshot(ws)
         runtime_stranding_reason = _latest_runtime_stranding_reason(ws.events)
+        fresh_execution_claim_owner_ids = await WorkerHeartbeatRepository(
+            session
+        ).list_fresh_worker_ids(now=now)
         execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
             ws,
             claim_cutoff=now,
+            fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
+            execution_claim_owner_id=self._worker_id,
         )
         claimed = await repo.claim_monitoring_pr(
             workspace_id,
@@ -569,6 +704,24 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
                 },
             )
             self._monitor_recovery_operation_ids[workspace_id] = operation.id
+        else:
+            ws = await repo.get(workspace_id, populate_existing=True)
+            if ws is None:
+                await session.commit()
+                return False
+            fresh_execution_claim_owner_ids = await WorkerHeartbeatRepository(
+                session
+            ).list_fresh_worker_ids(now=now)
+            await _record_monitor_recovery_deferred_active_execution_claim(
+                self,
+                repo,
+                ws,
+                previous_claim=previous_claim,
+                runtime_stranding_reason=runtime_stranding_reason,
+                claim_cutoff=now,
+                fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
+                execution_claim_owner_id=self._worker_id,
+            )
         await session.commit()
         if active_salvage_monitor_recovery_operation_id is not None:
             self._remember_active_salvage_monitor_recovery_operation_id(

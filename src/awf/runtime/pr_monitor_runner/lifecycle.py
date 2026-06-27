@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import time
+from collections.abc import Mapping
 from datetime import (
     UTC,
     datetime,
@@ -17,7 +18,7 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.operator_grants import (
     consume_active_operator_grants_in_session,
@@ -1100,6 +1101,7 @@ async def _terminate_failed(
     *,
     message: str,
     reason_code: AbortReason | str | None = None,
+    details: Mapping[str, Any] | None = None,
 ) -> None:
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -1178,5 +1180,12 @@ async def _terminate_failed(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 payload={"message": safe_message[:1000]},
             )
-        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc)
+        payload: dict[str, Any] = {
+            "failure_reason": FailureReason.infrastructure_failure.value,
+            "reason_code": rc,
+            "message": safe_message,
+        }
+        if details is not None:
+            payload["details"] = redact_audit_value(dict(details))
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc, payload=payload)
         await s.commit()

@@ -8059,6 +8059,31 @@
             ],
             "title": "Cooldown Seconds"
           },
+          "dirty_paths_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dirty Paths Count"
+          },
+          "dirty_paths_sample": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dirty Paths Sample"
+          },
           "failure_fingerprint": {
             "anyOf": [
               {
@@ -8125,6 +8150,28 @@
               }
             ],
             "title": "Model"
+          },
+          "operation_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Type"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
           },
           "planning_scope": {
             "anyOf": [

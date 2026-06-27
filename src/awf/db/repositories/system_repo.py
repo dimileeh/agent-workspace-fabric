@@ -32,6 +32,7 @@ from awf.db.repositories.base import (
     _worker_heartbeat_upsert_stmt,
     resolve_session_dialect_name,
 )
+from awf.service.worker_heartbeat import worker_heartbeat_is_fresh
 
 
 class EgressAuditRepository:
@@ -226,6 +227,20 @@ class WorkerHeartbeatRepository:
             .limit(1)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_fresh_worker_ids(self, *, now: datetime) -> builtins.set[str]:
+        """Return worker IDs whose latest heartbeat is fresh at ``now``."""
+        stmt = select(WorkerHeartbeat)
+        heartbeats = (await self._session.execute(stmt)).scalars().all()
+        return {
+            heartbeat.worker_id
+            for heartbeat in heartbeats
+            if worker_heartbeat_is_fresh(
+                heartbeat.last_heartbeat_at,
+                now=now,
+                poll_interval_seconds=heartbeat.poll_interval_seconds,
+            )
+        }
 
     async def prune_stale(self, *, before: datetime, limit: int) -> int:
         if limit <= 0:

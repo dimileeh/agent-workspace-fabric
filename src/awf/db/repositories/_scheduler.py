@@ -82,6 +82,8 @@ def _schedulable_workspace_ids_stmt(
     dialect_name: str | None,
     skip_locked: bool,
     claim_cutoff: datetime | None = None,
+    execution_claim_owner_id: str | None = None,
+    fresh_execution_claim_owner_ids: set[str] | None = None,
 ) -> Any:
     """Build a SELECT for workspaces in a given status ordered for scheduler claiming."""
     order_expressions = scheduler_order_expressions(
@@ -98,6 +100,17 @@ def _schedulable_workspace_ids_stmt(
                 Workspace.monitor_claim_expires_at <= claim_cutoff,
             )
         )
+        unavailable_execution_claim = _unavailable_execution_claim_condition(
+            claim_cutoff=claim_cutoff,
+            fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
+        )
+        execution_claim_available = unavailable_execution_claim
+        if execution_claim_owner_id is not None:
+            execution_claim_available = or_(
+                unavailable_execution_claim,
+                Workspace.execution_claimed_by == execution_claim_owner_id,
+            )
+        stmt = stmt.where(execution_claim_available)
     if exclude_ids:
         stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
     if after is not None:
@@ -119,6 +132,86 @@ def _schedulable_workspace_ids_stmt(
     if skip_locked:
         stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
     return stmt
+
+
+def _monitoring_pr_deferred_active_execution_claim_stmt(
+    *,
+    limit: int | None,
+    exclude_ids: set[str] | None = None,
+    node_id: str | None = None,
+    scoring_at: datetime,
+    dialect_name: str | None,
+    claim_cutoff: datetime,
+    execution_claim_owner_id: str | None = None,
+    fresh_execution_claim_owner_ids: set[str] | None = None,
+    skip_locked: bool,
+) -> Any:
+    """Build a SELECT for monitor rows deferred by another active execution claim."""
+    order_expressions = scheduler_order_expressions(
+        scoring_at=scoring_at,
+        dialect_name=dialect_name,
+    )
+    active_execution_claim = and_(
+        Workspace.execution_claimed_by.is_not(None),
+        Workspace.execution_claim_expires_at.is_not(None),
+        Workspace.execution_claim_expires_at > claim_cutoff,
+    )
+    if execution_claim_owner_id is not None:
+        active_execution_claim = and_(
+            active_execution_claim,
+            Workspace.execution_claimed_by != execution_claim_owner_id,
+        )
+    if fresh_execution_claim_owner_ids is not None:
+        active_execution_claim = and_(
+            active_execution_claim,
+            Workspace.execution_claimed_by.in_(sorted(fresh_execution_claim_owner_ids)),
+        )
+    stmt = select(Workspace).where(
+        Workspace.status == WorkspaceStatus.monitoring_pr.value,
+        or_(
+            Workspace.monitor_claim_expires_at.is_(None),
+            Workspace.monitor_claim_expires_at <= claim_cutoff,
+        ),
+        active_execution_claim,
+    )
+    if node_id is not None:
+        stmt = stmt.where(
+            _scheduler_node_scope_condition(
+                status=WorkspaceStatus.monitoring_pr,
+                node_id=node_id,
+            )
+        )
+    if exclude_ids:
+        stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
+    stmt = stmt.order_by(
+        order_expressions.class_priority.desc(),
+        order_expressions.effective_score.desc(),
+        Workspace.created_at.asc(),
+        Workspace.id.asc(),
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    if skip_locked:
+        stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
+    return stmt
+
+
+def _unavailable_execution_claim_condition(
+    *,
+    claim_cutoff: datetime,
+    fresh_execution_claim_owner_ids: set[str] | None,
+) -> ColumnElement[bool]:
+    stale_execution_claim = or_(
+        Workspace.execution_claimed_by.is_(None),
+        Workspace.execution_claim_expires_at.is_(None),
+        Workspace.execution_claim_expires_at <= claim_cutoff,
+    )
+    if fresh_execution_claim_owner_ids is None:
+        return stale_execution_claim
+    return or_(
+        stale_execution_claim,
+        Workspace.execution_claimed_by.not_in(sorted(fresh_execution_claim_owner_ids)),
+    )
 
 
 def _scheduler_node_scope_condition(

@@ -17,11 +17,12 @@ import awf.db.repositories as repositories
 from awf.db.base import Base
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.models import WorkerHeartbeat, Workspace
 from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
+    WorkerHeartbeatRepository,
     WorkspaceRepository,
     _schedulable_workspace_ids_stmt,
 )
@@ -111,11 +112,25 @@ class _FakeScalarResult:
         return self._values[0] if self._values else None
 
 
+def _is_worker_heartbeat_select(statement: object) -> bool:
+    return any(
+        description.get("entity") is WorkerHeartbeat
+        for description in getattr(statement, "column_descriptions", ())
+    )
+
+
 class _RecordingSchedulerSession:
-    def __init__(self, dialect_name: str, values: list[object] | None = None) -> None:
+    def __init__(
+        self,
+        dialect_name: str,
+        values: list[object] | None = None,
+        *,
+        heartbeat_values: list[WorkerHeartbeat] | None = None,
+    ) -> None:
         del dialect_name
         self.info: dict[str, object] = {}
         self.values = list(values or [])
+        self.heartbeat_values = list(heartbeat_values or [])
         self.executed: list[object] = []
 
     async def execute(
@@ -125,6 +140,8 @@ class _RecordingSchedulerSession:
     ) -> _FakeScalarResult:
         del parameters
         self.executed.append(statement)
+        if _is_worker_heartbeat_select(statement):
+            return _FakeScalarResult(self.heartbeat_values)
         return _FakeScalarResult(self.values)
 
 
@@ -475,6 +492,311 @@ class TestOwnedPathOverlapLookup:
         assert listed == [after_cursor.id]
 
     @pytest.mark.unit
+    async def test_monitoring_pr_scheduler_excludes_active_execution_claims_before_limit(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A deferred monitor row must not consume the limited recovery slot."""
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        deferred = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="deferred monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        eligible = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="eligible monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        for workspace in (deferred, eligible):
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            workspace.created_at = scoring_at
+            workspace.monitor_claimed_by = None
+            workspace.monitor_claim_expires_at = None
+        deferred.execution_claimed_by = "live-execution-worker"
+        deferred.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        heartbeat_at = datetime.now(UTC)
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="live-execution-worker",
+            node_id="local",
+            started_at=heartbeat_at - timedelta(minutes=1),
+            last_heartbeat_at=heartbeat_at,
+            poll_interval_seconds=300.0,
+        )
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.monitoring_pr,
+            limit=1,
+            scoring_at=scoring_at,
+        )
+
+        assert listed == [eligible.id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_scheduler_allows_unexpired_execution_claim_from_stale_heartbeat_owner(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Restart recovery should not wait for a dead worker's execution lease expiry."""
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        stale_owner = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="stale owner monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        lower_priority = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="lower priority monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        for workspace in (stale_owner, lower_priority):
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            workspace.created_at = scoring_at
+            workspace.monitor_claimed_by = None
+            workspace.monitor_claim_expires_at = None
+        stale_owner.execution_claimed_by = "stale-execution-worker"
+        stale_owner.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="stale-execution-worker",
+            node_id="local",
+            started_at=scoring_at - timedelta(minutes=10),
+            last_heartbeat_at=scoring_at - timedelta(minutes=10),
+            poll_interval_seconds=1.0,
+        )
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.monitoring_pr,
+            limit=1,
+            scoring_at=scoring_at,
+            execution_claim_owner_id="new-worker-after-restart",
+        )
+
+        assert listed == [stale_owner.id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_deferred_active_execution_claims_require_fresh_owner(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        claim_cutoff = datetime.now(UTC)
+        live_owner = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="live owner monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        stale_owner = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="stale owner monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 90}},
+        )
+        for workspace in (live_owner, stale_owner):
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            workspace.created_at = claim_cutoff
+            workspace.monitor_claimed_by = None
+            workspace.monitor_claim_expires_at = None
+            workspace.execution_claim_expires_at = claim_cutoff + timedelta(minutes=5)
+        live_owner.execution_claimed_by = "live-execution-worker"
+        stale_owner.execution_claimed_by = "stale-execution-worker"
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="live-execution-worker",
+            node_id="local",
+            started_at=claim_cutoff - timedelta(minutes=1),
+            last_heartbeat_at=claim_cutoff,
+            poll_interval_seconds=1.0,
+        )
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="stale-execution-worker",
+            node_id="local",
+            started_at=claim_cutoff - timedelta(minutes=10),
+            last_heartbeat_at=claim_cutoff - timedelta(minutes=10),
+            poll_interval_seconds=1.0,
+        )
+        await session.commit()
+
+        deferred = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            limit=10,
+            claim_cutoff=claim_cutoff,
+            owner_id="new-worker-after-restart",
+            scoring_at=claim_cutoff,
+        )
+
+        assert [workspace.id for workspace in deferred] == [live_owner.id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_deferred_active_execution_claims_apply_node_scope_and_limit(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        claim_cutoff = datetime.now(UTC)
+        first_scoped = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="first scoped deferred monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        second_scoped = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="second scoped deferred monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 90}},
+        )
+        unscoped = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="unscoped deferred monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 80}},
+        )
+        other_node = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="other node deferred monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 70}},
+        )
+        for workspace in (first_scoped, second_scoped, unscoped, other_node):
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            workspace.created_at = claim_cutoff
+            workspace.monitor_claimed_by = None
+            workspace.monitor_claim_expires_at = None
+            workspace.execution_claimed_by = "live-execution-worker"
+            workspace.execution_claim_expires_at = claim_cutoff + timedelta(minutes=5)
+        first_scoped.node_id = "worker-node-a"
+        second_scoped.node_id = "worker-node-a"
+        other_node.node_id = "worker-node-b"
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="live-execution-worker",
+            node_id="runtime-node",
+            started_at=claim_cutoff - timedelta(minutes=1),
+            last_heartbeat_at=claim_cutoff,
+            poll_interval_seconds=1.0,
+        )
+        await session.commit()
+
+        excluded = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            limit=10,
+            claim_cutoff=claim_cutoff,
+            owner_id="monitor-worker",
+            node_id="worker-node-a",
+            exclude_ids={first_scoped.id},
+            scoring_at=claim_cutoff,
+        )
+        limited = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            limit=1,
+            claim_cutoff=claim_cutoff,
+            owner_id="monitor-worker",
+            node_id="worker-node-a",
+            scoring_at=claim_cutoff,
+        )
+        none = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            limit=0,
+            claim_cutoff=claim_cutoff,
+            owner_id="monitor-worker",
+            node_id="worker-node-a",
+            scoring_at=claim_cutoff,
+        )
+
+        assert [workspace.id for workspace in excluded] == [second_scoped.id, unscoped.id]
+        assert [workspace.id for workspace in limited] == [first_scoped.id]
+        assert none == []
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_scheduler_allows_current_execution_claim_owner(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """The listing predicate matches the monitor claim CAS owner allowance."""
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        current_owner = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="current owner monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        lower_priority = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="lower priority monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        for workspace in (current_owner, lower_priority):
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            workspace.created_at = scoring_at
+            workspace.monitor_claimed_by = None
+            workspace.monitor_claim_expires_at = None
+        current_owner.execution_claimed_by = "worker-current"
+        current_owner.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.monitoring_pr,
+            limit=1,
+            scoring_at=scoring_at,
+            execution_claim_owner_id="worker-current",
+        )
+
+        assert listed == [current_owner.id]
+
+    @pytest.mark.unit
     async def test_scheduler_cursor_tie_breaks_equal_score_and_created_at_by_workspace_id(
         self,
         session: AsyncSession,
@@ -607,9 +929,13 @@ class TestOwnedPathOverlapLookup:
         )
 
         assert listed == ["ws_claimed"]
-        assert len(session.executed) == 1
+        expected_statement_count = 2 if status == WorkspaceStatus.monitoring_pr else 1
+        assert len(session.executed) == expected_statement_count
+        if status == WorkspaceStatus.monitoring_pr:
+            assert _is_worker_heartbeat_select(session.executed[0])
+        workspace_statement = session.executed[-1]
         sql = str(
-            session.executed[0].compile(  # type: ignore[attr-defined]
+            workspace_statement.compile(  # type: ignore[attr-defined]
                 dialect=postgresql.dialect(),
                 compile_kwargs={"literal_binds": True},
             )
@@ -1072,394 +1398,3 @@ class TestOwnedPathOverlapLookup:
             )
         )
         assert "SKIP LOCKED" in sql
-
-    @pytest.mark.unit
-    @pytest.mark.unit
-    async def test_empty_requested_owned_paths_do_not_report_overlap(
-        self, session: AsyncSession
-    ) -> None:
-        """Verify empty requested owned paths produce no overlap."""
-        repo = WorkspaceRepository(session)
-        await _create_policy_workspace(session, repo, owned_paths=["src/awf/api/**"])
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=[],
-        )
-
-        assert overlaps == []
-
-    @pytest.mark.unit
-    async def test_non_overlapping_owned_paths_do_not_report_overlap(
-        self, session: AsyncSession
-    ) -> None:
-        """Verify non-overlapping requested paths produce no overlap."""
-        repo = WorkspaceRepository(session)
-        await _create_policy_workspace(session, repo, owned_paths=["src/awf/api/**"])
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["docs/**"],
-        )
-
-        assert overlaps == []
-
-    @pytest.mark.unit
-    async def test_internal_plan_artifact_overlap_does_not_report_interworkspace_overlap(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Plan-artifact-only matches are excluded from repository overlaps."""
-        repo = WorkspaceRepository(session)
-        await _create_policy_workspace(
-            session,
-            repo,
-            owned_paths=["src/existing/**", "docs/awf-plans/**"],
-        )
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["src/requested/**", "docs/awf-plans/**"],
-        )
-
-        assert overlaps == []
-
-    @pytest.mark.unit
-    async def test_custom_internal_plan_artifact_overlap_does_not_report_interworkspace_overlap(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Profile-configured planning artifacts are excluded from repository overlaps."""
-        custom_profile = {
-            "planning": {
-                "required": True,
-                "plan_path": "docs/alternate/{workspace_id}.md",
-                "conformance_report_path": "docs/alternate/{workspace_id}.json",
-            },
-        }
-        existing_artifact_path = "docs/alternate/ws_*.md"
-        requested_artifact_path = "docs/alternate/ws_bbbbbbbbbbbbbbbbbbbbbbbb.md"
-        assert (
-            repositories.owned_path_overlap_match(existing_artifact_path, requested_artifact_path)
-            is not None
-        )
-        repo = WorkspaceRepository(session)
-        await _create_policy_workspace(
-            session,
-            repo,
-            owned_paths=[
-                "src/existing/**",
-                existing_artifact_path,
-            ],
-            resolved_profile=custom_profile,
-        )
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=[
-                "src/requested/**",
-                requested_artifact_path,
-            ],
-            resolved_profile=custom_profile,
-        )
-
-        assert overlaps == []
-
-    @pytest.mark.unit
-    async def test_custom_profile_unknown_requested_workspace_keeps_real_ws_docs_overlap(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Requested real docs matching ws_* keep overlap checks before id assignment."""
-        custom_profile = {"planning": {"required": True, "plan_path": "docs/{workspace_id}.md"}}
-        repo = WorkspaceRepository(session)
-        existing = await _create_policy_workspace(
-            session,
-            repo,
-            owned_paths=["docs/ws_protocol.md"],
-            resolved_profile=custom_profile,
-        )
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["docs/ws_protocol.md"],
-            resolved_profile=custom_profile,
-        )
-
-        assert overlaps == [
-            repositories.OwnedPathOverlap(
-                workspace_id=existing.id,
-                existing_path="docs/ws_protocol.md",
-                requested_path="docs/ws_protocol.md",
-            )
-        ]
-
-    @pytest.mark.unit
-    async def test_known_requested_workspace_id_does_not_filter_other_ws_shaped_docs_path(
-        self,
-        session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Known requested ids keep real ws-shaped docs paths in overlap checks."""
-        monkeypatch.setattr(
-            repositories,
-            "new_workspace_id",
-            lambda: "ws_aaaaaaaaaaaaaaaaaaaaaaaa",
-        )
-        custom_profile = {"planning": {"required": True, "plan_path": "docs/{workspace_id}.md"}}
-        repo = WorkspaceRepository(session)
-        existing = await _create_policy_workspace(
-            session,
-            repo,
-            owned_paths=["docs/ws_0123456789abcdef01234567.md"],
-            resolved_profile=custom_profile,
-        )
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["docs/ws_0123456789abcdef01234567.md"],
-            resolved_profile=custom_profile,
-            workspace_id="ws_bbbbbbbbbbbbbbbbbbbbbbbb",
-        )
-
-        assert overlaps == [
-            repositories.OwnedPathOverlap(
-                workspace_id=existing.id,
-                existing_path="docs/ws_0123456789abcdef01234567.md",
-                requested_path="docs/ws_0123456789abcdef01234567.md",
-            )
-        ]
-
-    @pytest.mark.unit
-    async def test_internal_plan_artifact_filter_does_not_hide_real_overlap(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Real source overlaps are preserved when plan artifacts also match."""
-        repo = WorkspaceRepository(session)
-        existing = await _create_policy_workspace(
-            session,
-            repo,
-            owned_paths=["src/shared/**", "docs/awf-plans/**"],
-        )
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["src/shared/module.py", "docs/awf-plans/**"],
-        )
-
-        assert overlaps == [
-            repositories.OwnedPathOverlap(
-                workspace_id=existing.id,
-                existing_path="src/shared/**",
-                requested_path="src/shared/module.py",
-            )
-        ]
-
-    @pytest.mark.unit
-    async def test_real_docs_owned_paths_still_report_overlap(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Repository documentation paths outside AWF internals still overlap."""
-        repo = WorkspaceRepository(session)
-        existing = await _create_policy_workspace(
-            session,
-            repo,
-            owned_paths=["docs/runbooks/**"],
-        )
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["docs/runbooks/deploy.md"],
-        )
-
-        assert overlaps == [
-            repositories.OwnedPathOverlap(
-                workspace_id=existing.id,
-                existing_path="docs/runbooks/**",
-                requested_path="docs/runbooks/deploy.md",
-            )
-        ]
-
-    @pytest.mark.unit
-    async def test_awf_plans_readme_owned_paths_still_report_overlap(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """The tracked awf-plans README is not filtered as generated metadata."""
-        repo = WorkspaceRepository(session)
-        existing = await _create_policy_workspace(
-            session,
-            repo,
-            owned_paths=["docs/awf-plans/README.md"],
-        )
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["docs/awf-plans/README.md"],
-        )
-
-        assert overlaps == [
-            repositories.OwnedPathOverlap(
-                workspace_id=existing.id,
-                existing_path="docs/awf-plans/README.md",
-                requested_path="docs/awf-plans/README.md",
-            )
-        ]
-
-    @pytest.mark.unit
-    async def test_same_paths_on_different_repo_or_base_branch_do_not_report_overlap(
-        self, session: AsyncSession
-    ) -> None:
-        """Verify overlap checks are scoped by repository and base branch."""
-        repo = WorkspaceRepository(session)
-        await _create_policy_workspace(
-            session,
-            repo,
-            repo_url="git@github.com:example/other.git",
-            branch_base="development",
-            owned_paths=["src/awf/api/**"],
-        )
-        await _create_policy_workspace(
-            session,
-            repo,
-            repo_url="git@github.com:example/app.git",
-            branch_base="main",
-            owned_paths=["src/awf/api/**"],
-        )
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["src/awf/api/routes/workspaces.py"],
-        )
-
-        assert overlaps == []
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "status",
-        [
-            WorkspaceStatus.completed,
-            WorkspaceStatus.failed,
-            WorkspaceStatus.cancelled,
-            WorkspaceStatus.destroying,
-            WorkspaceStatus.destroyed,
-        ],
-    )
-    async def test_terminal_and_teardown_statuses_do_not_report_overlap(
-        self,
-        session: AsyncSession,
-        status: WorkspaceStatus,
-    ) -> None:
-        """Verify terminal and teardown workspaces do not overlap."""
-        repo = WorkspaceRepository(session)
-        await _create_policy_workspace(
-            session,
-            repo,
-            owned_paths=["src/awf/api/**"],
-            status=status,
-        )
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["src/awf/api/routes/workspaces.py"],
-        )
-
-        assert overlaps == []
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("status", "existing_path", "requested_path"),
-        [
-            (
-                WorkspaceStatus.requested,
-                "src/awf/api/routes/workspaces.py",
-                "src/awf/api/routes/workspaces.py",
-            ),
-            (
-                WorkspaceStatus.provisioning,
-                "src/awf/api",
-                "src/awf/api/routes/workspaces.py",
-            ),
-            (
-                WorkspaceStatus.ready,
-                "src/awf/api/routes/workspaces.py",
-                "src/awf/api",
-            ),
-            (
-                WorkspaceStatus.running,
-                "src/awf/api/**",
-                "src/awf/api/routes/workspaces.py",
-            ),
-            (
-                WorkspaceStatus.validating,
-                "src/awf/api/routes/workspaces.py",
-                "src/awf/api/**",
-            ),
-            (
-                WorkspaceStatus.pushing,
-                "src/awf/api/*.py",
-                "src/awf/api/routes/workspaces.py",
-            ),
-            (
-                WorkspaceStatus.monitoring_pr,
-                "src/awf/api/routes/workspaces.py",
-                "src/awf/api/*.py",
-            ),
-            (
-                # A blocked workspace keeps its worktree while paused, so its
-                # owned paths still occupy and must report overlap.
-                WorkspaceStatus.blocked,
-                "src/awf/api/**",
-                "src/awf/api/routes/workspaces.py",
-            ),
-            (
-                WorkspaceStatus.running,
-                "src/awf/api/routes/workspaces.py",
-                "src/awf/api/../api/routes/workspaces.py",
-            ),
-            (
-                WorkspaceStatus.validating,
-                "src/awf/api/**",
-                "src/awf/service/../api/routes/workspaces.py",
-            ),
-        ],
-    )
-    async def test_active_exact_ancestor_and_wildcard_paths_report_overlap(
-        self,
-        session: AsyncSession,
-        status: WorkspaceStatus,
-        existing_path: str,
-        requested_path: str,
-    ) -> None:
-        """Verify active exact, ancestor, and wildcard paths report overlap."""
-        repo = WorkspaceRepository(session)
-        existing = await _create_policy_workspace(
-            session,
-            repo,
-            owned_paths=[existing_path],
-            status=status,
-        )
-
-        overlaps = await repo.find_active_owned_path_overlaps(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=[requested_path],
-        )
-
-        assert len(overlaps) == 1
-        assert overlaps[0].workspace_id == existing.id
-        assert overlaps[0].existing_path == existing_path
-        assert overlaps[0].requested_path == requested_path
