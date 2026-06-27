@@ -576,6 +576,7 @@ async def execute(
                     model=run_model,
                     command_evidence=agent_command_evidence,
                     workspace_id=workspace_id,
+                    execution_owner_id=execution_owner_id,
                     before_mark_failed=_deposit_planning_artifacts,
                     after_agent_cleanup_failure_repair=cleanup_repair,
                 )

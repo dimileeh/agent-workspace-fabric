@@ -44,6 +44,7 @@ async def _run_agent_task_with_service_recovery(
     model: str | None,
     command_evidence: list[str],
     workspace_id: str,
+    execution_owner_id: str | None = None,
     before_mark_failed: Callable[[], None] | None = None,
     after_agent_cleanup_failure_repair: (
         Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
@@ -75,6 +76,7 @@ async def _run_agent_task_with_service_recovery(
                 model=model,
                 restart_attempts=restart_attempts,
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
+                execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
             )
             if restart_result is None:
@@ -110,6 +112,7 @@ async def _run_agent_task_with_service_recovery(
                 service_healthy=service_healthy,
                 restart_attempts=restart_attempts,
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
+                execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
             )
             if not restarted:
@@ -142,6 +145,7 @@ async def _run_agent_task_with_service_recovery(
                 service_healthy=service_healthy,
                 restart_attempts=restart_attempts,
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
+                execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
             )
             if not restarted:
@@ -212,6 +216,7 @@ async def _restart_after_conformance_timeout_failure(
     model: str | None,
     restart_attempts: int,
     compose_up_timeout_seconds: int,
+    execution_owner_id: str | None = None,
     before_mark_failed: Callable[[], None] | None = None,
 ) -> tuple[int, bool] | None:
     source_reason_code = _conformance_stall_timeout_source_reason_code(planning_result)
@@ -239,6 +244,7 @@ async def _restart_after_conformance_timeout_failure(
         restart_attempts=restart_attempts,
         compose_up_timeout_seconds=compose_up_timeout_seconds,
         source_reason_code=source_reason_code,
+        execution_owner_id=execution_owner_id,
         before_mark_failed=before_mark_failed,
     )
 
@@ -306,6 +312,7 @@ async def _restart_agent_service_or_mark_unhealthy(
     restart_attempts: int,
     compose_up_timeout_seconds: int,
     source_reason_code: str | None = None,
+    execution_owner_id: str | None = None,
     before_mark_failed: Callable[[], None] | None = None,
 ) -> tuple[int, bool]:
     if restart_attempts >= _AGENT_SERVICE_RESTART_ATTEMPTS:
@@ -340,6 +347,13 @@ async def _restart_agent_service_or_mark_unhealthy(
             message=f"agent compose service restart failed: {restart_exc!r}"[:2000],
             before_mark_failed=before_mark_failed,
         )
+        return restart_attempts, False
+    if not await self._recheck_status(
+        workspace_id,
+        expected=WorkspaceStatus.running,
+        action="agent_service_restart_recovery",
+        owner_id=execution_owner_id,
+    ):
         return restart_attempts, False
     return restart_attempts, True
 

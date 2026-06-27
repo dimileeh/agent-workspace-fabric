@@ -73,6 +73,7 @@ def _executor(*, side_effect: list[object]) -> SimpleNamespace:
         _run_agent_task_with_optional_planning=AsyncMock(side_effect=side_effect),
         _compose=SimpleNamespace(ensure_project_up=AsyncMock()),
         _mark_failed=AsyncMock(),
+        _recheck_status=AsyncMock(return_value=True),
         _prepare_provider_recovery=AsyncMock(),
     )
 
@@ -83,6 +84,7 @@ async def _run_helper(
     *,
     profile: WorkspaceProfile | None = None,
     workspace: SimpleNamespace | None = None,
+    execution_owner_id: str | None = None,
 ) -> tuple[bool, object]:
     return await agent_service_recovery._run_agent_task_with_service_recovery(
         executor,
@@ -96,6 +98,7 @@ async def _run_helper(
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
+        execution_owner_id=execution_owner_id,
     )
 
 
@@ -118,6 +121,12 @@ async def test_agent_service_down_timeout_restarts_and_retries(
     assert recovered is True
     assert planning_failure == "planning-ok"
     executor._compose.ensure_project_up.assert_awaited_once()
+    executor._recheck_status.assert_awaited_once_with(
+        "ws_agent_service",
+        expected=WorkspaceStatus.running,
+        action="agent_service_restart_recovery",
+        owner_id=None,
+    )
     executor._mark_failed.assert_not_awaited()
     executor._prepare_provider_recovery.assert_not_awaited()
 
@@ -161,6 +170,38 @@ async def test_agent_service_restart_uses_companion_aware_timeout(
     assert (
         executor._compose.ensure_project_up.await_args.kwargs["compose_up_timeout_seconds"] == 900
     )
+
+
+@pytest.mark.unit
+async def test_agent_service_restart_rechecks_running_status_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT"), "planning-ok"])
+    executor._recheck_status.return_value = False
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, planning_failure = await _run_helper(
+        executor,
+        tmp_path,
+        execution_owner_id="worker-1",
+    )
+
+    assert recovered is False
+    assert planning_failure is None
+    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._recheck_status.assert_awaited_once_with(
+        "ws_agent_service",
+        expected=WorkspaceStatus.running,
+        action="agent_service_restart_recovery",
+        owner_id="worker-1",
+    )
+    assert executor._run_agent_task_with_optional_planning.await_count == 1
+    executor._mark_failed.assert_not_awaited()
 
 
 @pytest.mark.unit
