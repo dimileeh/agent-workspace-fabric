@@ -525,6 +525,7 @@ async def _restart_agent_service_or_mark_unhealthy(
         action="agent_service_restart_recovery",
         owner_id=execution_owner_id,
     ):
+        await _run_before_mark_failed(before_mark_failed)
         return restart_attempts, False
     return restart_attempts, True
 

@@ -256,6 +256,53 @@ async def test_agent_service_restart_rechecks_running_status_before_retry(
 
 
 @pytest.mark.unit
+async def test_agent_service_restart_recheck_failure_runs_terminal_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[])
+    executor._recheck_status.return_value = False
+    callback_calls: list[str] = []
+    run_agent = AsyncMock(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT"), "validation-ok"])
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _before_mark_failed() -> None:
+        callback_calls.append("finish-validation")
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, result = await agent_service_recovery._run_agent_callable_with_service_recovery(
+        executor,
+        run_agent=run_agent,
+        workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=tmp_path / "compose.yml",
+        model="gpt-5.3-codex",
+        command_evidence=[],
+        workspace_id="ws_agent_service",
+        before_mark_failed=_before_mark_failed,
+        expected_status=WorkspaceStatus.validating,
+        failure_from_status=WorkspaceStatus.validating,
+    )
+
+    assert recovered is False
+    assert result is None
+    assert callback_calls == ["finish-validation"]
+    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._recheck_status.assert_awaited_once_with(
+        "ws_agent_service",
+        expected=WorkspaceStatus.validating,
+        action="agent_service_restart_recovery",
+        owner_id=None,
+    )
+    assert run_agent.await_count == 1
+    executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_agent_service_down_conformance_timeout_failure_restarts_and_retries(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
