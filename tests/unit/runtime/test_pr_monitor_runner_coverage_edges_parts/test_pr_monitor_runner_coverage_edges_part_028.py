@@ -12,6 +12,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoverySupersededError,
+    _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
 
@@ -125,6 +126,55 @@ async def test_run_agent_for_verdict_propagates_recovery_control_flow_without_co
     runner = _VerdictRunner(tmp_path, adapter=_Adapter())
 
     with pytest.raises(type(recovery_exc)):
+        await comments._invoke_cli_for_verdict_result(
+            runner,
+            workspace_id=workspace_id,
+            prompt="Fix review comment",
+            commit_message="fix: review comment",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    assert runner.commit_dirty_worktree_calls == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "guard_exc",
+    [
+        _MonitorAgentRuntimeOwnershipRepairFailedError("AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"),
+        _MonitorHeadObjectMissingError(
+            "HEAD_OBJECT_MISSING_COMMENT_AGENT",
+            "HEAD object missing before comment agent retry",
+        ),
+        _MonitorMirrorHooksPathRepairFailedError(),
+    ],
+)
+async def test_run_agent_for_verdict_propagates_recovery_guard_errors_without_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    guard_exc: Exception,
+) -> None:
+    workspace_id = "ws_verdict_recovery_guard"
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+
+    class _Adapter:
+        async def run(self, **_kwargs: object) -> object:
+            raise guard_exc
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _repair_mirror_hooks_path(_path: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(comments, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership)
+    monkeypatch.setattr(comments, "mirror_path_for_worktree", lambda _worktree_path: None)
+    monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
+
+    runner = _VerdictRunner(tmp_path, adapter=_Adapter())
+
+    with pytest.raises(type(guard_exc)):
         await comments._invoke_cli_for_verdict_result(
             runner,
             workspace_id=workspace_id,

@@ -37,6 +37,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
     _MonitorAgentServiceRecoverySupersededError,
+    _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
 
@@ -330,6 +331,12 @@ async def _invoke_cli_for_verdict_result(
     except (ProviderRecoveryRetryError, _MonitorAgentServiceRecoverySupersededError):
         raise
     except _MonitorAgentServiceRecoveryFailedError:
+        raise
+    except (
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorHeadObjectMissingError,
+        _MonitorMirrorHooksPathRepairFailedError,
+    ):
         raise
     except Exception:
         if mirror_path is not None:
