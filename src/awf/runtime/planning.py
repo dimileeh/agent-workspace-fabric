@@ -568,8 +568,17 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
             "build",
         )
     ) or (re.search(r"(?<![a-z0-9_])git\s+diff\s+--check(?![a-z0-9_])", text) is not None)
+    instructional_validation_run = (
+        re.search(
+            r"(?:^|[.;:]\s*|(?<![a-z0-9_])"
+            r"(?:please\s+|(?:must|should|needs?|required|requires?)\s+(?:to\s+|be\s+)?))"
+            r"(?:re-?run|run)(?![a-z0-9_])",
+            text,
+        )
+        is not None
+    )
     named_validation_command_handoff = (
-        re.search(r"(?<![a-z0-9_])(?:re-?run|run)(?![a-z0-9_])", text) is not None
+        instructional_validation_run
         and any(
             has_marker(marker)
             for marker in (
