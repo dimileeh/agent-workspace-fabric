@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,7 @@ async def _run_agent_task_with_service_recovery(
     model: str | None,
     command_evidence: list[str],
     workspace_id: str,
+    before_mark_failed: Callable[[], None] | None = None,
 ) -> tuple[bool, Any]:
     restart_attempts = 0
     while True:
@@ -80,6 +81,7 @@ async def _run_agent_task_with_service_recovery(
                 exc=exc,
                 service_healthy=service_healthy,
                 restart_attempts=restart_attempts,
+                before_mark_failed=before_mark_failed,
             )
             if not restarted:
                 return False, None
@@ -107,6 +109,7 @@ async def _run_agent_task_with_service_recovery(
                 exc=exc,
                 service_healthy=service_healthy,
                 restart_attempts=restart_attempts,
+                before_mark_failed=before_mark_failed,
             )
             if not restarted:
                 return False, None
@@ -146,6 +149,7 @@ async def _restart_agent_service_or_mark_unhealthy(
     exc: AgentRunError | ComposeExecCleanupError,
     service_healthy: bool | None,
     restart_attempts: int,
+    before_mark_failed: Callable[[], None] | None = None,
 ) -> tuple[int, bool]:
     if restart_attempts >= _AGENT_SERVICE_RESTART_ATTEMPTS:
         await _mark_agent_service_unhealthy(
@@ -155,6 +159,7 @@ async def _restart_agent_service_or_mark_unhealthy(
             service_healthy=service_healthy,
             restart_attempts=restart_attempts,
             message="agent compose service stayed unhealthy after restart attempts",
+            before_mark_failed=before_mark_failed,
         )
         return restart_attempts, False
     restart_attempts += 1
@@ -174,6 +179,7 @@ async def _restart_agent_service_or_mark_unhealthy(
             service_healthy=service_healthy,
             restart_attempts=restart_attempts,
             message=f"agent compose service restart failed: {restart_exc!r}"[:2000],
+            before_mark_failed=before_mark_failed,
         )
         return restart_attempts, False
     return restart_attempts, True
@@ -187,6 +193,7 @@ async def _mark_agent_service_unhealthy(
     service_healthy: bool | None,
     restart_attempts: int,
     message: str,
+    before_mark_failed: Callable[[], None] | None = None,
 ) -> None:
     exc_details = getattr(exc, "details", None)
     details = dict(exc_details) if isinstance(exc_details, Mapping) else {}
@@ -204,6 +211,8 @@ async def _mark_agent_service_unhealthy(
         "service_healthy": service_healthy,
         "restart_attempts": restart_attempts,
     }
+    if before_mark_failed is not None:
+        before_mark_failed()
     await self._mark_failed(
         workspace_id=workspace_id,
         from_status=WorkspaceStatus.running,

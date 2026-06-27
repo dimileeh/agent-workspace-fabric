@@ -577,6 +577,7 @@ async def execute(
                     model=run_model,
                     command_evidence=agent_command_evidence,
                     workspace_id=workspace_id,
+                    before_mark_failed=_deposit_planning_artifacts,
                 )
                 if not agent_service_recovered:
                     return

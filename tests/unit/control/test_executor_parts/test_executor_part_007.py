@@ -13,16 +13,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
-from awf.common.commands import FakeCommandRunner
+from awf.adapters.base import AgentRunError
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
+    agent_service_recovery,
 )
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.db.enums import (
@@ -731,6 +734,91 @@ class TestPlanningArtifactDeposits:
         assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
             '{"status": "satisfied", "gaps": []}'
         )
+
+    @pytest.mark.unit
+    async def test_agent_service_recovery_exhaustion_deposits_planning_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Agent compose-service recovery marks the workspace FAILED when restart
+        # attempts are exhausted and returns ``agent_service_recovered=False`` to
+        # the executor. The executor must still surface any partial plan and
+        # conformance report already written in the preserved FAILED worktree.
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "max_iterations": 1},
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- do work\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "satisfied", "gaps": []}',
+            encoding="utf-8",
+        )
+
+        async def _service_down(*_args: object, **_kwargs: object) -> bool:
+            return False
+
+        monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+        monkeypatch.setattr(
+            executor._compose,
+            "ensure_project_up",
+            AsyncMock(),
+        )
+
+        def _timeout_error() -> AgentRunError:
+            return AgentRunError(
+                agent=AgentRuntime.codex,
+                result=CommandResult(
+                    returncode=124,
+                    stdout="",
+                    stderr='service "agent" is not running',
+                ),
+                reason_code="AGENT_IDLE_TIMEOUT",
+                details={
+                    "provider": "openai",
+                    "model": "gpt-5",
+                    "provider_recovery": {
+                        "reason_code": "AGENT_IDLE_TIMEOUT",
+                        "failure_type": "idle_timeout",
+                        "failure_scope": "provider",
+                        "failure_fingerprint": "provider-fingerprint",
+                    },
+                },
+            )
+
+        async def _timeout_agent_run(**_kwargs: Any) -> object:
+            raise _timeout_error()
+
+        monkeypatch.setattr(
+            executor,
+            "_run_agent_task_with_optional_planning",
+            _timeout_agent_run,
+        )
+        order = _record_deposit_vs_mark_order(executor, monkeypatch)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
+            '{"status": "satisfied", "gaps": []}'
+        )
+        assert order.index("deposit") < order.index("mark_failed")
 
     @pytest.mark.unit
     async def test_agent_phase_unexpected_error_deposits_planning_artifacts(
