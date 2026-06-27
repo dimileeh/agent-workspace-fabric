@@ -85,6 +85,37 @@ class RuntimeInspector:
         return RuntimeSnapshot(stack_state="stopped", services=services)
 
 
+def agent_service_health_from_snapshot(
+    snapshot: RuntimeSnapshot,
+    *,
+    service_name: str = "agent",
+) -> bool | None:
+    """Return tri-state health for the compose agent service."""
+
+    if snapshot.stack_state in {"unknown", "unavailable"}:
+        return None
+    service = next((item for item in snapshot.services if item.name == service_name), None)
+    if service is None:
+        return False
+    health = (service.health or "").strip().lower()
+    if health == "unhealthy":
+        return False
+    return service.state.strip().lower() == "running"
+
+
+async def probe_agent_service_health(
+    inspector: RuntimeInspector,
+    compose_project_name: str | None,
+) -> bool | None:
+    """Inspect a compose stack and return tri-state health for its agent service."""
+
+    try:
+        snapshot = await inspector.inspect(compose_project_name)
+    except Exception:
+        return None
+    return agent_service_health_from_snapshot(snapshot)
+
+
 @dataclass(frozen=True)
 class _ProcessResult:
     returncode: int
