@@ -256,6 +256,68 @@ async def test_agent_service_restart_rechecks_running_status_before_retry(
 
 
 @pytest.mark.unit
+async def test_recovery_callbacks_recheck_supplied_validation_status_before_retry(
+    tmp_path: Path,
+) -> None:
+    executor = SimpleNamespace(
+        _run_agent_git_writability_preflight=AsyncMock(return_value=True),
+        _ensure_ollama_model_or_mark_failed=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+    )
+    repair_calls: list[dict[str, object]] = []
+
+    async def _repair_mirror_hooks_path_or_mark_failed(**kwargs: object) -> bool:
+        repair_calls.append(kwargs)
+        return True
+
+    async def _repair_hooks_after_agent_cleanup_failure(**_kwargs: object) -> bool:
+        return True
+
+    async def _recover_missing_head_after_cleanup_failure(
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        return True
+
+    before_agent_retry, _cleanup_repair = (
+        agent_service_recovery._build_agent_service_recovery_callbacks(
+            executor,
+            workspace_id="ws_agent_service",
+            workspace=SimpleNamespace(owned_paths=[]),
+            compose_project="awf_ws_agent_service",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+            execution_owner_id="worker-1",
+            repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
+            repair_hooks_after_agent_cleanup_failure=_repair_hooks_after_agent_cleanup_failure,
+            recover_missing_head_after_cleanup_failure=(
+                _recover_missing_head_after_cleanup_failure
+            ),
+            deposit_planning_artifacts=lambda: None,
+            expected_status=WorkspaceStatus.validating,
+        )
+    )
+
+    assert await before_agent_retry() is True
+    executor._run_agent_git_writability_preflight.assert_awaited_once_with(
+        workspace_id="ws_agent_service",
+        compose_project="awf_ws_agent_service",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path,
+    )
+    executor._ensure_ollama_model_or_mark_failed.assert_awaited_once()
+    executor._recheck_status.assert_awaited_once_with(
+        "ws_agent_service",
+        expected=WorkspaceStatus.validating,
+        action="agent_run",
+        owner_id="worker-1",
+    )
+    assert len(repair_calls) == 1
+    assert repair_calls[0]["failure_stage"] == "before agent retry"
+    assert repair_calls[0]["before_mark_failed"] is not None
+
+
+@pytest.mark.unit
 async def test_agent_service_restart_recheck_failure_runs_terminal_callback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

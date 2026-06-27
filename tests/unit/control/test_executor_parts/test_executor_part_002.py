@@ -995,6 +995,7 @@ class TestHappyPathPart001:
         assert recovery_calls
         assert recovery_calls[-1]["expected_status"] is WorkspaceStatus.validating
         assert recovery_calls[-1]["failure_from_status"] is WorkspaceStatus.validating
+        assert callable(recovery_calls[-1]["before_agent_retry"])
         assert callable(recovery_calls[-1]["after_agent_cleanup_failure_repair"])
         assert "Validation evidence" in prompts[-1]
         assert "VALIDATION_OK" in prompts[-1]

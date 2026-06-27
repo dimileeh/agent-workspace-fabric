@@ -49,6 +49,7 @@ def _build_agent_service_recovery_callbacks(
     repair_hooks_after_agent_cleanup_failure: Callable[..., Awaitable[bool]],
     recover_missing_head_after_cleanup_failure: Callable[..., Awaitable[bool]],
     deposit_planning_artifacts: Callable[[], None],
+    expected_status: WorkspaceStatus = WorkspaceStatus.running,
     cleanup_failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
     cleanup_failure_stage: str = "agent_run_cleanup_failure",
     verify_post_agent_commit: bool = True,
@@ -64,6 +65,7 @@ def _build_agent_service_recovery_callbacks(
         execution_owner_id=execution_owner_id,
         repair_mirror_hooks_path_or_mark_failed=repair_mirror_hooks_path_or_mark_failed,
         deposit_planning_artifacts=deposit_planning_artifacts,
+        expected_status=expected_status,
     )
     cleanup_repair = partial(
         _repair_after_recoverable_agent_cleanup_failure,
@@ -92,6 +94,7 @@ async def _rerun_agent_pre_launch_guards(
     execution_owner_id: str | None,
     repair_mirror_hooks_path_or_mark_failed: Callable[..., Awaitable[bool]],
     deposit_planning_artifacts: Callable[[], None],
+    expected_status: WorkspaceStatus,
 ) -> bool:
     if not await self._run_agent_git_writability_preflight(
         workspace_id=workspace_id,
@@ -107,7 +110,7 @@ async def _rerun_agent_pre_launch_guards(
         return False
     if not await self._recheck_status(
         workspace_id,
-        expected=WorkspaceStatus.running,
+        expected=expected_status,
         action="agent_run",
         owner_id=execution_owner_id,
     ):

@@ -167,6 +167,7 @@ async def run_validation_and_fix_cycle(
     git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
     execution_owner_id: str | None = None,
     resume_disable_fix_passes: bool = False,
+    before_agent_retry: Callable[[], Awaitable[bool]] | None = None,
     after_agent_cleanup_failure_repair: (
         Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
     ) = None,
@@ -655,6 +656,7 @@ async def run_validation_and_fix_cycle(
                         workspace_id=workspace_id,
                         execution_owner_id=execution_owner_id,
                         before_mark_failed=_finish_conformance_recovery_failure,
+                        before_agent_retry=before_agent_retry,
                         after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
                         expected_status=WorkspaceStatus.validating,
                         failure_from_status=WorkspaceStatus.validating,
@@ -1066,6 +1068,7 @@ async def run_validation_and_fix_cycle(
                 workspace_id=workspace_id,
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=_finish_fix_recovery_failure,
+                before_agent_retry=before_agent_retry,
                 after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
                 expected_status=WorkspaceStatus.validating,
                 failure_from_status=WorkspaceStatus.validating,
