@@ -327,6 +327,13 @@ async def _restart_agent_service_or_mark_unhealthy(
     before_mark_failed: Callable[[], None] | None = None,
 ) -> tuple[int, bool]:
     if restart_attempts >= _AGENT_SERVICE_RESTART_ATTEMPTS:
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.running,
+            action="agent_service_restart_terminal",
+            owner_id=execution_owner_id,
+        ):
+            return restart_attempts, False
         await _mark_agent_service_unhealthy(
             self,
             workspace_id=workspace_id,
@@ -348,6 +355,13 @@ async def _restart_agent_service_or_mark_unhealthy(
             compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
     except ComposeOperationError as restart_exc:
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.running,
+            action="agent_service_restart_terminal",
+            owner_id=execution_owner_id,
+        ):
+            return restart_attempts, False
         await _mark_agent_service_unhealthy(
             self,
             workspace_id=workspace_id,

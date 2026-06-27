@@ -476,6 +476,44 @@ async def test_agent_service_down_restart_budget_exhausts_to_infra_failure(
 
 
 @pytest.mark.unit
+async def test_agent_service_down_restart_budget_exhaustion_respects_stale_owner_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(
+        side_effect=[
+            _timeout_error("AGENT_IDLE_TIMEOUT"),
+            _timeout_error("AGENT_IDLE_TIMEOUT"),
+            _timeout_error("AGENT_IDLE_TIMEOUT"),
+        ]
+    )
+    executor._recheck_status.side_effect = [True, True, False]
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, planning_failure = await _run_helper(
+        executor,
+        tmp_path,
+        execution_owner_id="worker-stale",
+    )
+
+    assert recovered is False
+    assert planning_failure is None
+    executor._compose.ensure_project_up.assert_awaited()
+    assert executor._recheck_status.await_count == 3
+    executor._recheck_status.assert_awaited_with(
+        "ws_agent_service",
+        expected=WorkspaceStatus.running,
+        action="agent_service_restart_terminal",
+        owner_id="worker-stale",
+    )
+    executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_agent_service_down_restart_failure_marks_infra_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -512,6 +550,44 @@ async def test_agent_service_down_restart_failure_marks_infra_failure(
     assert recovery_details["source_reason_code"] == "AGENT_IDLE_TIMEOUT"
     assert recovery_details["service_healthy"] is False
     assert recovery_details["restart_attempts"] == 1
+    executor._prepare_provider_recovery.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_agent_service_down_restart_failure_respects_stale_owner_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT")])
+    executor._compose.ensure_project_up.side_effect = ComposeOperationError(
+        operation="up",
+        returncode=1,
+        stdout="",
+        stderr="compose failed",
+    )
+    executor._recheck_status.return_value = False
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, planning_failure = await _run_helper(
+        executor,
+        tmp_path,
+        execution_owner_id="worker-stale",
+    )
+
+    assert recovered is False
+    assert planning_failure is None
+    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._recheck_status.assert_awaited_once_with(
+        "ws_agent_service",
+        expected=WorkspaceStatus.running,
+        action="agent_service_restart_terminal",
+        owner_id="worker-stale",
+    )
+    executor._mark_failed.assert_not_awaited()
     executor._prepare_provider_recovery.assert_not_awaited()
 
 
