@@ -1111,7 +1111,17 @@ async def test_manual_merge_checks_block_ready_until_green_and_merge_still_requi
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(check_state="FAILURE"))
-    cmd.queue_result(returncode=0, stdout="[]")  # gh run list
+    cmd.queue_result(
+        returncode=0,
+        stdout=(
+            '[{"databaseId": 4242, "name": "python-full-coverage", '
+            '"conclusion": "FAILURE", "status": "completed"}]'
+        ),
+    )  # gh run list — one actionable failing run
+    cmd.queue_result(
+        returncode=0,
+        stdout="tests/unit/test_x.py::test_y FAILED\nE   assert 1 == 2",
+    )  # gh run view --log-failed — actionable pytest evidence drives ReportCiFailure
     adapter.queue(stdout="fixed ci")
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0)  # git fetch origin <base>
