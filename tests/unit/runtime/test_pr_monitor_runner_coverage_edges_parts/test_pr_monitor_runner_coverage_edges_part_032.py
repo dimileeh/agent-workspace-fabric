@@ -15,6 +15,7 @@ from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_C
 from awf.runtime.pr_monitor import CheckFailure
 from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
@@ -197,6 +198,54 @@ async def test_ci_fix_agent_cleanup_ownership_repair_failure_returns_terminal_pu
     assert result.returncode == 1
     assert result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
     assert result.stderr == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+@pytest.mark.unit
+async def test_ci_fix_agent_recovery_superseded_propagates_before_commit_sink(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="abc123\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _raise_recovery_superseded(**_kwargs: object) -> None:
+        raise _MonitorAgentServiceRecoverySupersededError("agent service recovery superseded")
+
+    async def _unexpected_commit_dirty_worktree(**_kwargs: object) -> bool:
+        raise AssertionError("superseded recovery should propagate before commit sink")
+
+    monkeypatch.setattr(
+        runner,
+        "_run_monitor_agent_with_service_recovery",
+        _raise_recovery_superseded,
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _unexpected_commit_dirty_worktree)
+
+    with pytest.raises(
+        _MonitorAgentServiceRecoverySupersededError,
+        match="agent service recovery superseded",
+    ):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="test failure"),),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch="awf/ws_test",
+        )
 
 
 @pytest.mark.unit

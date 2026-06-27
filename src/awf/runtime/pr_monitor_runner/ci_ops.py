@@ -58,6 +58,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
@@ -286,7 +287,10 @@ async def _run_ci_fix(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
-    except _MonitorAgentServiceRecoveryFailedError:
+    except (
+        _MonitorAgentServiceRecoveryFailedError,
+        _MonitorAgentServiceRecoverySupersededError,
+    ):
         raise
     except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
         return _GitPushResult(
