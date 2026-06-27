@@ -998,24 +998,24 @@ class TestRunOnceMonitorRecoveryPart002:
         }
 
     @pytest.mark.unit
-    async def test_restart_recovery_clears_stale_execution_claim_and_records_monitor_claim_acquisition(
+    async def test_restart_recovery_clears_dead_owner_execution_claim_and_records_monitor_claim_acquisition(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        stale_execution_expires_at = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+        unexpired_execution_expires_at = datetime.now(UTC) + timedelta(minutes=5)
         monitor_id = await _create_monitoring_pr(
             session_factory,
             origin_repo,
-            "monitor-with-stale-execution-claim",
+            "monitor-with-dead-owner-execution-claim",
             pr_number=457,
         )
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(monitor_id)
             assert ws is not None
             ws.execution_claimed_by = "dead-execution-worker"
-            ws.execution_claim_expires_at = stale_execution_expires_at
+            ws.execution_claim_expires_at = unexpired_execution_expires_at
             await s.commit()
 
         original_claim_monitoring_pr = WorkspaceRepository.claim_monitoring_pr
@@ -1091,13 +1091,13 @@ class TestRunOnceMonitorRecoveryPart002:
             "monitor_claimed_by": None,
             "monitor_claim_expires_at": None,
             "execution_claimed_by": "dead-execution-worker",
-            "execution_claim_expires_at": stale_execution_expires_at.isoformat(),
+            "execution_claim_expires_at": unexpired_execution_expires_at.isoformat(),
         }
         assert operation.payload["claim_cleanup"]["execution_claim"] == {
             "action": "cleared_stale",
             "reason_code": "STALE_EXECUTION_CLAIM_CLEARED_DURING_MONITOR_RECOVERY",
             "previous_claimed_by": "dead-execution-worker",
-            "previous_expires_at": stale_execution_expires_at.isoformat(),
+            "previous_expires_at": unexpired_execution_expires_at.isoformat(),
         }
         assert operation.payload["claim_cleanup"]["monitor_claim"]["action"] == "acquired"
         assert operation.payload["claim_cleanup"]["monitor_claim"]["reason_code"] == (

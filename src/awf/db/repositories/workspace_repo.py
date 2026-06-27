@@ -53,6 +53,7 @@ from awf.db.repositories.quality_repo import (
     MergeCandidateRepository,
     ResourceReservationRepository,
 )
+from awf.db.repositories.system_repo import WorkerHeartbeatRepository
 from awf.db.repositories.task_repo import (
     TaskAttemptRepository,
     TaskRepository,
@@ -781,6 +782,9 @@ class WorkspaceRepository:
             return []
 
         scoring_time = scoring_at or claim_cutoff
+        fresh_execution_claim_owner_ids = await WorkerHeartbeatRepository(
+            self._session
+        ).list_fresh_worker_ids(now=claim_cutoff)
         stmt = _monitoring_pr_deferred_active_execution_claim_stmt(
             limit=limit,
             exclude_ids=exclude_ids,
@@ -789,6 +793,7 @@ class WorkspaceRepository:
             dialect_name=self._dialect_name,
             claim_cutoff=claim_cutoff,
             execution_claim_owner_id=owner_id,
+            fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
             skip_locked=self._dialect_name == "postgresql",
         )
         result = await self._session.execute(stmt)
@@ -810,6 +815,12 @@ class WorkspaceRepository:
         scoring_at: datetime,
         execution_claim_owner_id: str | None = None,
     ) -> builtins.list[Workspace]:
+        claim_cutoff = datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None
+        fresh_execution_claim_owner_ids = (
+            await WorkerHeartbeatRepository(self._session).list_fresh_worker_ids(now=claim_cutoff)
+            if claim_cutoff is not None
+            else None
+        )
         stmt = _schedulable_workspace_ids_stmt(
             status=status,
             limit=limit,
@@ -819,8 +830,9 @@ class WorkspaceRepository:
             scoring_at=scoring_at,
             dialect_name=self._dialect_name,
             skip_locked=self._dialect_name == "postgresql",
-            claim_cutoff=datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None,
+            claim_cutoff=claim_cutoff,
             execution_claim_owner_id=execution_claim_owner_id,
+            fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
@@ -1121,6 +1133,13 @@ class WorkspaceRepository:
         clear_stale_execution_claim_cutoff: datetime | None = None,
     ) -> bool:
         """Claim a monitor-recovery workspace unless another lease is active."""
+        fresh_execution_claim_owner_ids = (
+            await WorkerHeartbeatRepository(self._session).list_fresh_worker_ids(
+                now=clear_stale_execution_claim_cutoff
+            )
+            if clear_stale_execution_claim_cutoff is not None
+            else None
+        )
         return await claim_monitoring_pr(
             self._session,
             workspace_id,
@@ -1128,6 +1147,7 @@ class WorkspaceRepository:
             lease_expires_at=lease_expires_at,
             now=now,
             clear_stale_execution_claim_cutoff=clear_stale_execution_claim_cutoff,
+            fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
         )
 
     async def claim_worker_restart_recovery_execution(

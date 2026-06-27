@@ -88,6 +88,7 @@ from awf.db.repositories import (
     QueueDecisionRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
+    WorkerHeartbeatRepository,
     WorkspaceRepository,
 )
 from awf.db.repositories._scheduler import _scheduler_node_scope_condition
@@ -632,9 +633,14 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
             return False
         previous_claim = _workspace_claim_snapshot(ws)
         runtime_stranding_reason = _latest_runtime_stranding_reason(ws.events)
+        fresh_execution_claim_owner_ids = await WorkerHeartbeatRepository(
+            session
+        ).list_fresh_worker_ids(now=now)
         execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
             ws,
             claim_cutoff=now,
+            fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
+            execution_claim_owner_id=self._worker_id,
         )
         claimed = await repo.claim_monitoring_pr(
             workspace_id,

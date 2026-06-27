@@ -83,6 +83,7 @@ def _schedulable_workspace_ids_stmt(
     skip_locked: bool,
     claim_cutoff: datetime | None = None,
     execution_claim_owner_id: str | None = None,
+    fresh_execution_claim_owner_ids: set[str] | None = None,
 ) -> Any:
     """Build a SELECT for workspaces in a given status ordered for scheduler claiming."""
     order_expressions = scheduler_order_expressions(
@@ -99,15 +100,14 @@ def _schedulable_workspace_ids_stmt(
                 Workspace.monitor_claim_expires_at <= claim_cutoff,
             )
         )
-        stale_execution_claim = or_(
-            Workspace.execution_claimed_by.is_(None),
-            Workspace.execution_claim_expires_at.is_(None),
-            Workspace.execution_claim_expires_at <= claim_cutoff,
+        unavailable_execution_claim = _unavailable_execution_claim_condition(
+            claim_cutoff=claim_cutoff,
+            fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
         )
-        execution_claim_available = stale_execution_claim
+        execution_claim_available = unavailable_execution_claim
         if execution_claim_owner_id is not None:
             execution_claim_available = or_(
-                stale_execution_claim,
+                unavailable_execution_claim,
                 Workspace.execution_claimed_by == execution_claim_owner_id,
             )
         stmt = stmt.where(execution_claim_available)
@@ -143,6 +143,7 @@ def _monitoring_pr_deferred_active_execution_claim_stmt(
     dialect_name: str | None,
     claim_cutoff: datetime,
     execution_claim_owner_id: str | None = None,
+    fresh_execution_claim_owner_ids: set[str] | None = None,
     skip_locked: bool,
 ) -> Any:
     """Build a SELECT for monitor rows deferred by another active execution claim."""
@@ -159,6 +160,11 @@ def _monitoring_pr_deferred_active_execution_claim_stmt(
         active_execution_claim = and_(
             active_execution_claim,
             Workspace.execution_claimed_by != execution_claim_owner_id,
+        )
+    if fresh_execution_claim_owner_ids is not None:
+        active_execution_claim = and_(
+            active_execution_claim,
+            Workspace.execution_claimed_by.in_(sorted(fresh_execution_claim_owner_ids)),
         )
     stmt = select(Workspace).where(
         Workspace.status == WorkspaceStatus.monitoring_pr.value,
@@ -188,6 +194,24 @@ def _monitoring_pr_deferred_active_execution_claim_stmt(
     if skip_locked:
         stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
     return stmt
+
+
+def _unavailable_execution_claim_condition(
+    *,
+    claim_cutoff: datetime,
+    fresh_execution_claim_owner_ids: set[str] | None,
+) -> ColumnElement[bool]:
+    stale_execution_claim = or_(
+        Workspace.execution_claimed_by.is_(None),
+        Workspace.execution_claim_expires_at.is_(None),
+        Workspace.execution_claim_expires_at <= claim_cutoff,
+    )
+    if fresh_execution_claim_owner_ids is None:
+        return stale_execution_claim
+    return or_(
+        stale_execution_claim,
+        Workspace.execution_claimed_by.not_in(sorted(fresh_execution_claim_owner_ids)),
+    )
 
 
 def _scheduler_node_scope_condition(

@@ -22,6 +22,7 @@ from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
+    WorkerHeartbeatRepository,
     WorkspaceRepository,
     _schedulable_workspace_ids_stmt,
 )
@@ -509,6 +510,14 @@ class TestOwnedPathOverlapLookup:
             workspace.monitor_claim_expires_at = None
         deferred.execution_claimed_by = "live-execution-worker"
         deferred.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        heartbeat_at = datetime.now(UTC)
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="live-execution-worker",
+            node_id="local",
+            started_at=heartbeat_at - timedelta(minutes=1),
+            last_heartbeat_at=heartbeat_at,
+            poll_interval_seconds=1.0,
+        )
         await session.commit()
 
         listed = await repo.list_schedulable_ids(
@@ -518,6 +527,119 @@ class TestOwnedPathOverlapLookup:
         )
 
         assert listed == [eligible.id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_scheduler_allows_unexpired_execution_claim_from_stale_heartbeat_owner(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Restart recovery should not wait for a dead worker's execution lease expiry."""
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        stale_owner = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="stale owner monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        lower_priority = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="lower priority monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        for workspace in (stale_owner, lower_priority):
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            workspace.created_at = scoring_at
+            workspace.monitor_claimed_by = None
+            workspace.monitor_claim_expires_at = None
+        stale_owner.execution_claimed_by = "stale-execution-worker"
+        stale_owner.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="stale-execution-worker",
+            node_id="local",
+            started_at=scoring_at - timedelta(minutes=10),
+            last_heartbeat_at=scoring_at - timedelta(minutes=10),
+            poll_interval_seconds=1.0,
+        )
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.monitoring_pr,
+            limit=1,
+            scoring_at=scoring_at,
+            execution_claim_owner_id="new-worker-after-restart",
+        )
+
+        assert listed == [stale_owner.id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_deferred_active_execution_claims_require_fresh_owner(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        claim_cutoff = datetime.now(UTC)
+        live_owner = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="live owner monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        stale_owner = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="stale owner monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 90}},
+        )
+        for workspace in (live_owner, stale_owner):
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            workspace.created_at = claim_cutoff
+            workspace.monitor_claimed_by = None
+            workspace.monitor_claim_expires_at = None
+            workspace.execution_claim_expires_at = claim_cutoff + timedelta(minutes=5)
+        live_owner.execution_claimed_by = "live-execution-worker"
+        stale_owner.execution_claimed_by = "stale-execution-worker"
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="live-execution-worker",
+            node_id="local",
+            started_at=claim_cutoff - timedelta(minutes=1),
+            last_heartbeat_at=claim_cutoff,
+            poll_interval_seconds=1.0,
+        )
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="stale-execution-worker",
+            node_id="local",
+            started_at=claim_cutoff - timedelta(minutes=10),
+            last_heartbeat_at=claim_cutoff - timedelta(minutes=10),
+            poll_interval_seconds=1.0,
+        )
+        await session.commit()
+
+        deferred = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            limit=10,
+            claim_cutoff=claim_cutoff,
+            owner_id="new-worker-after-restart",
+            scoring_at=claim_cutoff,
+        )
+
+        assert [workspace.id for workspace in deferred] == [live_owner.id]
 
     @pytest.mark.unit
     async def test_monitoring_pr_scheduler_allows_current_execution_claim_owner(

@@ -21,6 +21,7 @@ from awf.db.repositories import (
     OperationRepository,
     TaskAttemptRepository,
     TaskRepository,
+    WorkerHeartbeatRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
     _wildcard_prefixes_overlap,
@@ -513,6 +514,13 @@ async def test_claim_monitoring_pr_defers_for_different_unexpired_execution_clai
     workspace.execution_claimed_by = "live-runner"
     workspace.execution_claim_expires_at = execution_expires_at
     workspace.execution_claim_epoch = 7
+    await WorkerHeartbeatRepository(session).record_heartbeat(
+        worker_id="live-runner",
+        node_id="local",
+        started_at=now - timedelta(minutes=1),
+        last_heartbeat_at=now,
+        poll_interval_seconds=1.0,
+    )
     await session.flush()
 
     claimed = await workspace_repo.claim_monitoring_pr(
@@ -529,6 +537,38 @@ async def test_claim_monitoring_pr_defers_for_different_unexpired_execution_clai
     assert workspace.execution_claimed_by == "live-runner"
     assert workspace.execution_claim_expires_at == execution_expires_at
     assert workspace.execution_claim_epoch == 7
+
+
+@pytest.mark.unit
+async def test_claim_monitoring_pr_clears_unexpired_execution_claim_from_missing_heartbeat_owner(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    now = datetime(2026, 5, 2, 9, 0, tzinfo=UTC)
+    execution_expires_at = now + timedelta(minutes=5)
+    workspace = await _workspace(
+        session,
+        title="monitor claim clears dead owner execution claim",
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    workspace.execution_claimed_by = "dead-runner"
+    workspace.execution_claim_expires_at = execution_expires_at
+    workspace.execution_claim_epoch = 7
+    await session.flush()
+
+    claimed = await workspace_repo.claim_monitoring_pr(
+        workspace.id,
+        owner_id="owner-1",
+        lease_expires_at=now + timedelta(minutes=5),
+        now=now,
+        clear_stale_execution_claim_cutoff=now,
+    )
+    assert claimed
+    await session.refresh(workspace)
+    assert workspace.monitor_claimed_by == "owner-1"
+    assert workspace.execution_claimed_by is None
+    assert workspace.execution_claim_expires_at is None
+    assert workspace.execution_claim_epoch == 8
 
 
 @pytest.mark.unit
