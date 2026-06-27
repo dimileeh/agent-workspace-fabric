@@ -809,6 +809,67 @@ async def test_review_comment_provider_failure_records_retry_and_ignores_comment
 
 
 @pytest.mark.unit
+async def test_run_returns_after_terminal_agent_service_recovery_sentinel(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _fetch_status_for_decision(**_kwargs: object) -> PRStatus:
+        return _green_status()
+
+    async def _refresh_pr_feedback_resolution_state(**_kwargs: object) -> bool:
+        return False
+
+    async def _resolve_addressed_outdated_threads(**_kwargs: object) -> None:
+        return None
+
+    async def _execute(**kwargs: object) -> bool:
+        await runner._terminate_failed(
+            str(kwargs["workspace_id"]),
+            message="monitor: agent service unhealthy after restart attempts",
+            reason_code=AGENT_SERVICE_UNHEALTHY,
+        )
+        raise _MonitorAgentServiceRecoveryFailedError("agent service unhealthy")
+
+    runner._fetch_status_for_decision = _fetch_status_for_decision  # type: ignore[method-assign]
+    runner._refresh_pr_feedback_resolution_state = (  # type: ignore[method-assign]
+        _refresh_pr_feedback_resolution_state
+    )
+    runner._resolve_addressed_outdated_threads = (  # type: ignore[method-assign]
+        _resolve_addressed_outdated_threads
+    )
+    runner._execute = _execute  # type: ignore[method-assign]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        unexpected_recovery_failures = [
+            event for event in workspace.events if event.reason_code == "MONITOR_RECOVERY_FAILED"
+        ]
+        unhealthy_events = [
+            event for event in workspace.events if event.reason_code == AGENT_SERVICE_UNHEALTHY
+        ]
+
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert len(unhealthy_events) == 1
+    assert unexpected_recovery_failures == []
+
+
+@pytest.mark.unit
 async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

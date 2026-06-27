@@ -62,6 +62,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
+    _MonitorAgentServiceRecoveryFailedError,
     _RunnerDeps,
 )
 from awf.runtime.pr_push_remote import (
@@ -488,6 +489,16 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
             )
             if state is not None:
                 await self._persist_state(workspace_id, state)
+            return
+        except _MonitorAgentServiceRecoveryFailedError as exc:
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.agent_service_recovery_failed",
+                    "workspace_id": workspace_id,
+                    "message": str(exc)[:400],
+                },
+            )
             return
         except ProviderRecoveryFallbackError:
             await self._write_monitor_log(
