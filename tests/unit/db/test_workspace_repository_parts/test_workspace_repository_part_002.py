@@ -17,7 +17,7 @@ import awf.db.repositories as repositories
 from awf.db.base import Base
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.models import WorkerHeartbeat, Workspace
 from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
@@ -112,11 +112,25 @@ class _FakeScalarResult:
         return self._values[0] if self._values else None
 
 
+def _is_worker_heartbeat_select(statement: object) -> bool:
+    return any(
+        description.get("entity") is WorkerHeartbeat
+        for description in getattr(statement, "column_descriptions", ())
+    )
+
+
 class _RecordingSchedulerSession:
-    def __init__(self, dialect_name: str, values: list[object] | None = None) -> None:
+    def __init__(
+        self,
+        dialect_name: str,
+        values: list[object] | None = None,
+        *,
+        heartbeat_values: list[WorkerHeartbeat] | None = None,
+    ) -> None:
         del dialect_name
         self.info: dict[str, object] = {}
         self.values = list(values or [])
+        self.heartbeat_values = list(heartbeat_values or [])
         self.executed: list[object] = []
 
     async def execute(
@@ -126,6 +140,8 @@ class _RecordingSchedulerSession:
     ) -> _FakeScalarResult:
         del parameters
         self.executed.append(statement)
+        if _is_worker_heartbeat_select(statement):
+            return _FakeScalarResult(self.heartbeat_values)
         return _FakeScalarResult(self.values)
 
 
@@ -820,9 +836,13 @@ class TestOwnedPathOverlapLookup:
         )
 
         assert listed == ["ws_claimed"]
-        assert len(session.executed) == 1
+        expected_statement_count = 2 if status == WorkspaceStatus.monitoring_pr else 1
+        assert len(session.executed) == expected_statement_count
+        if status == WorkspaceStatus.monitoring_pr:
+            assert _is_worker_heartbeat_select(session.executed[0])
+        workspace_statement = session.executed[-1]
         sql = str(
-            session.executed[0].compile(  # type: ignore[attr-defined]
+            workspace_statement.compile(  # type: ignore[attr-defined]
                 dialect=postgresql.dialect(),
                 compile_kwargs={"literal_binds": True},
             )
