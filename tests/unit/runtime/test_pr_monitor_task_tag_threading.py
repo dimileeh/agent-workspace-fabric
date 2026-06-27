@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunResult
+from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import RepoRef
@@ -47,6 +48,28 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     seed_monitoring_workspace,
 )
+
+
+class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
+    async def _run_monitor_agent_with_service_recovery(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        log_source: str,
+        command_evidence: list[str] | None = None,
+    ) -> AgentRunResult:
+        result = await self._deps.adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=prompt,
+            workspace_id=workspace_id,
+            log_source=log_source,
+        )
+        append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+        return result
 
 
 @pytest.fixture
@@ -280,7 +303,7 @@ def _verdict_runner(sink_task_tags: list[object]) -> SimpleNamespace:
         sink_task_tags.append(kwargs.get("task_tag"))
         return True
 
-    return SimpleNamespace(
+    return _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=Path("/tmp"),
         _provider_recovery_suppresses_cli=_suppress,
         _commit_dirty_worktree=_commit_dirty_worktree,
@@ -359,7 +382,7 @@ async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_before_agent(
     )
     monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _provider_recovery_suppresses_cli=_suppress,
         _commit_dirty_worktree=_commit_dirty_worktree,
@@ -428,7 +451,7 @@ async def test_invoke_cli_for_verdict_result_repairs_mirror_hooks_after_cleanup_
     )
     monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _provider_recovery_suppresses_cli=_suppress,
         _commit_dirty_worktree=_commit_dirty_worktree,
@@ -489,7 +512,7 @@ async def test_invoke_cli_for_verdict_result_blocks_agent_when_mirror_hook_repai
     )
     monkeypatch.setattr(comments, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _provider_recovery_suppresses_cli=_suppress,
         _commit_dirty_worktree=_commit_dirty_worktree,
@@ -657,7 +680,7 @@ async def test_run_ci_fix_resolves_once_and_threads_to_sink(
     monkeypatch.setattr(ci_ops, "_owned_paths_for_prompt", _owned_paths)
     monkeypatch.setattr(ci_ops, "fix_ci_prompt", _fix_ci_prompt)
 
-    self = SimpleNamespace(
+    self = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context=None,
         _resolve_task_tag=_resolve_task_tag,
@@ -740,7 +763,7 @@ async def test_run_ci_fix_repairs_mirror_hooks_before_agent(
     )
     monkeypatch.setattr(ci_ops, "repair_mirror_hooks_path", _repair_mirror_hooks_path)
 
-    self = SimpleNamespace(
+    self = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context=None,
         _resolve_task_tag=_resolve_task_tag,
@@ -1223,7 +1246,7 @@ async def test_run_sync_base_resolves_once_and_threads_to_sink(
         del workspace_id, worktree_path, operation_type, fallback_head_sha
         return "abc123", None
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _resolve_task_tag=_resolve_task_tag,

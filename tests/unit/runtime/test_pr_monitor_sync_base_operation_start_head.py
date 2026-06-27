@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from awf.adapters.base import AgentRunError
+from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
@@ -20,6 +21,28 @@ from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
 )
+
+
+class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
+    async def _run_monitor_agent_with_service_recovery(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        log_source: str,
+        command_evidence: list[str] | None = None,
+    ) -> object:
+        result = await self._deps.adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=prompt,
+            workspace_id=workspace_id,
+            log_source=log_source,
+        )
+        append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+        return result
 
 
 @pytest.mark.unit
@@ -482,7 +505,7 @@ async def test_run_sync_base_threads_compose_context_to_conflict_commit(
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -605,7 +628,7 @@ async def test_run_sync_base_repairs_mirror_hooks_before_conflict_agent_launch(
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -728,7 +751,7 @@ async def test_run_sync_base_fails_closed_when_conflict_prelaunch_mirror_repair_
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -858,7 +881,7 @@ async def test_run_sync_base_repairs_mirror_hooks_after_conflict_agent_cleanup_f
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -994,7 +1017,7 @@ async def test_run_sync_base_fails_closed_when_post_agent_mirror_hooks_repair_fa
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -1126,7 +1149,7 @@ async def test_run_sync_base_runs_post_agent_guard_before_provider_retry(
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
