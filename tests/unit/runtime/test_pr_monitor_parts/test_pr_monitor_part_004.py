@@ -24,6 +24,13 @@ from awf.runtime.pr_monitor import (
     ReviewComment,
     ReviewThread,
     WaitForTransientCI,
+    _ci_failure_identity,
+    _ci_transient_infra_wait_count,
+    _ci_transient_infra_wait_count_key,
+    _ci_transient_infra_wait_exhausted,
+    _ci_transient_infra_wait_seconds,
+    _ci_transient_infra_wait_started_at,
+    _ci_transient_infra_wait_started_key,
     _ci_transient_rerun_state_key,
     _record_ci_transient_infra_wait,
     _should_rerun_transient_ci,
@@ -381,3 +388,99 @@ class TestCiFailure:
             MonitorConfig(),
         )
         assert isinstance(action, AddressComments)
+
+
+class TestCiTransientInfraWaitHelpers:
+    """Direct coverage for the transient infra-wait state helpers.
+
+    ``decide`` only reaches some of these branches through accumulated monitor
+    state across many polls (corrupt markers, repeat waits, disabled caps), so
+    they are exercised here against the helper contract directly rather than
+    through a multi-poll integration path.
+    """
+
+    def _failure(self, run_id: str | None = "25655330295") -> CheckFailure:
+        return CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="curl: (56) Recv failure: Connection reset by peer",
+            run_id=run_id,
+        )
+
+    @pytest.mark.unit
+    def test_failure_identity_without_run_id_falls_back_to_name_conclusion(self) -> None:
+        # A failing run with no ``run_id`` has no stable run identity, so the
+        # name/conclusion pair is the budget key's only identity.
+        assert _ci_failure_identity(self._failure(run_id=None)) == ("", "CI", "FAILURE")
+
+    @pytest.mark.unit
+    def test_infra_wait_count_treats_corrupt_marker_as_zero(self) -> None:
+        failure = self._failure()
+        state = MonitorState()
+        state.threads_addressed_ids[_ci_transient_infra_wait_count_key("abc123", (failure,))] = (
+            "not-an-int"
+        )
+
+        assert _ci_transient_infra_wait_count(state, head_sha="abc123", failures=(failure,)) == 0
+
+    @pytest.mark.unit
+    def test_infra_wait_started_at_treats_corrupt_marker_as_unset(self) -> None:
+        failure = self._failure()
+        state = MonitorState()
+        state.threads_addressed_ids[_ci_transient_infra_wait_started_key("abc123", (failure,))] = (
+            "not-a-float"
+        )
+
+        assert (
+            _ci_transient_infra_wait_started_at(state, head_sha="abc123", failures=(failure,))
+            is None
+        )
+
+    @pytest.mark.unit
+    def test_record_infra_wait_preserves_first_seen_timestamp(self) -> None:
+        # The first wait stamps ``started_at``; later waits only bump the count
+        # and keep the original timestamp so the escalation deadline is stable.
+        failure = self._failure()
+        state = MonitorState()
+
+        first_count, first_started = _record_ci_transient_infra_wait(
+            state, head_sha="abc123", failures=(failure,), now=100.0
+        )
+        second_count, second_started = _record_ci_transient_infra_wait(
+            state, head_sha="abc123", failures=(failure,), now=500.0
+        )
+
+        assert (first_count, first_started) == (1, 100.0)
+        assert (second_count, second_started) == (2, 100.0)
+
+    @pytest.mark.unit
+    def test_infra_wait_exhausted_when_max_seconds_disabled(self) -> None:
+        # ``ci_transient_infra_wait_max_seconds <= 0`` disables waiting entirely,
+        # so the wait is always considered exhausted.
+        failure = self._failure()
+        status = _status(check_state=CheckState.FAILURE, ci_failures=(failure,))
+
+        assert _ci_transient_infra_wait_exhausted(
+            status,
+            MonitorState(),
+            MonitorConfig(ci_transient_infra_wait_max_seconds=0.0),
+            (failure,),
+        )
+
+    @pytest.mark.unit
+    def test_infra_wait_seconds_uncapped_when_backoff_cap_disabled(self) -> None:
+        # A non-positive backoff cap disables capping, so the exponential wait is
+        # returned in full instead of being clamped.
+        failure = self._failure()
+        status = _status(check_state=CheckState.FAILURE, ci_failures=(failure,))
+        state = MonitorState()
+        state.threads_addressed_ids[
+            _ci_transient_infra_wait_count_key(status.head_sha, (failure,))
+        ] = "5"
+        config = MonitorConfig(
+            poll_interval_seconds=60.0,
+            ci_transient_infra_wait_max_backoff_seconds=0.0,
+        )
+
+        # 60 * 2**5 = 1920, well above the default 300s cap, returned uncapped.
+        assert _ci_transient_infra_wait_seconds(status, state, config, (failure,)) == 1920.0
