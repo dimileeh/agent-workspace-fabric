@@ -709,6 +709,9 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
             if ws is None:
                 await session.commit()
                 return False
+            fresh_execution_claim_owner_ids = await WorkerHeartbeatRepository(
+                session
+            ).list_fresh_worker_ids(now=now)
             await _record_monitor_recovery_deferred_active_execution_claim(
                 self,
                 repo,

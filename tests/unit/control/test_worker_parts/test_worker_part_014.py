@@ -1297,6 +1297,14 @@ class TestRunOnceMonitorRecoveryPart002:
             now: datetime | None = None,
             clear_stale_execution_claim_cutoff: datetime | None = None,
         ) -> bool:
+            refresh_observed_at = now or datetime.now(UTC)
+            await WorkerHeartbeatRepository(self._session).record_heartbeat(
+                worker_id=refreshed_execution_owner,
+                node_id="worker-node-a",
+                started_at=refresh_observed_at - timedelta(minutes=1),
+                last_heartbeat_at=refresh_observed_at,
+                poll_interval_seconds=300.0,
+            )
             await self._session.execute(
                 update(Workspace)
                 .where(Workspace.id == workspace_id)
