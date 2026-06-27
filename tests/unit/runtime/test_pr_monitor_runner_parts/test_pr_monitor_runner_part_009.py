@@ -1294,6 +1294,54 @@ async def test_monitor_agent_cleanup_service_down_restarts_service_and_retries(
 
 
 @pytest.mark.unit
+async def test_monitor_agent_cleanup_service_down_uses_exception_message_when_output_empty(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=ComposeExecCleanupError(
+            invocation_id="awf-test-cleanup",
+            source="agent",
+            label="monitor",
+            message='service "agent" is not running',
+            cleanup_result=CommandResult(returncode=1, stdout="", stderr=""),
+        )
+    )
+    adapter.queue(stdout="AWF-VERDICT: FIXED: cleanup restarted")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+
+    result = await runner._run_monitor_agent_with_service_recovery(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        prompt="fix the comment",
+        log_source="recovery",
+        command_evidence=[],
+    )
+
+    assert result.stdout == "AWF-VERDICT: FIXED: cleanup restarted"
+    assert adapter.calls == ["fix the comment", "fix the comment"]
+    ensure_project_up.assert_awaited_once()
+
+
+@pytest.mark.unit
 async def test_monitor_agent_service_recovery_stops_when_workspace_leaves_monitoring(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
