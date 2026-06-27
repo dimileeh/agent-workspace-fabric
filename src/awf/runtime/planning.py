@@ -556,6 +556,18 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
     def has_marker(marker: str) -> bool:
         return re.search(rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])", text) is not None
 
+    named_validation_command = any(
+        has_marker(marker)
+        for marker in (
+            "pytest",
+            "ruff",
+            "mypy",
+            "coverage",
+            "npm",
+            "lint",
+            "build",
+        )
+    ) or (re.search(r"(?<![a-z0-9_])git\s+diff\s+--check(?![a-z0-9_])", text) is not None)
     named_validation_command_handoff = (
         re.search(r"(?<![a-z0-9_])(?:re-?run|run)(?![a-z0-9_])", text) is not None
         and any(
@@ -568,18 +580,7 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
                 "profile gates",
             )
         )
-        and any(
-            has_marker(marker)
-            for marker in (
-                "pytest",
-                "ruff",
-                "mypy",
-                "coverage",
-                "npm",
-                "lint",
-                "build",
-            )
-        )
+        and named_validation_command
     )
     evidence_markers = (
         "evidence",
@@ -619,6 +620,16 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         has_marker(marker) for marker in validation_subject_markers
     ):
         return False
+    saved_plan_scoped_check_handoff = (
+        has_marker("saved plan")
+        and named_validation_command_handoff
+        and re.search(r"(?<![a-z0-9_])(?:focused|scoped)[-\s]+checks?(?![a-z0-9_])", text)
+        is not None
+        and any(
+            has_marker(marker)
+            for marker in ("evidence", "record", "recorded", "recording", "validation phase")
+        )
+    )
     # Migration implementation gaps stay agent-owned; migration-gate evidence
     # gaps are AWF-owned because the profile gate must produce that evidence.
     migration_validation_evidence_gap = has_marker(
@@ -655,19 +666,25 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         r"\s+(?:gap|gaps|task|tasks|todo|todos|update|updates|change|changes|"
         r"need|needs|must|should|required|missing|absent|stale|outdated|lacks?)",
         r"(?<![a-z0-9_])(?:from|in|inside|within)\s+(?:the\s+)?"
-        r"(?:saved\s+)?plan(?![a-z0-9_])",
-        r"(?<![a-z0-9_])(?:from|in|inside|within)\s+(?:the\s+)?"
         r"(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])",
-        r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
-        r"[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
-        r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
-        r"not found|not run|has not run)\b",
         r"(?<![a-z0-9_])(?:docs|documentation|document|doc|guide|readme)"
         r"(?![a-z0-9_])[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
         r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
         r"not found|not run|has not run)\b",
     )
     if any(re.search(pattern, text) for pattern in deterministic_gap_patterns):
+        return False
+    saved_plan_artifact_patterns = (
+        r"(?<![a-z0-9_])(?:from|in|inside|within)\s+(?:the\s+)?"
+        r"(?:saved\s+)?plan(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
+        r"[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
+        r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
+        r"not found|not run|has not run)\b",
+    )
+    if not saved_plan_scoped_check_handoff and any(
+        re.search(pattern, text) for pattern in saved_plan_artifact_patterns
+    ):
         return False
     # Mixed mentions remain agent-owned: only "code coverage" is AWF-validation
     # evidence, while any other standalone "code" use is a deterministic gap.
@@ -682,6 +699,12 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
             if _has_test_path_work_context(text, match.start()):
                 return False
             continue
+        if named_validation_command_handoff and _is_test_directory_command_target(
+            text, match.start(), match.end()
+        ):
+            if _has_test_path_work_context(text, match.start()):
+                return False
+            continue
         if re.match(
             r"[\s\-,:]+(?:coverage|evidence|provenance|logs?|"
             r"(?:suites?|runners?|runs?|reports?)[\s\-,:]+"
@@ -691,6 +714,30 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
             continue
         return False
     return True
+
+
+def _is_test_directory_command_target(
+    text: str, path_match_start: int, path_match_end: int
+) -> bool:
+    if (
+        re.match(r"(?:\s*(?:[`),.;:]|$)|\s+-{1,2}[a-z0-9][a-z0-9-]*)", text[path_match_end:])
+        is None
+    ):
+        return False
+    segment_start = max(
+        text.rfind("`", 0, path_match_start),
+        text.rfind(";", 0, path_match_start),
+        text.rfind("\n", 0, path_match_start),
+    )
+    command_segment = text[segment_start + 1 : path_match_start]
+    return (
+        re.search(
+            r"(?<![a-z0-9_])(?:pytest|ruff\s+check|mypy|npm|git\s+diff\s+--check)"
+            r"(?![a-z0-9_])",
+            command_segment,
+        )
+        is not None
+    )
 
 
 def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
@@ -722,6 +769,7 @@ def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
         "targeted",
         "unit",
         "integration",
+        "validation",
     )
     work_objects = (
         "assertion",
