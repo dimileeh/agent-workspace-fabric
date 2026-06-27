@@ -209,8 +209,28 @@ async def _run_operator_hint_cycle(
                 acted_feedback_text=hint.directive,
             )
             return _GitPushResult(pushed=False, failed=False, returncode=0)
+        # Repeat-directive short-circuit: a prior cycle re-blocked this exact
+        # ``(preserved commit, directive)`` for leaving the ungranted protected commit
+        # in local history (revert-on-top), so re-running the identical directive would
+        # only repeat the leak — park needs_human without burning CLI tokens. But the
+        # stored marker alone is NOT proof the leak still exists: a valid reset/rebase
+        # (or an unfinalized drop whose marker clear was lost to a crash) can remove the
+        # preserved commit from the unpushed range while the marker lingers. Re-confirm
+        # against the same safety boundary the leak guard below uses —
+        # ``_preserved_commit_in_unpushed_range`` returns False once the commit was
+        # dropped or is already on the remote — so a now-resolved directive falls through
+        # to normal processing instead of being wedged at needs_human
+        # (PRRT_kwDOSJAM6s6Ms-zG).
         repeat_key = _protected_history_directive_reblock_key(preserved_head_sha, hint.directive)
-        if state.threads_addressed_ids.get(repeat_key):
+        if state.threads_addressed_ids.get(
+            repeat_key
+        ) and await self._preserved_commit_in_unpushed_range(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+            preserved_head_sha=preserved_head_sha,
+        ):
             reason = (
                 "The previous operator directive still left the ungranted protected "
                 f"commit {preserved_head_sha} in local history. Provide a new directive "
