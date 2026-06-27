@@ -109,6 +109,7 @@ async def _rerun_agent_pre_launch_guards(
     if not await self._ensure_ollama_model_or_mark_failed(
         workspace_id=workspace_id,
         ws=workspace,
+        from_status=failure_from_status,
     ):
         return False
     if not await self._recheck_status(

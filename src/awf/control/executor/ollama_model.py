@@ -81,6 +81,7 @@ async def _ensure_ollama_model_or_mark_failed(
     *,
     workspace_id: str,
     ws: Any,
+    from_status: WorkspaceStatus = WorkspaceStatus.running,
 ) -> bool:
     """Ensure the OpenCode/Ollama model is available; pull it if needed.
 
@@ -188,7 +189,7 @@ async def _ensure_ollama_model_or_mark_failed(
         message = f"{message} {detail}"
     await self._mark_failed(
         workspace_id=workspace_id,
-        from_status=WorkspaceStatus.running,
+        from_status=from_status,
         failure_reason=FailureReason.infrastructure_failure,
         message=message[:2000],
         reason_code=reason_code,

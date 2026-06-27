@@ -279,11 +279,12 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
     ) -> bool:
         return True
 
+    workspace = SimpleNamespace(owned_paths=[])
     before_agent_retry, _cleanup_repair = (
         agent_service_recovery._build_agent_service_recovery_callbacks(
             executor,
             workspace_id="ws_agent_service",
-            workspace=SimpleNamespace(owned_paths=[]),
+            workspace=workspace,
             compose_project="awf_ws_agent_service",
             compose_file=tmp_path / "compose.yml",
             worktree_path=tmp_path,
@@ -307,7 +308,11 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
         worktree_path=tmp_path,
         from_status=WorkspaceStatus.validating,
     )
-    executor._ensure_ollama_model_or_mark_failed.assert_awaited_once()
+    executor._ensure_ollama_model_or_mark_failed.assert_awaited_once_with(
+        workspace_id="ws_agent_service",
+        ws=workspace,
+        from_status=WorkspaceStatus.validating,
+    )
     executor._recheck_status.assert_awaited_once_with(
         "ws_agent_service",
         expected=WorkspaceStatus.validating,
