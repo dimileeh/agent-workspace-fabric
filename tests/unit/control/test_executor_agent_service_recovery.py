@@ -10,6 +10,7 @@ import pytest
 
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import agent_service_recovery
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
@@ -34,6 +35,20 @@ def _timeout_error(reason_code: str) -> AgentRunError:
                 "failure_fingerprint": "provider-fingerprint",
             },
         },
+    )
+
+
+def _cleanup_error() -> ComposeExecCleanupError:
+    return ComposeExecCleanupError(
+        invocation_id="agent-timeout-cleanup",
+        source="agent",
+        label="codex",
+        message='service "agent" is not running',
+        cleanup_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr='service "agent" is not running',
+        ),
     )
 
 
@@ -85,6 +100,65 @@ async def test_agent_service_down_timeout_restarts_and_retries(
     executor._compose.ensure_project_up.assert_awaited_once()
     executor._mark_failed.assert_not_awaited()
     executor._prepare_provider_recovery.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_agent_service_down_timeout_cleanup_failure_restarts_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[_cleanup_error(), "planning-ok"])
+    command_evidence: list[str] = []
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    (
+        recovered,
+        planning_failure,
+    ) = await agent_service_recovery._run_agent_task_with_service_recovery(
+        executor,
+        adapter=SimpleNamespace(),
+        workspace=SimpleNamespace(id="ws_agent_service", task_prompt="do it", task_tag=None),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path,
+        model="gpt-5.3-codex",
+        command_evidence=command_evidence,
+        workspace_id="ws_agent_service",
+    )
+
+    assert recovered is True
+    assert planning_failure == "planning-ok"
+    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._mark_failed.assert_not_awaited()
+    assert command_evidence == ['service "agent" is not running']
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("service_healthy", [True, None])
+async def test_agent_timeout_cleanup_failure_with_live_service_keeps_cleanup_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    service_healthy: bool | None,
+) -> None:
+    exc = _cleanup_error()
+    executor = _executor(side_effect=[exc])
+
+    async def _probe(*_args: object, **_kwargs: object) -> bool | None:
+        return service_healthy
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _probe)
+
+    with pytest.raises(ComposeExecCleanupError) as raised:
+        await _run_helper(executor, tmp_path)
+
+    assert raised.value is exc
+    executor._compose.ensure_project_up.assert_not_awaited()
+    executor._mark_failed.assert_not_awaited()
 
 
 @pytest.mark.unit

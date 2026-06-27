@@ -14,6 +14,7 @@ from awf.adapters.provider_failures import (
     classify_provider_failure,
 )
 from awf.common.command_evidence import append_command_evidence
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
@@ -70,34 +71,44 @@ async def _run_agent_task_with_service_recovery(
                 stdout=exc.result.stdout,
                 stderr=exc.result.stderr,
             )
-            if restart_attempts >= _AGENT_SERVICE_RESTART_ATTEMPTS:
-                await _mark_agent_service_unhealthy(
-                    self,
-                    workspace_id=workspace_id,
-                    exc=exc,
-                    service_healthy=service_healthy,
-                    restart_attempts=restart_attempts,
-                    message="agent compose service stayed unhealthy after restart attempts",
-                )
+            restart_attempts, restarted = await _restart_agent_service_or_mark_unhealthy(
+                self,
+                workspace_id=workspace_id,
+                profile=profile,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                exc=exc,
+                service_healthy=service_healthy,
+                restart_attempts=restart_attempts,
+            )
+            if not restarted:
                 return False, None
-            restart_attempts += 1
-            try:
-                await self._compose.ensure_project_up(
-                    project_name=compose_project,
-                    compose_file=compose_file,
-                    workspace_id=workspace_id,
-                    wait=True,
-                    compose_up_timeout_seconds=profile.docker.startup_timeout_seconds,
-                )
-            except Exception as restart_exc:
-                await _mark_agent_service_unhealthy(
-                    self,
-                    workspace_id=workspace_id,
-                    exc=exc,
-                    service_healthy=service_healthy,
-                    restart_attempts=restart_attempts,
-                    message=f"agent compose service restart failed: {restart_exc!r}"[:2000],
-                )
+        except ComposeExecCleanupError as exc:
+            service_healthy = await probe_agent_service_health(
+                RuntimeInspector(),
+                compose_project,
+            )
+            if service_healthy is not False or not _cleanup_failure_indicates_agent_service_down(
+                exc
+            ):
+                raise
+            cleanup_result = exc.cleanup_result
+            append_command_evidence(
+                command_evidence,
+                stdout=cleanup_result.stdout if cleanup_result is not None else "",
+                stderr=cleanup_result.stderr if cleanup_result is not None else str(exc),
+            )
+            restart_attempts, restarted = await _restart_agent_service_or_mark_unhealthy(
+                self,
+                workspace_id=workspace_id,
+                profile=profile,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                exc=exc,
+                service_healthy=service_healthy,
+                restart_attempts=restart_attempts,
+            )
+            if not restarted:
                 return False, None
 
 
@@ -125,16 +136,60 @@ def _classify_timeout_with_service_health(
     )
 
 
+async def _restart_agent_service_or_mark_unhealthy(
+    self: Any,
+    *,
+    workspace_id: str,
+    profile: WorkspaceProfile,
+    compose_project: str,
+    compose_file: Path,
+    exc: AgentRunError | ComposeExecCleanupError,
+    service_healthy: bool | None,
+    restart_attempts: int,
+) -> tuple[int, bool]:
+    if restart_attempts >= _AGENT_SERVICE_RESTART_ATTEMPTS:
+        await _mark_agent_service_unhealthy(
+            self,
+            workspace_id=workspace_id,
+            exc=exc,
+            service_healthy=service_healthy,
+            restart_attempts=restart_attempts,
+            message="agent compose service stayed unhealthy after restart attempts",
+        )
+        return restart_attempts, False
+    restart_attempts += 1
+    try:
+        await self._compose.ensure_project_up(
+            project_name=compose_project,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            wait=True,
+            compose_up_timeout_seconds=profile.docker.startup_timeout_seconds,
+        )
+    except Exception as restart_exc:
+        await _mark_agent_service_unhealthy(
+            self,
+            workspace_id=workspace_id,
+            exc=exc,
+            service_healthy=service_healthy,
+            restart_attempts=restart_attempts,
+            message=f"agent compose service restart failed: {restart_exc!r}"[:2000],
+        )
+        return restart_attempts, False
+    return restart_attempts, True
+
+
 async def _mark_agent_service_unhealthy(
     self: Any,
     *,
     workspace_id: str,
-    exc: AgentRunError,
+    exc: AgentRunError | ComposeExecCleanupError,
     service_healthy: bool | None,
     restart_attempts: int,
     message: str,
 ) -> None:
-    details = dict(exc.details) if isinstance(exc.details, Mapping) else {}
+    exc_details = getattr(exc, "details", None)
+    details = dict(exc_details) if isinstance(exc_details, Mapping) else {}
     details["provider_recovery"] = {
         "reason_code": AGENT_SERVICE_UNHEALTHY,
         "failure_type": "runtime_unhealthy",
@@ -165,3 +220,15 @@ def _mapping_str(mapping: Mapping[str, Any], key: str) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _cleanup_failure_indicates_agent_service_down(exc: ComposeExecCleanupError) -> bool:
+    if exc.reason_code != EXEC_PROCESS_CLEANUP_FAILED:
+        return False
+    result = exc.cleanup_result
+    output = f"{result.stdout}\n{result.stderr}" if result is not None else str(exc)
+    normalized = output.lower()
+    return (
+        'service "agent" is not running' in normalized
+        or "service 'agent' is not running" in normalized
+    )
