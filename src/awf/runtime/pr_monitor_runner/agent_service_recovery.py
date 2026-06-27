@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,7 +15,11 @@ from awf.adapters.provider_failures import (
 )
 from awf.common.command_evidence import append_command_evidence
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
+from awf.db.repositories import WorkspaceRepository
+from awf.node.companion_services import companion_specs_from_task_policy
 from awf.node.compose_manager import ComposeManager
+from awf.node.stack_launcher import effective_compose_up_timeout_seconds
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.types import _MonitorAgentServiceRecoveryFailedError
@@ -169,13 +174,17 @@ async def _restart_monitor_agent_service_or_fail(
         work_dir=self._work_dir,
         template_path=_monitor_agent_service_recovery_template_sentinel(self._work_dir),
     )
+    compose_up_timeout_seconds = await _monitor_agent_service_restart_timeout_seconds(
+        self,
+        workspace_id=workspace_id,
+    )
     try:
         await manager.ensure_project_up(
             project_name=compose_project,
             compose_file=compose_file,
             workspace_id=workspace_id,
             wait=True,
-            compose_up_timeout_seconds=_MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS,
+            compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
     except Exception as restart_exc:
         await _terminate_monitor_for_unhealthy_agent_service(
@@ -194,6 +203,32 @@ async def _restart_monitor_agent_service_or_fail(
         reason_code=AGENT_SERVICE_UNHEALTHY,
     )
     return restart_attempts
+
+
+async def _monitor_agent_service_restart_timeout_seconds(
+    self: Any,
+    *,
+    workspace_id: str,
+) -> int:
+    try:
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is None or not workspace.resolved_profile:
+                return _MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS
+            profile = WorkspaceProfile.model_validate(workspace.resolved_profile)
+            task_policy = (
+                workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
+            )
+            return effective_compose_up_timeout_seconds(
+                profile=profile,
+                companions=companion_specs_from_task_policy(task_policy),
+            )
+    except Exception:
+        _log.exception(
+            "monitor.agent_service_restart_timeout_resolution_failed",
+            workspace_id=workspace_id,
+        )
+        return _MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS
 
 
 async def _terminate_monitor_for_unhealthy_agent_service(

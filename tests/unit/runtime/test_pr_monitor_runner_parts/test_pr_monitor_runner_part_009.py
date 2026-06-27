@@ -38,6 +38,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.profiles.models import ProfileDocker, WorkspaceProfile
 from awf.runtime.planning import CONFORMANCE_REQUIRES_AWF_VALIDATION
 from awf.runtime.pr_monitor import (
     AddressComments,
@@ -872,6 +873,87 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
         workspace_id="ws_monitor_service_retry",
         wait=True,
         compose_up_timeout_seconds=300,
+    )
+
+
+@pytest.mark.unit
+async def test_monitor_agent_idle_timeout_uses_workspace_compose_timeout_for_restart(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.resolved_profile = WorkspaceProfile(
+            name="monitor-restart-timeout",
+            docker=ProfileDocker(startup_timeout_seconds=420),
+        ).model_dump(mode="json")
+        workspace.task_policy = {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:backend.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": 900,
+                }
+            ]
+        }
+        await session.commit()
+
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="monitor idle timeout while agent service was down",
+            ),
+            reason_code=AGENT_IDLE_TIMEOUT,
+            details={
+                "provider_recovery": {
+                    "provider": "google",
+                    "model": "gemini-2.5-pro",
+                }
+            },
+        )
+    )
+    adapter.queue(stdout="AWF-VERDICT: FIXED: restarted")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+    compose_file = tmp_path / "compose.yml"
+
+    result = await runner._run_monitor_agent_with_service_recovery(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=compose_file,
+        prompt="fix the comment",
+        log_source="recovery",
+        command_evidence=[],
+    )
+
+    assert result.stdout == "AWF-VERDICT: FIXED: restarted"
+    ensure_project_up.assert_awaited_once_with(
+        project_name="proj",
+        compose_file=compose_file,
+        workspace_id=workspace_id,
+        wait=True,
+        compose_up_timeout_seconds=900,
     )
 
 
