@@ -15,9 +15,11 @@ from awf.adapters.provider_failures import (
 )
 from awf.common.command_evidence import append_command_evidence
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
+from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
+from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
@@ -40,19 +42,32 @@ async def _run_agent_task_with_service_recovery(
     restart_attempts = 0
     while True:
         try:
-            return (
-                True,
-                await self._run_agent_task_with_optional_planning(
-                    adapter=adapter,
-                    workspace=workspace,
-                    profile=profile,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    worktree_path=worktree_path,
-                    model=model,
-                    command_evidence=command_evidence,
-                ),
+            planning_result = await self._run_agent_task_with_optional_planning(
+                adapter=adapter,
+                workspace=workspace,
+                profile=profile,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                worktree_path=worktree_path,
+                model=model,
+                command_evidence=command_evidence,
             )
+            restart_result = await _restart_after_conformance_timeout_failure(
+                self,
+                planning_result=planning_result,
+                workspace_id=workspace_id,
+                profile=profile,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                model=model,
+                restart_attempts=restart_attempts,
+                before_mark_failed=before_mark_failed,
+            )
+            if restart_result is None:
+                return True, planning_result
+            restart_attempts, restarted = restart_result
+            if not restarted:
+                return False, None
         except AgentRunError as exc:
             if exc.reason_code not in _AGENT_SERVICE_TIMEOUT_REASON_CODES:
                 raise
@@ -115,6 +130,47 @@ async def _run_agent_task_with_service_recovery(
                 return False, None
 
 
+async def _restart_after_conformance_timeout_failure(
+    self: Any,
+    *,
+    planning_result: Any,
+    workspace_id: str,
+    profile: WorkspaceProfile,
+    compose_project: str,
+    compose_file: Path,
+    model: str | None,
+    restart_attempts: int,
+    before_mark_failed: Callable[[], None] | None = None,
+) -> tuple[int, bool] | None:
+    source_reason_code = _conformance_stall_timeout_source_reason_code(planning_result)
+    if source_reason_code is None:
+        return None
+    service_healthy = await probe_agent_service_health(
+        RuntimeInspector(),
+        compose_project,
+    )
+    classification = _classify_conformance_timeout_failure_with_service_health(
+        planning_result,
+        source_reason_code=source_reason_code,
+        model=model,
+        service_healthy=service_healthy,
+    )
+    if classification is None or classification.reason_code != AGENT_SERVICE_UNHEALTHY:
+        return None
+    return await _restart_agent_service_or_mark_unhealthy(
+        self,
+        workspace_id=workspace_id,
+        profile=profile,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        exc=planning_result,
+        service_healthy=service_healthy,
+        restart_attempts=restart_attempts,
+        source_reason_code=source_reason_code,
+        before_mark_failed=before_mark_failed,
+    )
+
+
 def _classify_timeout_with_service_health(
     exc: AgentRunError,
     *,
@@ -139,6 +195,34 @@ def _classify_timeout_with_service_health(
     )
 
 
+def _classify_conformance_timeout_failure_with_service_health(
+    failure: _PlanningRunFailure,
+    *,
+    source_reason_code: str,
+    model: str | None,
+    service_healthy: bool | None,
+) -> Any:
+    details = failure.details if isinstance(failure.details, Mapping) else {}
+    provider_recovery = details.get("provider_recovery")
+    if not isinstance(provider_recovery, Mapping):
+        provider_recovery = {}
+    conformance_stall = details.get("conformance_stall")
+    if not isinstance(conformance_stall, Mapping):
+        conformance_stall = {}
+    provider = _mapping_str(details, "provider") or _mapping_str(provider_recovery, "provider")
+    classified_model = (
+        _mapping_str(details, "model") or _mapping_str(provider_recovery, "model") or model
+    )
+    return classify_provider_failure(
+        reason_code=source_reason_code,
+        stdout="",
+        stderr=_mapping_str(conformance_stall, "last_output_excerpt") or failure.message,
+        provider=provider,
+        model=classified_model,
+        service_healthy=service_healthy,
+    )
+
+
 async def _restart_agent_service_or_mark_unhealthy(
     self: Any,
     *,
@@ -146,9 +230,10 @@ async def _restart_agent_service_or_mark_unhealthy(
     profile: WorkspaceProfile,
     compose_project: str,
     compose_file: Path,
-    exc: AgentRunError | ComposeExecCleanupError,
+    exc: AgentRunError | ComposeExecCleanupError | _PlanningRunFailure,
     service_healthy: bool | None,
     restart_attempts: int,
+    source_reason_code: str | None = None,
     before_mark_failed: Callable[[], None] | None = None,
 ) -> tuple[int, bool]:
     if restart_attempts >= _AGENT_SERVICE_RESTART_ATTEMPTS:
@@ -158,6 +243,7 @@ async def _restart_agent_service_or_mark_unhealthy(
             exc=exc,
             service_healthy=service_healthy,
             restart_attempts=restart_attempts,
+            source_reason_code=source_reason_code,
             message="agent compose service stayed unhealthy after restart attempts",
             before_mark_failed=before_mark_failed,
         )
@@ -178,6 +264,7 @@ async def _restart_agent_service_or_mark_unhealthy(
             exc=exc,
             service_healthy=service_healthy,
             restart_attempts=restart_attempts,
+            source_reason_code=source_reason_code,
             message=f"agent compose service restart failed: {restart_exc!r}"[:2000],
             before_mark_failed=before_mark_failed,
         )
@@ -189,10 +276,11 @@ async def _mark_agent_service_unhealthy(
     self: Any,
     *,
     workspace_id: str,
-    exc: AgentRunError | ComposeExecCleanupError,
+    exc: AgentRunError | ComposeExecCleanupError | _PlanningRunFailure,
     service_healthy: bool | None,
     restart_attempts: int,
     message: str,
+    source_reason_code: str | None = None,
     before_mark_failed: Callable[[], None] | None = None,
 ) -> None:
     exc_details = getattr(exc, "details", None)
@@ -207,7 +295,7 @@ async def _mark_agent_service_unhealthy(
     }
     details["agent_service_recovery"] = {
         "reason_code": AGENT_SERVICE_UNHEALTHY,
-        "source_reason_code": exc.reason_code,
+        "source_reason_code": source_reason_code or exc.reason_code,
         "service_healthy": service_healthy,
         "restart_attempts": restart_attempts,
     }
@@ -229,6 +317,21 @@ def _mapping_str(mapping: Mapping[str, Any], key: str) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _conformance_stall_timeout_source_reason_code(value: Any) -> str | None:
+    if not isinstance(value, _PlanningRunFailure):
+        return None
+    if value.reason_code != AGENT_STALLED_IN_CONFORMANCE:
+        return None
+    details = value.details if isinstance(value.details, Mapping) else {}
+    conformance_stall = details.get("conformance_stall")
+    if not isinstance(conformance_stall, Mapping):
+        return None
+    source_reason_code = _mapping_str(conformance_stall, "source_reason_code")
+    if source_reason_code not in _AGENT_SERVICE_TIMEOUT_REASON_CODES:
+        return None
+    return source_reason_code
 
 
 def _cleanup_failure_indicates_agent_service_down(exc: ComposeExecCleanupError) -> bool:

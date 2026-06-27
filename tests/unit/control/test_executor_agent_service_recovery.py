@@ -12,8 +12,10 @@ from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import agent_service_recovery
+from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
 
 def _timeout_error(reason_code: str) -> AgentRunError:
@@ -49,6 +51,20 @@ def _cleanup_error() -> ComposeExecCleanupError:
             stdout="",
             stderr='service "agent" is not running',
         ),
+    )
+
+
+def _conformance_timeout_failure(reason_code: str) -> _PlanningRunFailure:
+    return _PlanningRunFailure(
+        message="plan conformance stalled in iteration 0 (no_output)",
+        reason_code=AGENT_STALLED_IN_CONFORMANCE,
+        details={
+            "conformance_stall": {
+                "reason_code": AGENT_STALLED_IN_CONFORMANCE,
+                "source_reason_code": reason_code,
+                "last_output_excerpt": 'service "agent" is not running',
+            }
+        },
     )
 
 
@@ -100,6 +116,79 @@ async def test_agent_service_down_timeout_restarts_and_retries(
     executor._compose.ensure_project_up.assert_awaited_once()
     executor._mark_failed.assert_not_awaited()
     executor._prepare_provider_recovery.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_agent_service_down_conformance_timeout_failure_restarts_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(
+        side_effect=[_conformance_timeout_failure("AGENT_IDLE_TIMEOUT"), "planning-ok"]
+    )
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, planning_failure = await _run_helper(executor, tmp_path)
+
+    assert recovered is True
+    assert planning_failure == "planning-ok"
+    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._mark_failed.assert_not_awaited()
+    executor._prepare_provider_recovery.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_conformance_timeout_failure_with_live_service_keeps_stall_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    failure = _conformance_timeout_failure("AGENT_IDLE_TIMEOUT")
+    executor = _executor(side_effect=[failure])
+
+    async def _service_up(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_up)
+
+    recovered, planning_failure = await _run_helper(executor, tmp_path)
+
+    assert recovered is True
+    assert planning_failure is failure
+    executor._compose.ensure_project_up.assert_not_awaited()
+    executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_agent_service_down_conformance_timeout_exhausts_to_infra_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(
+        side_effect=[
+            _conformance_timeout_failure("AGENT_TIMEOUT"),
+            _conformance_timeout_failure("AGENT_TIMEOUT"),
+            _conformance_timeout_failure("AGENT_TIMEOUT"),
+        ]
+    )
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, planning_failure = await _run_helper(executor, tmp_path)
+
+    assert recovered is False
+    assert planning_failure is None
+    assert executor._compose.ensure_project_up.await_count == 2
+    executor._mark_failed.assert_awaited_once()
+    recovery_details = executor._mark_failed.await_args.kwargs["details"]["agent_service_recovery"]
+    assert recovery_details["source_reason_code"] == "AGENT_TIMEOUT"
+    assert recovery_details["restart_attempts"] == 2
 
 
 @pytest.mark.unit

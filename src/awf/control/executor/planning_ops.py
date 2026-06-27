@@ -1118,6 +1118,9 @@ async def _run_agent_task_with_optional_planning(
                     plan_path=plan_path,
                     report_path=report_path,
                     recovery_action=planning.conformance_stall.recovery_action,
+                    source_reason_code=(
+                        compare_error.reason_code if compare_error is not None else None
+                    ),
                 ),
             )
 
@@ -1175,6 +1178,7 @@ async def _build_conformance_stall_failure(
     plan_path: Path,
     report_path: Path,
     recovery_action: str | None = None,
+    source_reason_code: str | None = None,
 ) -> _PlanningRunFailure:
     head_sha = await self._git_rev_parse_head(worktree_path)
     commit_count = 0
@@ -1199,6 +1203,8 @@ async def _build_conformance_stall_failure(
         changed_paths=changed_paths,
         recovery_action=recovery_action,
     )
+    if source_reason_code in {"AGENT_IDLE_TIMEOUT", "AGENT_TIMEOUT"}:
+        stall_evidence_payload["source_reason_code"] = source_reason_code
     details: dict[str, Any] = {"conformance_stall": stall_evidence_payload}
     if last_report is not None:
         details["conformance"] = build_conformance_failure_evidence(
