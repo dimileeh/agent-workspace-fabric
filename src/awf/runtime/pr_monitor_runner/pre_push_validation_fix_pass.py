@@ -65,6 +65,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
@@ -551,6 +552,8 @@ async def _run_pre_push_validation_fix_pass(
         ProviderRecoveryRetryError,
         _MonitorAgentRuntimeOwnershipRepairFailedError,
         _MonitorAgentServiceRecoveryFailedError,
+        _MonitorAgentServiceRecoverySupersededError,
+        _MonitorHeadObjectMissingError,
         _MonitorMirrorHooksPathRepairFailedError,
     ):
         raise

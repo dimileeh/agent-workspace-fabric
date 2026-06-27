@@ -12,6 +12,8 @@ from awf.common.commands import FakeCommandRunner
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
+    _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
 from tests.postgres import postgres_test_engine
@@ -41,6 +43,11 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     [
         ProviderRecoveryRetryError(),
         _MonitorAgentRuntimeOwnershipRepairFailedError("AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"),
+        _MonitorAgentServiceRecoverySupersededError("agent service recovery superseded"),
+        _MonitorHeadObjectMissingError(
+            "HEAD_OBJECT_MISSING_PRE_PUSH_FIX_AGENT_RECOVERY",
+            "HEAD object missing during agent cleanup repair",
+        ),
         _MonitorMirrorHooksPathRepairFailedError(),
     ],
 )
