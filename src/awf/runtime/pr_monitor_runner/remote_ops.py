@@ -938,6 +938,22 @@ async def _run_sync_base(
             )
         except _MonitorAgentServiceRecoveryFailedError:
             raise
+        except _MonitorHeadObjectMissingError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
+        except _MonitorMirrorHooksPathRepairFailedError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
         except Exception as exc:
             # Runtime plumbing can fail outside ``AgentRunError`` after the agent
             # has already mutated the shared sync-base mirror or self-committed.
