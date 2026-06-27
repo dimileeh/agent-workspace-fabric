@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+import awf.runtime.pr_monitor as pr_monitor_module
 from awf.runtime.pr_monitor import (
     AddressComments,
     CheckFailure,
@@ -22,7 +23,9 @@ from awf.runtime.pr_monitor import (
     RerunTransientCI,
     ReviewComment,
     ReviewThread,
+    WaitForTransientCI,
     _ci_transient_rerun_state_key,
+    _record_ci_transient_infra_wait,
     _should_rerun_transient_ci,
     decide,
 )
@@ -104,7 +107,7 @@ class TestCiFailure:
         )
 
     @pytest.mark.unit
-    def test_transient_failure_parks_for_human_after_rerun_budget(self) -> None:
+    def test_transient_failure_enters_infra_wait_after_rerun_budget(self) -> None:
         failure = CheckFailure(
             name="CI",
             conclusion="FAILURE",
@@ -119,12 +122,13 @@ class TestCiFailure:
 
         action = decide(status, state, MonitorConfig(ci_transient_rerun_max_attempts=2))
 
-        assert isinstance(action, NotifyHuman)
-        assert action.message is not None
-        assert "transient or infrastructure-related" in action.message
+        assert isinstance(action, WaitForTransientCI)
+        assert action.failures == (failure,)
+        assert action.wait_count == 1
+        assert action.wait_seconds == 60
 
     @pytest.mark.unit
-    def test_transient_rerun_budget_reads_legacy_rollup_signature(self) -> None:
+    def test_transient_infra_wait_reads_legacy_rollup_signature(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
@@ -148,9 +152,8 @@ class TestCiFailure:
 
         action = decide(status, state, MonitorConfig(ci_transient_rerun_max_attempts=2))
 
-        assert isinstance(action, NotifyHuman)
-        assert action.message is not None
-        assert "transient or infrastructure-related" in action.message
+        assert isinstance(action, WaitForTransientCI)
+        assert action.failures == (failure,)
 
     @pytest.mark.unit
     def test_transient_failure_with_disabled_rerun_budget_notifies_human(self) -> None:
@@ -165,6 +168,43 @@ class TestCiFailure:
             _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
             MonitorState(),
             MonitorConfig(ci_transient_rerun_max_attempts=0),
+        )
+
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "transient or infrastructure-related" in action.message
+
+    @pytest.mark.unit
+    def test_transient_infra_wait_cap_notifies_human(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="curl: (56) Recv failure: Connection reset by peer",
+            run_id="25655330295",
+        )
+        status = _status(check_state=CheckState.FAILURE, ci_failures=(failure,))
+        state = MonitorState()
+        state.threads_addressed_ids[
+            _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+        ] = "2"
+        _record_ci_transient_infra_wait(
+            state,
+            head_sha=status.head_sha,
+            failures=(failure,),
+            now=100.0,
+        )
+        monkeypatch.setattr(pr_monitor_module.time, "time", lambda: 2000.0)
+
+        action = decide(
+            status,
+            state,
+            MonitorConfig(
+                ci_transient_rerun_max_attempts=2,
+                ci_transient_infra_wait_max_seconds=1800,
+            ),
         )
 
         assert isinstance(action, NotifyHuman)

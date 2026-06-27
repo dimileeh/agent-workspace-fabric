@@ -17,7 +17,11 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
 )
-from awf.runtime.pr_monitor import CheckState
+from awf.runtime.pr_monitor import CheckState, CheckTiming
+
+
+def _run_view_calls(fake: FakeCommandRunner) -> list[list[str]]:
+    return [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]]
 
 
 def _sample_pr_payload(
@@ -199,3 +203,149 @@ class TestFetchPrStatusCiSignal:
             await client.fetch_pr_status(
                 repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
             )
+
+
+class TestFetchFailingCheckLogsRollupFallback:
+    @pytest.mark.unit
+    async def test_rollup_details_url_fetches_missing_actions_run(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "python-coverage-shards (7)\tPull postgres\t/usr/bin/docker pull postgres:16\n"
+                "context deadline exceeded\n"
+                "Docker pull failed with exit code 1\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (7)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert len(failures) == 1
+        assert failures[0].name == "python-coverage-shards (7)"
+        assert failures[0].run_id == "123"
+        assert "Docker pull failed" in failures[0].log_excerpt
+        assert _run_view_calls(fake) == [
+            ["gh", "run", "view", "123", "--repo", "o/r", "--log-failed"]
+        ]
+
+    @pytest.mark.unit
+    async def test_rollup_fallback_dedupes_run_list_results(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 123,
+                        "name": "python-coverage-shards (7)",
+                        "conclusion": "FAILURE",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="HTTP status server error (502 Bad Gateway)")
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (7)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert len(failures) == 1
+        assert len(_run_view_calls(fake)) == 1
+
+    @pytest.mark.unit
+    async def test_rollup_fallback_ignores_non_actions_evidence(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="status-context",
+                    status="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                ),
+                CheckTiming(
+                    name="third-party",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/124/job/456",
+                    app_slug="codecov",
+                ),
+                CheckTiming(
+                    name="external",
+                    conclusion="FAILURE",
+                    details_url="https://ci.example.test/build/1",
+                    app_slug="github-actions",
+                ),
+                CheckTiming(
+                    name="green-actions",
+                    conclusion="SUCCESS",
+                    details_url="https://github.com/o/r/actions/runs/125/job/456",
+                    app_slug="github-actions",
+                ),
+                CheckTiming(
+                    name="malformed-actions",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/126",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert failures == ()
+        assert _run_view_calls(fake) == []
+
+    @pytest.mark.unit
+    async def test_rollup_fallback_preserves_warning_when_log_unavailable(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")
+        fake.queue_result(returncode=1, stderr="gh network timeout with ghp_secret")
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (7)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert len(failures) == 1
+        assert failures[0].log_excerpt == ""
+        assert failures[0].evidence_warnings == (
+            "GitHub Actions log unavailable for failed check python-coverage-shards (7).",
+        )

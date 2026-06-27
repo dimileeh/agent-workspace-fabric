@@ -5,6 +5,7 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,8 +38,10 @@ from awf.runtime.pr_monitor import (
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
+    WaitForTransientCI,
     _ci_transient_rerun_count,
     _ci_transient_rerun_state_key,
+    _record_ci_transient_infra_wait,
 )
 from awf.runtime.pr_monitor_runner import (
     merge_loop as _merge_loop,
@@ -753,6 +756,75 @@ async def _execute(
             monitor_log=monitor_log,
             extra_payload=event_payload,
             extra_identity=(rerun_signature, attempt, *run_ids, "wait"),
+        )
+        state.iter_count += 1
+        return False
+
+    if isinstance(action, WaitForTransientCI):
+        failures_payload = [_ci_failure_payload(failure) for failure in action.failures]
+        run_ids = tuple(
+            dict.fromkeys(failure.run_id for failure in action.failures if failure.run_id)
+        )
+        rerun_signature = _ci_transient_rerun_state_key(status.head_sha, action.failures)
+        recorded_wait_count, first_seen_at = _record_ci_transient_infra_wait(
+            state,
+            head_sha=status.head_sha,
+            failures=action.failures,
+        )
+        elapsed_seconds = max(time.time() - first_seen_at, 0.0)
+        rerun_attempts = _ci_transient_rerun_count(
+            state,
+            head_sha=status.head_sha,
+            failures=action.failures,
+            legacy_failures=status.ci_failures,
+        )
+        infra_wait_payload: dict[str, object] = {
+            "wait_count": recorded_wait_count,
+            "wait_seconds": action.wait_seconds,
+            "elapsed_seconds": elapsed_seconds,
+            "rerun_attempts": rerun_attempts,
+            "failures": failures_payload,
+            "run_ids": list(run_ids),
+            "head_sha": status.head_sha,
+        }
+        await self._persist_state(workspace_id, state)
+        await self._write_monitor_log(
+            monitor_log,
+            {
+                "event": "monitor.ci_transient_infra_waiting",
+                "workspace_id": workspace_id,
+                "pr_number": pr_number,
+                "reason_code": _CI_TRANSIENT_RERUN_REASON,
+                **infra_wait_payload,
+            },
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="workspace.monitor_ci_transient_infra_waiting",
+                    reason_code=_CI_TRANSIENT_RERUN_REASON,
+                    payload=infra_wait_payload,
+                )
+            ],
+        )
+        await self._sleep_with_monitor_state_operation(
+            workspace_id=workspace_id,
+            action="ci_transient_infra_wait",
+            requested_action="wait_for_transient_ci",
+            reason=(
+                "CI failure still matches transient infrastructure signatures "
+                "after deterministic reruns; waiting before human escalation."
+            ),
+            reason_code=_CI_TRANSIENT_RERUN_REASON,
+            pr_number=pr_number,
+            status=status,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            wait_seconds=action.wait_seconds,
+            monitor_log=monitor_log,
+            extra_payload=infra_wait_payload,
+            extra_identity=(rerun_signature, recorded_wait_count, *run_ids, "infra_wait"),
         )
         state.iter_count += 1
         return False

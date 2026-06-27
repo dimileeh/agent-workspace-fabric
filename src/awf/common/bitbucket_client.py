@@ -94,7 +94,7 @@ from awf.common.github_client_parsing import _quiet_period_anchor
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
-from awf.runtime.pr_monitor import CheckFailure, PRStatus
+from awf.runtime.pr_monitor import CheckFailure, CheckTiming, PRStatus
 
 _log = get_logger(__name__)
 
@@ -379,6 +379,7 @@ class BitbucketClient:
         head_sha: str,
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
+        rollup_checks: Sequence[CheckTiming] = (),  # noqa: ARG002 - GitHub-only fallback input
     ) -> tuple[CheckFailure, ...]:
         """Fetch logs for failing checks via the Bitbucket pipeline-lookup chain.
 

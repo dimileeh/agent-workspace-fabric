@@ -77,7 +77,6 @@ __all__ = [
     "ReviewComment",
     "ReviewThread",
     "ReviewThreadComment",
-    # This module's own public decision-core API.
     "MonitorState",
     "OperatorHint",
     "MonitorConfig",
@@ -86,6 +85,7 @@ __all__ = [
     "AddressOperatorHint",
     "ReportCiFailure",
     "RerunTransientCI",
+    "WaitForTransientCI",
     "SyncBase",
     "WaitForCI",
     "Merge",
@@ -456,8 +456,13 @@ class MonitorConfig:
     burning monitor iterations forever."""
 
     ci_transient_rerun_max_attempts: int = 2
-    """Maximum deterministic GitHub reruns for the same transient CI
-    failure signature before falling back to agent CI repair."""
+    """Maximum deterministic GitHub reruns for the same transient CI signature."""
+
+    ci_transient_infra_wait_max_seconds: float = 1800.0
+    """Maximum wait for a known infra CI flake after reruns are exhausted."""
+
+    ci_transient_infra_wait_max_backoff_seconds: float = 300.0
+    """Maximum single sleep interval while waiting on exhausted transient CI."""
 
 
 # ── Actions — the vocabulary decide() returns to the runner ────────────────
@@ -516,6 +521,15 @@ class RerunTransientCI:
 
 
 @dataclass(frozen=True)
+class WaitForTransientCI:
+    """Known infra-like CI failure; wait/back off before human escalation."""
+
+    failures: tuple[CheckFailure, ...]
+    wait_seconds: float
+    wait_count: int
+
+
+@dataclass(frozen=True)
 class SyncBase:
     """Merge base into head. No payload — the runner knows base + head."""
 
@@ -565,6 +579,7 @@ MonitorAction = (
     | AddressOperatorHint
     | ReportCiFailure
     | RerunTransientCI
+    | WaitForTransientCI
     | SyncBase
     | WaitForCI
     | Merge
@@ -727,6 +742,7 @@ def _sync_base_no_progress_exhausted(
 
 
 _CI_TRANSIENT_RERUN_KEY_PREFIX = "__awf_ci_rerun:"
+_CI_TRANSIENT_INFRA_WAIT_KEY_PREFIX = "__awf_ci_infra_wait:"
 
 _CI_FAILED_JOB_RERUN_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT"})
 
@@ -842,6 +858,123 @@ def _ci_transient_rerun_count_for_key(state: MonitorState, key: str) -> int:
         return 0
 
 
+def _ci_transient_infra_wait_state_key(
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> str:
+    rerun_key = _ci_transient_rerun_state_key(head_sha, failures)
+    return rerun_key.replace(
+        _CI_TRANSIENT_RERUN_KEY_PREFIX,
+        _CI_TRANSIENT_INFRA_WAIT_KEY_PREFIX,
+        1,
+    )
+
+
+def _ci_transient_infra_wait_started_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str:
+    return f"{_ci_transient_infra_wait_state_key(head_sha, failures)}:started"
+
+
+def _ci_transient_infra_wait_count_key(head_sha: str, failures: tuple[CheckFailure, ...]) -> str:
+    return f"{_ci_transient_infra_wait_state_key(head_sha, failures)}:count"
+
+
+def _ci_transient_infra_wait_count(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> int:
+    raw_count = state.threads_addressed_ids.get(
+        _ci_transient_infra_wait_count_key(head_sha, failures),
+        "0",
+    )
+    try:
+        return int(raw_count)
+    except ValueError:
+        return 0
+
+
+def _ci_transient_infra_wait_started_at(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> float | None:
+    raw_started = state.threads_addressed_ids.get(
+        _ci_transient_infra_wait_started_key(head_sha, failures)
+    )
+    if raw_started is None:
+        return None
+    try:
+        return float(raw_started)
+    except ValueError:
+        return None
+
+
+def _record_ci_transient_infra_wait(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+    now: float | None = None,
+) -> tuple[int, float]:
+    current_time = time.time() if now is None else now
+    started_key = _ci_transient_infra_wait_started_key(head_sha, failures)
+    count_key = _ci_transient_infra_wait_count_key(head_sha, failures)
+    started_at = _ci_transient_infra_wait_started_at(
+        state,
+        head_sha=head_sha,
+        failures=failures,
+    )
+    if started_at is None:
+        started_at = current_time
+        state.threads_addressed_ids[started_key] = f"{started_at:.6f}"
+    wait_count = _ci_transient_infra_wait_count(
+        state,
+        head_sha=head_sha,
+        failures=failures,
+    )
+    recorded_count = wait_count + 1
+    state.threads_addressed_ids[count_key] = str(recorded_count)
+    return recorded_count, started_at
+
+
+def _ci_transient_infra_wait_exhausted(
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+    failures: tuple[CheckFailure, ...],
+) -> bool:
+    max_seconds = config.ci_transient_infra_wait_max_seconds
+    if max_seconds <= 0:
+        return True
+    started_at = _ci_transient_infra_wait_started_at(
+        state,
+        head_sha=status.head_sha,
+        failures=failures,
+    )
+    return started_at is not None and time.time() - started_at >= max_seconds
+
+
+def _ci_transient_infra_wait_seconds(
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+    failures: tuple[CheckFailure, ...],
+) -> float:
+    wait_count = _ci_transient_infra_wait_count(
+        state,
+        head_sha=status.head_sha,
+        failures=failures,
+    )
+    exponent = min(max(wait_count, 0), 30)
+    wait_seconds = max(config.poll_interval_seconds, 0.0) * float(2**exponent)
+    cap = max(config.ci_transient_infra_wait_max_backoff_seconds, 0.0)
+    if cap <= 0:
+        return wait_seconds
+    return wait_seconds if wait_seconds < cap else cap
+
+
 def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     """True for retryable infra flakes with no structured/textual code evidence."""
 
@@ -928,7 +1061,31 @@ def _ci_failure_action(
     if any(_has_actionable_ci_failure_evidence(f) for f in status.ci_failures):
         return ReportCiFailure(failures=status.ci_failures)
     if rerun_failures and all(_looks_like_transient_ci_failure(f) for f in rerun_failures):
-        return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
+        if config.ci_transient_rerun_max_attempts <= 0:
+            return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
+        if any(not failure.run_id for failure in rerun_failures):
+            return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
+        if any(not _supports_failed_job_rerun(failure) for failure in rerun_failures):
+            return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
+        if _ci_transient_infra_wait_exhausted(status, state, config, rerun_failures):
+            return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
+        return WaitForTransientCI(
+            failures=rerun_failures,
+            wait_seconds=_ci_transient_infra_wait_seconds(
+                status,
+                state,
+                config,
+                rerun_failures,
+            ),
+            wait_count=(
+                _ci_transient_infra_wait_count(
+                    state,
+                    head_sha=status.head_sha,
+                    failures=rerun_failures,
+                )
+                + 1
+            ),
+        )
     return NotifyHuman(message=_CI_UNACTIONABLE_HUMAN_MESSAGE)
 
 
