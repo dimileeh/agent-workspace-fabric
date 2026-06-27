@@ -82,6 +82,60 @@ async def _preserved_protected_change_fully_granted(
     )
 
 
+async def _recorded_protected_block_paths_absent_from_current_diff(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    remote_branch: str,
+    remote_push_url: str | None = None,
+) -> bool:
+    """Return whether the original protected block paths are absent now.
+
+    Directive resumes can leave stale preserved-head/local-history evidence from
+    the original pause. Once the current diff to the remote PR branch no longer
+    includes the protected paths recorded on that block, that marker is resume
+    metadata, not proof of a current protected-scope change. Any uncertainty
+    returns ``False`` so the caller keeps the existing fail-closed leak guard.
+    """
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:
+            return False
+        recorded_paths = tuple(
+            str(entry.get("path"))
+            for entry in (workspace.block_violations or [])
+            if isinstance(entry, dict) and entry.get("path")
+        )
+    if not recorded_paths:
+        return False
+    try:
+        _local_base, changed_paths = await self._remote_branch_diff_base_and_changed_paths(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+    except ProtectedScopeDiffError:
+        _log.warning(
+            "monitor.protected_scope_current_diff_unavailable_for_stale_marker_check",
+            workspace_id=workspace_id,
+            remote_branch=remote_branch,
+        )
+        return False
+    return not any(
+        _changed_path_matches_recorded_protected_path(changed_path, recorded_path)
+        for changed_path in changed_paths
+        for recorded_path in recorded_paths
+    )
+
+
+def _changed_path_matches_recorded_protected_path(changed_path: str, recorded_path: str) -> bool:
+    if changed_path == recorded_path:
+        return True
+    return recorded_path.endswith("/") and changed_path.startswith(recorded_path)
+
+
 async def _preserved_commit_already_on_remote(
     self: Any,
     *,

@@ -436,6 +436,15 @@ async def _run_operator_hint_cycle(
             workspace_id=workspace_id,
             grant_specs=active_grant_specs,
         )
+        # If the original block's protected paths are absent from the current
+        # remote-branch diff, the preserved marker is stale resume metadata. Do
+        # not re-block a directive-clean head solely from local history residue.
+        and not await self._recorded_protected_block_paths_absent_from_current_diff(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
         and await self._preserved_commit_in_unpushed_range(
             workspace_id=workspace_id,
             worktree_path=worktree_path,

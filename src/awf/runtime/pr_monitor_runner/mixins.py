@@ -153,6 +153,9 @@ class RunnerDelegatesMixin:
     _preserved_commit_in_unpushed_range = (
         _remote_repair_protected_grants._preserved_commit_in_unpushed_range
     )
+    _recorded_protected_block_paths_absent_from_current_diff = (
+        _remote_repair_protected_grants._recorded_protected_block_paths_absent_from_current_diff
+    )
     _preserved_head_on_remote_fetch_head = (
         _remote_repair_protected_grants._preserved_head_on_remote_fetch_head
     )
