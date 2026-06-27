@@ -13,6 +13,8 @@ from awf.adapters.provider_failures import (
 )
 from awf.service.provider_recovery import provider_recovery_metadata_from_failure
 
+pytestmark = pytest.mark.unit
+
 
 def test_provider_recovery_metadata_from_failure_rejects_infra_service_unhealthy():
     metadata = provider_recovery_metadata_from_failure(
