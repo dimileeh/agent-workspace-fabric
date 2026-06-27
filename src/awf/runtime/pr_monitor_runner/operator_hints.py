@@ -427,7 +427,11 @@ async def _run_operator_hint_cycle(
     # protected path of the current block, otherwise this wedges a valid push at
     # needs_human where no further grant can be added (PRRT_kwDOSJAM6s6KG1hs). A
     # grant that covers only some of those paths (or none) still leaves an ungranted
-    # protected change, so the guard keeps firing.
+    # protected change, so the guard keeps firing. A clean current net diff is NOT
+    # enough to skip this check: a revert-on-top can remove the protected path from
+    # the tree diff while the preserved protected commit remains an unpushed ancestor
+    # of HEAD. ``_preserved_commit_in_unpushed_range`` is the safety boundary: it
+    # returns false only when the preserved commit was dropped or is already remote.
     if (
         protected_scope_block is None
         and hint.directive
