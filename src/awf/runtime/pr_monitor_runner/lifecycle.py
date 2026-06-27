@@ -18,7 +18,7 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.operator_grants import (
     consume_active_operator_grants_in_session,
@@ -1186,6 +1186,6 @@ async def _terminate_failed(
             "message": safe_message,
         }
         if details is not None:
-            payload["details"] = dict(details)
+            payload["details"] = redact_audit_value(dict(details))
         await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc, payload=payload)
         await s.commit()
