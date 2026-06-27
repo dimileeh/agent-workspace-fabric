@@ -47,16 +47,22 @@ async def _run_agent_task_with_service_recovery(
     workspace_id: str,
     execution_owner_id: str | None = None,
     before_mark_failed: Callable[[], None] | None = None,
+    before_agent_retry: Callable[[], Awaitable[bool]] | None = None,
     after_agent_cleanup_failure_repair: (
         Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
     ) = None,
 ) -> tuple[bool, Any]:
     restart_attempts = 0
+    run_before_retry = False
     restart_compose_up_timeout_seconds = _agent_service_restart_timeout_seconds(
         profile=profile,
         workspace=workspace,
     )
     while True:
+        if run_before_retry:
+            run_before_retry = False
+            if before_agent_retry is not None and not await before_agent_retry():
+                return False, None
         try:
             planning_result = await self._run_agent_task_with_optional_planning(
                 adapter=adapter,
@@ -85,6 +91,7 @@ async def _run_agent_task_with_service_recovery(
             restart_attempts, restarted = restart_result
             if not restarted:
                 return False, None
+            run_before_retry = True
         except AgentRunError as exc:
             if exc.reason_code not in _AGENT_SERVICE_TIMEOUT_REASON_CODES:
                 raise
@@ -118,6 +125,7 @@ async def _run_agent_task_with_service_recovery(
             )
             if not restarted:
                 return False, None
+            run_before_retry = True
         except ComposeExecCleanupError as exc:
             service_healthy = await probe_agent_service_health(
                 RuntimeInspector(),
@@ -151,6 +159,7 @@ async def _run_agent_task_with_service_recovery(
             )
             if not restarted:
                 return False, None
+            run_before_retry = True
 
 
 async def _repair_after_recoverable_agent_cleanup_failure(

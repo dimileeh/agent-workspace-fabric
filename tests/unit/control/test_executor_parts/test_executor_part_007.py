@@ -26,6 +26,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
     agent_service_recovery,
+    execution_flow,
 )
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.db.enums import (
@@ -819,6 +820,96 @@ class TestPlanningArtifactDeposits:
             '{"status": "satisfied", "gaps": []}'
         )
         assert order.index("deposit") < order.index("mark_failed")
+
+    @pytest.mark.unit
+    async def test_agent_service_recovery_reruns_pre_launch_guards_before_retry(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        calls: list[str] = []
+
+        async def _git_preflight(**_kwargs: Any) -> bool:
+            calls.append("git_preflight")
+            return True
+
+        async def _ensure_ollama(**_kwargs: Any) -> bool:
+            calls.append("ollama")
+            return True
+
+        async def _recheck_status(
+            _workspace_id: str,
+            *,
+            action: str,
+            **_kwargs: Any,
+        ) -> bool:
+            calls.append(f"status:{action}")
+            return True
+
+        async def _measure_baseline(**_kwargs: Any) -> None:
+            calls.append("baseline")
+
+        async def _repair_mirror_hooks_path_or_mark_failed(**kwargs: Any) -> bool:
+            calls.append(f"mirror:{kwargs['failure_stage']}")
+            return True
+
+        async def _service_down(*_args: object, **_kwargs: object) -> bool:
+            return False
+
+        async def _agent_run(**_kwargs: Any) -> object:
+            calls.append("agent_run")
+            if calls.count("agent_run") == 1:
+                raise AgentRunError(
+                    agent=AgentRuntime.codex,
+                    result=CommandResult(
+                        returncode=124,
+                        stdout="",
+                        stderr='service "agent" is not running',
+                    ),
+                    reason_code="AGENT_IDLE_TIMEOUT",
+                    details={
+                        "provider": "openai",
+                        "model": "gpt-5",
+                    },
+                )
+            return "retry stopped after pre-launch guards"
+
+        monkeypatch.setattr(executor, "_run_agent_git_writability_preflight", _git_preflight)
+        monkeypatch.setattr(executor, "_ensure_ollama_model_or_mark_failed", _ensure_ollama)
+        monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+        monkeypatch.setattr(
+            executor,
+            "_measure_and_persist_baseline_coverage",
+            _measure_baseline,
+        )
+        monkeypatch.setattr(
+            execution_flow,
+            "repair_mirror_hooks_path_or_mark_failed",
+            _repair_mirror_hooks_path_or_mark_failed,
+        )
+        monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+        monkeypatch.setattr(
+            executor._compose,
+            "ensure_project_up",
+            AsyncMock(side_effect=lambda **_kwargs: calls.append("compose_restart")),
+        )
+        monkeypatch.setattr(
+            executor,
+            "_run_agent_task_with_optional_planning",
+            _agent_run,
+        )
+
+        await executor.execute(ws_id)
+
+        retry_agent_index = calls.index("agent_run", calls.index("compose_restart"))
+        assert calls[retry_agent_index - 4 : retry_agent_index] == [
+            "git_preflight",
+            "ollama",
+            "status:agent_run",
+            "mirror:before agent retry",
+        ]
 
     @pytest.mark.unit
     async def test_agent_phase_unexpected_error_deposits_planning_artifacts(

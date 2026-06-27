@@ -562,6 +562,32 @@ async def execute(
                     ),
                     deposit_planning_artifacts=_deposit_planning_artifacts,
                 )
+
+                async def _rerun_agent_pre_launch_guards() -> bool:
+                    if not await self._run_agent_git_writability_preflight(
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        worktree_path=worktree_path,
+                    ):
+                        return False
+                    if not await self._ensure_ollama_model_or_mark_failed(
+                        workspace_id=workspace_id,
+                        ws=ws,
+                    ):
+                        return False
+                    if not await self._recheck_status(
+                        workspace_id,
+                        expected=WorkspaceStatus.running,
+                        action="agent_run",
+                        owner_id=execution_owner_id,
+                    ):
+                        return False
+                    return await _repair_mirror_hooks_path_or_mark_failed(
+                        failure_stage="before agent retry",
+                        before_mark_failed=_deposit_planning_artifacts,
+                    )
+
                 (
                     agent_service_recovered,
                     planning_failure,
@@ -578,6 +604,7 @@ async def execute(
                     workspace_id=workspace_id,
                     execution_owner_id=execution_owner_id,
                     before_mark_failed=_deposit_planning_artifacts,
+                    before_agent_retry=_rerun_agent_pre_launch_guards,
                     after_agent_cleanup_failure_repair=cleanup_repair,
                 )
                 if not agent_service_recovered:
