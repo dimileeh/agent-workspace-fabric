@@ -317,6 +317,12 @@ class TestFetchFailingCheckLogsRollupFallback:
                     details_url="https://github.com/o/r/actions/runs/126",
                     app_slug="github-actions",
                 ),
+                CheckTiming(
+                    name="actions-without-details-url",
+                    conclusion="FAILURE",
+                    details_url=None,
+                    app_slug="github-actions",
+                ),
             ),
         )
 
