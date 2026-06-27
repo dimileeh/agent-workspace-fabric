@@ -55,6 +55,16 @@ def _cleanup_error() -> ComposeExecCleanupError:
     )
 
 
+def _cleanup_error_message_only() -> ComposeExecCleanupError:
+    return ComposeExecCleanupError(
+        invocation_id="agent-timeout-cleanup",
+        source="agent",
+        label="codex",
+        message='service "agent" is not running',
+        cleanup_result=CommandResult(returncode=1, stdout="", stderr=""),
+    )
+
+
 def _conformance_timeout_failure(reason_code: str) -> _PlanningRunFailure:
     return _PlanningRunFailure(
         message="plan conformance stalled in iteration 0 (no_output)",
@@ -321,6 +331,27 @@ async def test_agent_service_down_timeout_cleanup_failure_restarts_and_retries(
     executor._compose.ensure_project_up.assert_awaited_once()
     executor._mark_failed.assert_not_awaited()
     assert command_evidence == ['service "agent" is not running']
+
+
+@pytest.mark.unit
+async def test_agent_service_down_timeout_cleanup_message_only_restarts_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cleanup_exc = _cleanup_error_message_only()
+    executor = _executor(side_effect=[cleanup_exc, "planning-ok"])
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, planning_failure = await _run_helper(executor, tmp_path)
+
+    assert recovered is True
+    assert planning_failure == "planning-ok"
+    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._mark_failed.assert_not_awaited()
 
 
 @pytest.mark.unit

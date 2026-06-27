@@ -425,7 +425,12 @@ def _cleanup_failure_indicates_agent_service_down(exc: ComposeExecCleanupError) 
     if exc.reason_code != EXEC_PROCESS_CLEANUP_FAILED:
         return False
     result = exc.cleanup_result
-    output = f"{result.stdout}\n{result.stderr}" if result is not None else str(exc)
+    if result is None:
+        output = str(exc)
+    else:
+        output = f"{result.stdout}\n{result.stderr}"
+        if not output.strip():
+            output = str(exc)
     normalized = output.lower()
     return (
         'service "agent" is not running' in normalized
