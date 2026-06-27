@@ -376,6 +376,39 @@ async def test_planning_required_fails_when_plan_file_is_not_changed(tmp_path: P
 
 
 @pytest.mark.unit
+async def test_planning_recovery_retry_accepts_existing_required_plan(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = worktree / "docs" / "awf-plans" / "ws_retry_plan.md"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# Plan\n\nResume implementation.\n", encoding="utf-8")
+
+    runner = FakeCommandRunner()
+    _queue_planning_success_with_conformance_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan already committed",
+        "implementation resumed",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_retry_plan", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-existing-plan"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 3
+
+
+@pytest.mark.unit
 async def test_planning_required_accepts_ignored_plan_file_written_by_agent(
     tmp_path: Path,
 ) -> None:

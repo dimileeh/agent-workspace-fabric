@@ -830,6 +830,7 @@ class TestPlanningArtifactDeposits:
     ) -> None:
         ws_id = await _seed_ready_workspace(factory)
         calls: list[str] = []
+        accept_existing_plan_values: list[bool] = []
 
         async def _git_preflight(**_kwargs: Any) -> bool:
             calls.append("git_preflight")
@@ -860,6 +861,7 @@ class TestPlanningArtifactDeposits:
 
         async def _agent_run(**_kwargs: Any) -> object:
             calls.append("agent_run")
+            accept_existing_plan_values.append(bool(_kwargs["accept_existing_plan"]))
             if calls.count("agent_run") == 1:
                 raise AgentRunError(
                     agent=AgentRuntime.codex,
@@ -910,6 +912,7 @@ class TestPlanningArtifactDeposits:
             "status:agent_run",
             "mirror:before agent retry",
         ]
+        assert accept_existing_plan_values == [False, True]
 
     @pytest.mark.unit
     async def test_agent_phase_unexpected_error_deposits_planning_artifacts(

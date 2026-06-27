@@ -73,6 +73,7 @@ async def _run_agent_task_with_service_recovery(
                 worktree_path=worktree_path,
                 model=model,
                 command_evidence=command_evidence,
+                accept_existing_plan=restart_attempts > 0,
             )
             restart_result = await _restart_after_conformance_timeout_failure(
                 self,

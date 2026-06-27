@@ -761,6 +761,7 @@ async def _run_agent_task_with_optional_planning(
     worktree_path: Path,
     model: str | None,
     command_evidence: list[str] | None = None,
+    accept_existing_plan: bool = False,
 ) -> str | _PlanningRunFailure | _PlanningValidationHandoff | None:
     planning = profile.planning
     coordination_warnings = coordination_warnings_from_task_policy(
@@ -873,6 +874,10 @@ async def _run_agent_task_with_optional_planning(
             )
             if recovered_near_miss:
                 after_plan = {*after_plan, plan_path}
+    if plan_path not in after_plan and accept_existing_plan:
+        plan_file_digest_after = _digest_file_if_present(worktree_path / plan_path)
+        if plan_file_digest_after is not None:
+            after_plan = {*after_plan, plan_path}
     if plan_path not in after_plan:
         return _build_planning_scope_failure(
             scope_phase="planning",
