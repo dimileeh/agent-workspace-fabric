@@ -36,13 +36,28 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import StrEnum
 from typing import Literal
 
 from awf.runtime._docker_pull_detection import _log_shows_docker_registry_timeout
 from awf.runtime.monitor_state_keys import (
     _merge_method_blocked_key,
     _outdated_resolve_requeued_key,
+)
+from awf.runtime.pr_monitor_actions import (
+    BOT_REVIEWER_LOGINS,
+    Abort,
+    AbortReason,
+    AddressComments,
+    AddressOperatorHint,
+    Merge,
+    MonitorAction,
+    NotifyHuman,
+    ReportCiFailure,
+    RerunTransientCI,
+    ShortCircuitCompleted,
+    SyncBase,
+    WaitForCI,
+    WaitForTransientCI,
 )
 from awf.runtime.pr_monitor_models import (
     DEFAULT_NON_CHECK_REVIEWER_LOGINS,
@@ -57,16 +72,18 @@ from awf.runtime.pr_monitor_models import (
     ReviewThreadComment,
 )
 
-# Wire-shape value types now live in ``pr_monitor_models`` (keeps this pure
-# decision core under the maintainability line budget). They are re-exported
-# here so the historical ``from awf.runtime.pr_monitor import PRStatus`` call
-# sites — and ``import *`` consumers — keep resolving them from this module.
+# Wire-shape value types now live in ``pr_monitor_models`` and the monitor-action
+# vocabulary in ``pr_monitor_actions`` (both keep this pure decision core under the
+# maintainability line budget). They are re-exported here so the historical
+# ``from awf.runtime.pr_monitor import PRStatus`` / ``import Merge`` call sites — and
+# ``import *`` consumers — keep resolving them from this module.
 # ``__all__`` must also enumerate this module's *own* public API (``decide``,
-# the state/config types, the monitor-action dataclasses), otherwise adding it
-# would silently shrink ``import *`` to just the re-exported wire types and drop
-# everything historically exported by the bare module.
+# the state/config types), otherwise adding it would silently shrink ``import *``
+# to just the re-exported names and drop everything historically exported by the
+# bare module.
 __all__ = [
-    # Re-exported wire-shape value types (now defined in ``pr_monitor_models``).
+    # Re-exported wire-shape value types (now defined in ``pr_monitor_models``)
+    # and monitor actions (now defined in ``pr_monitor_actions``).
     "DEFAULT_NON_CHECK_REVIEWER_LOGINS",
     "CheckFailure",
     "CheckState",
@@ -463,149 +480,6 @@ class MonitorConfig:
 
     ci_transient_infra_wait_max_backoff_seconds: float = 300.0
     """Maximum single sleep interval while waiting on exhausted transient CI."""
-
-
-# ── Actions — the vocabulary decide() returns to the runner ────────────────
-
-
-class AbortReason(StrEnum):
-    """Reason codes for why the monitor gave up. Propagate into
-    ``Workspace.failure_reason``-style fields so operators can triage.
-
-    No ``iter_cap_reached`` / ``wall_clock_cap_reached`` — volume is
-    not a terminal condition; bots can leave thousands of review
-    cycles and the monitor must keep servicing the PR."""
-
-    pr_closed_externally = "pr_closed_externally"
-    no_progress_on_comments = "no_progress_on_comments"
-    merge_conflict_unresolvable = "merge_conflict_unresolvable"
-    merge_conflict_not_reproduced = "merge_conflict_not_reproduced"
-    base_sync_no_progress = "base_sync_no_progress"
-    stale = "stale"
-    """GitHub reports mergeStateStatus == DIRTY after every other gate is
-    clean — git can't auto-resolve and the CLI already had its chance."""
-
-
-@dataclass(frozen=True)
-class AddressComments:
-    """Re-invoke the coding CLI to fix a batch of unresolved threads.
-
-    ``threads`` are inline comments; ``review_comments`` are outside-diff.
-    The runner addresses every item in the batch before re-polling for new
-    activity (the ``fix_cycle`` inner loop).
-    """
-
-    threads: tuple[ReviewThread, ...]
-    review_comments: tuple[ReviewComment, ...]
-
-
-@dataclass(frozen=True)
-class AddressOperatorHint:
-    """Run one repair pass for a pending operator remonitor hint."""
-
-    hint: OperatorHint
-
-
-@dataclass(frozen=True)
-class ReportCiFailure:
-    """Re-invoke the CLI with logs of the failing checks."""
-
-    failures: tuple[CheckFailure, ...]
-
-
-@dataclass(frozen=True)
-class RerunTransientCI:
-    """Ask GitHub to rerun failed jobs for infra-like CI failures."""
-
-    failures: tuple[CheckFailure, ...]
-
-
-@dataclass(frozen=True)
-class WaitForTransientCI:
-    """Known infra-like CI failure; wait/back off before human escalation."""
-
-    failures: tuple[CheckFailure, ...]
-    wait_seconds: float
-    wait_count: int
-
-
-@dataclass(frozen=True)
-class SyncBase:
-    """Merge base into head. No payload — the runner knows base + head."""
-
-
-@dataclass(frozen=True)
-class WaitForCI:
-    """CI still running; sleep poll_interval then re-decide. Does NOT bump iter_count."""
-
-    reason: Literal[
-        "pending_checks",
-        "unknown_mergeable_state",
-        "awaiting_required_checks",
-    ] = "pending_checks"
-
-
-@dataclass(frozen=True)
-class Merge:
-    """All 5 gates green — squash-merge + delete branch."""
-
-
-@dataclass(frozen=True)
-class NotifyHuman:
-    """Post a human-attention comment and keep monitoring.
-
-    This is deliberately not terminal. A monitor owns the PR until it is
-    merged, closed, or fails; human-attention comments are just status
-    notifications while the workspace remains alive.
-    """
-
-    message: str | None = None
-
-
-@dataclass(frozen=True)
-class ShortCircuitCompleted:
-    """PR already merged upstream — workspace can transition to completed."""
-
-
-@dataclass(frozen=True)
-class Abort:
-    """Terminal failure; the runner transitions the workspace to ``failed``."""
-
-    reason: AbortReason
-
-
-MonitorAction = (
-    AddressComments
-    | AddressOperatorHint
-    | ReportCiFailure
-    | RerunTransientCI
-    | WaitForTransientCI
-    | SyncBase
-    | WaitForCI
-    | Merge
-    | NotifyHuman
-    | ShortCircuitCompleted
-    | Abort
-)
-
-
-# Known bot reviewer logins whose "defer" verdicts should not block the
-# merge — they only post advisory feedback and cannot themselves mark
-# threads resolved. Any GitHub App handle ending in "[bot]" (e.g.
-# dependabot[bot], renovate[bot]) is also treated as a bot. A
-# non-member in this set whose login we don't recognise is treated as
-# human — safer default: block the merge, let the operator triage.
-BOT_REVIEWER_LOGINS = frozenset(
-    {
-        "greptile-apps",
-        "coderabbitai",
-        "gemini-code-assist",
-        "chatgpt-codex-connector",
-        "cursor",
-        "codex",
-        "github-actions",
-    }
-)
 
 
 def _is_bot_author(login: str | None) -> bool:
