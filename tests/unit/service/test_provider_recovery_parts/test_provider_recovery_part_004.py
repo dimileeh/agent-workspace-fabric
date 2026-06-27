@@ -1,3 +1,5 @@
+"""Provider recovery service-unhealthy timeout regression tests."""
+
 from __future__ import annotations
 
 import pytest
@@ -10,8 +12,6 @@ from awf.adapters.provider_failures import (
     classify_provider_failure,
 )
 from awf.service.provider_recovery import provider_recovery_metadata_from_failure
-
-"""Provider recovery service-unhealthy timeout regression tests."""
 
 
 def test_provider_recovery_metadata_from_failure_rejects_infra_service_unhealthy():
