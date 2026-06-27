@@ -695,6 +695,10 @@ class ProviderRecoveryStateResponse(BaseModel):
 class WorkspaceFailureDetailsResponse(BaseModel):
     reason_code: str | None = None
     message: str | None = None
+    phase: str | None = None
+    operation_type: str | None = None
+    dirty_paths_count: int | None = None
+    dirty_paths_sample: list[str] | None = None
     conformance: WorkspaceFailureConformanceResponse | None = None
     salvage: WorkspaceFailureSalvageResponse | None = None
     planning_scope: WorkspaceFailurePlanningScopeResponse | None = None

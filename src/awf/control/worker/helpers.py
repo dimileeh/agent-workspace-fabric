@@ -488,6 +488,8 @@ def _monitor_recovery_execution_claim_cleanup_payload(
     workspace: Workspace,
     *,
     claim_cutoff: datetime,
+    fresh_execution_claim_owner_ids: set[str] | None = None,
+    execution_claim_owner_id: str | None = None,
 ) -> dict[str, str | None]:
     previous_claimed_by = workspace.execution_claimed_by
     previous_expires_at = _json_datetime(workspace.execution_claim_expires_at)
@@ -501,6 +503,16 @@ def _monitor_recovery_execution_claim_cleanup_payload(
         return payload
 
     if _execution_claim_is_stale(workspace, claim_cutoff):
+        return {
+            **payload,
+            "action": "cleared_stale",
+            "reason_code": _MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE,
+        }
+    if (
+        fresh_execution_claim_owner_ids is not None
+        and previous_claimed_by != execution_claim_owner_id
+        and previous_claimed_by not in fresh_execution_claim_owner_ids
+    ):
         return {
             **payload,
             "action": "cleared_stale",
