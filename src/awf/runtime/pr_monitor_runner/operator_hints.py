@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -503,10 +504,17 @@ async def _run_operator_hint_cycle(
         # one more time instead of parking for human attention. Mirror the re-block's
         # own marker logic exactly (PRRT_kwDOSJAM6s6MtBzN).
         reblock_marker_sha = await self._rev_parse_head(worktree_path) or preserved_head_sha
-        state.mark_addressed(
-            _protected_history_directive_reblock_key(reblock_marker_sha, hint.directive),
-            "reblocked",
+        reblock_repeat_key = _protected_history_directive_reblock_key(
+            reblock_marker_sha, hint.directive
         )
+        # In-memory mark (flushed by the loop's later ``_persist_state``) AND durable
+        # persistence in the re-block commit itself (via ``extra_state_markers`` below).
+        # The re-block rewrites the preserved-head marker durably to this same HEAD, so
+        # the repeat key must be just as durable; otherwise a crash before
+        # ``_persist_state`` keeps the rewritten marker but loses the repeat key, and the
+        # next identical directive recomputes the same key, misses, and re-runs the agent
+        # instead of parking for human attention (PRRT_kwDOSJAM6s6MtULR).
+        state.mark_addressed(reblock_repeat_key, "reblocked")
         # RE-BLOCK into ``blocked`` so the approve-and-keep grant this message
         # advertises is actually reachable. ``guide_workspace`` only accepts
         # ``--grant`` inputs for a ``blocked`` workspace (non-blocked + grants ->
@@ -533,6 +541,7 @@ async def _run_operator_hint_cycle(
             operation_start_head=operation_start_head,
             block_resume_phase=block_resume_phase,
             reason=reason,
+            extra_state_markers={reblock_repeat_key: "reblocked"},
         )
     # Idempotent push (divergence recovery, WS-2 §5): if the preserved commit is
     # already on the remote PR branch (a monitor/worker restart re-ran the resume
@@ -776,6 +785,7 @@ async def _reblock_preserved_protected_leak(
     operation_start_head: str | None,
     block_resume_phase: str,
     reason: str,
+    extra_state_markers: Mapping[str, str] | None = None,
 ) -> _GitPushResult:
     """Re-block a still-undeliverable preserved protected commit into ``blocked``.
 
@@ -822,6 +832,7 @@ async def _reblock_preserved_protected_leak(
                 operation_id=operation_id,
                 operation_type=operation_type,
                 source_head_sha=operation_start_head,
+                extra_state_markers=extra_state_markers,
             ),
         )
         if reblock_result.paused_into_blocked:

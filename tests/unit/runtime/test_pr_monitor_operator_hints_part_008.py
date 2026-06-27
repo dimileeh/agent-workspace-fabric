@@ -285,13 +285,15 @@ async def test_operator_hint_directive_clean_current_diff_reblocks_unpushed_pres
     # and parks for human attention instead of re-running the agent.
     rewritten_marker = state.threads_addressed_ids[_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY]
     assert rewritten_marker == "revert-on-top-sha"
-    assert (
-        _protected_history_directive_reblock_key(
-            rewritten_marker,
-            "revert .github/workflows/ci.yml",
-        )
-        in state.threads_addressed_ids
+    rewritten_repeat_key = _protected_history_directive_reblock_key(
+        rewritten_marker,
+        "revert .github/workflows/ci.yml",
     )
+    assert rewritten_repeat_key in state.threads_addressed_ids
+    # The repeat key is ALSO threaded into the re-block via ``extra_state_markers`` so
+    # the pause commits it ATOMICALLY with the block (crash-durable), not only in the
+    # loop-flushed in-memory state (PRRT_kwDOSJAM6s6MtULR).
+    assert captured["extra_state_markers"] == {rewritten_repeat_key: "reblocked"}
     # The stale old-preserved-SHA key would be recomputed-as-missed next cycle, so it
     # must NOT be what gets stored.
     assert (
