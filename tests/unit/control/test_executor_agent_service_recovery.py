@@ -433,6 +433,48 @@ async def test_agent_service_down_timeout_cleanup_repair_failure_aborts_retry(
 
 
 @pytest.mark.unit
+async def test_agent_service_cleanup_repair_failure_runs_terminal_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[_cleanup_error(), "planning-ok"])
+    callback_calls: list[str] = []
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _repair_after_cleanup_failure(_exc: ComposeExecCleanupError) -> bool:
+        return False
+
+    async def _before_mark_failed() -> None:
+        callback_calls.append("finish-validation")
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, result = await agent_service_recovery._run_agent_callable_with_service_recovery(
+        executor,
+        run_agent=AsyncMock(side_effect=[_cleanup_error(), "planning-ok"]),
+        workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=tmp_path / "compose.yml",
+        model="gpt-5.3-codex",
+        command_evidence=[],
+        workspace_id="ws_agent_service",
+        before_mark_failed=_before_mark_failed,
+        after_agent_cleanup_failure_repair=_repair_after_cleanup_failure,
+        expected_status=WorkspaceStatus.validating,
+        failure_from_status=WorkspaceStatus.validating,
+    )
+
+    assert recovered is False
+    assert result is None
+    assert callback_calls == ["finish-validation"]
+    executor._compose.ensure_project_up.assert_not_awaited()
+    executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("service_healthy", [True, None])
 async def test_agent_timeout_cleanup_failure_with_live_service_keeps_cleanup_path(
     monkeypatch: pytest.MonkeyPatch,

@@ -274,6 +274,7 @@ async def _run_agent_callable_with_service_recovery(
             if after_agent_cleanup_failure_repair is not None:
                 cleanup_repaired = await after_agent_cleanup_failure_repair(exc)
                 if not cleanup_repaired:
+                    await _run_before_mark_failed(before_mark_failed)
                     return False, None
             restart_attempts, restarted = await _restart_agent_service_or_mark_unhealthy(
                 self,
@@ -557,9 +558,7 @@ async def _mark_agent_service_unhealthy(
         "restart_attempts": restart_attempts,
     }
     if before_mark_failed is not None:
-        result = before_mark_failed()
-        if isawaitable(result):
-            await result
+        await _run_before_mark_failed(before_mark_failed)
     await self._mark_failed(
         workspace_id=workspace_id,
         from_status=from_status,
@@ -568,6 +567,14 @@ async def _mark_agent_service_unhealthy(
         reason_code=AGENT_SERVICE_UNHEALTHY,
         details=details,
     )
+
+
+async def _run_before_mark_failed(before_mark_failed: _BeforeMarkFailed | None) -> None:
+    if before_mark_failed is None:
+        return
+    result = before_mark_failed()
+    if isawaitable(result):
+        await result
 
 
 def _mapping_str(mapping: Mapping[str, Any], key: str) -> str | None:
