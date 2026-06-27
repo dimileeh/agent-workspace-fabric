@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
@@ -835,7 +836,7 @@ async def test_monitor_agent_service_recovery_stops_when_workspace_leaves_monito
         side_effect=_cancel_workspace_after_restart,
     )
 
-    with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError):
         await runner._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project="proj",
@@ -901,7 +902,7 @@ async def test_monitor_agent_service_recovery_stops_when_monitor_claim_is_supers
         side_effect=_supersede_monitor_claim_after_restart,
     )
 
-    with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError):
         await runner._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project="proj",

@@ -102,6 +102,10 @@ class _MonitorAgentServiceRecoveryFailedError(RuntimeError):
     """Raised after monitor records terminal unhealthy agent-service recovery."""
 
 
+class _MonitorAgentServiceRecoverySupersededError(RuntimeError):
+    """Raised when agent-service recovery is abandoned by a superseded monitor."""
+
+
 class _MonitorMirrorHooksPathRepairFailedError(RuntimeError):
     """Raised when monitor cannot repair a poisoned ``core.hooksPath`` on the shared mirror."""
 

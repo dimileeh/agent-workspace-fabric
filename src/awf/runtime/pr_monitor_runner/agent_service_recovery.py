@@ -49,6 +49,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
@@ -367,7 +368,7 @@ async def _raise_if_monitor_agent_service_recovery_was_superseded(
                 workspace_id=workspace_id,
                 reason="workspace_missing",
             )
-            raise _MonitorAgentServiceRecoveryFailedError(message)
+            raise _MonitorAgentServiceRecoverySupersededError(message)
         if workspace.status != WorkspaceStatus.monitoring_pr.value:
             message = "agent compose service recovery superseded: workspace left monitoring_pr"
             _log.warning(
@@ -376,7 +377,7 @@ async def _raise_if_monitor_agent_service_recovery_was_superseded(
                 reason="status_changed",
                 status=workspace.status,
             )
-            raise _MonitorAgentServiceRecoveryFailedError(message)
+            raise _MonitorAgentServiceRecoverySupersededError(message)
         monitor_owner_id = getattr(self, "_monitor_owner_id", None)
         superseded_claimed_runner = (
             monitor_owner_id is not None and workspace.monitor_claimed_by != monitor_owner_id
@@ -393,7 +394,7 @@ async def _raise_if_monitor_agent_service_recovery_was_superseded(
                 monitor_owner_id=monitor_owner_id,
                 monitor_claimed_by=workspace.monitor_claimed_by,
             )
-            raise _MonitorAgentServiceRecoveryFailedError(message)
+            raise _MonitorAgentServiceRecoverySupersededError(message)
 
 
 async def _monitor_agent_service_restart_timeout_seconds(

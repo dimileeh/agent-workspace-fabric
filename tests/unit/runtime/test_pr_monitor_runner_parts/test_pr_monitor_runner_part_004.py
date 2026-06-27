@@ -72,6 +72,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -1019,6 +1020,102 @@ async def test_agent_service_recovery_sentinel_finishes_monitor_operation(
     assert operation.result == expected_result
     assert operation.error_code == "MONITOR_RECOVERY_FAILED"
     assert operation.error_message == "agent service unhealthy"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "case",
+    ["sync_base", "ci_repair", "comment_repair", "operator_hint_repair"],
+)
+async def test_superseded_agent_service_recovery_cancels_monitor_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    case: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    status = _green_status()
+    state = MonitorState(started_at=0.0)
+    expected_result: dict[str, object] = {
+        "status": "cancelled",
+        "outcome": "agent_service_recovery_superseded",
+        "reason_code": "MONITOR_RECOVERY_SUPERSEDED",
+        "pushed": False,
+    }
+
+    if case == "sync_base":
+        action = SyncBase()
+        target_method = "_run_sync_base"
+        expected_type = "sync_base"
+    elif case == "ci_repair":
+        failures = (CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),)
+        action = ReportCiFailure(failures=failures)
+        status = _with_ci_failures(status, failures)
+        target_method = "_run_ci_fix"
+        expected_type = "ci_repair"
+        expected_result["failure_count"] = 1
+    elif case == "comment_repair":
+        thread = ReviewThread(
+            thread_id="T_service",
+            path="src/app.py",
+            line=12,
+            body_excerpt="please fix",
+            author="reviewer",
+        )
+        action = AddressComments(threads=(thread,), review_comments=())
+        status = replace(status, unresolved_inline_threads=(thread,))
+        target_method = "_run_fix_cycle"
+        expected_type = "comment_repair"
+        expected_result.update({"thread_count": 1, "review_comment_count": 0})
+    else:
+        hint = OperatorHint(
+            reason="repair after operator guide",
+            directive="fix it",
+            operation_id="op_operator_hint",
+            requested_at="2026-06-27T00:00:00+00:00",
+            reason_code="OPERATOR_GUIDE",
+        )
+        action = AddressOperatorHint(hint=hint)
+        state = MonitorState(started_at=0.0, pending_operator_hint=hint)
+        target_method = "_run_operator_hint_cycle"
+        expected_type = "comment_repair"
+
+    async def _raise_agent_service_recovery_superseded(**_kwargs: object) -> object:
+        raise _MonitorAgentServiceRecoverySupersededError("agent service recovery superseded")
+
+    mocker.patch.object(runner, target_method, _raise_agent_service_recovery_superseded)
+
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError):
+        await runner._execute(
+            action=action,
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=status,
+            state=state,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    operation = operations[0]
+    assert operation.type == expected_type
+    assert operation.status == OperationStatus.cancelled.value
+    assert operation.result == expected_result
+    assert operation.error_code == "MONITOR_RECOVERY_SUPERSEDED"
+    assert operation.error_message == "agent service recovery superseded"
 
 
 @pytest.mark.unit

@@ -74,9 +74,11 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
 )
 
 _MONITOR_AGENT_SERVICE_RECOVERY_FAILED_REASON = "MONITOR_RECOVERY_FAILED"
+_MONITOR_AGENT_SERVICE_RECOVERY_SUPERSEDED_REASON = "MONITOR_RECOVERY_SUPERSEDED"
 
 
 async def _finish_agent_service_recovery_failed_operation(
@@ -99,6 +101,30 @@ async def _finish_agent_service_recovery_failed_operation(
         status=OperationStatus.failed,
         result=result,
         error_code=_MONITOR_AGENT_SERVICE_RECOVERY_FAILED_REASON,
+        error_message=error_message,
+    )
+
+
+async def _finish_agent_service_recovery_superseded_operation(
+    self: Any,
+    operation: Any,
+    *,
+    error_message: str,
+    extra_result: dict[str, object] | None = None,
+) -> None:
+    result: dict[str, object] = {
+        "status": "cancelled",
+        "outcome": "agent_service_recovery_superseded",
+        "reason_code": _MONITOR_AGENT_SERVICE_RECOVERY_SUPERSEDED_REASON,
+        "pushed": False,
+    }
+    if extra_result:
+        result.update(extra_result)
+    await self._finish_monitor_operation(
+        operation,
+        status=OperationStatus.cancelled,
+        result=result,
+        error_code=_MONITOR_AGENT_SERVICE_RECOVERY_SUPERSEDED_REASON,
         error_message=error_message,
     )
 
@@ -340,6 +366,13 @@ async def _execute(
                 monitor_log=monitor_log,
             )
             _clear_transient_base_fetch_retry_state(state, context="sync_base")
+        except _MonitorAgentServiceRecoverySupersededError as exc:
+            await _finish_agent_service_recovery_superseded_operation(
+                self,
+                operation,
+                error_message=str(exc),
+            )
+            raise
         except _MonitorAgentServiceRecoveryFailedError as exc:
             await _finish_agent_service_recovery_failed_operation(
                 self,
@@ -899,6 +932,14 @@ async def _execute(
                 operation_type=OperationType.ci_repair.value,
                 monitor_log=monitor_log,
             )
+        except _MonitorAgentServiceRecoverySupersededError as exc:
+            await _finish_agent_service_recovery_superseded_operation(
+                self,
+                operation,
+                error_message=str(exc),
+                extra_result={"failure_count": len(action.failures)},
+            )
+            raise
         except _MonitorAgentServiceRecoveryFailedError as exc:
             await _finish_agent_service_recovery_failed_operation(
                 self,
@@ -1100,6 +1141,17 @@ async def _execute(
                 operation_id=operation.operation_id if operation is not None else None,
                 operation_type=OperationType.comment_repair.value,
             )
+        except _MonitorAgentServiceRecoverySupersededError as exc:
+            await _finish_agent_service_recovery_superseded_operation(
+                self,
+                operation,
+                error_message=str(exc),
+                extra_result={
+                    "thread_count": len(action.threads),
+                    "review_comment_count": len(action.review_comments),
+                },
+            )
+            raise
         except _MonitorAgentServiceRecoveryFailedError as exc:
             await _finish_agent_service_recovery_failed_operation(
                 self,
@@ -1281,6 +1333,13 @@ async def _execute(
                 _operation_id=operation.operation_id if operation is not None else None,
                 _operation_type=OperationType.comment_repair.value,
             )
+        except _MonitorAgentServiceRecoverySupersededError as exc:
+            await _finish_agent_service_recovery_superseded_operation(
+                self,
+                operation,
+                error_message=str(exc),
+            )
+            raise
         except _MonitorAgentServiceRecoveryFailedError as exc:
             await _finish_agent_service_recovery_failed_operation(
                 self,

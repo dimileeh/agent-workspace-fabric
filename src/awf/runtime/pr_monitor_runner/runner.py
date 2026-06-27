@@ -63,6 +63,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _RunnerDeps,
 )
 from awf.runtime.pr_push_remote import (
@@ -495,6 +496,16 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 monitor_log,
                 {
                     "event": "monitor.agent_service_recovery_failed",
+                    "workspace_id": workspace_id,
+                    "message": str(exc)[:400],
+                },
+            )
+            return
+        except _MonitorAgentServiceRecoverySupersededError as exc:
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.agent_service_recovery_superseded",
                     "workspace_id": workspace_id,
                     "message": str(exc)[:400],
                 },
