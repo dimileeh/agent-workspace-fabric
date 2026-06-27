@@ -18,6 +18,9 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.operator_hints import (
+    _protected_history_directive_reblock_key,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -217,10 +220,20 @@ async def test_operator_hint_directive_clean_current_diff_reblocks_unpushed_pres
     async def _not_on_remote(**_kwargs: object) -> bool:
         return False
 
+    async def _revert_on_top_head(*_args: object, **_kwargs: object) -> str:
+        # After the revert-on-top directive, the worktree HEAD is the revert commit,
+        # distinct from the preserved offending SHA still in the unpushed range.
+        return "revert-on-top-sha"
+
     captured: dict[str, object] = {}
 
     async def _pause(**kwargs: object) -> _GitPushResult:
         captured.update(kwargs)
+        # Faithfully mirror the real ``_pause_monitor_for_protected_scope_block``:
+        # it re-reads the worktree HEAD and OVERWRITES the preserved-head marker with
+        # it. A stub that skips this rewrite would not exercise the path where the
+        # repeat-directive key must track the NEW marker (PRRT_kwDOSJAM6s6MtBzN).
+        state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "revert-on-top-sha")
         return _GitPushResult(
             pushed=False,
             failed=True,
@@ -234,6 +247,7 @@ async def test_operator_hint_directive_clean_current_diff_reblocks_unpushed_pres
 
     monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
     monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_rev_parse_head", _revert_on_top_head)
     monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
     monkeypatch.setattr(runner, "_protected_scope_push_block", _no_current_violation)
     monkeypatch.setattr(
@@ -265,3 +279,188 @@ async def test_operator_hint_directive_clean_current_diff_reblocks_unpushed_pres
     assert [violation.path for violation in leak_block.violations] == [".github/workflows/ci.yml"]
     assert "unpushed-workflow-sha" in leak_block.message
     assert state.pending_operator_hint is None
+    # The re-block overwrote the preserved marker with the revert-on-top HEAD. The
+    # repeat-directive guard MUST be keyed to that rewritten marker — the value the
+    # next identical-directive resume reads — so the next cycle's recomputed key hits
+    # and parks for human attention instead of re-running the agent.
+    rewritten_marker = state.threads_addressed_ids[_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY]
+    assert rewritten_marker == "revert-on-top-sha"
+    rewritten_repeat_key = _protected_history_directive_reblock_key(
+        rewritten_marker,
+        "revert .github/workflows/ci.yml",
+    )
+    assert rewritten_repeat_key in state.threads_addressed_ids
+    # The repeat key is ALSO threaded into the re-block via ``extra_state_markers`` so
+    # the pause commits it ATOMICALLY with the block (crash-durable), not only in the
+    # loop-flushed in-memory state (PRRT_kwDOSJAM6s6MtULR).
+    assert captured["extra_state_markers"] == {rewritten_repeat_key: "reblocked"}
+    # The stale old-preserved-SHA key would be recomputed-as-missed next cycle, so it
+    # must NOT be what gets stored.
+    assert (
+        _protected_history_directive_reblock_key(
+            "unpushed-workflow-sha",
+            "revert .github/workflows/ci.yml",
+        )
+        not in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_operator_hint_repeat_preserved_history_directive_does_not_rerun_agent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    directive = "revert .github/workflows/ci.yml"
+    hint = OperatorHint(
+        reason="previous directive leaked protected history",
+        directive=directive,
+        operation_id="op_repeat_revert_on_top",
+        requested_at="2026-06-27T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    preserved_head_sha = "unpushed-workflow-sha"
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, preserved_head_sha)
+    state.mark_addressed(
+        _protected_history_directive_reblock_key(preserved_head_sha, directive),
+        "reblocked",
+    )
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return (preserved_head_sha, None)
+
+    async def _local_head(*_args: object, **_kwargs: object) -> str:
+        return "local-unpushed-head"
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _leak_persists(**_kwargs: object) -> bool:
+        return True
+
+    async def _agent_must_not_run(**_kwargs: object) -> VerdictResult:
+        pytest.fail("repeat revert-on-top directive must not invoke the agent again")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_rev_parse_head", _local_head)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    # The leak still exists: the preserved commit remains in the unpushed range, so the
+    # repeat-directive guard must fire and skip the agent.
+    monkeypatch.setattr(runner, "_preserved_commit_in_unpushed_range", _leak_persists)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _agent_must_not_run)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert result.stderr is not None
+    assert preserved_head_sha in result.stderr
+    assert "reset/rebase/cherry-pick" in result.stderr
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    assert state.pending_operator_hint.status_reason == result.stderr
+
+
+@pytest.mark.unit
+async def test_operator_hint_repeat_directive_marker_with_dropped_commit_runs_agent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale reblock marker must not park needs_human once the leak is gone.
+
+    The repeat-directive guard keys on a stored ``reblocked`` marker, but a valid
+    reset/rebase (or an unfinalized drop whose marker clear was lost to a crash) can
+    remove the preserved commit from the unpushed range while that marker lingers.
+    ``_preserved_commit_in_unpushed_range`` is then False, so the guard must be skipped
+    and the directive re-run instead of being wedged at needs_human (PRRT_kwDOSJAM6s6Ms-zG).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    directive = "revert .github/workflows/ci.yml"
+    hint = OperatorHint(
+        reason="previous directive leaked protected history",
+        directive=directive,
+        operation_id="op_repeat_revert_dropped",
+        requested_at="2026-06-27T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    preserved_head_sha = "unpushed-workflow-sha"
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, preserved_head_sha)
+    state.mark_addressed(
+        _protected_history_directive_reblock_key(preserved_head_sha, directive),
+        "reblocked",
+    )
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return (preserved_head_sha, None)
+
+    async def _local_head(*_args: object, **_kwargs: object) -> str:
+        return "local-unpushed-head"
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _leak_gone(**_kwargs: object) -> bool:
+        return False
+
+    class _AgentReachedError(RuntimeError):
+        """Sentinel proving the cycle reached the CLI instead of parking at the guard."""
+
+    async def _agent_runs(**_kwargs: object) -> VerdictResult:
+        raise _AgentReachedError
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_rev_parse_head", _local_head)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    # The preserved commit was dropped (valid reset/rebase): no leak remains, so the
+    # stale reblock marker must NOT short-circuit — the directive runs again.
+    monkeypatch.setattr(runner, "_preserved_commit_in_unpushed_range", _leak_gone)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _agent_runs)
+
+    with pytest.raises(_AgentReachedError):
+        await runner._run_operator_hint_cycle(
+            workspace_id=workspace_id,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            pr_head_sha="abc1234567890def",
+            hint=hint,
+            state=state,
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )

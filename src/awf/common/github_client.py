@@ -48,6 +48,7 @@ from awf.db.enums import ForgeKind
 from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
 from awf.runtime.pr_monitor import (
     CheckFailure,
+    CheckTiming,
     PRStatus,
     ReviewComment,
     ReviewThread,
@@ -62,6 +63,8 @@ _log = get_logger(__name__)
 # PR-number extraction would otherwise silently yield ``None`` and break the
 # monitor handoff.
 _PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
+_ACTIONS_RUN_JOB_PATH_RE = re.compile(r"/actions/runs/(?P<run_id>\d+)/job/\d+")
+_FAILED_CHECK_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"})
 
 
 # GitHub shells ``gh`` and carries no HTTP status, so it has no native per-fault
@@ -896,14 +899,17 @@ class GitHubClient:
         head_sha: str,
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
+        rollup_checks: Sequence[CheckTiming] = (),
     ) -> tuple[CheckFailure, ...]:
         """Fetch logs for failing/timed-out checks via ``gh run view``.
 
         The GraphQL PR query only surfaces an aggregate ``statusCheckRollup``
         state. For a ``ReportCiFailure`` action we also want the per-check
         log so the coding CLI has something concrete to fix. We list the
-        workflow runs for the head SHA, find the failing ones, and grab
-        their failed-step logs.
+        workflow runs for the head SHA, find the failing ones, and grab their
+        failed-step logs. If ``gh run list --commit`` misses a failed Actions
+        run that the PR rollup already exposed, fall back to the check's
+        ``detailsUrl`` run id instead of returning an empty failure snapshot.
         """
         runs_raw = await self._gh_json(
             [
@@ -922,12 +928,14 @@ class GitHubClient:
             operation="list_runs_for_sha",
         )
         failures: list[CheckFailure] = []
-        for run in runs_raw or []:
-            conclusion = run.get("conclusion") or ""
-            if conclusion.upper() not in {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
-                continue
-            database_id = run.get("databaseId")
-            run_id = str(database_id) if database_id is not None else None
+        seen_run_ids: set[str] = set()
+
+        async def _append_failure(
+            *,
+            run_id: str | None,
+            run_name: str,
+            conclusion: str,
+        ) -> None:
             log = (
                 await self._run_gh(
                     [
@@ -945,7 +953,6 @@ class GitHubClient:
                 if run_id is not None
                 else None
             )
-            run_name = run.get("name") or (f"run/{run_id}" if run_id is not None else "run/unknown")
             raw_log_text = log.stdout if log is not None else ""
             log_text = redact_ci_log(raw_log_text)
             evidence = extract_ci_failure_evidence(
@@ -956,7 +963,7 @@ class GitHubClient:
             failures.append(
                 CheckFailure(
                     name=run_name,
-                    conclusion=conclusion.upper(),
+                    conclusion=conclusion,
                     log_excerpt=_tail(log_text, log_tail_chars),
                     run_id=run_id,
                     failing_commands=evidence.failing_commands,
@@ -966,6 +973,32 @@ class GitHubClient:
                     suggested_repro_commands=evidence.suggested_repro_commands,
                     evidence_warnings=evidence.evidence_warnings,
                 )
+            )
+
+        for run in runs_raw or []:
+            conclusion = run.get("conclusion") or ""
+            conclusion_upper = conclusion.upper()
+            if conclusion_upper not in _FAILED_CHECK_CONCLUSIONS:
+                continue
+            database_id = run.get("databaseId")
+            run_id = str(database_id) if database_id is not None else None
+            if run_id is not None:
+                seen_run_ids.add(run_id)
+            run_name = run.get("name") or (f"run/{run_id}" if run_id is not None else "run/unknown")
+            await _append_failure(
+                run_id=run_id,
+                run_name=run_name,
+                conclusion=conclusion_upper,
+            )
+        for check in _rollup_action_run_failures(rollup_checks):
+            run_id = _actions_run_id_from_details_url(check.details_url)
+            if run_id is None or run_id in seen_run_ids:
+                continue
+            seen_run_ids.add(run_id)
+            await _append_failure(
+                run_id=run_id,
+                run_name=check.name,
+                conclusion=(check.conclusion or "FAILURE").upper(),
             )
         return tuple(failures)
 
@@ -1323,6 +1356,39 @@ def _flatten_branch_rules_pages(payload: list[Any]) -> list[Any]:
     if not all(isinstance(page, list) for page in payload):
         return payload
     return [rule for page in payload for rule in page]
+
+
+def _rollup_action_run_failures(checks: Sequence[CheckTiming]) -> tuple[CheckTiming, ...]:
+    """Return failed GitHub Actions rollup checks with parseable run details URLs."""
+    failures: list[CheckTiming] = []
+    for check in checks:
+        conclusion = (check.conclusion or "").upper()
+        if conclusion not in _FAILED_CHECK_CONCLUSIONS:
+            continue
+        if not _rollup_check_is_github_actions(check):
+            continue
+        if _actions_run_id_from_details_url(check.details_url) is None:
+            continue
+        failures.append(check)
+    return tuple(failures)
+
+
+def _rollup_check_is_github_actions(check: CheckTiming) -> bool:
+    app_slug = (check.app_slug or "").lower()
+    app_name = (check.app_name or "").lower()
+    return app_slug in {"", "github-actions"} or app_name == "github actions"
+
+
+def _actions_run_id_from_details_url(details_url: str | None) -> str | None:
+    if not details_url:
+        return None
+    parsed = urlsplit(details_url)
+    if parsed.netloc.lower() != "github.com":
+        return None
+    match = _ACTIONS_RUN_JOB_PATH_RE.search(parsed.path)
+    if match is None:
+        return None
+    return match.group("run_id")
 
 
 # ── Tiny helpers kept private to avoid accidental imports ──────────────────

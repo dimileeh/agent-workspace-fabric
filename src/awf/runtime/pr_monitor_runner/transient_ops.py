@@ -93,6 +93,7 @@ async def _fetch_status_for_decision(
             pr_number=pr_number,
             head_sha=status.head_sha,
             pytest_fallback_commands=pytest_fallback_commands,
+            rollup_checks=status.checks,
         )
         status = _with_ci_failures(status, failures)
     return cast(PRStatus, status)

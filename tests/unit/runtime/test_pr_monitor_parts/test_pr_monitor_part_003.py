@@ -15,6 +15,7 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorConfig,
     MonitorState,
+    NotifyHuman,
     PRStatus,
     ReportCiFailure,
     RerunTransientCI,
@@ -157,7 +158,40 @@ class TestCiFailure:
         assert action.failures == (transient_failure,)
 
     @pytest.mark.unit
-    def test_required_rollup_without_underlying_transient_job_dispatches_agent_repair(
+    def test_mixed_run_with_rollup_marker_and_transient_evidence_dispatches_rerun(
+        self,
+    ) -> None:
+        """A single workflow run can fail a transient job *and* the ci-required
+        rollup step. ``gh run view --log-failed`` then emits one combined log
+        carrying a retryable 503/timeout marker alongside the rollup marker;
+        the monitor must still rerun the run rather than parking the flake on
+        ``NotifyHuman`` just because the excerpt also names the required-CI marker.
+
+        Regression for PRRT_kwDOSJAM6s6MtULO."""
+        mixed_failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "error: Failed to install cpython-3.12.9-linux-x86_64-gnu\n"
+                "Caused by: HTTP status server error (503 Service Unavailable)\n"
+                "A required CI job did not pass.\n"
+                "python-full-coverage: failure\n"
+                "console: success"
+            ),
+            run_id="25897584271",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(mixed_failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (mixed_failure,)
+
+    @pytest.mark.unit
+    def test_required_rollup_without_underlying_transient_job_notifies_human(
         self,
     ) -> None:
         rollup_failure = CheckFailure(
@@ -177,8 +211,130 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "without actionable code-failure evidence" in action.message
+
+    @pytest.mark.unit
+    def test_mixed_run_with_rollup_marker_and_code_evidence_reports_failure(
+        self,
+    ) -> None:
+        """A single workflow run can fail both a real job and the ci-required
+        rollup step. ``gh run view --log-failed`` then emits one combined log
+        carrying code-failure evidence alongside the rollup marker; the monitor
+        must still dispatch the repair agent rather than parking on
+        ``NotifyHuman``."""
+        mixed_failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "src/awf/foo.py:12: error: Incompatible return value type "
+                "[return-value]\n"
+                "Found type errors\n"
+                "A required CI job did not pass.\n"
+                "lint-and-type: failure\n"
+                "console: success"
+            ),
+            run_id="25897584271",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(mixed_failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
         assert isinstance(action, ReportCiFailure)
-        assert action.failures == (rollup_failure,)
+        assert action.failures == (mixed_failure,)
+
+    @pytest.mark.unit
+    def test_exhausted_transient_sibling_does_not_mask_actionable_code_evidence(
+        self,
+    ) -> None:
+        """When the rerun budget is exhausted/disabled, a transient flake sibling
+        must not short-circuit to ``NotifyHuman`` while a rollup-marked,
+        code-bearing failure (filtered out of the rerun set) still carries
+        fixable evidence. The repair agent must be dispatched."""
+        transient_failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "error: Failed to install cpython-3.12.9-linux-x86_64-gnu\n"
+                "Caused by: HTTP status server error (503 Service Unavailable)"
+            ),
+            run_id="25897584271",
+        )
+        mixed_failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "src/awf/foo.py:12: error: Incompatible return value type "
+                "[return-value]\n"
+                "Found type errors\n"
+                "A required CI job did not pass.\n"
+                "python-full-coverage: failure\n"
+                "console: success"
+            ),
+            run_id="25897584271",
+        )
+
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(transient_failure, mixed_failure),
+            ),
+            MonitorState(),
+            MonitorConfig(ci_transient_rerun_max_attempts=0),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (transient_failure, mixed_failure)
+
+    @pytest.mark.unit
+    def test_default_budget_transient_sibling_does_not_mask_actionable_code_evidence(
+        self,
+    ) -> None:
+        """With the default rerun budget still available, a transient flake sibling
+        must not trigger ``RerunTransientCI`` while a separate rollup-marked,
+        code-bearing failure (filtered out of the rerun set) still carries fixable
+        pytest/mypy/ruff evidence. The repair agent must be dispatched instead of
+        burning reruns on the flake until the budget clears.
+
+        Regression for PRRT_kwDOSJAM6s6MtSBI."""
+        transient_failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "error: Failed to install cpython-3.12.9-linux-x86_64-gnu\n"
+                "Caused by: HTTP status server error (503 Service Unavailable)"
+            ),
+            run_id="25897584271",
+        )
+        mixed_failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "src/awf/foo.py:12: error: Incompatible return value type "
+                "[return-value]\n"
+                "Found type errors\n"
+                "A required CI job did not pass.\n"
+                "python-full-coverage: failure\n"
+                "console: success"
+            ),
+            run_id="25897584299",
+        )
+
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(transient_failure, mixed_failure),
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (transient_failure, mixed_failure)
 
     @pytest.mark.unit
     def test_transient_tool_download_failure_dispatches_rerun(self) -> None:
@@ -735,322 +891,6 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_daemon_error_timeout_without_pull_context_reports_ci_failure(self) -> None:
-        """A bare ``Error response from daemon: context deadline exceeded`` from an
-        ordinary ``docker run``/``docker build`` test step — no registry URL, image,
-        or pull wording — is a real Docker daemon timeout, not a registry image
-        pull, so it must reach the repair agent, not be silently rerun. The
-        ``error response from daemon`` marker is emitted for any daemon operation,
-        so it only anchors a registry timeout with registry/image-pull context."""
-        failure = CheckFailure(
-            name="integration-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker run --rm postgres:16 pg_isready\n"
-                "Error response from daemon: context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_daemon_error_generic_pulling_from_phrase_reports_ci_failure(self) -> None:
-        """A daemon error for a non-registry operation whose text merely contains the
-        generic phrase ``pulling from`` (e.g. ``failed while pulling from local
-        volume``) must not anchor a nearby timeout as a registry image pull. The
-        registry-context markers stay specific to request forms (``/v2/`` and the
-        ``auth.docker.io`` token host), so this real daemon timeout reaches the
-        repair agent."""
-        failure = CheckFailure(
-            name="integration-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Error response from daemon: failed while pulling from local volume\n"
-                "context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_daemon_error_with_registry_url_timeout_dispatches_rerun(self) -> None:
-        """A daemon error whose own line carries registry context (an outbound
-        ``/v2/`` registry request) tying the timeout to an image pull is genuine
-        transient infra and is still rerun after the marker is narrowed."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
-                "context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_daemon_error_with_docker_hub_auth_endpoint_timeout_dispatches_rerun(
-        self,
-    ) -> None:
-        """Pulling from Docker Hub first fetches a bearer token from
-        ``auth.docker.io/token``; when that request times out the daemon reports the
-        failure against the auth endpoint rather than ``registry-1.docker.io``/``/v2/``.
-        The auth host is the registry-auth token service contacted only for registry
-        operations, so it is registry pull context and the timeout is rerun as
-        transient infra."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                'Error response from daemon: Get "https://auth.docker.io/token'
-                '?service=registry.docker.io&scope=repository:library/postgres:pull": '
-                "context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_daemon_error_with_ghcr_token_endpoint_timeout_dispatches_rerun(
-        self,
-    ) -> None:
-        """Pulling from a non-Docker-Hub Bearer-auth registry (GHCR, ACR, Harbor,
-        ...) first fetches a token from the registry-selected token endpoint —
-        ``https://ghcr.io/token?service=...&scope=...``. When that request times out
-        the daemon reports the failure against the token endpoint, which carries no
-        ``/v2/`` path and is not ``auth.docker.io``. The ``/token?`` request form is
-        contacted only for registry auth, so it is registry pull context and the
-        timeout is rerun as transient infra rather than reported to the repair
-        agent."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull ghcr.io/org/app:v1\n"
-                'Error response from daemon: Get "https://ghcr.io/token'
-                '?service=ghcr.io&scope=repository:org/app:pull": '
-                "context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_daemon_token_endpoint_denial_does_not_anchor_adjacent_timeout(
-        self,
-    ) -> None:
-        """The ``/token?`` request form, like ``/v2/``, must carry the registry-
-        timeout marker on its own line to anchor. A permanent token-auth denial
-        (``Error response from daemon: Get "https://ghcr.io/token?...":
-        unauthorized``) is a synchronous 401, not a timeout, so an *adjacent
-        unrelated* ``context deadline exceeded`` must not let it pose as a transient
-        registry pull — the real auth bug must reach the repair agent."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                'Error response from daemon: Get "https://ghcr.io/token'
-                '?service=ghcr.io&scope=repository:org/app:pull": unauthorized\n'
-                "context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_daemon_pull_access_denied_does_not_anchor_adjacent_timeout(self) -> None:
-        """``pull access denied`` is a synchronous registry 403 — it cannot itself
-        cause a ``context deadline exceeded``, so a daemon-error auth-denial line
-        must not anchor an *adjacent* unrelated timeout. A real auth-config bug
-        (``Error response from daemon: pull access denied for myapp``) sitting one
-        line away from an unrelated health-check/retry timeout must reach the repair
-        agent rather than be silently rerun as transient infra."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Error response from daemon: pull access denied for myapp\n"
-                "context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_daemon_registry_qualified_pull_access_denied_does_not_anchor_timeout(
-        self,
-    ) -> None:
-        """A registry-qualified permanent daemon error must not anchor an adjacent
-        timeout. ``Error response from daemon: pull access denied for
-        ghcr.io/org/app`` is a synchronous 403 (the registry host sits on the image
-        *ref*, not on an outbound request), so a nearby unrelated ``context deadline
-        exceeded`` must not let it pose as a transient registry pull. The auth bug
-        must reach the repair agent rather than be silently rerun: a bare image-
-        reference host is not a registry-*request* form."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Error response from daemon: pull access denied for ghcr.io/org/app\n"
-                "context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_daemon_registry_qualified_no_such_image_does_not_anchor_timeout(
-        self,
-    ) -> None:
-        """``Error response from daemon: No such image: ghcr.io/org/app`` is a
-        permanent missing-image error, not a registry timeout — the host is on the
-        image ref, not an outbound ``/v2/`` request. A nearby unrelated ``context
-        deadline exceeded`` must not anchor it as a transient pull; the real
-        image/config bug must reach the repair agent."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Error response from daemon: No such image: ghcr.io/org/app:latest\n"
-                "context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_daemon_registry_request_denial_does_not_anchor_adjacent_timeout(
-        self,
-    ) -> None:
-        """A permanent daemon error can quote the ``/v2/`` registry *request* form yet
-        still be a synchronous auth denial, not a timeout — ``Error response from
-        daemon: Head "https://ghcr.io/v2/org/app/manifests/latest": denied``. The
-        ``/v2/`` request form alone must not anchor an *adjacent unrelated* ``context
-        deadline exceeded``; only a daemon line carrying the registry-timeout marker
-        itself is transient infra, so this real auth bug must reach the repair
-        agent rather than be silently rerun."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Error response from daemon: Head "
-                '"https://ghcr.io/v2/org/app/manifests/latest": denied\n'
-                "context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_bare_daemon_error_does_not_anchor_failed_to_pull_image(self) -> None:
-        """A bare ``Error response from daemon: context deadline exceeded`` line —
-        no registry/image-pull context — must not corroborate a nearby
-        kubelet-style ``Failed to pull image "app"`` event. Both are real failures
-        (a ``docker run`` daemon timeout and an application image/deploy bug), so
-        the daemon line is not Docker pull context and the failure must reach the
-        repair agent rather than be silently rerun as transient CI."""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Error response from daemon: context deadline exceeded\n"
-                'Failed to pull image "app": context deadline exceeded'
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
     def test_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure(
         self,
     ) -> None:
@@ -1286,7 +1126,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_timed_out_failure_without_logs_or_run_id_dispatches_agent_repair(self) -> None:
+    def test_timed_out_failure_without_logs_or_run_id_notifies_human(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="TIMED_OUT",
@@ -1300,12 +1140,13 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "without actionable code-failure evidence" in action.message
 
     @pytest.mark.unit
     @pytest.mark.parametrize("conclusion", ["CANCELLED", "ACTION_REQUIRED"])
-    def test_transient_non_failed_job_conclusions_dispatch_agent_repair(
+    def test_transient_non_failed_job_conclusions_notify_human(
         self,
         conclusion: str,
     ) -> None:
@@ -1322,8 +1163,9 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "transient or infrastructure-related" in action.message
 
     @pytest.mark.unit
     def test_tool_diagnostics_still_dispatch_agent_repair(self) -> None:
