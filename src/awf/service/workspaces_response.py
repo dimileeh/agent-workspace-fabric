@@ -73,6 +73,10 @@ if TYPE_CHECKING:
     from awf.service.workspaces import WorkspaceRetryResult
 
 
+_DIRTY_PATH_SAMPLE_LIMIT = 25
+_PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
+
+
 def _workspace_response_source(
     workspace: Workspace,
     computed_fields: Mapping[str, Any],
@@ -410,6 +414,19 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
     ):
         if field in details:
             result[field] = details[field]
+
+    if reason_code == _PRE_EXISTING_DIRTY_WORKTREE_REASON:
+        phase = details.get("phase")
+        if isinstance(phase, str):
+            result["phase"] = phase
+        operation_type = details.get("operation_type")
+        if isinstance(operation_type, str):
+            result["operation_type"] = operation_type
+        dirty_paths = details.get("paths")
+        if isinstance(dirty_paths, list):
+            dirty_path_values = [path for path in dirty_paths if isinstance(path, str)]
+            result["dirty_paths_count"] = len(dirty_path_values)
+            result["dirty_paths_sample"] = dirty_path_values[:_DIRTY_PATH_SAMPLE_LIMIT]
 
     provider_recovery = provider_recovery_metadata_from_failure(
         reason_code=reason_code,

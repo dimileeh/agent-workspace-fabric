@@ -29,11 +29,24 @@ async def claim_monitoring_pr(
         "monitor_claim_expires_at": lease_expires_at,
         "updated_at": Workspace.updated_at,
     }
+    claim_conditions: list[Any] = [
+        Workspace.id == workspace_id,
+        Workspace.status == WorkspaceStatus.monitoring_pr.value,
+        or_(
+            Workspace.monitor_claim_expires_at.is_(None),
+            Workspace.monitor_claim_expires_at <= cutoff,
+            Workspace.monitor_claimed_by == owner_id,
+        ),
+    ]
     if clear_stale_execution_claim_cutoff is not None:
         stale_execution_claim = or_(
             Workspace.execution_claimed_by.is_(None),
             Workspace.execution_claim_expires_at.is_(None),
             Workspace.execution_claim_expires_at <= clear_stale_execution_claim_cutoff,
+        )
+        execution_claim_available = or_(
+            stale_execution_claim,
+            Workspace.execution_claimed_by == owner_id,
         )
         values.update(
             execution_claimed_by=case(
@@ -53,17 +66,10 @@ async def claim_monitoring_pr(
                 else_=Workspace.execution_claim_epoch,
             ),
         )
+        claim_conditions.append(execution_claim_available)
     result = await session.execute(
         update(Workspace)
-        .where(
-            Workspace.id == workspace_id,
-            Workspace.status == WorkspaceStatus.monitoring_pr.value,
-            or_(
-                Workspace.monitor_claim_expires_at.is_(None),
-                Workspace.monitor_claim_expires_at <= cutoff,
-                Workspace.monitor_claimed_by == owner_id,
-            ),
-        )
+        .where(*claim_conditions)
         .values(**values)
         .returning(Workspace.id)
         .execution_options(synchronize_session=False)

@@ -1273,10 +1273,10 @@ class TestRunOnceMonitorRecoveryPart002:
             ),
         )
 
-        assert await worker.run_once() == 1
+        assert await worker.run_once() == 0
         await worker.wait_for_execution_tasks()
 
-        assert executor.resume_calls == [monitor_id]
+        assert executor.resume_calls == []
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(monitor_id)
             assert ws is not None
@@ -1286,13 +1286,24 @@ class TestRunOnceMonitorRecoveryPart002:
                 refreshed_execution_expires_at
             )
             operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
+            recovery_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_started",
+            )
+            deferred_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_deferred",
+            )
 
         remonitor_operations = [
             operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
-        assert len(remonitor_operations) == 1
-        assert remonitor_operations[0].payload is not None
-        assert remonitor_operations[0].payload["claim_cleanup"]["execution_claim"] == {
+        assert remonitor_operations == []
+        assert recovery_events == []
+        assert len(deferred_events) == 1
+        assert deferred_events[0].reason_code == "MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM"
+        assert deferred_events[0].payload is not None
+        assert deferred_events[0].payload["execution_claim"] == {
             "action": "preserved_unexpired",
             "reason_code": "UNEXPIRED_EXECUTION_CLAIM_PRESERVED_DURING_MONITOR_RECOVERY",
             "previous_claimed_by": refreshed_execution_owner,
@@ -1300,7 +1311,7 @@ class TestRunOnceMonitorRecoveryPart002:
         }
 
     @pytest.mark.unit
-    async def test_restart_recovery_preserves_unexpired_execution_claim_but_reports_it(
+    async def test_restart_recovery_defers_when_unexpired_execution_claim_has_different_owner(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1332,11 +1343,11 @@ class TestRunOnceMonitorRecoveryPart002:
             ),
         )
 
-        assert await worker.run_once() == 1
+        assert await worker.run_once() == 0
         await worker.wait_for_execution_tasks()
 
         assert executor.calls == []
-        assert executor.resume_calls == [monitor_id]
+        assert executor.resume_calls == []
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(monitor_id)
             assert ws is not None
@@ -1351,19 +1362,85 @@ class TestRunOnceMonitorRecoveryPart002:
                 workspace_id=monitor_id,
                 event_type="workspace.monitor_recovery_started",
             )
+            deferred_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_deferred",
+            )
 
         remonitor_operations = [
             operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
-        assert len(remonitor_operations) == 1
-        assert remonitor_operations[0].payload is not None
-        execution_cleanup = remonitor_operations[0].payload["claim_cleanup"]["execution_claim"]
-        assert execution_cleanup == {
+        assert remonitor_operations == []
+        assert recovery_events == []
+        assert len(deferred_events) == 1
+        assert deferred_events[0].reason_code == "MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM"
+        assert deferred_events[0].payload is not None
+        assert deferred_events[0].payload["execution_claim"] == {
             "action": "preserved_unexpired",
             "reason_code": "UNEXPIRED_EXECUTION_CLAIM_PRESERVED_DURING_MONITOR_RECOVERY",
             "previous_claimed_by": "live-execution-worker",
             "previous_expires_at": execution_expires_at.isoformat(),
         }
+
+        assert await worker.run_once() == 0
+        async with session_factory() as s:
+            deferred_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_deferred",
+            )
+        assert len(deferred_events) == 1
+
+    @pytest.mark.unit
+    async def test_restart_recovery_same_owner_unexpired_execution_claim_can_resume(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        execution_expires_at = datetime.now(UTC) + timedelta(minutes=10)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitor-with-same-owner-execution-claim",
+            pr_number=461,
+        )
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                node_id="worker-node-a",
+            ),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            ws.execution_claimed_by = worker._worker_id
+            ws.execution_claim_expires_at = execution_expires_at
+            await s.commit()
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.resume_calls == [monitor_id]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.execution_claimed_by == worker._worker_id
+            assert ws.execution_claim_expires_at is not None
+            assert ws.execution_claim_expires_at.replace(tzinfo=UTC) == execution_expires_at
+            recovery_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_started",
+            )
+            deferred_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_deferred",
+            )
+
         assert len(recovery_events) == 1
-        assert recovery_events[0].payload is not None
-        assert recovery_events[0].payload["claim_cleanup"]["execution_claim"] == (execution_cleanup)
+        assert deferred_events == []

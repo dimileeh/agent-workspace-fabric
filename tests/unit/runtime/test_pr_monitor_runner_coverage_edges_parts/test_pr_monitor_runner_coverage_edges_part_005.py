@@ -431,12 +431,17 @@ async def test_execute_comment_repair_pre_existing_dirty_worktree_is_terminal(
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.failed.value
     assert workspace.events[-1].reason_code == "PRE_EXISTING_DIRTY_WORKTREE"
+    assert workspace.events[-1].payload is not None
+    assert workspace.events[-1].payload["details"]["phase"] == "repair_start"
+    assert workspace.events[-1].payload["details"]["operation_type"] == "comment_repair"
+    assert workspace.events[-1].payload["details"]["paths"] == ["leftover.txt"]
     comment_operation = next(
         operation for operation in operations if operation.type == "comment_repair"
     )
     assert comment_operation.status == OperationStatus.failed.value
     assert comment_operation.error_code == "PRE_EXISTING_DIRTY_WORKTREE"
     assert comment_operation.result["outcome"] == "repair_start_blocked"
+    assert comment_operation.result["failure_evidence"]["paths"] == ["leftover.txt"]
 
 
 @pytest.mark.unit
