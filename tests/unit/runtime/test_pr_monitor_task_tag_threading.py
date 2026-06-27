@@ -60,7 +60,9 @@ class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
         prompt: str,
         log_source: str,
         command_evidence: list[str] | None = None,
+        operation_start_head: str | None = None,
     ) -> AgentRunResult:
+        del operation_start_head
         result = await self._deps.adapter.run(
             compose_project=compose_project,
             compose_file=compose_file,
