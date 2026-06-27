@@ -427,7 +427,11 @@ async def _run_operator_hint_cycle(
     # protected path of the current block, otherwise this wedges a valid push at
     # needs_human where no further grant can be added (PRRT_kwDOSJAM6s6KG1hs). A
     # grant that covers only some of those paths (or none) still leaves an ungranted
-    # protected change, so the guard keeps firing.
+    # protected change, so the guard keeps firing. A clean current net diff is NOT
+    # enough to skip this check: a revert-on-top can remove the protected path from
+    # the tree diff while the preserved protected commit remains an unpushed ancestor
+    # of HEAD. ``_preserved_commit_in_unpushed_range`` is the safety boundary: it
+    # returns false only when the preserved commit was dropped or is already remote.
     if (
         protected_scope_block is None
         and hint.directive
@@ -435,15 +439,6 @@ async def _run_operator_hint_cycle(
         and not await self._preserved_protected_change_fully_granted(
             workspace_id=workspace_id,
             grant_specs=active_grant_specs,
-        )
-        # If the original block's protected paths are absent from the current
-        # remote-branch diff, the preserved marker is stale resume metadata. Do
-        # not re-block a directive-clean head solely from local history residue.
-        and not await self._recorded_protected_block_paths_absent_from_current_diff(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            remote_branch=remote_branch,
-            remote_push_url=remote_push_url,
         )
         and await self._preserved_commit_in_unpushed_range(
             workspace_id=workspace_id,
