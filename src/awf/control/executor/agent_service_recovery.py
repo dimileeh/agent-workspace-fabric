@@ -17,6 +17,8 @@ from awf.common.command_evidence import append_command_evidence
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.node.companion_services import companion_specs_from_task_policy
+from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
 from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
@@ -40,6 +42,10 @@ async def _run_agent_task_with_service_recovery(
     before_mark_failed: Callable[[], None] | None = None,
 ) -> tuple[bool, Any]:
     restart_attempts = 0
+    restart_compose_up_timeout_seconds = _agent_service_restart_timeout_seconds(
+        profile=profile,
+        workspace=workspace,
+    )
     while True:
         try:
             planning_result = await self._run_agent_task_with_optional_planning(
@@ -56,11 +62,11 @@ async def _run_agent_task_with_service_recovery(
                 self,
                 planning_result=planning_result,
                 workspace_id=workspace_id,
-                profile=profile,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 model=model,
                 restart_attempts=restart_attempts,
+                compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
                 before_mark_failed=before_mark_failed,
             )
             if restart_result is None:
@@ -90,12 +96,12 @@ async def _run_agent_task_with_service_recovery(
             restart_attempts, restarted = await _restart_agent_service_or_mark_unhealthy(
                 self,
                 workspace_id=workspace_id,
-                profile=profile,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 exc=exc,
                 service_healthy=service_healthy,
                 restart_attempts=restart_attempts,
+                compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
                 before_mark_failed=before_mark_failed,
             )
             if not restarted:
@@ -118,16 +124,30 @@ async def _run_agent_task_with_service_recovery(
             restart_attempts, restarted = await _restart_agent_service_or_mark_unhealthy(
                 self,
                 workspace_id=workspace_id,
-                profile=profile,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 exc=exc,
                 service_healthy=service_healthy,
                 restart_attempts=restart_attempts,
+                compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
                 before_mark_failed=before_mark_failed,
             )
             if not restarted:
                 return False, None
+
+
+def _agent_service_restart_timeout_seconds(
+    *,
+    profile: WorkspaceProfile,
+    workspace: Any,
+) -> int:
+    task_policy = getattr(workspace, "task_policy", None)
+    if not isinstance(task_policy, Mapping):
+        return profile.docker.startup_timeout_seconds
+    return effective_compose_up_timeout_seconds(
+        profile=profile,
+        companions=companion_specs_from_task_policy(task_policy),
+    )
 
 
 async def _restart_after_conformance_timeout_failure(
@@ -135,11 +155,11 @@ async def _restart_after_conformance_timeout_failure(
     *,
     planning_result: Any,
     workspace_id: str,
-    profile: WorkspaceProfile,
     compose_project: str,
     compose_file: Path,
     model: str | None,
     restart_attempts: int,
+    compose_up_timeout_seconds: int,
     before_mark_failed: Callable[[], None] | None = None,
 ) -> tuple[int, bool] | None:
     source_reason_code = _conformance_stall_timeout_source_reason_code(planning_result)
@@ -160,12 +180,12 @@ async def _restart_after_conformance_timeout_failure(
     return await _restart_agent_service_or_mark_unhealthy(
         self,
         workspace_id=workspace_id,
-        profile=profile,
         compose_project=compose_project,
         compose_file=compose_file,
         exc=planning_result,
         service_healthy=service_healthy,
         restart_attempts=restart_attempts,
+        compose_up_timeout_seconds=compose_up_timeout_seconds,
         source_reason_code=source_reason_code,
         before_mark_failed=before_mark_failed,
     )
@@ -227,12 +247,12 @@ async def _restart_agent_service_or_mark_unhealthy(
     self: Any,
     *,
     workspace_id: str,
-    profile: WorkspaceProfile,
     compose_project: str,
     compose_file: Path,
     exc: AgentRunError | ComposeExecCleanupError | _PlanningRunFailure,
     service_healthy: bool | None,
     restart_attempts: int,
+    compose_up_timeout_seconds: int,
     source_reason_code: str | None = None,
     before_mark_failed: Callable[[], None] | None = None,
 ) -> tuple[int, bool]:
@@ -255,7 +275,7 @@ async def _restart_agent_service_or_mark_unhealthy(
             compose_file=compose_file,
             workspace_id=workspace_id,
             wait=True,
-            compose_up_timeout_seconds=profile.docker.startup_timeout_seconds,
+            compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
     except Exception as restart_exc:
         await _mark_agent_service_unhealthy(

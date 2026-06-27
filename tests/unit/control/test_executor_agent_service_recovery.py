@@ -80,12 +80,16 @@ def _executor(*, side_effect: list[object]) -> SimpleNamespace:
 async def _run_helper(
     executor: SimpleNamespace,
     tmp_path: Path,
+    *,
+    profile: WorkspaceProfile | None = None,
+    workspace: SimpleNamespace | None = None,
 ) -> tuple[bool, object]:
     return await agent_service_recovery._run_agent_task_with_service_recovery(
         executor,
         adapter=SimpleNamespace(),
-        workspace=SimpleNamespace(id="ws_agent_service", task_prompt="do it", task_tag=None),
-        profile=WorkspaceProfile(name="test"),
+        workspace=workspace
+        or SimpleNamespace(id="ws_agent_service", task_prompt="do it", task_tag=None),
+        profile=profile or WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
         compose_file=tmp_path / "compose.yml",
         worktree_path=tmp_path,
@@ -116,6 +120,47 @@ async def test_agent_service_down_timeout_restarts_and_retries(
     executor._compose.ensure_project_up.assert_awaited_once()
     executor._mark_failed.assert_not_awaited()
     executor._prepare_provider_recovery.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_agent_service_restart_uses_companion_aware_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT"), "planning-ok"])
+    profile = WorkspaceProfile(name="test")
+    workspace = SimpleNamespace(
+        id="ws_agent_service",
+        task_prompt="do it",
+        task_tag=None,
+        task_policy={
+            "companions": [
+                {
+                    "name": "slow-api",
+                    "repo_url": "git@github.com:x/slow-api.git",
+                    "compose_up_timeout_seconds": 900,
+                }
+            ],
+        },
+    )
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, planning_failure = await _run_helper(
+        executor,
+        tmp_path,
+        profile=profile,
+        workspace=workspace,
+    )
+
+    assert recovered is True
+    assert planning_failure == "planning-ok"
+    assert (
+        executor._compose.ensure_project_up.await_args.kwargs["compose_up_timeout_seconds"] == 900
+    )
 
 
 @pytest.mark.unit
