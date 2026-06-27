@@ -499,18 +499,19 @@ async def test_claim_monitoring_pr_clears_stale_execution_claim_bumps_epoch(
 
 
 @pytest.mark.unit
-async def test_claim_monitoring_pr_preserves_epoch_for_unexpired_execution_claim(
+async def test_claim_monitoring_pr_defers_for_different_unexpired_execution_claim(
     session: AsyncSession,
 ) -> None:
     workspace_repo = WorkspaceRepository(session)
     now = datetime(2026, 5, 2, 9, 0, tzinfo=UTC)
+    execution_expires_at = now + timedelta(minutes=5)
     workspace = await _workspace(
         session,
-        title="monitor claim preserves unexpired execution epoch",
+        title="monitor claim defers to unexpired execution claim",
         status=WorkspaceStatus.monitoring_pr,
     )
     workspace.execution_claimed_by = "live-runner"
-    workspace.execution_claim_expires_at = now + timedelta(minutes=5)
+    workspace.execution_claim_expires_at = execution_expires_at
     workspace.execution_claim_epoch = 7
     await session.flush()
 
@@ -521,10 +522,46 @@ async def test_claim_monitoring_pr_preserves_epoch_for_unexpired_execution_claim
         now=now,
         clear_stale_execution_claim_cutoff=now,
     )
+    assert not claimed
+    await session.refresh(workspace)
+    assert workspace.monitor_claimed_by is None
+    assert workspace.monitor_claim_expires_at is None
+    assert workspace.execution_claimed_by == "live-runner"
+    assert workspace.execution_claim_expires_at == execution_expires_at
+    assert workspace.execution_claim_epoch == 7
+
+
+@pytest.mark.unit
+async def test_claim_monitoring_pr_preserves_epoch_for_same_owner_execution_claim(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    now = datetime(2026, 5, 2, 9, 0, tzinfo=UTC)
+    execution_expires_at = now + timedelta(minutes=5)
+    monitor_expires_at = now + timedelta(minutes=10)
+    workspace = await _workspace(
+        session,
+        title="monitor claim preserves same-owner execution epoch",
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    workspace.execution_claimed_by = "owner-1"
+    workspace.execution_claim_expires_at = execution_expires_at
+    workspace.execution_claim_epoch = 7
+    await session.flush()
+
+    claimed = await workspace_repo.claim_monitoring_pr(
+        workspace.id,
+        owner_id="owner-1",
+        lease_expires_at=monitor_expires_at,
+        now=now,
+        clear_stale_execution_claim_cutoff=now,
+    )
     assert claimed
     await session.refresh(workspace)
-    # An unexpired execution claim is preserved, and its epoch is left untouched.
-    assert workspace.execution_claimed_by == "live-runner"
+    assert workspace.monitor_claimed_by == "owner-1"
+    assert workspace.monitor_claim_expires_at == monitor_expires_at
+    assert workspace.execution_claimed_by == "owner-1"
+    assert workspace.execution_claim_expires_at == execution_expires_at
     assert workspace.execution_claim_epoch == 7
 
 
