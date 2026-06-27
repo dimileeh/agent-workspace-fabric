@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,9 @@ async def _run_agent_task_with_service_recovery(
     command_evidence: list[str],
     workspace_id: str,
     before_mark_failed: Callable[[], None] | None = None,
+    after_agent_cleanup_failure_repair: (
+        Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
+    ) = None,
 ) -> tuple[bool, Any]:
     restart_attempts = 0
     restart_compose_up_timeout_seconds = _agent_service_restart_timeout_seconds(
@@ -121,6 +124,10 @@ async def _run_agent_task_with_service_recovery(
                 stdout=cleanup_result.stdout if cleanup_result is not None else "",
                 stderr=cleanup_result.stderr if cleanup_result is not None else str(exc),
             )
+            if after_agent_cleanup_failure_repair is not None:
+                cleanup_repaired = await after_agent_cleanup_failure_repair(exc)
+                if not cleanup_repaired:
+                    return False, None
             restart_attempts, restarted = await _restart_agent_service_or_mark_unhealthy(
                 self,
                 workspace_id=workspace_id,

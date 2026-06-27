@@ -241,11 +241,18 @@ async def test_agent_service_down_timeout_cleanup_failure_restarts_and_retries(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    executor = _executor(side_effect=[_cleanup_error(), "planning-ok"])
+    cleanup_exc = _cleanup_error()
+    executor = _executor(side_effect=[cleanup_exc, "planning-ok"])
     command_evidence: list[str] = []
 
     async def _service_down(*_args: object, **_kwargs: object) -> bool:
         return False
+
+    repair_calls: list[tuple[ComposeExecCleanupError, int]] = []
+
+    async def _repair_after_cleanup_failure(exc: ComposeExecCleanupError) -> bool:
+        repair_calls.append((exc, executor._compose.ensure_project_up.await_count))
+        return True
 
     monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
 
@@ -263,13 +270,53 @@ async def test_agent_service_down_timeout_cleanup_failure_restarts_and_retries(
         model="gpt-5.3-codex",
         command_evidence=command_evidence,
         workspace_id="ws_agent_service",
+        after_agent_cleanup_failure_repair=_repair_after_cleanup_failure,
     )
 
     assert recovered is True
     assert planning_failure == "planning-ok"
+    assert repair_calls == [(cleanup_exc, 0)]
     executor._compose.ensure_project_up.assert_awaited_once()
     executor._mark_failed.assert_not_awaited()
     assert command_evidence == ['service "agent" is not running']
+
+
+@pytest.mark.unit
+async def test_agent_service_down_timeout_cleanup_repair_failure_aborts_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[_cleanup_error(), "planning-ok"])
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _repair_after_cleanup_failure(_exc: ComposeExecCleanupError) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    (
+        recovered,
+        planning_failure,
+    ) = await agent_service_recovery._run_agent_task_with_service_recovery(
+        executor,
+        adapter=SimpleNamespace(),
+        workspace=SimpleNamespace(id="ws_agent_service", task_prompt="do it", task_tag=None),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path,
+        model="gpt-5.3-codex",
+        command_evidence=[],
+        workspace_id="ws_agent_service",
+        after_agent_cleanup_failure_repair=_repair_after_cleanup_failure,
+    )
+
+    assert recovered is False
+    assert planning_failure is None
+    executor._compose.ensure_project_up.assert_not_awaited()
+    executor._mark_failed.assert_not_awaited()
 
 
 @pytest.mark.unit
