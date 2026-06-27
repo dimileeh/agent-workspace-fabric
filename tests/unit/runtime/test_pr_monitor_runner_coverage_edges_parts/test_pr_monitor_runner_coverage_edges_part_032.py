@@ -321,3 +321,60 @@ async def test_sync_base_agent_cleanup_repair_failure_returns_terminal_push_resu
     assert push_result.pushed is False
     assert push_result.returncode == 1
     assert push_result.reason_code == expected_reason
+
+
+@pytest.mark.unit
+async def test_sync_base_agent_ownership_repair_failure_returns_terminal_push_result(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    for result in [
+        (0, "abc123\n", ""),
+        (0, "", ""),
+        (0, "", ""),
+        (1, "", "merge conflict"),
+        (0, "UU src/conflict.py\n", ""),
+    ]:
+        cmd.queue_result(returncode=result[0], stdout=result[1], stderr=result[2])
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _raise_ownership_repair_failure(**_kwargs: object) -> None:
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        )
+
+    async def _unexpected_commit_dirty_worktree(**_kwargs: object) -> bool:
+        raise AssertionError("ownership repair failures should return before commit sink")
+
+    monkeypatch.setattr(
+        runner,
+        "_run_monitor_agent_with_service_recovery",
+        _raise_ownership_repair_failure,
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _unexpected_commit_dirty_worktree)
+
+    push_result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.returncode == 1
+    assert push_result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert push_result.stderr == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE

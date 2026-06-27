@@ -938,6 +938,14 @@ async def _run_sync_base(
             )
         except _MonitorAgentServiceRecoveryFailedError:
             raise
+        except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
         except _MonitorHeadObjectMissingError as exc:
             return _GitPushResult(
                 pushed=False,
