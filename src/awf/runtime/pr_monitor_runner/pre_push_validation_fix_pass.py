@@ -547,7 +547,12 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason_code=exc.reason_code,
         )
-    except _MonitorAgentServiceRecoveryFailedError:
+    except (
+        ProviderRecoveryRetryError,
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorAgentServiceRecoveryFailedError,
+        _MonitorMirrorHooksPathRepairFailedError,
+    ):
         raise
     except ComposeExecCleanupError as exc:
         _log.warning(
