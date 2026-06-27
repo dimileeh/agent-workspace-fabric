@@ -10,7 +10,7 @@ import pytest
 
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
-from awf.control.executor import execution_flow
+from awf.control.executor import agent_service_recovery
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
 
@@ -50,7 +50,7 @@ async def _run_helper(
     executor: SimpleNamespace,
     tmp_path: Path,
 ) -> tuple[bool, object]:
-    return await execution_flow._run_agent_task_with_service_recovery(
+    return await agent_service_recovery._run_agent_task_with_service_recovery(
         executor,
         adapter=SimpleNamespace(),
         workspace=SimpleNamespace(id="ws_agent_service", task_prompt="do it", task_tag=None),
@@ -76,7 +76,7 @@ async def test_agent_service_down_timeout_restarts_and_retries(
     async def _service_down(*_args: object, **_kwargs: object) -> bool:
         return False
 
-    monkeypatch.setattr(execution_flow, "probe_agent_service_health", _service_down)
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
 
     recovered, planning_failure = await _run_helper(executor, tmp_path)
 
@@ -100,7 +100,7 @@ async def test_agent_timeout_with_healthy_or_indeterminate_service_keeps_provide
     async def _probe(*_args: object, **_kwargs: object) -> bool | None:
         return service_healthy
 
-    monkeypatch.setattr(execution_flow, "probe_agent_service_health", _probe)
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _probe)
 
     with pytest.raises(AgentRunError) as raised:
         await _run_helper(executor, tmp_path)
@@ -126,7 +126,7 @@ async def test_agent_service_down_restart_budget_exhausts_to_infra_failure(
     async def _service_down(*_args: object, **_kwargs: object) -> bool:
         return False
 
-    monkeypatch.setattr(execution_flow, "probe_agent_service_health", _service_down)
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
 
     recovered, planning_failure = await _run_helper(executor, tmp_path)
 
