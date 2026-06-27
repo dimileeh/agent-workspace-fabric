@@ -14,6 +14,7 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import agent_service_recovery
 from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
+from awf.node.compose_manager import ComposeOperationError
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
@@ -449,7 +450,12 @@ async def test_agent_service_down_restart_failure_marks_infra_failure(
     tmp_path: Path,
 ) -> None:
     executor = _executor(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT")])
-    executor._compose.ensure_project_up.side_effect = RuntimeError("compose failed")
+    executor._compose.ensure_project_up.side_effect = ComposeOperationError(
+        operation="up",
+        returncode=1,
+        stdout="",
+        stderr="compose failed",
+    )
 
     async def _service_down(*_args: object, **_kwargs: object) -> bool:
         return False
@@ -465,9 +471,8 @@ async def test_agent_service_down_restart_failure_marks_infra_failure(
     mark_failed_kwargs = executor._mark_failed.await_args.kwargs
     assert mark_failed_kwargs["from_status"] is WorkspaceStatus.running
     assert mark_failed_kwargs["failure_reason"] is FailureReason.infrastructure_failure
-    assert mark_failed_kwargs["message"] == (
-        "agent compose service restart failed: RuntimeError('compose failed')"
-    )
+    assert mark_failed_kwargs["message"].startswith("agent compose service restart failed:")
+    assert "compose failed" in mark_failed_kwargs["message"]
     assert mark_failed_kwargs["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
     assert mark_failed_kwargs["details"]["provider_recovery"]["reason_code"] == (
         "AGENT_SERVICE_UNHEALTHY"
@@ -476,4 +481,25 @@ async def test_agent_service_down_restart_failure_marks_infra_failure(
     assert recovery_details["source_reason_code"] == "AGENT_IDLE_TIMEOUT"
     assert recovery_details["service_healthy"] is False
     assert recovery_details["restart_attempts"] == 1
+    executor._prepare_provider_recovery.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_agent_service_down_restart_unexpected_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT")])
+    executor._compose.ensure_project_up.side_effect = RuntimeError("unexpected bug")
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    with pytest.raises(RuntimeError, match="unexpected bug"):
+        await _run_helper(executor, tmp_path)
+
+    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._mark_failed.assert_not_awaited()
     executor._prepare_provider_recovery.assert_not_awaited()

@@ -23,6 +23,7 @@ from awf.control.executor.quality_gates import _log
 from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.node.companion_services import companion_specs_from_task_policy
+from awf.node.compose_manager import ComposeOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
@@ -336,7 +337,7 @@ async def _restart_agent_service_or_mark_unhealthy(
             wait=True,
             compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
-    except Exception as restart_exc:
+    except ComposeOperationError as restart_exc:
         await _mark_agent_service_unhealthy(
             self,
             workspace_id=workspace_id,
