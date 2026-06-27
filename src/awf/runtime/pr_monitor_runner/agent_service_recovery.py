@@ -15,6 +15,7 @@ from awf.adapters.provider_failures import (
 )
 from awf.common.command_evidence import append_command_evidence
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
+from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import companion_specs_from_task_policy
 from awf.node.compose_manager import ComposeManager
@@ -202,7 +203,54 @@ async def _restart_monitor_agent_service_or_fail(
         restart_attempts=restart_attempts,
         reason_code=AGENT_SERVICE_UNHEALTHY,
     )
+    await _raise_if_monitor_agent_service_recovery_was_superseded(
+        self,
+        workspace_id=workspace_id,
+    )
     return restart_attempts
+
+
+async def _raise_if_monitor_agent_service_recovery_was_superseded(
+    self: Any,
+    *,
+    workspace_id: str,
+) -> None:
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:
+            message = "agent compose service recovery superseded: workspace disappeared"
+            _log.warning(
+                "monitor.agent_service_recovery_superseded",
+                workspace_id=workspace_id,
+                reason="workspace_missing",
+            )
+            raise _MonitorAgentServiceRecoveryFailedError(message)
+        if workspace.status != WorkspaceStatus.monitoring_pr.value:
+            message = "agent compose service recovery superseded: workspace left monitoring_pr"
+            _log.warning(
+                "monitor.agent_service_recovery_superseded",
+                workspace_id=workspace_id,
+                reason="status_changed",
+                status=workspace.status,
+            )
+            raise _MonitorAgentServiceRecoveryFailedError(message)
+        monitor_owner_id = getattr(self, "_monitor_owner_id", None)
+        superseded_claimed_runner = (
+            monitor_owner_id is not None and workspace.monitor_claimed_by != monitor_owner_id
+        )
+        superseded_inline_handoff = (
+            monitor_owner_id is None and workspace.monitor_claimed_by is not None
+        )
+        if superseded_claimed_runner or superseded_inline_handoff:
+            message = "agent compose service recovery superseded: monitor claim changed"
+            _log.warning(
+                "monitor.agent_service_recovery_superseded",
+                workspace_id=workspace_id,
+                reason="monitor_claim_changed",
+                monitor_owner_id=monitor_owner_id,
+                monitor_claimed_by=workspace.monitor_claimed_by,
+            )
+            raise _MonitorAgentServiceRecoveryFailedError(message)
 
 
 async def _monitor_agent_service_restart_timeout_seconds(

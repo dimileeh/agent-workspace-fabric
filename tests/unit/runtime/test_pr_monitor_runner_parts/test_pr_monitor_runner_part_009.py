@@ -875,6 +875,7 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
 ) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(
         exc=AgentRunError(
@@ -913,7 +914,7 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
     compose_file = tmp_path / "compose.yml"
 
     result = await runner._run_monitor_agent_with_service_recovery(
-        workspace_id="ws_monitor_service_retry",
+        workspace_id=workspace_id,
         compose_project="proj",
         compose_file=compose_file,
         prompt="fix the comment",
@@ -931,7 +932,7 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
     ensure_project_up.assert_awaited_once_with(
         project_name="proj",
         compose_file=compose_file,
-        workspace_id="ws_monitor_service_retry",
+        workspace_id=workspace_id,
         wait=True,
         compose_up_timeout_seconds=300,
     )
@@ -1024,6 +1025,7 @@ async def test_monitor_agent_cleanup_service_down_restarts_service_and_retries(
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
 ) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(
         exc=ComposeExecCleanupError(
@@ -1058,7 +1060,7 @@ async def test_monitor_agent_cleanup_service_down_restarts_service_and_retries(
     compose_file = tmp_path / "compose.yml"
 
     result = await runner._run_monitor_agent_with_service_recovery(
-        workspace_id="ws_monitor_cleanup_retry",
+        workspace_id=workspace_id,
         compose_project="proj",
         compose_file=compose_file,
         prompt="fix the comment",
@@ -1076,10 +1078,140 @@ async def test_monitor_agent_cleanup_service_down_restarts_service_and_retries(
     ensure_project_up.assert_awaited_once_with(
         project_name="proj",
         compose_file=compose_file,
-        workspace_id="ws_monitor_cleanup_retry",
+        workspace_id=workspace_id,
         wait=True,
         compose_up_timeout_seconds=300,
     )
+
+
+@pytest.mark.unit
+async def test_monitor_agent_service_recovery_stops_when_workspace_leaves_monitoring(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="monitor idle timeout while agent service was down",
+            ),
+            reason_code=AGENT_IDLE_TIMEOUT,
+            details={"provider": "google", "model": "gemini-2.5-pro"},
+        )
+    )
+    adapter.queue(stdout="AWF-VERDICT: FIXED: should not run")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+
+    async def _cancel_workspace_after_restart(*_args: object, **_kwargs: object) -> None:
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.cancelled,
+                reason_code="TEST_CANCELLED_DURING_RESTART",
+            )
+            await session.commit()
+
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        side_effect=_cancel_workspace_after_restart,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    assert adapter.calls == ["fix the comment"]
+    ensure_project_up.assert_awaited_once()
+
+
+@pytest.mark.unit
+async def test_monitor_agent_service_recovery_stops_when_monitor_claim_is_superseded(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-old"
+        await session.commit()
+
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="monitor idle timeout while agent service was down",
+            ),
+            reason_code=AGENT_IDLE_TIMEOUT,
+            details={"provider": "google", "model": "gemini-2.5-pro"},
+        )
+    )
+    adapter.queue(stdout="AWF-VERDICT: FIXED: should not run")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = "worker-old"
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+
+    async def _supersede_monitor_claim_after_restart(*_args: object, **_kwargs: object) -> None:
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.monitor_claimed_by = "worker-new"
+            await session.commit()
+
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        side_effect=_supersede_monitor_claim_after_restart,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    assert adapter.calls == ["fix the comment"]
+    ensure_project_up.assert_awaited_once()
 
 
 @pytest.mark.unit
