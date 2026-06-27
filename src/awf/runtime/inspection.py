@@ -98,7 +98,7 @@ def agent_service_health_from_snapshot(
     if service is None:
         return False
     health = (service.health or "").strip().lower()
-    if health == "unhealthy":
+    if health in {"starting", "unhealthy"}:
         return False
     return service.state.strip().lower() == "running"
 

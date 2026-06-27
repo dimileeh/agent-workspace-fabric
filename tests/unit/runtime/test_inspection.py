@@ -271,6 +271,13 @@ def test_agent_service_health_from_snapshot_running(service: RuntimeService) -> 
             container_id="abc",
             image="agent",
             state="running",
+            health="starting",
+        ),
+        RuntimeService(
+            name="agent",
+            container_id="abc",
+            image="agent",
+            state="running",
             health="unhealthy",
         ),
     ],
