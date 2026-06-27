@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from functools import partial
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
+_BeforeMarkFailed = Callable[[], None | Awaitable[None]]
 
 
 def _build_agent_service_recovery_callbacks(
@@ -129,6 +131,56 @@ async def _run_agent_task_with_service_recovery(
         Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
     ) = None,
 ) -> tuple[bool, Any]:
+    async def _run_initial_agent(accept_existing_plan: bool) -> Any:
+        return await self._run_agent_task_with_optional_planning(
+            adapter=adapter,
+            workspace=workspace,
+            profile=profile,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+            model=model,
+            command_evidence=command_evidence,
+            accept_existing_plan=accept_existing_plan,
+        )
+
+    return await _run_agent_callable_with_service_recovery(
+        self,
+        run_agent=_run_initial_agent,
+        workspace=workspace,
+        profile=profile,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        model=model,
+        command_evidence=command_evidence,
+        workspace_id=workspace_id,
+        execution_owner_id=execution_owner_id,
+        before_mark_failed=before_mark_failed,
+        before_agent_retry=before_agent_retry,
+        after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+    )
+
+
+async def _run_agent_callable_with_service_recovery(
+    self: Any,
+    *,
+    run_agent: Callable[[bool], Awaitable[Any]],
+    workspace: Any,
+    profile: WorkspaceProfile,
+    compose_project: str,
+    compose_file: Path,
+    model: str | None,
+    command_evidence: list[str],
+    workspace_id: str,
+    execution_owner_id: str | None = None,
+    before_mark_failed: _BeforeMarkFailed | None = None,
+    before_agent_retry: Callable[[], Awaitable[bool]] | None = None,
+    after_agent_cleanup_failure_repair: (
+        Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
+    ) = None,
+    expected_status: WorkspaceStatus = WorkspaceStatus.running,
+    failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
+) -> tuple[bool, Any]:
     restart_attempts = 0
     run_before_retry = False
     restart_compose_up_timeout_seconds = _agent_service_restart_timeout_seconds(
@@ -141,17 +193,7 @@ async def _run_agent_task_with_service_recovery(
             if before_agent_retry is not None and not await before_agent_retry():
                 return False, None
         try:
-            planning_result = await self._run_agent_task_with_optional_planning(
-                adapter=adapter,
-                workspace=workspace,
-                profile=profile,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                worktree_path=worktree_path,
-                model=model,
-                command_evidence=command_evidence,
-                accept_existing_plan=restart_attempts > 0,
-            )
+            planning_result = await run_agent(restart_attempts > 0)
             restart_result = await _restart_after_conformance_timeout_failure(
                 self,
                 planning_result=planning_result,
@@ -163,6 +205,8 @@ async def _run_agent_task_with_service_recovery(
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
+                expected_status=expected_status,
+                failure_from_status=failure_from_status,
             )
             if restart_result is None:
                 return True, planning_result
@@ -200,6 +244,8 @@ async def _run_agent_task_with_service_recovery(
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
+                expected_status=expected_status,
+                failure_from_status=failure_from_status,
             )
             if not restarted:
                 return False, None
@@ -234,6 +280,8 @@ async def _run_agent_task_with_service_recovery(
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
+                expected_status=expected_status,
+                failure_from_status=failure_from_status,
             )
             if not restarted:
                 return False, None
@@ -305,7 +353,9 @@ async def _restart_after_conformance_timeout_failure(
     restart_attempts: int,
     compose_up_timeout_seconds: int,
     execution_owner_id: str | None = None,
-    before_mark_failed: Callable[[], None] | None = None,
+    before_mark_failed: _BeforeMarkFailed | None = None,
+    expected_status: WorkspaceStatus = WorkspaceStatus.running,
+    failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
 ) -> tuple[int, bool] | None:
     source_reason_code = _conformance_stall_timeout_source_reason_code(planning_result)
     if source_reason_code is None:
@@ -334,6 +384,8 @@ async def _restart_after_conformance_timeout_failure(
         source_reason_code=source_reason_code,
         execution_owner_id=execution_owner_id,
         before_mark_failed=before_mark_failed,
+        expected_status=expected_status,
+        failure_from_status=failure_from_status,
     )
 
 
@@ -401,12 +453,14 @@ async def _restart_agent_service_or_mark_unhealthy(
     compose_up_timeout_seconds: int,
     source_reason_code: str | None = None,
     execution_owner_id: str | None = None,
-    before_mark_failed: Callable[[], None] | None = None,
+    before_mark_failed: _BeforeMarkFailed | None = None,
+    expected_status: WorkspaceStatus = WorkspaceStatus.running,
+    failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
 ) -> tuple[int, bool]:
     if restart_attempts >= _AGENT_SERVICE_RESTART_ATTEMPTS:
         if not await self._recheck_status(
             workspace_id,
-            expected=WorkspaceStatus.running,
+            expected=expected_status,
             action="agent_service_restart_terminal",
             owner_id=execution_owner_id,
         ):
@@ -420,6 +474,7 @@ async def _restart_agent_service_or_mark_unhealthy(
             source_reason_code=source_reason_code,
             message="agent compose service stayed unhealthy after restart attempts",
             before_mark_failed=before_mark_failed,
+            from_status=failure_from_status,
         )
         return restart_attempts, False
     restart_attempts += 1
@@ -434,7 +489,7 @@ async def _restart_agent_service_or_mark_unhealthy(
     except ComposeOperationError as restart_exc:
         if not await self._recheck_status(
             workspace_id,
-            expected=WorkspaceStatus.running,
+            expected=expected_status,
             action="agent_service_restart_terminal",
             owner_id=execution_owner_id,
         ):
@@ -448,11 +503,12 @@ async def _restart_agent_service_or_mark_unhealthy(
             source_reason_code=source_reason_code,
             message=f"agent compose service restart failed: {restart_exc!r}"[:2000],
             before_mark_failed=before_mark_failed,
+            from_status=failure_from_status,
         )
         return restart_attempts, False
     if not await self._recheck_status(
         workspace_id,
-        expected=WorkspaceStatus.running,
+        expected=expected_status,
         action="agent_service_restart_recovery",
         owner_id=execution_owner_id,
     ):
@@ -469,7 +525,8 @@ async def _mark_agent_service_unhealthy(
     restart_attempts: int,
     message: str,
     source_reason_code: str | None = None,
-    before_mark_failed: Callable[[], None] | None = None,
+    before_mark_failed: _BeforeMarkFailed | None = None,
+    from_status: WorkspaceStatus = WorkspaceStatus.running,
 ) -> None:
     exc_details = getattr(exc, "details", None)
     details = dict(exc_details) if isinstance(exc_details, Mapping) else {}
@@ -488,10 +545,12 @@ async def _mark_agent_service_unhealthy(
         "restart_attempts": restart_attempts,
     }
     if before_mark_failed is not None:
-        before_mark_failed()
+        result = before_mark_failed()
+        if isawaitable(result):
+            await result
     await self._mark_failed(
         workspace_id=workspace_id,
-        from_status=WorkspaceStatus.running,
+        from_status=from_status,
         failure_reason=FailureReason.infrastructure_failure,
         message=message,
         reason_code=AGENT_SERVICE_UNHEALTHY,

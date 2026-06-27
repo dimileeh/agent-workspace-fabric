@@ -7,7 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from awf.adapters.base import AgentAdapter, AgentRunError
+from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
+from awf.adapters.provider_failures import AGENT_SERVICE_UNHEALTHY
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import (
@@ -21,6 +22,9 @@ from awf.common.git_identity import (
 )
 from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
 from awf.control.executor import planning_artifacts as _planning_artifacts
+from awf.control.executor.agent_service_recovery import (
+    _run_agent_callable_with_service_recovery,
+)
 from awf.control.executor.constants import (
     PLAN_CONFORMANCE_UNSATISFIED,
     POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
@@ -594,18 +598,71 @@ async def run_validation_and_fix_cycle(
                             max_fix_passes=post_validation_conformance_fix_pass_budget,
                             will_retry=False,
                         )
-                    conformance_failure = await self._run_post_validation_conformance_check(
-                        adapter=adapter,
+
+                    async def _run_conformance_agent(
+                        _accept_existing_plan: bool,
+                        *,
+                        _handoff: _PlanningValidationHandoff = conformance_handoff,
+                        _validation_run_id: str = validation_run_id,
+                    ) -> Any:
+                        return await self._run_post_validation_conformance_check(
+                            adapter=adapter,
+                            workspace=ws,
+                            profile=profile,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            worktree_path=worktree_path,
+                            model=run_model,
+                            handoff=_handoff,
+                            validation_run_id=_validation_run_id,
+                            base_commit=base_commit,
+                        )
+
+                    async def _finish_conformance_recovery_failure(
+                        *,
+                        _validation_run_id: str = validation_run_id,
+                        _validation_coverage: dict[str, object] | None = validation_coverage,
+                    ) -> None:
+                        _deposit_planning_artifacts_if_required()
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=_validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=AGENT_SERVICE_UNHEALTHY,
+                            coverage=_validation_coverage,
+                            error_message=(
+                                "agent compose service recovery failed during "
+                                "post-validation conformance"
+                            ),
+                        )
+
+                    (
+                        conformance_recovered,
+                        conformance_failure,
+                    ) = await _run_agent_callable_with_service_recovery(
+                        self,
+                        run_agent=_run_conformance_agent,
                         workspace=ws,
                         profile=profile,
                         compose_project=compose_project,
                         compose_file=compose_file,
-                        worktree_path=worktree_path,
                         model=run_model,
-                        handoff=conformance_handoff,
-                        validation_run_id=validation_run_id,
-                        base_commit=base_commit,
+                        command_evidence=[],
+                        workspace_id=workspace_id,
+                        execution_owner_id=execution_owner_id,
+                        before_mark_failed=_finish_conformance_recovery_failure,
+                        expected_status=WorkspaceStatus.validating,
+                        failure_from_status=WorkspaceStatus.validating,
                     )
+                    if not conformance_recovered:
+                        return ExecutionValidationResult(
+                            stop=True,
+                            successful_validation_run_id=successful_validation_run_id,
+                            successful_validation_workspace_head_sha=(
+                                successful_validation_workspace_head_sha
+                            ),
+                        )
                 except ComposeExecCleanupError as exc:
                     message = cleanup_failure_message(exc)
                     _log.error(
@@ -958,13 +1015,62 @@ async def run_validation_and_fix_cycle(
             )
         fix_command_evidence: list[str] = []
         try:
-            fix_result = await adapter.run(
+
+            async def _run_fix_agent(
+                _accept_existing_plan: bool,
+                *,
+                _fix_prompt: str = fix_prompt,
+            ) -> AgentRunResult:
+                return await adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=_fix_prompt,
+                    model=run_model,
+                    workspace_id=workspace_id,
+                )
+
+            async def _finish_fix_recovery_failure(
+                *,
+                _validation_run_id: str = validation_run_id,
+                _val_result: ValidationResult = val_result,
+            ) -> None:
+                _deposit_planning_artifacts_if_required()
+                await self._finish_pending_validate_operations(
+                    workspace_id=workspace_id,
+                    status=OperationStatus.failed,
+                    validation_run_id=_validation_run_id,
+                    requested_tier=validation_tier,
+                    reason_code=AGENT_SERVICE_UNHEALTHY,
+                    coverage=_validation_run_coverage_metadata(
+                        _val_result,
+                        baseline_coverage=baseline_coverage,
+                    ),
+                    error_message=(
+                        "agent compose service recovery failed during validation fix pass"
+                    ),
+                )
+
+            fix_recovered, fix_result = await _run_agent_callable_with_service_recovery(
+                self,
+                run_agent=_run_fix_agent,
+                workspace=ws,
+                profile=profile,
                 compose_project=compose_project,
                 compose_file=compose_file,
-                prompt=fix_prompt,
                 model=run_model,
+                command_evidence=fix_command_evidence,
                 workspace_id=workspace_id,
+                execution_owner_id=execution_owner_id,
+                before_mark_failed=_finish_fix_recovery_failure,
+                expected_status=WorkspaceStatus.validating,
+                failure_from_status=WorkspaceStatus.validating,
             )
+            if not fix_recovered:
+                return ExecutionValidationResult(
+                    stop=True,
+                    successful_validation_run_id=successful_validation_run_id,
+                    successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                )
             append_command_evidence(
                 fix_command_evidence,
                 stdout=fix_result.stdout,

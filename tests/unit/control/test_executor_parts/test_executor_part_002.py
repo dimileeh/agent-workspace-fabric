@@ -25,6 +25,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
     ollama_model,
 )
+from awf.control.executor import execution_validation as execution_validation_mod
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
@@ -881,6 +882,7 @@ class TestHappyPathPart001:
     @pytest.mark.unit
     async def test_planning_validation_handoff_runs_validation_then_conformance_only_check(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -954,6 +956,19 @@ class TestHappyPathPart001:
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
 
+        recovery_calls: list[dict[str, object]] = []
+        original_recovery = execution_validation_mod._run_agent_callable_with_service_recovery
+
+        async def _spy_recovery(*args: object, **kwargs: object) -> tuple[bool, object]:
+            recovery_calls.append(kwargs)
+            return await original_recovery(*args, **kwargs)
+
+        monkeypatch.setattr(
+            execution_validation_mod,
+            "_run_agent_callable_with_service_recovery",
+            _spy_recovery,
+        )
+
         await executor.execute(ws_id)
 
         adapter_prompt_calls = _adapter_prompt_calls(fake)
@@ -977,6 +992,9 @@ class TestHappyPathPart001:
 
         assert phase_names == ["planning", "execution", "conformance", "conformance"]
         assert conformance_call_indexes[-1] > validation_call_index
+        assert recovery_calls
+        assert recovery_calls[-1]["expected_status"] is WorkspaceStatus.validating
+        assert recovery_calls[-1]["failure_from_status"] is WorkspaceStatus.validating
         assert "Validation evidence" in prompts[-1]
         assert "VALIDATION_OK" in prompts[-1]
         assert "validation.01_validate.stdout" in prompts[-1]

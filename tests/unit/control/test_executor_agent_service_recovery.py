@@ -143,6 +143,46 @@ async def test_agent_service_down_timeout_restarts_and_retries(
 
 
 @pytest.mark.unit
+async def test_agent_callable_service_recovery_uses_validation_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[])
+    run_agent = AsyncMock(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT"), "validation-ok"])
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, result = await agent_service_recovery._run_agent_callable_with_service_recovery(
+        executor,
+        run_agent=run_agent,
+        workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=tmp_path / "compose.yml",
+        model="gpt-5.3-codex",
+        command_evidence=[],
+        workspace_id="ws_agent_service",
+        expected_status=WorkspaceStatus.validating,
+        failure_from_status=WorkspaceStatus.validating,
+    )
+
+    assert recovered is True
+    assert result == "validation-ok"
+    assert run_agent.await_count == 2
+    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._recheck_status.assert_awaited_once_with(
+        "ws_agent_service",
+        expected=WorkspaceStatus.validating,
+        action="agent_service_restart_recovery",
+        owner_id=None,
+    )
+    executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_agent_service_restart_uses_companion_aware_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
