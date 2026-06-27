@@ -16,6 +16,7 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorConfig,
     MonitorState,
+    NotifyHuman,
     PRStatus,
     ReportCiFailure,
     RerunTransientCI,
@@ -103,7 +104,7 @@ class TestCiFailure:
         )
 
     @pytest.mark.unit
-    def test_transient_failure_falls_back_to_agent_after_rerun_budget(self) -> None:
+    def test_transient_failure_parks_for_human_after_rerun_budget(self) -> None:
         failure = CheckFailure(
             name="CI",
             conclusion="FAILURE",
@@ -118,8 +119,9 @@ class TestCiFailure:
 
         action = decide(status, state, MonitorConfig(ci_transient_rerun_max_attempts=2))
 
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "transient or infrastructure-related" in action.message
 
     @pytest.mark.unit
     def test_transient_rerun_budget_reads_legacy_rollup_signature(self) -> None:
@@ -146,11 +148,12 @@ class TestCiFailure:
 
         action = decide(status, state, MonitorConfig(ci_transient_rerun_max_attempts=2))
 
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == status.ci_failures
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "transient or infrastructure-related" in action.message
 
     @pytest.mark.unit
-    def test_transient_failure_with_disabled_rerun_budget_dispatches_agent_repair(self) -> None:
+    def test_transient_failure_with_disabled_rerun_budget_notifies_human(self) -> None:
         failure = CheckFailure(
             name="CI",
             conclusion="FAILURE",
@@ -164,8 +167,9 @@ class TestCiFailure:
             MonitorConfig(ci_transient_rerun_max_attempts=0),
         )
 
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "transient or infrastructure-related" in action.message
 
     @pytest.mark.unit
     def test_transient_failure_corrupt_rerun_count_is_treated_as_zero(self) -> None:
@@ -234,7 +238,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     @pytest.mark.parametrize("run_id", [None, ""])
-    def test_transient_failure_without_run_id_dispatches_agent_repair(
+    def test_transient_failure_without_run_id_notifies_human(
         self,
         run_id: str | None,
     ) -> None:
@@ -251,8 +255,9 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "transient or infrastructure-related" in action.message
 
     @pytest.mark.unit
     def test_code_like_failure_still_dispatches_agent_repair(self) -> None:
@@ -286,15 +291,16 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_failure_with_empty_failure_list_still_returns_action(self) -> None:
-        """Runner can still fetch logs on its own via ``gh run view``."""
+    def test_failure_with_empty_failure_list_notifies_human(self) -> None:
+        """A red rollup without fetched logs must not launch an agent repair."""
         action = decide(
             _status(check_state=CheckState.FAILURE),
             MonitorState(),
             MonitorConfig(),
         )
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == ()
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "could not retrieve actionable" in action.message
 
     @pytest.mark.unit
     def test_unresolved_comments_take_priority_over_ci_failure(self) -> None:

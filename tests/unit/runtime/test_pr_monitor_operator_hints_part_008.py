@@ -18,6 +18,9 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.operator_hints import (
+    _protected_history_directive_reblock_key,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -265,3 +268,83 @@ async def test_operator_hint_directive_clean_current_diff_reblocks_unpushed_pres
     assert [violation.path for violation in leak_block.violations] == [".github/workflows/ci.yml"]
     assert "unpushed-workflow-sha" in leak_block.message
     assert state.pending_operator_hint is None
+    assert (
+        _protected_history_directive_reblock_key(
+            "unpushed-workflow-sha",
+            "revert .github/workflows/ci.yml",
+        )
+        in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_operator_hint_repeat_preserved_history_directive_does_not_rerun_agent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    directive = "revert .github/workflows/ci.yml"
+    hint = OperatorHint(
+        reason="previous directive leaked protected history",
+        directive=directive,
+        operation_id="op_repeat_revert_on_top",
+        requested_at="2026-06-27T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    preserved_head_sha = "unpushed-workflow-sha"
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, preserved_head_sha)
+    state.mark_addressed(
+        _protected_history_directive_reblock_key(preserved_head_sha, directive),
+        "reblocked",
+    )
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return (preserved_head_sha, None)
+
+    async def _local_head(*_args: object, **_kwargs: object) -> str:
+        return "local-unpushed-head"
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _agent_must_not_run(**_kwargs: object) -> VerdictResult:
+        pytest.fail("repeat revert-on-top directive must not invoke the agent again")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_rev_parse_head", _local_head)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _agent_must_not_run)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert result.stderr is not None
+    assert preserved_head_sha in result.stderr
+    assert "reset/rebase/cherry-pick" in result.stderr
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    assert state.pending_operator_hint.status_reason == result.stderr

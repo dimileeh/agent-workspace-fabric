@@ -1017,14 +1017,7 @@ def _ci_transient_rerun_count_for_key(state: MonitorState, key: str) -> int:
 
 
 def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
-    """Whether a failing check is infrastructure flake worth a silent rerun.
-
-    Returns ``True`` only when the failure carries no structured or textual
-    evidence of a genuine code failure and either matches a generic transient
-    marker, is an empty-log timed-out run, or is a Docker registry/pull timeout
-    (see ``_log_shows_docker_registry_timeout``). Anything that looks like a real
-    code failure short-circuits to ``False`` so it reaches the repair agent.
-    """
+    """True for retryable infra flakes with no structured/textual code evidence."""
 
     log_text = failure.log_excerpt.lower()
     if _has_structured_code_failure_evidence(failure):
@@ -1064,6 +1057,43 @@ def _looks_like_code_failure_text(text: str) -> bool:
     if any(marker in text for marker in _CI_CODE_FAILURE_MARKERS):
         return True
     return any(pattern.search(text) for pattern in _CI_CODE_FAILURE_PATTERNS)
+
+
+def _has_actionable_ci_failure_evidence(failure: CheckFailure) -> bool:
+    if _looks_like_required_ci_rollup_failure(failure):
+        return False
+    log_text = failure.log_excerpt.lower()
+    if _has_structured_code_failure_evidence(failure) or _looks_like_code_failure_text(log_text):
+        return True
+    if not log_text.strip():
+        return False
+    return not _looks_like_transient_ci_failure(failure)
+
+
+_CI_MISSING_LOGS_HUMAN_MESSAGE = (
+    "CI failed: AWF could not retrieve actionable logs; operator attention is required."
+)
+_CI_TRANSIENT_HUMAN_MESSAGE = (
+    "CI failure appears transient or infrastructure-related; AWF cannot safely rerun it again."
+)
+_CI_UNACTIONABLE_HUMAN_MESSAGE = (
+    "CI failed without actionable code-failure evidence; operator attention is required."
+)
+
+
+def _ci_failure_action(
+    status: PRStatus, state: MonitorState, config: MonitorConfig
+) -> MonitorAction:
+    if not status.ci_failures:
+        return NotifyHuman(message=_CI_MISSING_LOGS_HUMAN_MESSAGE)
+    rerun_failures = _ci_transient_rerun_failures(status)
+    if _should_rerun_transient_ci(status, state, config):
+        return RerunTransientCI(failures=rerun_failures)
+    if rerun_failures and all(_looks_like_transient_ci_failure(f) for f in rerun_failures):
+        return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
+    if not any(_has_actionable_ci_failure_evidence(f) for f in status.ci_failures):
+        return NotifyHuman(message=_CI_UNACTIONABLE_HUMAN_MESSAGE)
+    return ReportCiFailure(failures=status.ci_failures)
 
 
 def _supports_failed_job_rerun(failure: CheckFailure) -> bool:
@@ -1299,15 +1329,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
 
     # 5. CI failures.
     if status.check_state == CheckState.FAILURE:
-        if not status.ci_failures:
-            # Failure reported by GraphQL but no per-check log available.
-            # The runner treats an empty CheckFailure list as a signal to
-            # grab ``gh run view --log-failed`` on its end; we still hand
-            # off a ReportCiFailure action.
-            return ReportCiFailure(failures=())
-        if _should_rerun_transient_ci(status, state, config):
-            return RerunTransientCI(failures=_ci_transient_rerun_failures(status))
-        return ReportCiFailure(failures=status.ci_failures)
+        return _ci_failure_action(status, state, config)
 
     # 6. CI still running, or GitHub is still computing state → passive wait.
     # Skip the pending-checks wait ONLY when the operator opted out of CI

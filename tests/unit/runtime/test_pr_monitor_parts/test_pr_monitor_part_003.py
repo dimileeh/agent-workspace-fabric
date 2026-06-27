@@ -15,6 +15,7 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorConfig,
     MonitorState,
+    NotifyHuman,
     PRStatus,
     ReportCiFailure,
     RerunTransientCI,
@@ -157,7 +158,7 @@ class TestCiFailure:
         assert action.failures == (transient_failure,)
 
     @pytest.mark.unit
-    def test_required_rollup_without_underlying_transient_job_dispatches_agent_repair(
+    def test_required_rollup_without_underlying_transient_job_notifies_human(
         self,
     ) -> None:
         rollup_failure = CheckFailure(
@@ -177,8 +178,9 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (rollup_failure,)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "without actionable code-failure evidence" in action.message
 
     @pytest.mark.unit
     def test_transient_tool_download_failure_dispatches_rerun(self) -> None:
@@ -1286,7 +1288,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_timed_out_failure_without_logs_or_run_id_dispatches_agent_repair(self) -> None:
+    def test_timed_out_failure_without_logs_or_run_id_notifies_human(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="TIMED_OUT",
@@ -1300,12 +1302,13 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "without actionable code-failure evidence" in action.message
 
     @pytest.mark.unit
     @pytest.mark.parametrize("conclusion", ["CANCELLED", "ACTION_REQUIRED"])
-    def test_transient_non_failed_job_conclusions_dispatch_agent_repair(
+    def test_transient_non_failed_job_conclusions_notify_human(
         self,
         conclusion: str,
     ) -> None:
@@ -1322,8 +1325,9 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "transient or infrastructure-related" in action.message
 
     @pytest.mark.unit
     def test_tool_diagnostics_still_dispatch_agent_repair(self) -> None:

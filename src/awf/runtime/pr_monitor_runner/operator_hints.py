@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -63,6 +64,12 @@ _OPERATOR_HINT_BARE_FEEDBACK_ID_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_PROTECTED_HISTORY_DIRECTIVE_REBLOCK_PREFIX = "__awf_protected_history_directive_reblocked__:"
+
+
+def _protected_history_directive_reblock_key(preserved_head_sha: str, directive: str) -> str:
+    digest = hashlib.sha256(directive.strip().encode("utf-8")).hexdigest()[:16]
+    return f"{_PROTECTED_HISTORY_DIRECTIVE_REBLOCK_PREFIX}{preserved_head_sha}:{digest}"
 
 
 async def _run_operator_hint_cycle(
@@ -202,6 +209,16 @@ async def _run_operator_hint_cycle(
                 acted_feedback_text=hint.directive,
             )
             return _GitPushResult(pushed=False, failed=False, returncode=0)
+        repeat_key = _protected_history_directive_reblock_key(preserved_head_sha, hint.directive)
+        if state.threads_addressed_ids.get(repeat_key):
+            reason = (
+                "The previous operator directive still left the ungranted protected "
+                f"commit {preserved_head_sha} in local history. Provide a new directive "
+                "that drops the commit with reset/rebase/cherry-pick, not a revert-on-top "
+                "commit, or approve-and-keep the protected path."
+            )
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
     acted_feedback_text = hint.directive
     if hint.directive or not active_grant_specs:
         if not hint.directive:
@@ -451,8 +468,13 @@ async def _run_operator_hint_cycle(
         reason = (
             "operator directive resolved the protected block by reverting on top of "
             f"the preserved commit {preserved_head_sha} instead of dropping it; pushing "
-            "would publish the ungranted protected change. Reset the worktree to remove "
-            "the preserved commit, or approve-and-keep the protected path, then resume."
+            "would publish the ungranted protected change. Drop the preserved commit "
+            "with reset/rebase/cherry-pick; do not add another revert-on-top commit. "
+            "Alternatively, approve-and-keep the protected path, then resume."
+        )
+        state.mark_addressed(
+            _protected_history_directive_reblock_key(preserved_head_sha, hint.directive),
+            "reblocked",
         )
         # RE-BLOCK into ``blocked`` so the approve-and-keep grant this message
         # advertises is actually reachable. ``guide_workspace`` only accepts
