@@ -183,6 +183,38 @@ class TestCiFailure:
         assert "without actionable code-failure evidence" in action.message
 
     @pytest.mark.unit
+    def test_mixed_run_with_rollup_marker_and_code_evidence_reports_failure(
+        self,
+    ) -> None:
+        """A single workflow run can fail both a real job and the ci-required
+        rollup step. ``gh run view --log-failed`` then emits one combined log
+        carrying code-failure evidence alongside the rollup marker; the monitor
+        must still dispatch the repair agent rather than parking on
+        ``NotifyHuman``."""
+        mixed_failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "src/awf/foo.py:12: error: Incompatible return value type "
+                "[return-value]\n"
+                "Found type errors\n"
+                "A required CI job did not pass.\n"
+                "lint-and-type: failure\n"
+                "console: success"
+            ),
+            run_id="25897584271",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(mixed_failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (mixed_failure,)
+
+    @pytest.mark.unit
     def test_transient_tool_download_failure_dispatches_rerun(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",

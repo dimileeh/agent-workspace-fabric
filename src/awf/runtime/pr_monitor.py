@@ -1060,11 +1060,16 @@ def _looks_like_code_failure_text(text: str) -> bool:
 
 
 def _has_actionable_ci_failure_evidence(failure: CheckFailure) -> bool:
-    if _looks_like_required_ci_rollup_failure(failure):
-        return False
+    # A workflow run that fails a real job *and* the ci-required rollup step
+    # yields one combined ``--log-failed`` excerpt carrying both. Check for
+    # structured/code evidence first so a mixed run is not discarded as
+    # rollup-only; only treat it as a non-actionable rollup once no code
+    # evidence remains.
     log_text = failure.log_excerpt.lower()
     if _has_structured_code_failure_evidence(failure) or _looks_like_code_failure_text(log_text):
         return True
+    if _looks_like_required_ci_rollup_failure(failure):
+        return False
     if not log_text.strip():
         return False
     return not _looks_like_transient_ci_failure(failure)
