@@ -33,6 +33,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
+    WorkerHeartbeatRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
@@ -1336,6 +1337,13 @@ class TestRunOnceMonitorRecoveryPart002:
             assert ws is not None
             ws.execution_claimed_by = "live-execution-worker"
             ws.execution_claim_expires_at = execution_expires_at
+            await WorkerHeartbeatRepository(s).record_heartbeat(
+                worker_id="live-execution-worker",
+                node_id="worker-node-a",
+                started_at=execution_expires_at - timedelta(minutes=1),
+                last_heartbeat_at=datetime.now(UTC),
+                poll_interval_seconds=0.01,
+            )
             await s.commit()
 
         executor = _RecordingExecutor()
