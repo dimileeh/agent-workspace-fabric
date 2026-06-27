@@ -1244,6 +1244,23 @@ async def execute(
         git_in_worktree=_git_in_worktree,
         execution_owner_id=execution_owner_id,
         resume_disable_fix_passes=resume_disable_fix_passes,
+        after_agent_cleanup_failure_repair=_build_agent_service_recovery_callbacks(
+            self,
+            workspace_id=workspace_id,
+            workspace=ws,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+            execution_owner_id=execution_owner_id,
+            repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
+            repair_hooks_after_agent_cleanup_failure=_repair_mirror_hooks_path_after_cleanup_failure,
+            recover_missing_head_after_cleanup_failure=(
+                _recover_missing_head_after_cleanup_failure
+            ),
+            deposit_planning_artifacts=_deposit_planning_artifacts,
+            cleanup_failure_from_status=WorkspaceStatus.validating,
+            cleanup_failure_stage="validation_agent_cleanup_failure",
+        )[1],
     )
     if validation_result.stop:
         await _repair_mirror_hooks_path_or_mark_failed(

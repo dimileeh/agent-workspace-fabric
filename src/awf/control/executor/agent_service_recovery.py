@@ -49,6 +49,9 @@ def _build_agent_service_recovery_callbacks(
     repair_hooks_after_agent_cleanup_failure: Callable[..., Awaitable[bool]],
     recover_missing_head_after_cleanup_failure: Callable[..., Awaitable[bool]],
     deposit_planning_artifacts: Callable[[], None],
+    cleanup_failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
+    cleanup_failure_stage: str = "agent_run_cleanup_failure",
+    verify_post_agent_commit: bool = True,
 ) -> tuple[Callable[[], Awaitable[bool]], Callable[[ComposeExecCleanupError], Awaitable[bool]]]:
     before_agent_retry = partial(
         _rerun_agent_pre_launch_guards,
@@ -71,6 +74,9 @@ def _build_agent_service_recovery_callbacks(
         repair_hooks_after_agent_cleanup_failure=repair_hooks_after_agent_cleanup_failure,
         recover_missing_head_after_cleanup_failure=recover_missing_head_after_cleanup_failure,
         deposit_planning_artifacts=deposit_planning_artifacts,
+        failure_from_status=cleanup_failure_from_status,
+        missing_head_recovery_stage=cleanup_failure_stage,
+        verify_post_agent_commit=verify_post_agent_commit,
     )
     return before_agent_retry, cleanup_repair
 
@@ -295,18 +301,24 @@ async def _repair_after_recoverable_agent_cleanup_failure(
     workspace_id: str,
     owned_paths: list[str],
     execution_owner_id: str | None,
-    repair_hooks_after_agent_cleanup_failure: Callable[[], Awaitable[bool]],
+    repair_hooks_after_agent_cleanup_failure: Callable[..., Awaitable[bool]],
     recover_missing_head_after_cleanup_failure: Callable[..., Awaitable[bool]],
     deposit_planning_artifacts: Callable[[], None],
+    failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
+    missing_head_recovery_stage: str = "agent_run_cleanup_failure",
+    verify_post_agent_commit: bool = True,
 ) -> bool:
-    if not await repair_hooks_after_agent_cleanup_failure():
+    if not await repair_hooks_after_agent_cleanup_failure(
+        failure_from_status=failure_from_status,
+    ):
         return False
     if await recover_missing_head_after_cleanup_failure(
         exc,
-        stage="agent_run_cleanup_failure",
+        stage=missing_head_recovery_stage,
+        from_status=failure_from_status,
         owned_paths=owned_paths,
         execution_owner_id=execution_owner_id,
-        verify_post_agent_commit=True,
+        verify_post_agent_commit=verify_post_agent_commit,
     ):
         return True
     _log.error(
@@ -320,7 +332,7 @@ async def _repair_after_recoverable_agent_cleanup_failure(
     deposit_planning_artifacts()
     await self._mark_failed(
         workspace_id=workspace_id,
-        from_status=WorkspaceStatus.running,
+        from_status=failure_from_status,
         failure_reason=FailureReason.infrastructure_failure,
         message=cleanup_failure_message(exc),
         reason_code=EXEC_PROCESS_CLEANUP_FAILED,
