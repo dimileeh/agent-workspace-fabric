@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -32,6 +33,104 @@ from tests.unit.control.test_worker_parts.test_worker_part_014 import (
 
 class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
     @pytest.mark.unit
+    async def test_deferred_active_execution_claim_recorder_ignores_non_positive_limit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitor-deferred-recorder-limit-zero",
+            pr_number=458,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            ws.execution_claimed_by = "live-execution-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=10)
+            await WorkerHeartbeatRepository(s).record_heartbeat(
+                worker_id="live-execution-worker",
+                node_id="worker-node-a",
+                started_at=datetime.now(UTC) - timedelta(minutes=1),
+                last_heartbeat_at=datetime.now(UTC),
+                poll_interval_seconds=0.01,
+            )
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                node_id="worker-node-a",
+            ),
+        )
+
+        await worker._record_monitor_recovery_deferred_active_execution_claims(limit=0)  # noqa: SLF001
+
+        async with session_factory() as s:
+            deferred_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_deferred",
+            )
+        assert deferred_events == []
+
+    @pytest.mark.unit
+    async def test_monitor_claim_returns_false_when_workspace_disappears_after_lost_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitor-disappears-after-lost-claim",
+            pr_number=458,
+        )
+        original_get = WorkspaceRepository.get
+        get_calls = 0
+
+        async def get_once_then_missing(
+            repo: WorkspaceRepository,
+            workspace_id: str,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            nonlocal get_calls
+            get_calls += 1
+            if get_calls == 1:
+                return await original_get(repo, workspace_id, *args, **kwargs)
+            return None
+
+        async def lose_monitor_claim(*args: Any, **kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(WorkspaceRepository, "get", get_once_then_missing)
+        monkeypatch.setattr(WorkspaceRepository, "claim_monitoring_pr", lose_monitor_claim)
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                node_id="worker-node-a",
+            ),
+        )
+
+        claimed = await worker._claim_monitoring_pr(monitor_id)  # noqa: SLF001
+
+        assert claimed is False
+        assert get_calls == 2
+
+    @pytest.mark.unit
     async def test_restart_recovery_defers_when_unexpired_execution_claim_has_different_owner(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -57,6 +156,15 @@ class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
             assert ws is not None
             ws.execution_claimed_by = "live-execution-worker"
             ws.execution_claim_expires_at = execution_expires_at
+            await WorkspaceRepository(s).add_event(
+                ws,
+                event_type="workspace.monitor_recovery_deferred",
+                reason_code="MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM",
+                payload={
+                    "execution_claim": "malformed prior payload",
+                    "reason_code": "MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM",
+                },
+            )
             await WorkerHeartbeatRepository(s).record_heartbeat(
                 worker_id="live-execution-worker",
                 node_id="worker-node-a",
@@ -108,10 +216,22 @@ class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
         ]
         assert remonitor_operations == []
         assert recovery_events == []
-        assert len(deferred_events) == 1
-        assert deferred_events[0].reason_code == "MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM"
-        assert deferred_events[0].payload is not None
-        assert deferred_events[0].payload["execution_claim"] == {
+        assert len(deferred_events) == 2
+        malformed_event = next(
+            event
+            for event in deferred_events
+            if event.payload is not None
+            and event.payload.get("execution_claim") == "malformed prior payload"
+        )
+        valid_event = next(
+            event
+            for event in deferred_events
+            if event.payload is not None and isinstance(event.payload.get("execution_claim"), dict)
+        )
+        assert malformed_event.reason_code == "MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM"
+        assert valid_event.reason_code == "MONITOR_RECOVERY_DEFERRED_ACTIVE_EXECUTION_CLAIM"
+        assert valid_event.payload is not None
+        assert valid_event.payload["execution_claim"] == {
             "action": "preserved_unexpired",
             "reason_code": "UNEXPIRED_EXECUTION_CLAIM_PRESERVED_DURING_MONITOR_RECOVERY",
             "previous_claimed_by": "live-execution-worker",
@@ -138,7 +258,7 @@ class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
                 workspace_id=monitor_id,
                 event_type="workspace.monitor_recovery_deferred",
             )
-        assert len(deferred_events) == 1
+        assert len(deferred_events) == 2
 
     @pytest.mark.unit
     async def test_restart_recovery_same_owner_unexpired_execution_claim_can_resume(

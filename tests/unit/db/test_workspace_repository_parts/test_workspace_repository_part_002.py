@@ -658,6 +658,99 @@ class TestOwnedPathOverlapLookup:
         assert [workspace.id for workspace in deferred] == [live_owner.id]
 
     @pytest.mark.unit
+    async def test_monitoring_pr_deferred_active_execution_claims_apply_node_scope_and_limit(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        claim_cutoff = datetime.now(UTC)
+        first_scoped = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="first scoped deferred monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        second_scoped = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="second scoped deferred monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 90}},
+        )
+        unscoped = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="unscoped deferred monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 80}},
+        )
+        other_node = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="other node deferred monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 70}},
+        )
+        for workspace in (first_scoped, second_scoped, unscoped, other_node):
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            workspace.created_at = claim_cutoff
+            workspace.monitor_claimed_by = None
+            workspace.monitor_claim_expires_at = None
+            workspace.execution_claimed_by = "live-execution-worker"
+            workspace.execution_claim_expires_at = claim_cutoff + timedelta(minutes=5)
+        first_scoped.node_id = "worker-node-a"
+        second_scoped.node_id = "worker-node-a"
+        other_node.node_id = "worker-node-b"
+        await WorkerHeartbeatRepository(session).record_heartbeat(
+            worker_id="live-execution-worker",
+            node_id="runtime-node",
+            started_at=claim_cutoff - timedelta(minutes=1),
+            last_heartbeat_at=claim_cutoff,
+            poll_interval_seconds=1.0,
+        )
+        await session.commit()
+
+        excluded = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            limit=10,
+            claim_cutoff=claim_cutoff,
+            owner_id="monitor-worker",
+            node_id="worker-node-a",
+            exclude_ids={first_scoped.id},
+            scoring_at=claim_cutoff,
+        )
+        limited = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            limit=1,
+            claim_cutoff=claim_cutoff,
+            owner_id="monitor-worker",
+            node_id="worker-node-a",
+            scoring_at=claim_cutoff,
+        )
+        none = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            limit=0,
+            claim_cutoff=claim_cutoff,
+            owner_id="monitor-worker",
+            node_id="worker-node-a",
+            scoring_at=claim_cutoff,
+        )
+
+        assert [workspace.id for workspace in excluded] == [second_scoped.id, unscoped.id]
+        assert [workspace.id for workspace in limited] == [first_scoped.id]
+        assert none == []
+
+    @pytest.mark.unit
     async def test_monitoring_pr_scheduler_allows_current_execution_claim_owner(
         self,
         session: AsyncSession,
