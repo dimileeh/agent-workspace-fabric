@@ -36,6 +36,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
 
@@ -326,6 +327,8 @@ async def _invoke_cli_for_verdict_result(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+    except (ProviderRecoveryRetryError, _MonitorAgentServiceRecoverySupersededError):
+        raise
     except _MonitorAgentServiceRecoveryFailedError:
         raise
     except Exception:
