@@ -728,13 +728,28 @@ def _is_test_directory_command_target(
         text.rfind("`", 0, path_match_start),
         text.rfind(";", 0, path_match_start),
         text.rfind("\n", 0, path_match_start),
+        text.rfind(":", 0, path_match_start),
     )
     command_segment = text[segment_start + 1 : path_match_start]
+    if segment_start == -1 and not _starts_with_validation_command_segment(command_segment):
+        return False
     return (
         re.search(
             r"(?<![a-z0-9_])(?:pytest|ruff\s+check|mypy|npm|git\s+diff\s+--check)"
             r"(?![a-z0-9_])",
             command_segment,
+        )
+        is not None
+    )
+
+
+def _starts_with_validation_command_segment(segment: str) -> bool:
+    return (
+        re.match(
+            r"\s*(?:uv\s+run|python(?:3(?:\.\d+)?)?(?:\s+-m)?|"
+            r"/usr/bin/env|env|pytest|ruff\s+check|mypy|npm|"
+            r"git\s+diff\s+--check)(?![a-z0-9_])",
+            segment,
         )
         is not None
     )

@@ -601,6 +601,7 @@ def test_conformance_requires_awf_validation_accepts_saved_plan_scoped_check_han
         "Run pytest during AWF validation and add src/tests/unit/test_widget.py.",
         "Rerun pytest under validation after updating ./tests/unit/test_widget.py.",
         "Run pytest during AWF validation and add validation tests.",
+        "Run pytest during AWF validation and the feature needs tests.",
     ),
 )
 def test_conformance_requires_awf_validation_rejects_mixed_named_command_test_path_work_gaps(
