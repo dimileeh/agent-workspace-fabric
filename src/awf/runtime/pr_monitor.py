@@ -61,7 +61,12 @@ from awf.runtime.pr_monitor_models import (
 # decision core under the maintainability line budget). They are re-exported
 # here so the historical ``from awf.runtime.pr_monitor import PRStatus`` call
 # sites — and ``import *`` consumers — keep resolving them from this module.
+# ``__all__`` must also enumerate this module's *own* public API (``decide``,
+# the state/config types, the monitor-action dataclasses), otherwise adding it
+# would silently shrink ``import *`` to just the re-exported wire types and drop
+# everything historically exported by the bare module.
 __all__ = [
+    # Re-exported wire-shape value types (now defined in ``pr_monitor_models``).
     "DEFAULT_NON_CHECK_REVIEWER_LOGINS",
     "CheckFailure",
     "CheckState",
@@ -72,6 +77,25 @@ __all__ = [
     "ReviewComment",
     "ReviewThread",
     "ReviewThreadComment",
+    # This module's own public decision-core API.
+    "MonitorState",
+    "OperatorHint",
+    "MonitorConfig",
+    "AbortReason",
+    "AddressComments",
+    "AddressOperatorHint",
+    "ReportCiFailure",
+    "RerunTransientCI",
+    "SyncBase",
+    "WaitForCI",
+    "Merge",
+    "NotifyHuman",
+    "ShortCircuitCompleted",
+    "Abort",
+    "MonitorAction",
+    "BOT_REVIEWER_LOGINS",
+    "sync_base_no_progress_signature",
+    "decide",
 ]
 
 # ── State — small, serialisable, lives on the workspace row ────────────────
