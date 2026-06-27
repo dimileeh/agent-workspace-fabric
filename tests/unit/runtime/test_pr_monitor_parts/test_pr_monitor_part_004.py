@@ -107,6 +107,33 @@ class TestCiFailure:
         )
 
     @pytest.mark.unit
+    def test_rerun_state_key_is_stable_when_run_id_present_despite_name_drift(self) -> None:
+        # One poll resolves the failing run through ``gh run list`` and records
+        # the workflow run name; a later poll misses it there and falls back to
+        # the rollup check name (and a defaulted conclusion). Same ``run_id`` ->
+        # the retry-budget key must not drift, or the rerun/wait budget resets.
+        run_list_poll = (
+            CheckFailure(
+                name="CI / build",
+                conclusion="FAILURE",
+                log_excerpt="HTTP 502",
+                run_id="25655330295",
+            ),
+        )
+        rollup_fallback_poll = (
+            CheckFailure(
+                name="ci-required",
+                conclusion="TIMED_OUT",
+                log_excerpt="HTTP 502",
+                run_id="25655330295",
+            ),
+        )
+
+        assert _ci_transient_rerun_state_key(
+            "head", run_list_poll
+        ) == _ci_transient_rerun_state_key("head", rollup_fallback_poll)
+
+    @pytest.mark.unit
     def test_transient_failure_enters_infra_wait_after_rerun_budget(self) -> None:
         failure = CheckFailure(
             name="CI",

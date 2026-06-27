@@ -686,6 +686,25 @@ _CI_REQUIRED_ROLLUP_FAILURE_MARKERS = (
 )
 
 
+def _ci_failure_identity(failure: CheckFailure) -> tuple[str, str, str]:
+    """Stable identity for one failing check inside a retry-budget key.
+
+    When a workflow ``run_id`` is available it *is* the stable identity for the
+    failing run, so the free-form check ``name`` and ``conclusion`` are dropped:
+    the same persistent run can otherwise present different names/conclusions
+    across polls (e.g. one poll records the workflow run name from
+    ``gh run list``, while a fallback poll records the rollup check name and a
+    defaulted conclusion). Keying on those drifting fields would mint a fresh
+    key for the same failure and silently reset the rerun/infra-wait budget,
+    granting extra reruns past ``ci_transient_rerun_max_attempts``. Without a
+    ``run_id`` we fall back to the name/conclusion pair as the only identity.
+    """
+
+    if failure.run_id:
+        return (failure.run_id, "", "")
+    return ("", failure.name, failure.conclusion)
+
+
 def _ci_transient_rerun_state_key(
     head_sha: str,
     failures: tuple[CheckFailure, ...],
@@ -698,13 +717,7 @@ def _ci_transient_rerun_state_key(
     """
 
     signature = json.dumps(
-        [
-            (failure.run_id or "", failure.name, failure.conclusion)
-            for failure in sorted(
-                failures,
-                key=lambda item: (item.run_id or "", item.name, item.conclusion),
-            )
-        ],
+        sorted(_ci_failure_identity(failure) for failure in failures),
         separators=(",", ":"),
     )
     digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
