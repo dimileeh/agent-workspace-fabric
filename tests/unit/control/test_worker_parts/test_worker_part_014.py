@@ -1321,7 +1321,15 @@ class TestRunOnceMonitorRecoveryPart002:
             session_factory,
             origin_repo,
             "monitor-with-unexpired-execution-claim",
+            task_policy={"scheduler": {"base_priority": 100}},
             pr_number=459,
+        )
+        eligible_monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "eligible-monitor-after-deferred-execution-claim",
+            task_policy={"scheduler": {"base_priority": 1}},
+            pr_number=460,
         )
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(monitor_id)
@@ -1343,11 +1351,11 @@ class TestRunOnceMonitorRecoveryPart002:
             ),
         )
 
-        assert await worker.run_once() == 0
+        assert await worker.run_once() == 1
         await worker.wait_for_execution_tasks()
 
         assert executor.calls == []
-        assert executor.resume_calls == []
+        assert executor.resume_calls == [eligible_monitor_id]
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(monitor_id)
             assert ws is not None
@@ -1382,7 +1390,8 @@ class TestRunOnceMonitorRecoveryPart002:
             "previous_expires_at": execution_expires_at.isoformat(),
         }
 
-        assert await worker.run_once() == 0
+        await worker.run_once()
+        await worker.wait_for_execution_tasks()
         async with session_factory() as s:
             deferred_events = await WorkspaceEventRepository(s).list(
                 workspace_id=monitor_id,

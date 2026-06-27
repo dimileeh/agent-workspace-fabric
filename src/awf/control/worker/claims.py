@@ -506,6 +506,46 @@ async def _claim_monitoring_pr_ids(self: Any, workspace_ids: list[str], *, limit
     return claimed
 
 
+async def _record_monitor_recovery_deferred_active_execution_claims(
+    self: Any,
+    *,
+    limit: int,
+    exclude_ids: set[str] | None = None,
+) -> None:
+    if limit <= 0:
+        return
+
+    claim_cutoff = datetime.now(UTC)
+    row_limit = _scheduler_candidate_fetch_limit(limit)
+
+    async def _operation(session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        workspaces = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            limit=row_limit,
+            claim_cutoff=claim_cutoff,
+            owner_id=self._worker_id,
+            exclude_ids=exclude_ids,
+            scoring_at=claim_cutoff,
+        )
+        for ws in workspaces:
+            await _record_monitor_recovery_deferred_active_execution_claim(
+                self,
+                repo,
+                ws,
+                previous_claim=_workspace_claim_snapshot(ws),
+                runtime_stranding_reason=_latest_runtime_stranding_reason(ws.events),
+                claim_cutoff=claim_cutoff,
+            )
+
+    await run_db_operation_with_retry(
+        self._session_factory,
+        _operation,
+        commit=True,
+        retry_commit_failures=False,
+        on_retry=self._log_transient_db_retry,
+    )
+
+
 def _monitor_recovery_deferred_event_seen(
     events: list[Any],
     *,

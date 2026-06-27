@@ -134,6 +134,62 @@ def _schedulable_workspace_ids_stmt(
     return stmt
 
 
+def _monitoring_pr_deferred_active_execution_claim_stmt(
+    *,
+    limit: int | None,
+    exclude_ids: set[str] | None = None,
+    node_id: str | None = None,
+    scoring_at: datetime,
+    dialect_name: str | None,
+    claim_cutoff: datetime,
+    execution_claim_owner_id: str | None = None,
+    skip_locked: bool,
+) -> Any:
+    """Build a SELECT for monitor rows deferred by another active execution claim."""
+    order_expressions = scheduler_order_expressions(
+        scoring_at=scoring_at,
+        dialect_name=dialect_name,
+    )
+    active_execution_claim = and_(
+        Workspace.execution_claimed_by.is_not(None),
+        Workspace.execution_claim_expires_at.is_not(None),
+        Workspace.execution_claim_expires_at > claim_cutoff,
+    )
+    if execution_claim_owner_id is not None:
+        active_execution_claim = and_(
+            active_execution_claim,
+            Workspace.execution_claimed_by != execution_claim_owner_id,
+        )
+    stmt = select(Workspace).where(
+        Workspace.status == WorkspaceStatus.monitoring_pr.value,
+        or_(
+            Workspace.monitor_claim_expires_at.is_(None),
+            Workspace.monitor_claim_expires_at <= claim_cutoff,
+        ),
+        active_execution_claim,
+    )
+    if node_id is not None:
+        stmt = stmt.where(
+            _scheduler_node_scope_condition(
+                status=WorkspaceStatus.monitoring_pr,
+                node_id=node_id,
+            )
+        )
+    if exclude_ids:
+        stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
+    stmt = stmt.order_by(
+        order_expressions.class_priority.desc(),
+        order_expressions.effective_score.desc(),
+        Workspace.created_at.asc(),
+        Workspace.id.asc(),
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    if skip_locked:
+        stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
+    return stmt
+
+
 def _scheduler_node_scope_condition(
     *,
     status: WorkspaceStatus,

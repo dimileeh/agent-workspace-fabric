@@ -34,6 +34,7 @@ from awf.db.models import (
     WorkspaceEvent,
 )
 from awf.db.repositories._scheduler import (
+    _monitoring_pr_deferred_active_execution_claim_stmt,
     _schedulable_workspace_ids_stmt,
     _scheduler_scoring_time,
 )
@@ -759,6 +760,39 @@ class WorkspaceRepository:
             execution_claim_owner_id=execution_claim_owner_id,
         )
 
+        return self._sort_schedulable_workspaces(
+            candidates,
+            limit,
+            scoring_at=scoring_time,
+        )
+
+    async def list_monitoring_pr_deferred_active_execution_claim_workspaces(
+        self,
+        *,
+        limit: int,
+        claim_cutoff: datetime,
+        owner_id: str,
+        exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
+        scoring_at: datetime | None = None,
+    ) -> builtins.list[Workspace]:
+        """Return monitor rows blocked by another worker's active execution claim."""
+        if limit <= 0:
+            return []
+
+        scoring_time = scoring_at or claim_cutoff
+        stmt = _monitoring_pr_deferred_active_execution_claim_stmt(
+            limit=limit,
+            exclude_ids=exclude_ids,
+            node_id=node_id,
+            scoring_at=scoring_time,
+            dialect_name=self._dialect_name,
+            claim_cutoff=claim_cutoff,
+            execution_claim_owner_id=owner_id,
+            skip_locked=self._dialect_name == "postgresql",
+        )
+        result = await self._session.execute(stmt)
+        candidates = list(result.scalars().all())
         return self._sort_schedulable_workspaces(
             candidates,
             limit,
