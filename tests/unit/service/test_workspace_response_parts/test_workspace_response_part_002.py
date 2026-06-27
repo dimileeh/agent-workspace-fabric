@@ -125,6 +125,46 @@ def test_failure_details_exposes_dirty_repair_start_evidence_with_sample() -> No
 
 
 @pytest.mark.unit
+def test_failure_details_omits_malformed_dirty_repair_start_evidence() -> None:
+    workspace = _workspace_response_fixture(
+        workspace_id="ws-dirty-malformed-details",
+        status=WorkspaceStatus.failed.value,
+        events=[
+            SimpleNamespace(
+                event_type="workspace.state_changed",
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.failed.value,
+                reason_code="PRE_EXISTING_DIRTY_WORKTREE",
+                payload={
+                    "reason_code": "PRE_EXISTING_DIRTY_WORKTREE",
+                    "message": "Repair worktree has pre-existing uncommitted changes.",
+                    "details": {
+                        "reason_code": "PRE_EXISTING_DIRTY_WORKTREE",
+                        "phase": {"unexpected": "mapping"},
+                        "operation_type": ["comment_repair"],
+                        "paths": "plans/REVIEW.md",
+                    },
+                },
+                occurred_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+            )
+        ],
+    )
+
+    payload = workspace_failure_details_payload(workspace)  # type: ignore[arg-type]
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert payload == {
+        "reason_code": "PRE_EXISTING_DIRTY_WORKTREE",
+        "message": "Repair worktree has pre-existing uncommitted changes.",
+    }
+    assert response.failure_details is not None
+    assert response.failure_details.phase is None
+    assert response.failure_details.operation_type is None
+    assert response.failure_details.dirty_paths_count is None
+    assert response.failure_details.dirty_paths_sample is None
+
+
+@pytest.mark.unit
 def test_loaded_collection_returns_empty_for_unloaded_orm_relationship() -> None:
     workspace = Workspace(
         id="ws_unloaded_relationship",
