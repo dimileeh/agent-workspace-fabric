@@ -215,6 +215,49 @@ class TestCiFailure:
         assert action.failures == (mixed_failure,)
 
     @pytest.mark.unit
+    def test_exhausted_transient_sibling_does_not_mask_actionable_code_evidence(
+        self,
+    ) -> None:
+        """When the rerun budget is exhausted/disabled, a transient flake sibling
+        must not short-circuit to ``NotifyHuman`` while a rollup-marked,
+        code-bearing failure (filtered out of the rerun set) still carries
+        fixable evidence. The repair agent must be dispatched."""
+        transient_failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "error: Failed to install cpython-3.12.9-linux-x86_64-gnu\n"
+                "Caused by: HTTP status server error (503 Service Unavailable)"
+            ),
+            run_id="25897584271",
+        )
+        mixed_failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "src/awf/foo.py:12: error: Incompatible return value type "
+                "[return-value]\n"
+                "Found type errors\n"
+                "A required CI job did not pass.\n"
+                "python-full-coverage: failure\n"
+                "console: success"
+            ),
+            run_id="25897584271",
+        )
+
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(transient_failure, mixed_failure),
+            ),
+            MonitorState(),
+            MonitorConfig(ci_transient_rerun_max_attempts=0),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (transient_failure, mixed_failure)
+
+    @pytest.mark.unit
     def test_transient_tool_download_failure_dispatches_rerun(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",

@@ -1094,11 +1094,16 @@ def _ci_failure_action(
     rerun_failures = _ci_transient_rerun_failures(status)
     if _should_rerun_transient_ci(status, state, config):
         return RerunTransientCI(failures=rerun_failures)
+    # Actionable code evidence wins over an exhausted-transient NotifyHuman: a
+    # mixed run can carry a rollup-marked, code-bearing sibling that is filtered
+    # out of ``rerun_failures``, leaving only a transient flake there. Checking
+    # ``status.ci_failures`` (not ``rerun_failures``) first ensures the repair
+    # agent still sees the fixable pytest/mypy/ruff evidence.
+    if any(_has_actionable_ci_failure_evidence(f) for f in status.ci_failures):
+        return ReportCiFailure(failures=status.ci_failures)
     if rerun_failures and all(_looks_like_transient_ci_failure(f) for f in rerun_failures):
         return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
-    if not any(_has_actionable_ci_failure_evidence(f) for f in status.ci_failures):
-        return NotifyHuman(message=_CI_UNACTIONABLE_HUMAN_MESSAGE)
-    return ReportCiFailure(failures=status.ci_failures)
+    return NotifyHuman(message=_CI_UNACTIONABLE_HUMAN_MESSAGE)
 
 
 def _supports_failed_job_rerun(failure: CheckFailure) -> bool:
