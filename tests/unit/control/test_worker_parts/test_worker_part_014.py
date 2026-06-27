@@ -1133,6 +1133,66 @@ class TestRunOnceMonitorRecoveryPart002:
         assert remonitor_operations[0].status == OperationStatus.succeeded.value
 
     @pytest.mark.unit
+    async def test_restart_recovery_deferred_recompute_uses_fresh_owner_context(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        unexpired_execution_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitor-with-dead-owner-deferred-recompute",
+            pr_number=458,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            ws.execution_claimed_by = "dead-execution-worker"
+            ws.execution_claim_expires_at = unexpired_execution_expires_at
+            await s.commit()
+
+        async def claim_monitoring_pr_race_lost(
+            _self: WorkspaceRepository,
+            _workspace_id: str,
+            *,
+            owner_id: str,  # noqa: ARG001
+            lease_expires_at: datetime,  # noqa: ARG001
+            now: datetime | None = None,  # noqa: ARG001
+            clear_stale_execution_claim_cutoff: datetime | None = None,  # noqa: ARG001
+        ) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "claim_monitoring_pr",
+            claim_monitoring_pr_race_lost,
+        )
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                node_id="worker-node-a",
+            ),
+        )
+
+        assert await worker._claim_monitoring_pr(monitor_id) is False  # noqa: SLF001
+
+        async with session_factory() as s:
+            deferred_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_deferred",
+            )
+
+        assert deferred_events == []
+
+    @pytest.mark.unit
     async def test_restart_recovery_cleans_orphaned_execution_expiry_without_reporting_claim_clear(
         self,
         session_factory: async_sessionmaker[AsyncSession],

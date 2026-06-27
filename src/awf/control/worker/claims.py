@@ -521,6 +521,9 @@ async def _record_monitor_recovery_deferred_active_execution_claims(
 
     async def _operation(session: AsyncSession) -> None:
         repo = WorkspaceRepository(session)
+        fresh_execution_claim_owner_ids = await WorkerHeartbeatRepository(
+            session
+        ).list_fresh_worker_ids(now=claim_cutoff)
         workspaces = await repo.list_monitoring_pr_deferred_active_execution_claim_workspaces(
             limit=row_limit,
             claim_cutoff=claim_cutoff,
@@ -536,6 +539,8 @@ async def _record_monitor_recovery_deferred_active_execution_claims(
                 previous_claim=_workspace_claim_snapshot(ws),
                 runtime_stranding_reason=_latest_runtime_stranding_reason(ws.events),
                 claim_cutoff=claim_cutoff,
+                fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
+                execution_claim_owner_id=self._worker_id,
             )
 
     await run_db_operation_with_retry(
@@ -577,10 +582,14 @@ async def _record_monitor_recovery_deferred_active_execution_claim(
     previous_claim: Mapping[str, object],
     runtime_stranding_reason: str | None,
     claim_cutoff: datetime,
+    fresh_execution_claim_owner_ids: set[str] | None = None,
+    execution_claim_owner_id: str | None = None,
 ) -> None:
     execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
         ws,
         claim_cutoff=claim_cutoff,
+        fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
+        execution_claim_owner_id=execution_claim_owner_id,
     )
     if (
         execution_claim_cleanup.get("action") != "preserved_unexpired"
@@ -707,6 +716,8 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
                 previous_claim=previous_claim,
                 runtime_stranding_reason=runtime_stranding_reason,
                 claim_cutoff=now,
+                fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
+                execution_claim_owner_id=self._worker_id,
             )
         await session.commit()
         if active_salvage_monitor_recovery_operation_id is not None:
