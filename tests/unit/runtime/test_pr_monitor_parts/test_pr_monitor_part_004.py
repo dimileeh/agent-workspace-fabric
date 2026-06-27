@@ -311,6 +311,28 @@ class TestCiFailure:
         )
 
     @pytest.mark.unit
+    def test_transient_rerun_helper_rejects_rerunnable_failure_without_transient_evidence(
+        self,
+    ) -> None:
+        # A failed job that is rerunnable (FAILURE conclusion + run_id) but whose
+        # logs could not be fetched (empty excerpt) carries no transient/flake
+        # evidence. It clears the earlier rerun guards — non-actionable, has a
+        # run id, supports a failed-job rerun — yet the "all look transient"
+        # check rejects it, so the helper must refuse to burn a rerun on it.
+        failure = CheckFailure(
+            name="build",
+            conclusion="FAILURE",
+            log_excerpt="",
+            run_id="25655330295",
+        )
+
+        assert not _should_rerun_transient_ci(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("run_id", [None, ""])
     def test_transient_failure_without_run_id_notifies_human(
         self,
