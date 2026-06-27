@@ -98,6 +98,10 @@ class _MonitorAgentRuntimeOwnershipRepairFailedError(RuntimeError):
         return AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 
 
+class _MonitorAgentServiceRecoveryFailedError(RuntimeError):
+    """Raised after monitor records terminal unhealthy agent-service recovery."""
+
+
 class _MonitorMirrorHooksPathRepairFailedError(RuntimeError):
     """Raised when monitor cannot repair a poisoned ``core.hooksPath`` on the shared mirror."""
 

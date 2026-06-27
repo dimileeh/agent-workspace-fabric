@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
-from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
+from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_SERVICE_UNHEALTHY
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
@@ -59,6 +59,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
+    _MonitorAgentServiceRecoveryFailedError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -803,6 +804,206 @@ async def test_review_comment_provider_failure_records_retry_and_ignores_comment
         )
 
     assert "C_provider" not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="monitor idle timeout while agent service was down",
+            ),
+            reason_code=AGENT_IDLE_TIMEOUT,
+            details={
+                "provider_recovery": {
+                    "provider": "google",
+                    "model": "gemini-2.5-pro",
+                }
+            },
+        )
+    )
+    adapter.queue(stdout="AWF-VERDICT: FIXED: restarted")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    probe = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+    command_evidence: list[str] = []
+    compose_file = tmp_path / "compose.yml"
+
+    result = await runner._run_monitor_agent_with_service_recovery(
+        workspace_id="ws_monitor_service_retry",
+        compose_project="proj",
+        compose_file=compose_file,
+        prompt="fix the comment",
+        log_source="recovery",
+        command_evidence=command_evidence,
+    )
+
+    assert result.stdout == "AWF-VERDICT: FIXED: restarted"
+    assert adapter.calls == ["fix the comment", "fix the comment"]
+    assert command_evidence == [
+        "monitor idle timeout while agent service was down",
+        "AWF-VERDICT: FIXED: restarted",
+    ]
+    probe.assert_awaited_once()
+    ensure_project_up.assert_awaited_once_with(
+        project_name="proj",
+        compose_file=compose_file,
+        workspace_id="ws_monitor_service_retry",
+        wait=True,
+        compose_up_timeout_seconds=300,
+    )
+
+
+@pytest.mark.unit
+async def test_monitor_agent_service_restart_failure_terminates_without_provider_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="monitor idle timeout while agent service was down",
+            ),
+            reason_code=AGENT_IDLE_TIMEOUT,
+            details={"provider": "google", "model": "gemini-2.5-pro"},
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        side_effect=RuntimeError("compose unavailable"),
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        event_types = [event.event_type for event in workspace.events]
+        unhealthy_events = [
+            event for event in workspace.events if event.reason_code == AGENT_SERVICE_UNHEALTHY
+        ]
+
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.failure_reason == "infrastructure_failure"
+    assert "workspace.provider_recovery_requested" not in event_types
+    assert len(unhealthy_events) == 1
+    assert unhealthy_events[0].event_type == "workspace.state_changed"
+    assert unhealthy_events[0].payload["details"]["agent_service_recovery"] == {
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "source_reason_code": AGENT_IDLE_TIMEOUT,
+        "service_healthy": False,
+        "restart_attempts": 1,
+    }
+
+
+@pytest.mark.unit
+async def test_monitor_agent_service_recovery_exhaustion_terminates_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    for _ in range(3):
+        adapter.queue(
+            exc=AgentRunError(
+                agent=AgentRuntime.claude_code,
+                result=CommandResult(
+                    returncode=1,
+                    stdout="",
+                    stderr="monitor idle timeout while agent service stayed down",
+                ),
+                reason_code=AGENT_IDLE_TIMEOUT,
+                details={"provider": "google", "model": "gemini-2.5-pro"},
+            )
+        )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        unhealthy_events = [
+            event for event in workspace.events if event.reason_code == AGENT_SERVICE_UNHEALTHY
+        ]
+
+    assert adapter.calls == ["fix the comment", "fix the comment", "fix the comment"]
+    assert ensure_project_up.await_count == 2
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert unhealthy_events[-1].payload["details"]["agent_service_recovery"] == {
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "source_reason_code": AGENT_IDLE_TIMEOUT,
+        "service_healthy": False,
+        "restart_attempts": 2,
+    }
 
 
 @pytest.mark.unit

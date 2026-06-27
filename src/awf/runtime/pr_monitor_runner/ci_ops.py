@@ -57,6 +57,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoveryFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
@@ -269,14 +270,14 @@ async def _run_ci_fix(
                 details=repair_details,
             )
     try:
-        result = await self._deps.adapter.run(
+        await self._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
             prompt=prompt,
-            workspace_id=workspace_id,
             log_source="recovery",
+            command_evidence=command_evidence,
         )
-        append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
     except AgentRunError as exc:
         agent_run_err = exc
         append_command_evidence(
@@ -284,6 +285,8 @@ async def _run_ci_fix(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+    except _MonitorAgentServiceRecoveryFailedError:
+        raise
     except Exception as exc:
         # Runtime plumbing can fail outside ``AgentRunError`` after the agent
         # has already mutated the shared mirror or self-committed. Repair
