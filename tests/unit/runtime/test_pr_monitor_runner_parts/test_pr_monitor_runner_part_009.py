@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_SERVICE_UNHEALTHY
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
     AgentRuntime,
@@ -872,6 +873,119 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
         wait=True,
         compose_up_timeout_seconds=300,
     )
+
+
+@pytest.mark.unit
+async def test_monitor_agent_cleanup_service_down_restarts_service_and_retries(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=ComposeExecCleanupError(
+            invocation_id="awf-test-cleanup",
+            source="agent",
+            label="monitor",
+            message='service "agent" is not running',
+            cleanup_result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr='service "agent" is not running',
+            ),
+        )
+    )
+    adapter.queue(stdout="AWF-VERDICT: FIXED: cleanup restarted")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    probe = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+    command_evidence: list[str] = []
+    compose_file = tmp_path / "compose.yml"
+
+    result = await runner._run_monitor_agent_with_service_recovery(
+        workspace_id="ws_monitor_cleanup_retry",
+        compose_project="proj",
+        compose_file=compose_file,
+        prompt="fix the comment",
+        log_source="recovery",
+        command_evidence=command_evidence,
+    )
+
+    assert result.stdout == "AWF-VERDICT: FIXED: cleanup restarted"
+    assert adapter.calls == ["fix the comment", "fix the comment"]
+    assert command_evidence == [
+        'service "agent" is not running',
+        "AWF-VERDICT: FIXED: cleanup restarted",
+    ]
+    probe.assert_awaited_once()
+    ensure_project_up.assert_awaited_once_with(
+        project_name="proj",
+        compose_file=compose_file,
+        workspace_id="ws_monitor_cleanup_retry",
+        wait=True,
+        compose_up_timeout_seconds=300,
+    )
+
+
+@pytest.mark.unit
+async def test_monitor_agent_unrelated_cleanup_failure_is_not_recovered(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="awf-test-cleanup",
+        source="agent",
+        label="monitor",
+        message="permission denied",
+        cleanup_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="permission denied",
+        ),
+    )
+    adapter = FakeAdapter()
+    adapter.queue(exc=cleanup_error)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+
+    with pytest.raises(ComposeExecCleanupError) as raised:
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id="ws_monitor_cleanup_passthrough",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    assert raised.value is cleanup_error
+    ensure_project_up.assert_not_awaited()
 
 
 @pytest.mark.unit

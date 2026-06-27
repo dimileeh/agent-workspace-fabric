@@ -13,6 +13,7 @@ from awf.adapters.provider_failures import (
     classify_provider_failure,
 )
 from awf.common.command_evidence import append_command_evidence
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
 from awf.runtime.pr_monitor_runner.logging import _log
@@ -45,6 +46,20 @@ async def _run_monitor_agent_with_service_recovery(
             )
         except AgentRunError as exc:
             recovered = await _recover_monitor_agent_service_after_error(
+                self,
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                exc=exc,
+                restart_attempts=restart_attempts,
+                command_evidence=command_evidence,
+            )
+            if recovered is None:
+                raise
+            restart_attempts = recovered
+            continue
+        except ComposeExecCleanupError as exc:
+            recovered = await _recover_monitor_agent_service_after_cleanup_error(
                 self,
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -100,13 +115,43 @@ async def _recover_monitor_agent_service_after_error(
     )
 
 
+async def _recover_monitor_agent_service_after_cleanup_error(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    exc: ComposeExecCleanupError,
+    restart_attempts: int,
+    command_evidence: list[str] | None,
+) -> int | None:
+    service_healthy = await probe_agent_service_health(RuntimeInspector(), compose_project)
+    if service_healthy is not False or not _cleanup_failure_indicates_agent_service_down(exc):
+        return None
+    cleanup_result = exc.cleanup_result
+    append_command_evidence(
+        command_evidence,
+        stdout=cleanup_result.stdout if cleanup_result is not None else "",
+        stderr=cleanup_result.stderr if cleanup_result is not None else str(exc),
+    )
+    return await _restart_monitor_agent_service_or_fail(
+        self,
+        workspace_id=workspace_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        exc=exc,
+        service_healthy=service_healthy,
+        restart_attempts=restart_attempts,
+    )
+
+
 async def _restart_monitor_agent_service_or_fail(
     self: Any,
     *,
     workspace_id: str,
     compose_project: str,
     compose_file: Path,
-    exc: AgentRunError,
+    exc: AgentRunError | ComposeExecCleanupError,
     service_healthy: bool | None,
     restart_attempts: int,
 ) -> int:
@@ -155,12 +200,13 @@ async def _terminate_monitor_for_unhealthy_agent_service(
     self: Any,
     *,
     workspace_id: str,
-    exc: AgentRunError,
+    exc: AgentRunError | ComposeExecCleanupError,
     service_healthy: bool | None,
     restart_attempts: int,
     message: str,
 ) -> None:
-    details = dict(exc.details) if isinstance(exc.details, dict) else {}
+    exc_details = getattr(exc, "details", None)
+    details = dict(exc_details) if isinstance(exc_details, dict) else {}
     details["provider_recovery"] = {
         "reason_code": AGENT_SERVICE_UNHEALTHY,
         "failure_type": "runtime_unhealthy",
@@ -186,6 +232,18 @@ async def _terminate_monitor_for_unhealthy_agent_service(
 
 def _monitor_agent_service_recovery_template_sentinel(work_dir: Path) -> Path:
     return work_dir / "compose" / ".monitor-agent-service-recovery-does-not-render.yml.j2"
+
+
+def _cleanup_failure_indicates_agent_service_down(exc: ComposeExecCleanupError) -> bool:
+    if exc.reason_code != EXEC_PROCESS_CLEANUP_FAILED:
+        return False
+    result = exc.cleanup_result
+    output = f"{result.stdout}\n{result.stderr}" if result is not None else str(exc)
+    normalized = output.lower()
+    return (
+        'service "agent" is not running' in normalized
+        or "service 'agent' is not running" in normalized
+    )
 
 
 def _provider_from_error(exc: AgentRunError) -> str | None:
