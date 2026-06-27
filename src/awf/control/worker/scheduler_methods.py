@@ -117,6 +117,9 @@ async def _list_scheduler_dispatchable_ids_from_pages(
             node_id=node_id,
             after=candidate_after,
             scoring_at=scoring_at,
+            execution_claim_owner_id=(
+                self._worker_id if status == WorkspaceStatus.monitoring_pr else None
+            ),
         )
         if not workspaces:
             break

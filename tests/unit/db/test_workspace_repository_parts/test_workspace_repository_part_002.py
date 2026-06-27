@@ -475,6 +475,97 @@ class TestOwnedPathOverlapLookup:
         assert listed == [after_cursor.id]
 
     @pytest.mark.unit
+    async def test_monitoring_pr_scheduler_excludes_active_execution_claims_before_limit(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A deferred monitor row must not consume the limited recovery slot."""
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        deferred = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="deferred monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        eligible = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="eligible monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        for workspace in (deferred, eligible):
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            workspace.created_at = scoring_at
+            workspace.monitor_claimed_by = None
+            workspace.monitor_claim_expires_at = None
+        deferred.execution_claimed_by = "live-execution-worker"
+        deferred.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.monitoring_pr,
+            limit=1,
+            scoring_at=scoring_at,
+        )
+
+        assert listed == [eligible.id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_scheduler_allows_current_execution_claim_owner(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """The listing predicate matches the monitor claim CAS owner allowance."""
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        current_owner = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="current owner monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        lower_priority = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="lower priority monitor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        for workspace in (current_owner, lower_priority):
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            workspace.created_at = scoring_at
+            workspace.monitor_claimed_by = None
+            workspace.monitor_claim_expires_at = None
+        current_owner.execution_claimed_by = "worker-current"
+        current_owner.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.monitoring_pr,
+            limit=1,
+            scoring_at=scoring_at,
+            execution_claim_owner_id="worker-current",
+        )
+
+        assert listed == [current_owner.id]
+
+    @pytest.mark.unit
     async def test_scheduler_cursor_tie_breaks_equal_score_and_created_at_by_workspace_id(
         self,
         session: AsyncSession,

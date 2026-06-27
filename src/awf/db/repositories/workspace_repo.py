@@ -708,6 +708,7 @@ class WorkspaceRepository:
         node_id: str | None = None,
         after: Any | None = None,
         scoring_at: datetime | None = None,
+        execution_claim_owner_id: str | None = None,
     ) -> builtins.list[str]:
         """Return schedulable workspace IDs in scheduler priority order."""
         if limit <= 0:
@@ -721,6 +722,7 @@ class WorkspaceRepository:
             node_id=node_id,
             after=after,
             scoring_at=scoring_time,
+            execution_claim_owner_id=execution_claim_owner_id,
         )
         return [
             workspace.id
@@ -740,6 +742,7 @@ class WorkspaceRepository:
         node_id: str | None = None,
         after: Any | None = None,
         scoring_at: datetime | None = None,
+        execution_claim_owner_id: str | None = None,
     ) -> builtins.list[Workspace]:
         """Return schedulable workspaces in scheduler priority order."""
         if limit <= 0:
@@ -753,6 +756,7 @@ class WorkspaceRepository:
             node_id=node_id,
             after=after,
             scoring_at=scoring_time,
+            execution_claim_owner_id=execution_claim_owner_id,
         )
 
         return self._sort_schedulable_workspaces(
@@ -770,6 +774,7 @@ class WorkspaceRepository:
         node_id: str | None = None,
         after: Any | None = None,
         scoring_at: datetime,
+        execution_claim_owner_id: str | None = None,
     ) -> builtins.list[Workspace]:
         stmt = _schedulable_workspace_ids_stmt(
             status=status,
@@ -781,6 +786,7 @@ class WorkspaceRepository:
             dialect_name=self._dialect_name,
             skip_locked=self._dialect_name == "postgresql",
             claim_cutoff=datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None,
+            execution_claim_owner_id=execution_claim_owner_id,
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())

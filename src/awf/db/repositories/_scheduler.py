@@ -82,6 +82,7 @@ def _schedulable_workspace_ids_stmt(
     dialect_name: str | None,
     skip_locked: bool,
     claim_cutoff: datetime | None = None,
+    execution_claim_owner_id: str | None = None,
 ) -> Any:
     """Build a SELECT for workspaces in a given status ordered for scheduler claiming."""
     order_expressions = scheduler_order_expressions(
@@ -98,6 +99,18 @@ def _schedulable_workspace_ids_stmt(
                 Workspace.monitor_claim_expires_at <= claim_cutoff,
             )
         )
+        stale_execution_claim = or_(
+            Workspace.execution_claimed_by.is_(None),
+            Workspace.execution_claim_expires_at.is_(None),
+            Workspace.execution_claim_expires_at <= claim_cutoff,
+        )
+        execution_claim_available = stale_execution_claim
+        if execution_claim_owner_id is not None:
+            execution_claim_available = or_(
+                stale_execution_claim,
+                Workspace.execution_claimed_by == execution_claim_owner_id,
+            )
+        stmt = stmt.where(execution_claim_available)
     if exclude_ids:
         stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
     if after is not None:
