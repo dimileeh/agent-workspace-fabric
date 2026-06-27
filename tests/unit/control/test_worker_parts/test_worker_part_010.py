@@ -1330,8 +1330,9 @@ class TestRunOnceExecutionPart003:
             node_id: str | None = None,
             after: SchedulerOrderCursor | None = None,
             scoring_at: datetime | None = None,
+            execution_claim_owner_id: str | None = None,
         ) -> list[Workspace]:
-            del self, node_id, after, scoring_at
+            del self, node_id, after, scoring_at, execution_claim_owner_id
             queries.append((status, limit, set(exclude_ids or set())))
             return []
 
