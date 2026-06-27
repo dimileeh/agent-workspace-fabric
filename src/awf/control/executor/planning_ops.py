@@ -834,24 +834,26 @@ async def _run_agent_task_with_optional_planning(
             preserved_head_sha = planning_retry_scope_baseline.get("head_sha")
             if isinstance(preserved_head_sha, str) and preserved_head_sha:
                 baseline_sha = preserved_head_sha
-    await self._update_subphase(workspace.id, "planning")
-    plan_result = await adapter.run(
-        compose_project=compose_project,
-        compose_file=compose_file,
-        prompt=build_planning_prompt(
-            task_prompt=workspace.task_prompt,
-            plan_path=agent_plan_path,
-            coordination_warnings=coordination_warnings,
-            workspace_runtime_context=workspace_runtime_context,
-        ),
-        model=model,
-        workspace_id=workspace.id,
-    )
-    append_command_evidence(
-        command_evidence,
-        stdout=plan_result.stdout,
-        stderr=plan_result.stderr,
-    )
+    skip_planning_for_existing_plan = accept_existing_plan and plan_file_digest_before is not None
+    if not skip_planning_for_existing_plan:
+        await self._update_subphase(workspace.id, "planning")
+        plan_result = await adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=build_planning_prompt(
+                task_prompt=workspace.task_prompt,
+                plan_path=agent_plan_path,
+                coordination_warnings=coordination_warnings,
+                workspace_runtime_context=workspace_runtime_context,
+            ),
+            model=model,
+            workspace_id=workspace.id,
+        )
+        append_command_evidence(
+            command_evidence,
+            stdout=plan_result.stdout,
+            stderr=plan_result.stderr,
+        )
     dirty_paths = await self._changed_paths(worktree_path)
     committed_paths = (
         await self._committed_paths_since(worktree_path, baseline_sha)
@@ -859,6 +861,8 @@ async def _run_agent_task_with_optional_planning(
         else set()
     )
     after_plan = dirty_paths | committed_paths
+    if skip_planning_for_existing_plan:
+        after_plan = {*after_plan, plan_path}
     plan_candidates_after = _plan_artifact_candidate_digests(worktree_path, plan_path)
     near_miss_plan_artifacts: list[dict[str, object]] = []
     if plan_path not in after_plan:

@@ -388,7 +388,6 @@ async def test_planning_recovery_retry_accepts_existing_required_plan(
     _queue_planning_success_with_conformance_commands(runner)
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
-        "plan already committed",
         "implementation resumed",
         '{"status":"satisfied","summary":"done","gaps":[]}',
     )
@@ -405,7 +404,9 @@ async def test_planning_recovery_retry_accepts_existing_required_plan(
     )
 
     assert message is None
-    assert len(adapter.prompts) == 3
+    assert len(adapter.prompts) == 2
+    assert adapter.prompts[0].startswith("## Execution phase")
+    assert adapter.prompts[1].startswith("## Conformance phase")
 
 
 @pytest.mark.unit
