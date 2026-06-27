@@ -220,10 +220,20 @@ async def test_operator_hint_directive_clean_current_diff_reblocks_unpushed_pres
     async def _not_on_remote(**_kwargs: object) -> bool:
         return False
 
+    async def _revert_on_top_head(*_args: object, **_kwargs: object) -> str:
+        # After the revert-on-top directive, the worktree HEAD is the revert commit,
+        # distinct from the preserved offending SHA still in the unpushed range.
+        return "revert-on-top-sha"
+
     captured: dict[str, object] = {}
 
     async def _pause(**kwargs: object) -> _GitPushResult:
         captured.update(kwargs)
+        # Faithfully mirror the real ``_pause_monitor_for_protected_scope_block``:
+        # it re-reads the worktree HEAD and OVERWRITES the preserved-head marker with
+        # it. A stub that skips this rewrite would not exercise the path where the
+        # repeat-directive key must track the NEW marker (PRRT_kwDOSJAM6s6MtBzN).
+        state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "revert-on-top-sha")
         return _GitPushResult(
             pushed=False,
             failed=True,
@@ -237,6 +247,7 @@ async def test_operator_hint_directive_clean_current_diff_reblocks_unpushed_pres
 
     monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
     monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_rev_parse_head", _revert_on_top_head)
     monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
     monkeypatch.setattr(runner, "_protected_scope_push_block", _no_current_violation)
     monkeypatch.setattr(
@@ -268,12 +279,27 @@ async def test_operator_hint_directive_clean_current_diff_reblocks_unpushed_pres
     assert [violation.path for violation in leak_block.violations] == [".github/workflows/ci.yml"]
     assert "unpushed-workflow-sha" in leak_block.message
     assert state.pending_operator_hint is None
+    # The re-block overwrote the preserved marker with the revert-on-top HEAD. The
+    # repeat-directive guard MUST be keyed to that rewritten marker — the value the
+    # next identical-directive resume reads — so the next cycle's recomputed key hits
+    # and parks for human attention instead of re-running the agent.
+    rewritten_marker = state.threads_addressed_ids[_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY]
+    assert rewritten_marker == "revert-on-top-sha"
+    assert (
+        _protected_history_directive_reblock_key(
+            rewritten_marker,
+            "revert .github/workflows/ci.yml",
+        )
+        in state.threads_addressed_ids
+    )
+    # The stale old-preserved-SHA key would be recomputed-as-missed next cycle, so it
+    # must NOT be what gets stored.
     assert (
         _protected_history_directive_reblock_key(
             "unpushed-workflow-sha",
             "revert .github/workflows/ci.yml",
         )
-        in state.threads_addressed_ids
+        not in state.threads_addressed_ids
     )
 
 

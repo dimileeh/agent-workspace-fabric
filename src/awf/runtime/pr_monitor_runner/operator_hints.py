@@ -492,8 +492,19 @@ async def _run_operator_hint_cycle(
             "with reset/rebase/cherry-pick; do not add another revert-on-top commit. "
             "Alternatively, approve-and-keep the protected path, then resume."
         )
+        # Key the repeat guard to the head the re-block will RECORD as the next
+        # ``__awf_protected_block_preserved_head__`` marker, NOT the old preserved
+        # SHA. ``_pause_monitor_for_protected_scope_block`` (reached via
+        # ``_reblock_preserved_protected_leak`` below) re-reads the worktree HEAD —
+        # here the revert-on-top commit — and overwrites the marker with it (falling
+        # back to leaving the old marker when HEAD is unresolvable). The next resume
+        # reads THAT rewritten marker to recompute its repeat key, so keying this mark
+        # to the old preserved SHA always misses, re-running the identical directive
+        # one more time instead of parking for human attention. Mirror the re-block's
+        # own marker logic exactly (PRRT_kwDOSJAM6s6MtBzN).
+        reblock_marker_sha = await self._rev_parse_head(worktree_path) or preserved_head_sha
         state.mark_addressed(
-            _protected_history_directive_reblock_key(preserved_head_sha, hint.directive),
+            _protected_history_directive_reblock_key(reblock_marker_sha, hint.directive),
             "reblocked",
         )
         # RE-BLOCK into ``blocked`` so the approve-and-keep grant this message
