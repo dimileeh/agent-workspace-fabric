@@ -563,8 +563,6 @@ def _monitor_recovery_deferred_event_seen(
             continue
         if prior_execution_claim.get("previous_claimed_by") == execution_claim_cleanup.get(
             "previous_claimed_by"
-        ) and prior_execution_claim.get("previous_expires_at") == execution_claim_cleanup.get(
-            "previous_expires_at"
         ):
             return True
     return False

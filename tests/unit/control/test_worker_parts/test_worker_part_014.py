@@ -1390,9 +1390,22 @@ class TestRunOnceMonitorRecoveryPart002:
             "previous_expires_at": execution_expires_at.isoformat(),
         }
 
+        refreshed_execution_expires_at = execution_expires_at + timedelta(minutes=5)
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            ws.execution_claim_expires_at = refreshed_execution_expires_at
+            await s.commit()
+
         await worker.run_once()
         await worker.wait_for_execution_tasks()
         async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.execution_claim_expires_at is not None
+            assert ws.execution_claim_expires_at.replace(tzinfo=UTC) == (
+                refreshed_execution_expires_at
+            )
             deferred_events = await WorkspaceEventRepository(s).list(
                 workspace_id=monitor_id,
                 event_type="workspace.monitor_recovery_deferred",
