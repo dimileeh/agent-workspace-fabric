@@ -26,6 +26,7 @@ from awf.node.git_manager import (
     GitOperationError,
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
+    verify_head_object_exists,
 )
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.profiles.models import WorkspaceProfile
@@ -34,13 +35,21 @@ from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
-from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_REASON
+from awf.runtime.pr_monitor_runner.constants import (
+    _HEAD_OBJECT_MISSING_RECOVERED_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+)
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.remote_repair import (
+    _recover_missing_head_object_from_filesystem,
+)
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
 
@@ -58,6 +67,7 @@ async def _run_monitor_agent_with_service_recovery(
     prompt: str,
     log_source: str,
     command_evidence: list[str] | None = None,
+    operation_start_head: str | None = None,
 ) -> AgentRunResult:
     restart_attempts = 0
     while True:
@@ -93,6 +103,7 @@ async def _run_monitor_agent_with_service_recovery(
                 exc=exc,
                 restart_attempts=restart_attempts,
                 command_evidence=command_evidence,
+                operation_start_head=operation_start_head,
             )
             if recovered is None:
                 raise
@@ -189,6 +200,7 @@ async def _recover_monitor_agent_service_after_cleanup_error(
     exc: ComposeExecCleanupError,
     restart_attempts: int,
     command_evidence: list[str] | None,
+    operation_start_head: str | None,
 ) -> int | None:
     service_healthy = await probe_agent_service_health(RuntimeInspector(), compose_project)
     if service_healthy is not False or not _cleanup_failure_indicates_agent_service_down(exc):
@@ -199,6 +211,12 @@ async def _recover_monitor_agent_service_after_cleanup_error(
         stdout=cleanup_result.stdout if cleanup_result is not None else "",
         stderr=cleanup_result.stderr if cleanup_result is not None else str(exc),
     )
+    await _repair_monitor_git_after_recoverable_agent_cleanup_failure(
+        self,
+        workspace_id=workspace_id,
+        operation_start_head=operation_start_head,
+        command_evidence=command_evidence,
+    )
     return await _restart_monitor_agent_service_or_fail(
         self,
         workspace_id=workspace_id,
@@ -207,6 +225,72 @@ async def _recover_monitor_agent_service_after_cleanup_error(
         exc=exc,
         service_healthy=service_healthy,
         restart_attempts=restart_attempts,
+    )
+
+
+async def _repair_monitor_git_after_recoverable_agent_cleanup_failure(
+    self: Any,
+    *,
+    workspace_id: str,
+    operation_start_head: str | None,
+    command_evidence: list[str] | None,
+) -> None:
+    worktree_path = self._worktrees_root / workspace_id
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except (GitOperationError, OSError) as exc:
+            repair_details = mirror_hooks_repair_failure_details(
+                exc,
+                repair_stage="after_monitor_agent_cleanup_failure",
+                mirror_path=mirror_path,
+            )
+            _log.warning(
+                "monitor.agent_cleanup_mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                **repair_details,
+            )
+            raise _MonitorMirrorHooksPathRepairFailedError() from exc
+
+    if await verify_head_object_exists(worktree_path):
+        return
+
+    recovery_head = operation_start_head or await self._open_merge_candidate_head_sha(workspace_id)
+    if recovery_head is None:
+        _log.warning(
+            "monitor.agent_cleanup_head_object_missing",
+            workspace_id=workspace_id,
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+        raise _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            f"HEAD object missing for workspace {workspace_id} after agent cleanup failure",
+        )
+    recovered = await _recover_missing_head_object_from_filesystem(
+        self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        operation_start_head=recovery_head,
+        command_evidence=tuple(command_evidence or ()),
+    )
+    if recovered is None:
+        _log.warning(
+            "monitor.agent_cleanup_head_object_recovery_failed",
+            workspace_id=workspace_id,
+            recovery_head=recovery_head[:10],
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+        raise _MonitorHeadObjectMissingError(
+            _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+            f"HEAD object recovery failed for workspace {workspace_id} after agent cleanup failure",
+        )
+    _log.info(
+        "monitor.agent_cleanup_head_object_recovered",
+        workspace_id=workspace_id,
+        recovered_head=recovered[:10],
+        reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
     )
 
 

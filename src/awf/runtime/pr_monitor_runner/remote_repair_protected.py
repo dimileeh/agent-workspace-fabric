@@ -927,6 +927,7 @@ async def _repair_protected_scope_changes_before_commit(
             compose_file=compose_file,
             prompt=prompt,
             log_source="recovery",
+            operation_start_head=pre_repair_head,
         )
     except AgentRunError as exc:
         agent_run_err = exc

@@ -66,6 +66,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
 from tests.postgres import postgres_test_engine
@@ -1265,6 +1266,10 @@ async def test_monitor_agent_cleanup_service_down_restarts_service_and_retries(
         "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
         return_value=None,
     )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.verify_head_object_exists",
+        return_value=True,
+    )
     command_evidence: list[str] = []
     compose_file = tmp_path / "compose.yml"
 
@@ -1291,6 +1296,199 @@ async def test_monitor_agent_cleanup_service_down_restarts_service_and_retries(
         wait=True,
         compose_up_timeout_seconds=300,
     )
+
+
+@pytest.mark.unit
+async def test_monitor_agent_cleanup_service_down_repairs_git_before_restart(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    calls: list[str] = []
+
+    class RecordingAdapter(FakeAdapter):
+        async def run(self, **kwargs: object):  # type: ignore[no-untyped-def,override]
+            calls.append("adapter.run")
+            return await super().run(**kwargs)  # type: ignore[arg-type]
+
+    adapter = RecordingAdapter()
+    adapter.queue(
+        exc=ComposeExecCleanupError(
+            invocation_id="awf-test-cleanup",
+            source="agent",
+            label="monitor",
+            message='service "agent" is not running',
+            cleanup_result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr='service "agent" is not running',
+            ),
+        )
+    )
+    adapter.queue(stdout="AWF-VERDICT: FIXED: cleanup repaired")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mirror_path = tmp_path / "mirror.git"
+
+    async def _ensure_project_up(**_kwargs: object) -> None:
+        calls.append("ensure_project_up")
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        calls.append("mirror_hooks_repair")
+        return True
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        calls.append("verify_head")
+        return False
+
+    async def _open_merge_candidate_head_sha(_workspace_id: str) -> str:
+        calls.append("open_candidate_head")
+        return "abc123"
+
+    async def _recover_missing_head_object_from_filesystem(
+        *_args: object,
+        **_kwargs: object,
+    ) -> str:
+        calls.append("recover_missing_head")
+        return "def456"
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        calls.append("ownership_repair")
+        return True
+
+    runner._open_merge_candidate_head_sha = _open_merge_candidate_head_sha  # type: ignore[method-assign]
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        side_effect=_ensure_project_up,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.mirror_path_for_worktree",
+        return_value=mirror_path,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_mirror_hooks_path",
+        side_effect=_repair_mirror_hooks_path,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.verify_head_object_exists",
+        side_effect=_verify_head_object_exists,
+        create=True,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._recover_missing_head_object_from_filesystem",
+        side_effect=_recover_missing_head_object_from_filesystem,
+        create=True,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_agent_runtime_ownership",
+        side_effect=_repair_agent_runtime_ownership,
+    )
+
+    result = await runner._run_monitor_agent_with_service_recovery(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        prompt="fix the comment",
+        log_source="recovery",
+        command_evidence=[],
+    )
+
+    assert result.stdout == "AWF-VERDICT: FIXED: cleanup repaired"
+    assert calls == [
+        "adapter.run",
+        "mirror_hooks_repair",
+        "verify_head",
+        "open_candidate_head",
+        "recover_missing_head",
+        "ensure_project_up",
+        "ownership_repair",
+        "mirror_hooks_repair",
+        "adapter.run",
+    ]
+
+
+@pytest.mark.unit
+async def test_monitor_agent_cleanup_service_down_stops_when_missing_head_repair_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=ComposeExecCleanupError(
+            invocation_id="awf-test-cleanup",
+            source="agent",
+            label="monitor",
+            message='service "agent" is not running',
+            cleanup_result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr='service "agent" is not running',
+            ),
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _open_merge_candidate_head_sha(_workspace_id: str) -> str:
+        return "abc123"
+
+    runner._open_merge_candidate_head_sha = _open_merge_candidate_head_sha  # type: ignore[method-assign]
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.mirror_path_for_worktree",
+        return_value=tmp_path / "mirror.git",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_mirror_hooks_path",
+        return_value=True,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.verify_head_object_exists",
+        return_value=False,
+        create=True,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._recover_missing_head_object_from_filesystem",
+        return_value=None,
+        create=True,
+    )
+
+    with pytest.raises(_MonitorHeadObjectMissingError):
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    assert adapter.calls == ["fix the comment"]
+    ensure_project_up.assert_not_awaited()
 
 
 @pytest.mark.unit
@@ -1325,6 +1523,10 @@ async def test_monitor_agent_cleanup_service_down_uses_exception_message_when_ou
     ensure_project_up = mocker.patch(
         "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
         return_value=None,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.verify_head_object_exists",
+        return_value=True,
     )
 
     result = await runner._run_monitor_agent_with_service_recovery(

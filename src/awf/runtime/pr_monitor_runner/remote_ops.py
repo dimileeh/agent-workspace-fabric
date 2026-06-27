@@ -927,6 +927,7 @@ async def _run_sync_base(
                 prompt=prompt,
                 log_source="recovery",
                 command_evidence=command_evidence,
+                operation_start_head=operation_start_head,
             )
         except AgentRunError as exc:
             agent_run_err = exc

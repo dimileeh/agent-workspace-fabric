@@ -314,6 +314,7 @@ async def _invoke_cli_for_verdict_result(
             prompt=prompt,
             log_source="recovery",
             command_evidence=command_evidence,
+            operation_start_head=operation_start_head,
         )
         result_stdout = result.stdout
     except AgentRunError as exc:
