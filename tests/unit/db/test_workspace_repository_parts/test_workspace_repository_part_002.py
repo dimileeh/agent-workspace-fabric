@@ -532,7 +532,7 @@ class TestOwnedPathOverlapLookup:
             node_id="local",
             started_at=heartbeat_at - timedelta(minutes=1),
             last_heartbeat_at=heartbeat_at,
-            poll_interval_seconds=1.0,
+            poll_interval_seconds=300.0,
         )
         await session.commit()
 
