@@ -20,6 +20,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
+    _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     CheckState,
     CheckTiming,
     MergeableState,
@@ -33,6 +34,9 @@ from awf.runtime.pr_monitor_runner import comments as pr_monitor_runner_comments
 from awf.runtime.pr_monitor_runner.helpers import (
     _needs_human_reason_state_key,
     _review_comment_body_state_key,
+)
+from awf.runtime.pr_monitor_runner.operator_hints import (
+    _protected_history_directive_reblock_key,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
@@ -485,6 +489,80 @@ async def test_protected_pause_with_matching_monitor_owner_pauses_into_blocked(
         assert ws is not None
         assert ws.status == "blocked"
         assert ws.block_epoch == 1
+
+
+@pytest.mark.unit
+async def test_protected_pause_persists_extra_state_markers_atomically_with_block(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Extra monitor-state markers land in the SAME commit as the block transition.
+
+    The directive-leak re-block keys its repeat-directive guard to the rewritten
+    preserved-head marker; that key is only crash-durable if it is persisted
+    atomically with the block, not deferred to the loop's later ``_persist_state``.
+    A crash after the block commit but before that flush would otherwise keep the
+    rewritten marker yet drop the repeat key, so the next identical directive
+    recomputes the same key, misses, and re-launches the agent instead of parking
+    (PRRT_kwDOSJAM6s6MtULR). Assert the committed DB row carries both markers,
+    independent of any ``_persist_state`` flush of the in-memory ``MonitorState``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="revert-on-top-sha\n")  # rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_RecordingGh(),
+    )
+    runner._monitor_owner_id = "worker-current"
+    block = _ProtectedScopePushBlock(
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            ),
+        ),
+    )
+    repeat_key = _protected_history_directive_reblock_key(
+        "revert-on-top-sha", "revert .github/workflows/ci.yml"
+    )
+    # An empty in-memory state proves durability comes from the block commit alone.
+    state = MonitorState()
+
+    result = await runner._pause_monitor_for_protected_scope_block(
+        workspace_id=workspace_id,
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        protected_scope_block=block,
+        worktree_path=worktree,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        extra_state_markers={repeat_key: "reblocked"},
+    )
+
+    assert result.paused_into_blocked is True
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "blocked"
+        threads = ws.monitor_threads_addressed or {}
+        # Both the rewritten preserved-head marker AND the repeat-directive key are
+        # durable in the block commit — not only in the loop-flushed in-memory state.
+        assert threads[_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY] == "revert-on-top-sha"
+        assert threads[repeat_key] == "reblocked"
 
 
 @pytest.mark.unit

@@ -253,6 +253,7 @@ async def _pause_monitor_for_protected_scope_block(
     operation_type: str | None = None,
     monitor_log: WorkspaceLogSink | None = None,
     source_head_sha: str | None = None,
+    extra_state_markers: Mapping[str, str] | None = None,
 ) -> _GitPushResult:
     """Pause the workspace into ``blocked`` for an operator decision.
 
@@ -306,18 +307,33 @@ async def _pause_monitor_for_protected_scope_block(
             )
         block_epoch = ws.block_epoch
         repo_url = ws.repo_url
+        # Persist monitor-state markers ATOMICALLY with the block commit. The
+        # in-memory ``state`` copies (set below, and at the caller for
+        # ``extra_state_markers``) are only flushed by the loop's later
+        # ``_persist_state``; a crash after this commit but before that flush would
+        # otherwise lose the only monitor-state copy.
+        #
+        # ``preserved_head_sha``: lose it and a later grant-only resume on a
+        # reset/recreated worktree would read ``preserved_head_sha=None``, skip the
+        # SHA containment guard, and treat an empty diff as already-pushed —
+        # silently dropping the approved commit (PRRT_kwDOSJAM6s6KEtU6).
+        #
+        # ``extra_state_markers``: the directive-leak re-block keys its
+        # repeat-directive guard to the rewritten preserved marker (this same HEAD).
+        # That marker is rewritten durably here, so the repeat key must land in the
+        # SAME commit; otherwise a crash before ``_persist_state`` keeps the rewritten
+        # marker but drops the repeat key, and the next identical directive recomputes
+        # the same key, misses, and re-launches the agent instead of parking
+        # (PRRT_kwDOSJAM6s6MtULR).
+        durable_markers: dict[str, str] = {}
         if preserved_head_sha:
-            # Persist the preserved HEAD marker ATOMICALLY with the block commit.
-            # The in-memory ``state`` marker set below is only flushed by the
-            # loop's later ``_persist_state``; a crash after this commit but before
-            # that flush would otherwise lose the only monitor-state copy of the
-            # preserved head, so a later grant-only resume on a reset/recreated
-            # worktree would read ``preserved_head_sha=None``, skip the SHA
-            # containment guard, and treat an empty diff as already-pushed —
-            # silently dropping the approved commit (PRRT_kwDOSJAM6s6KEtU6).
+            durable_markers[_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY] = preserved_head_sha
+        if extra_state_markers:
+            durable_markers.update(extra_state_markers)
+        if durable_markers:
             # Reassign (not in-place mutate) so the JSON column change is tracked.
             merged_threads = dict(ws.monitor_threads_addressed or {})
-            merged_threads[_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY] = preserved_head_sha
+            merged_threads.update(durable_markers)
             ws.monitor_threads_addressed = merged_threads
         await session.commit()
 

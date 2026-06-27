@@ -208,7 +208,9 @@ class _CapturingGH:
         pr_number: int,
         head_sha: str,
         pytest_fallback_commands: Sequence[str] = (),
+        rollup_checks: object = (),
     ) -> tuple[CheckFailure, ...]:
+        del rollup_checks
         self.failing_log_requests.append(
             (repo, pr_number, head_sha, tuple(pytest_fallback_commands))
         )

@@ -95,9 +95,22 @@ def test_require_ci_false_with_checks_present_still_waits() -> None:
 
 @pytest.mark.unit
 def test_require_ci_false_failure_still_reports() -> None:
-    # The failure path is unaffected by the opt-out.
+    # The failure path is unaffected by the opt-out: a genuine FAILURE carrying
+    # actionable code evidence still dispatches a CI repair (gate 5) regardless of
+    # ``require_ci``, which only governs the PENDING wait (gate 6).
     action = decide(
-        status=_status(check_state=CheckState.FAILURE, no_checks_observed=True),
+        status=_status(
+            check_state=CheckState.FAILURE,
+            ci_failures=(
+                CheckFailure(
+                    name="python-full-coverage",
+                    conclusion="FAILURE",
+                    log_excerpt="tests/unit/test_x.py::test_y FAILED\nE   assert 1 == 2",
+                    test_node_ids=("tests/unit/test_x.py::test_y",),
+                    assertion_snippets=("assert 1 == 2",),
+                ),
+            ),
+        ),
         state=MonitorState(),
         config=MonitorConfig(require_ci=False),
     )
@@ -327,8 +340,11 @@ def test_absent_pending_clean_state_still_waits_at_gate_6() -> None:
 
 @pytest.mark.unit
 def test_failure_still_routes_to_gate_5() -> None:
-    # A.7: FAILURE fires gate 5 (ReportCiFailure); the new gate must not steal it
-    # even within grace with checks absent and BLOCKED.
+    # A.7: FAILURE fires gate 5; the required-checks grace gate (8b) must not steal
+    # it even within grace with checks absent and BLOCKED. With no per-check logs
+    # fetched, gate 5 escalates to the missing-logs NotifyHuman rather than gate 8b's
+    # bounded WaitForCI or gate 9's BLOCKED notice — so the distinct message proves
+    # gate 5, not the grace gate, owned the decision.
     action = decide(
         status=_status(
             check_state=CheckState.FAILURE,
@@ -339,7 +355,9 @@ def test_failure_still_routes_to_gate_5() -> None:
         state=MonitorState(),
         config=MonitorConfig(),
     )
-    assert isinstance(action, ReportCiFailure)
+    assert isinstance(action, NotifyHuman)
+    assert action.message is not None
+    assert "could not retrieve actionable logs" in action.message
 
 
 @pytest.mark.unit

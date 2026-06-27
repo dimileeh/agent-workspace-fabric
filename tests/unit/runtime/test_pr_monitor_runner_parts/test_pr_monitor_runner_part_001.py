@@ -214,7 +214,9 @@ class _CapturingGH:
         pr_number: int,
         head_sha: str,
         pytest_fallback_commands: Sequence[str] = (),
+        rollup_checks: object = (),
     ) -> tuple[CheckFailure, ...]:
+        del rollup_checks
         self.failing_log_requests.append(
             (repo, pr_number, head_sha, tuple(pytest_fallback_commands))
         )
@@ -730,10 +732,14 @@ async def test_rerun_transient_ci_operation_identity_includes_failure_signature(
 
         assert terminal is False
 
+    # Both polls describe the same failing workflow run (same ``run_id``) under
+    # drifting check names, so they share one retry-budget key and the count
+    # accumulates instead of resetting — otherwise the rerun budget inflates
+    # past ``ci_transient_rerun_max_attempts``.
     first_state_key = _ci_transient_rerun_state_key(head_sha, (first_failure,))
     second_state_key = _ci_transient_rerun_state_key(head_sha, (second_failure,))
-    assert state.threads_addressed_ids[first_state_key] == "1"
-    assert state.threads_addressed_ids[second_state_key] == "1"
+    assert first_state_key == second_state_key
+    assert state.threads_addressed_ids[first_state_key] == "2"
     assert [call.args[3] for call in cmd.calls] == ["25655330295", "25655330295"]
     assert sleep_fn.calls == [60, 60]
 
