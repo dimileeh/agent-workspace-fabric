@@ -322,6 +322,7 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
     assert len(repair_calls) == 1
     assert repair_calls[0]["failure_stage"] == "before agent retry"
     assert repair_calls[0]["before_mark_failed"] is not None
+    assert repair_calls[0]["failure_from_status"] is WorkspaceStatus.validating
 
 
 @pytest.mark.unit

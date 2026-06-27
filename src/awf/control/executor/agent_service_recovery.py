@@ -122,6 +122,7 @@ async def _rerun_agent_pre_launch_guards(
     return await repair_mirror_hooks_path_or_mark_failed(
         failure_stage="before agent retry",
         before_mark_failed=deposit_planning_artifacts,
+        failure_from_status=failure_from_status,
     )
 
 
