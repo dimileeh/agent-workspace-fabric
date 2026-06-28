@@ -507,7 +507,9 @@ async def test_planning_recovery_retry_skips_plan_scope_for_implementation_delta
     runner.queue_result(returncode=0, stdout="")  # retry committed_paths_since
     runner.queue_result(returncode=0, stdout="impl_sha\n")  # implementation baseline
     runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # before_compare
+    runner.queue_result(returncode=0, stdout="impl_sha\n")  # conformance baseline HEAD
     runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # conformance committed_paths_since
     runner.queue_result(returncode=0, stdout="impl_sha\n")  # post-compare HEAD
     retry_adapter = _PlanningAdapter(
         "implementation resumed",
@@ -529,6 +531,109 @@ async def test_planning_recovery_retry_skips_plan_scope_for_implementation_delta
     assert message is None
     assert len(retry_adapter.prompts) == 2
     assert retry_adapter.prompts[0].startswith("## Execution phase")
+
+
+@pytest.mark.unit
+async def test_planning_recovery_retry_rejects_preserved_conformance_source_delta(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_retry_conformance.md")
+    report_path = Path("docs/awf-plans/ws_retry_conformance.json")
+    (worktree / plan_path).parent.mkdir(parents=True, exist_ok=True)
+    (worktree / plan_path).write_text("# Plan\n\nResume implementation.\n", encoding="utf-8")
+    (worktree / "src").mkdir(parents=True, exist_ok=True)
+    (worktree / "src" / "side_effect.py").write_text("leaked = True\n", encoding="utf-8")
+
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=0,
+        stdout=(f"?? {plan_path.as_posix()}\n?? {report_path.as_posix()}\n?? src/side_effect.py\n"),
+    )  # preserved conformance retry scope check
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter("implementation would have run")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_retry_conformance", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-conformance-source-delta"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+        planning_retry_scope_baseline={
+            "post_planning_dirty_paths": {plan_path},
+            "post_planning_head_sha": "post_plan_sha",
+            "conformance_before_compare": {plan_path},
+            "conformance_before_compare_head": "before_compare_sha",
+            "conformance_before_dirty_digests": {},
+        },
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["scope_phase"] == "conformance"
+    assert scope["offending_paths"] == ["src/side_effect.py"]
+    assert adapter.prompts == []
+
+
+@pytest.mark.unit
+async def test_planning_recovery_retry_rejects_preserved_conformance_commit_and_predirty_edit(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_retry_conformance_commit.md")
+    report_path = Path("docs/awf-plans/ws_retry_conformance_commit.json")
+    predirty_path = Path("src/already_dirty.py")
+    (worktree / plan_path).parent.mkdir(parents=True, exist_ok=True)
+    (worktree / plan_path).write_text("# Plan\n\nResume implementation.\n", encoding="utf-8")
+    (worktree / predirty_path).parent.mkdir(parents=True, exist_ok=True)
+    (worktree / predirty_path).write_text("edited_by_conformance = True\n", encoding="utf-8")
+
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=0,
+        stdout=(
+            f"?? {plan_path.as_posix()}\n"
+            f"?? {report_path.as_posix()}\n"
+            f" M {predirty_path.as_posix()}\n"
+        ),
+    )  # preserved conformance retry scope check
+    runner.queue_result(returncode=0, stdout="src/committed.py\n")  # committed_paths_since
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter("implementation would have run")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(
+            id="ws_retry_conformance_commit", task_prompt="do it", task_tag=None
+        ),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-conformance-commit"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+        planning_retry_scope_baseline={
+            "post_planning_dirty_paths": {plan_path, predirty_path},
+            "post_planning_head_sha": "post_plan_sha",
+            "conformance_before_compare": {plan_path, predirty_path},
+            "conformance_before_compare_head": "before_compare_sha",
+            "conformance_before_dirty_digests": {predirty_path: "original-digest"},
+        },
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["offending_paths"] == ["src/already_dirty.py", "src/committed.py"]
+    assert adapter.prompts == []
 
 
 @pytest.mark.unit

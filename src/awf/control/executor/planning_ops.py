@@ -799,6 +799,20 @@ async def _run_agent_task_with_optional_planning(
     except ValueError as exc:
         return f"planning profile is invalid: {exc}"
 
+    if (
+        planning.fail_on_unexplained_deviation
+        and accept_existing_plan
+        and planning_retry_scope_baseline is not None
+    ):
+        preserved_conformance_failure = await _check_preserved_conformance_retry_scope(
+            self,
+            worktree_path=worktree_path,
+            report_path=report_path,
+            planning_retry_scope_baseline=planning_retry_scope_baseline,
+        )
+        if preserved_conformance_failure is not None:
+            return preserved_conformance_failure
+
     # Hand the agent worktree-root-anchored artifact paths so the plan/report
     # land at the repo root even if the agent cd's into a task subdir mid-run
     # (#620). All internal logic below — digests, scope checks, the validation
@@ -978,6 +992,19 @@ async def _run_agent_task_with_optional_planning(
             stderr=execute_result.stderr,
         )
         before_compare = await self._changed_paths(worktree_path)
+        before_compare_head: str | None = None
+        before_dirty_digests: dict[Path, str] = {}
+        if planning.fail_on_unexplained_deviation and planning_retry_scope_baseline is not None:
+            before_compare_head = await self._git_rev_parse_head(worktree_path)
+            before_dirty_digests = {
+                path: self._digest_dirty_content(worktree_path, {path})
+                for path in before_compare - {report_path}
+            }
+            planning_retry_scope_baseline["conformance_before_compare"] = set(before_compare)
+            planning_retry_scope_baseline["conformance_before_compare_head"] = before_compare_head
+            planning_retry_scope_baseline["conformance_before_dirty_digests"] = dict(
+                before_dirty_digests
+            )
         # Snapshot any pre-existing report digest so the timeout branch
         # can distinguish a report this compare call produced from a
         # stale leftover (e.g., a satisfied JSON written by a prior
@@ -1027,7 +1054,21 @@ async def _run_agent_task_with_optional_planning(
         # and slip past the success short-circuit below.
         after_compare = await self._changed_paths(worktree_path)
         if planning.fail_on_unexplained_deviation:
-            extra = sorted(after_compare - before_compare - {report_path})
+            committed_compare = (
+                await self._committed_paths_since(worktree_path, before_compare_head)
+                if before_compare_head is not None
+                else set()
+            )
+            edited_pre_dirty_extra = {
+                path
+                for path, digest in before_dirty_digests.items()
+                if self._digest_dirty_content(worktree_path, {path}) != digest
+            }
+            extra = sorted(
+                (after_compare - before_compare - {report_path})
+                | (committed_compare - {report_path})
+                | edited_pre_dirty_extra
+            )
             if extra:
                 return _build_planning_scope_failure(
                     scope_phase="conformance",
@@ -1284,6 +1325,58 @@ async def _build_conformance_stall_failure(
         message=message,
         reason_code=AGENT_STALLED_IN_CONFORMANCE,
         details=details,
+    )
+
+
+async def _check_preserved_conformance_retry_scope(
+    self: Any,
+    *,
+    worktree_path: Path,
+    report_path: Path,
+    planning_retry_scope_baseline: dict[str, object],
+) -> _PlanningRunFailure | None:
+    preserved_dirty_paths = planning_retry_scope_baseline.pop("conformance_before_compare", None)
+    preserved_head_sha = planning_retry_scope_baseline.pop("conformance_before_compare_head", None)
+    preserved_dirty_digests = planning_retry_scope_baseline.pop(
+        "conformance_before_dirty_digests", None
+    )
+    if not isinstance(preserved_dirty_paths, set):
+        return None
+
+    before_compare = {path for path in preserved_dirty_paths if isinstance(path, Path)}
+    before_compare_head = preserved_head_sha if isinstance(preserved_head_sha, str) else None
+    before_dirty_digests = (
+        {
+            path: digest
+            for path, digest in preserved_dirty_digests.items()
+            if isinstance(path, Path) and isinstance(digest, str)
+        }
+        if isinstance(preserved_dirty_digests, Mapping)
+        else {}
+    )
+    after_compare = await self._changed_paths(worktree_path)
+    committed_compare = (
+        await self._committed_paths_since(worktree_path, before_compare_head)
+        if before_compare_head
+        else set()
+    )
+    edited_pre_dirty_extra = {
+        path
+        for path, digest in before_dirty_digests.items()
+        if self._digest_dirty_content(worktree_path, {path}) != digest
+    }
+    extra = sorted(
+        (after_compare - before_compare - {report_path})
+        | (committed_compare - {report_path})
+        | edited_pre_dirty_extra
+    )
+    if not extra:
+        return None
+    return _build_planning_scope_failure(
+        scope_phase="conformance",
+        required_paths=(report_path,),
+        offending_paths=extra,
+        summary=(f"conformance phase changed files outside `{report_path}`"),
     )
 
 
