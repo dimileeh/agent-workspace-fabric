@@ -144,6 +144,40 @@ async def test_runtime_inspector_builds_running_service_snapshot(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "inspect_data",
+    [
+        {},
+        {"Config": {"Labels": {}}, "State": {"Status": "running"}},
+    ],
+)
+async def test_probe_agent_service_health_is_indeterminate_when_running_labels_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    inspect_data: dict[str, object],
+) -> None:
+    ps_row = {
+        "ID": "abc123",
+        "Image": "awf-agent-runtime:latest",
+        "Names": "awf_ws_agent_1",
+        "State": "running",
+        "Status": "Up 2 minutes",
+    }
+
+    async def _fake_run(args: list[str]) -> _ProcessResult:
+        assert args[:2] == ["docker", "ps"]
+        return _ProcessResult(returncode=0, stdout=json.dumps(ps_row) + "\n", stderr="")
+
+    async def _fake_inspect(container_id: str) -> dict[str, object]:
+        assert container_id == "abc123"
+        return inspect_data
+
+    monkeypatch.setattr(inspection, "_run", _fake_run)
+    monkeypatch.setattr(inspection, "_inspect_container", _fake_inspect)
+
+    assert await inspection.probe_agent_service_health(RuntimeInspector(), "awf_ws_running") is None
+
+
+@pytest.mark.unit
 async def test_runtime_inspector_uses_row_fallbacks_for_stopped_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
