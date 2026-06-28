@@ -1449,7 +1449,6 @@ async def execute(
     # repo URL and passed in per-call, so a Bitbucket feature workspace opens its
     # PR via ``BitbucketClient`` instead of the GitHub-only ``gh pr create``.
 
-    # ── Step 3: push + open PR ──────────────────────────────────────────
     if not await self._transition_if_current(
         workspace_id,
         from_status=WorkspaceStatus.validating,
@@ -1488,7 +1487,6 @@ async def execute(
     if pr is None:
         return
 
-    # ── Step 4: persist PR URL + (optionally) hand off to monitor ──────
     await persist_pr_and_handoff(
         self,
         workspace_id=workspace_id,

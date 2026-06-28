@@ -90,6 +90,12 @@ def _executor(*, side_effect: list[object]) -> SimpleNamespace:
     )
 
 
+def _compose_file(tmp_path: Path) -> Path:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n")
+    return compose_file
+
+
 async def _run_helper(
     executor: SimpleNamespace,
     tmp_path: Path,
@@ -105,7 +111,7 @@ async def _run_helper(
         or SimpleNamespace(id="ws_agent_service", task_prompt="do it", task_tag=None),
         profile=profile or WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         worktree_path=tmp_path,
         model="gpt-5.3-codex",
         command_evidence=[],
@@ -162,7 +168,7 @@ async def test_agent_callable_service_recovery_uses_validation_status(
         workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
@@ -281,13 +287,14 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
         return True
 
     workspace = SimpleNamespace(owned_paths=[])
+    compose_file = _compose_file(tmp_path)
     before_agent_retry, _cleanup_repair = (
         agent_service_recovery._build_agent_service_recovery_callbacks(
             executor,
             workspace_id="ws_agent_service",
             workspace=workspace,
             compose_project="awf_ws_agent_service",
-            compose_file=tmp_path / "compose.yml",
+            compose_file=compose_file,
             worktree_path=tmp_path,
             execution_owner_id="worker-1",
             repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
@@ -305,7 +312,7 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
     executor._run_agent_git_writability_preflight.assert_awaited_once_with(
         workspace_id="ws_agent_service",
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=compose_file,
         worktree_path=tmp_path,
         from_status=WorkspaceStatus.validating,
     )
@@ -348,13 +355,14 @@ async def test_recovery_callbacks_fence_stale_owner_before_retry_preflights(
     ) -> bool:
         return True
 
+    compose_file = _compose_file(tmp_path)
     before_agent_retry, _cleanup_repair = (
         agent_service_recovery._build_agent_service_recovery_callbacks(
             executor,
             workspace_id="ws_agent_service",
             workspace=SimpleNamespace(owned_paths=[]),
             compose_project="awf_ws_agent_service",
-            compose_file=tmp_path / "compose.yml",
+            compose_file=compose_file,
             worktree_path=tmp_path,
             execution_owner_id="worker-stale",
             repair_mirror_hooks_path_or_mark_failed=repair_mirror_hooks_path_or_mark_failed,
@@ -404,7 +412,7 @@ async def test_agent_service_retry_guard_failure_runs_terminal_callback(
         workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
@@ -448,7 +456,7 @@ async def test_agent_service_retry_guard_failure_passes_reason_to_terminal_callb
         workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
@@ -491,7 +499,7 @@ async def test_agent_service_retry_guard_false_uses_recovery_abort_reason(
         workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
@@ -516,8 +524,7 @@ async def test_agent_service_restart_recheck_failure_skips_terminal_callback(
     executor._recheck_status.return_value = False
     callback_reason_codes: list[str | None] = []
     run_agent = AsyncMock(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT"), "validation-ok"])
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("services: {}\n")
+    compose_file = _compose_file(tmp_path)
 
     async def _service_down(*_args: object, **_kwargs: object) -> bool:
         return False
@@ -660,7 +667,7 @@ async def test_agent_service_down_timeout_cleanup_failure_restarts_and_retries(
         workspace=SimpleNamespace(id="ws_agent_service", task_prompt="do it", task_tag=None),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         worktree_path=tmp_path,
         model="gpt-5.3-codex",
         command_evidence=command_evidence,
@@ -721,7 +728,7 @@ async def test_agent_service_down_timeout_cleanup_repair_failure_aborts_retry(
         workspace=SimpleNamespace(id="ws_agent_service", task_prompt="do it", task_tag=None),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         worktree_path=tmp_path,
         model="gpt-5.3-codex",
         command_evidence=[],
@@ -760,7 +767,7 @@ async def test_agent_service_cleanup_repair_failure_runs_terminal_callback(
         workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
@@ -802,7 +809,7 @@ async def test_agent_service_cleanup_repair_failure_passes_reason_to_terminal_ca
         workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
@@ -844,7 +851,7 @@ async def test_agent_service_cleanup_repair_false_uses_recovery_abort_reason(
         workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
@@ -981,7 +988,7 @@ async def test_agent_service_down_restart_budget_exhaustion_terminal_callback_ge
         workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_compose_file(tmp_path),
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
@@ -1001,8 +1008,7 @@ async def test_validation_agent_service_recovery_callback_gets_terminal_details(
 ) -> None:
     executor = _executor(side_effect=[])
     callback_calls: list[dict[str, object]] = []
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("services: {}\n")
+    compose_file = _compose_file(tmp_path)
 
     async def _service_down(*_args: object, **_kwargs: object) -> bool:
         return False
