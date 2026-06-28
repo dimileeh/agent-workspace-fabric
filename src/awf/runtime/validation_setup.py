@@ -392,11 +392,6 @@ def node_package_manager_command(profile: WorkspaceProfile) -> str:
     return _infer_node_package_manager(profile)
 
 
-def node_package_manager_executable(profile: WorkspaceProfile) -> str:
-    """Return the inferred Node package manager executable."""
-    return _infer_node_package_manager(profile).split(maxsplit=1)[0]
-
-
 def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
     fallback_package_manager: str | None = None
     dependency_install_package_manager: str | None = None
