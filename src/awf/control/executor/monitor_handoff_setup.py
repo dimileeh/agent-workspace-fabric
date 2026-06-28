@@ -389,6 +389,22 @@ async def _run_monitor_handoff_profile_setup(
                 reason_code=getattr(exc, "reason_code", None),
                 error=redact_secrets(str(exc))[:1000],
             )
+        record_browser_findings = getattr(self, "_record_runtime_browser_findings", None)
+        if callable(record_browser_findings):
+            try:
+                await record_browser_findings(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    profile=profile,
+                )
+            except Exception as exc:
+                _log.warning(
+                    "executor.monitor_handoff_runtime_browser_probe_record_failed",
+                    workspace_id=workspace_id,
+                    reason_code=getattr(exc, "reason_code", None),
+                    error=redact_secrets(str(exc))[:1000],
+                )
         # Adopt-pr skips the agent, so the only thing that provisions the validate
         # toolchain is the setup phase just run. Fail early + clearly if a validate
         # tool is still missing, before transitioning to monitoring_pr.

@@ -456,6 +456,14 @@ async def execute(
             compose_file=compose_file,
             profile=profile,
         )
+        record_browser_findings = getattr(self, "_record_runtime_browser_findings_safe", None)
+        if callable(record_browser_findings):
+            await record_browser_findings(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+            )
         profile_preflight = getattr(self._validation, "run_profile_tool_preflight", None)
         profile_preflight_result = (
             await profile_preflight(workspace_id=workspace_id, profile=profile)

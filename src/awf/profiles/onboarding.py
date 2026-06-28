@@ -25,6 +25,7 @@ from awf.profiles.models import (
     ProfileValidation,
     WorkspaceProfile,
 )
+from awf.runtime.validation_setup import playwright_command
 
 _COMPOSE_FILENAMES = (
     "compose.yml",
@@ -473,6 +474,7 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
             validation_scripts=_playwright_validation_scripts(inspection),
             fallback_validation=(),
             fallback_commands=(_playwright_command(inspection.package_manager or "npm"),),
+            runtime=ProfileRuntime(browsers=["chromium"]),
         )
     elif template == "python-postgres":
         database_url = "postgresql+psycopg://awf:${POSTGRES_PASSWORD}@postgres:5432/awf"
@@ -555,6 +557,7 @@ def _node_profile(
     validation_scripts: tuple[str, ...],
     fallback_validation: tuple[str, ...],
     fallback_commands: tuple[str, ...] = (),
+    runtime: ProfileRuntime | None = None,
 ) -> WorkspaceProfile:
     """Build a node-based profile including install and validation command derivation."""
     package_manager = inspection.package_manager or "npm"
@@ -577,6 +580,7 @@ def _node_profile(
         source=f"onboarding:{name}",
         confidence="medium",
         description=description,
+        runtime=runtime or ProfileRuntime(),
         phases={
             "setup": [_node_install_command(inspection.path, package_manager)],
             "validate": validate_commands,
@@ -888,13 +892,7 @@ def _playwright_validation_scripts(inspection: ProjectInspection) -> tuple[str, 
 
 def _playwright_command(package_manager: str) -> str:
     """Build the package-manager-specific Playwright command for one-shot validation."""
-    if package_manager == "pnpm":
-        return "pnpm exec playwright test"
-    if package_manager == "yarn":
-        return "yarn playwright test"
-    if package_manager == "bun":
-        return "bunx playwright test"
-    return "npx playwright test"
+    return playwright_command(package_manager, "test")
 
 
 def _compose_ports(inspection: ProjectInspection) -> dict[str, str]:

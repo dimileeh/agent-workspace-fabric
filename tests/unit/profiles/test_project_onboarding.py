@@ -248,6 +248,9 @@ def test_detects_node_playwright_template(tmp_path: Path) -> None:
     preview = preview_project_onboarding(tmp_path)
 
     assert preview.draft.template == "node-playwright"
+    assert preview.draft.profile.runtime.browsers == ["chromium"]
+    assert "browsers:" in preview.draft.yaml
+    assert "- chromium" in preview.draft.yaml
     assert "npm run test:e2e" in [
         command.command for command in preview.draft.profile.phases.validate_commands
     ]

@@ -71,6 +71,42 @@ def test_runtime_toolchains_explicit_none_is_treated_as_empty() -> None:
 
 
 @pytest.mark.unit
+def test_runtime_browsers_absent_none_and_empty_are_noops() -> None:
+    assert ProfileRuntime().browsers == []
+    assert ProfileRuntime.model_validate({"browsers": None}).browsers == []
+    assert ProfileRuntime.model_validate({"browsers": []}).browsers == []
+
+
+@pytest.mark.unit
+def test_runtime_browsers_accepts_allowlist_lowercases_and_dedupes() -> None:
+    runtime = ProfileRuntime.model_validate(
+        {"browsers": ["CHROMIUM", "firefox", "chromium", "WebKit"]}
+    )
+
+    assert runtime.browsers == ["chromium", "firefox", "webkit"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_browser", ["chrome", "edge", "", " chromium "])
+def test_runtime_browsers_rejects_unknown_names(bad_browser: str) -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"browsers": [bad_browser]})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_value", ["chromium", {"name": "chromium"}, [17]])
+def test_runtime_browsers_rejects_invalid_shapes(bad_value: object) -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"browsers": bad_value})
+
+
+@pytest.mark.unit
+def test_runtime_browsers_caps_declaration_count_before_deduping() -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"browsers": ["chromium"] * 9})
+
+
+@pytest.mark.unit
 def test_runtime_toolchains_rejects_non_string_language_key() -> None:
     with pytest.raises(ValidationError):
         ProfileRuntime.model_validate({"toolchains": {17: ["17"]}})

@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from awf.common.audit import redact_audit_text
 from awf.common.logging import get_logger
 from awf.profiles.models import (
+    ProfileCommand,
     WorkspaceProfile,
 )
 from awf.runtime.validation_command_probe import (
@@ -185,6 +186,9 @@ def profile_phase_command_plan(
     ):
         if phase == "setup":
             commands.extend(_phase_commands(profile, "setup"))
+            browser_install = playwright_browser_install_command(profile)
+            if browser_install is not None:
+                commands.append(ProfileExecutionCommand(phase="setup", command=browser_install))
             commands.extend(
                 ProfileExecutionCommand(
                     phase=DB_GENERATED_SETUP_PHASE,
@@ -209,6 +213,36 @@ def profile_phase_command_plan(
             continue
         commands.extend(_phase_commands(profile, phase))
     return commands
+
+
+def playwright_command(package_manager: str, *args: str) -> str:
+    """Build a package-manager-aware Playwright command."""
+    escaped_args = shlex.join(args)
+    if package_manager == "pnpm":
+        return f"pnpm exec playwright {escaped_args}"
+    if package_manager == "yarn":
+        return f"yarn playwright {escaped_args}"
+    if package_manager == "bun":
+        return f"bunx playwright {escaped_args}"
+    return f"npx playwright {escaped_args}"
+
+
+def playwright_browser_install_command(profile: WorkspaceProfile) -> ProfileCommand | None:
+    """Return the generated setup command for declared Playwright browsers."""
+    if not profile.runtime.browsers:
+        return None
+    package_manager = _infer_node_package_manager(profile)
+    return ProfileCommand(
+        command=playwright_command(package_manager, "install", *profile.runtime.browsers)
+    )
+
+
+def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
+    for command in profile.phases.setup:
+        executable = _leading_executable(command.command)
+        if executable in {"npm", "pnpm", "yarn", "bun"}:
+            return executable
+    return "npm"
 
 
 def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecutionCommand]:

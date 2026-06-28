@@ -13,9 +13,11 @@ from awf.profiles.lint import (
     profile_service_volume_lint_errors,
 )
 from awf.profiles.models import (
+    RUNTIME_BROWSER_UNAVAILABLE,
     RUNTIME_TOOLCHAIN_UNAVAILABLE,
     ProfileLintSeverity,
     WorkspaceProfile,
+    runtime_browser_findings,
     runtime_toolchain_findings,
 )
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
@@ -858,6 +860,65 @@ def _profile_with_toolchains(toolchains: dict[str, list[str]]) -> WorkspaceProfi
     return WorkspaceProfile.model_validate(
         {"name": "toolchain-profile", "runtime": {"toolchains": toolchains}}
     )
+
+
+def _profile_with_browsers(browsers: list[str]) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {"name": "browser-profile", "runtime": {"browsers": browsers}}
+    )
+
+
+@pytest.mark.unit
+def test_runtime_browser_findings_unknown_availability_is_silent() -> None:
+    profile = _profile_with_browsers(["chromium"])
+
+    assert runtime_browser_findings(profile, None) == ()
+
+
+@pytest.mark.unit
+def test_runtime_browser_findings_all_declared_browsers_present_no_findings() -> None:
+    profile = _profile_with_browsers(["chromium", "firefox"])
+
+    assert runtime_browser_findings(profile, {"chromium": True, "firefox": True}) == ()
+
+
+@pytest.mark.unit
+def test_runtime_browser_findings_missing_declared_browser_warns() -> None:
+    profile = _profile_with_browsers(["chromium", "firefox"])
+
+    findings = runtime_browser_findings(profile, {"chromium": False, "firefox": True})
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.reason_code == RUNTIME_BROWSER_UNAVAILABLE
+    assert finding.severity == ProfileLintSeverity.warning
+    assert finding.path == "runtime.browsers"
+    assert finding.details == {
+        "browser": "chromium",
+        "available_browsers": ["firefox"],
+    }
+
+
+@pytest.mark.unit
+def test_runtime_browser_findings_absent_declared_browser_warns() -> None:
+    profile = _profile_with_browsers(["webkit"])
+
+    findings = runtime_browser_findings(profile, {"chromium": True})
+
+    assert len(findings) == 1
+    assert findings[0].reason_code == RUNTIME_BROWSER_UNAVAILABLE
+    assert findings[0].details == {
+        "browser": "webkit",
+        "available_browsers": ["chromium"],
+    }
+
+
+@pytest.mark.unit
+def test_runtime_browser_findings_no_declaration_never_warns() -> None:
+    profile = WorkspaceProfile.model_validate({"name": "plain"})
+
+    assert runtime_browser_findings(profile, {"chromium": False}) == ()
+    assert runtime_browser_findings(profile, None) == ()
 
 
 @pytest.mark.unit

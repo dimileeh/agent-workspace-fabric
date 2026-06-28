@@ -315,6 +315,88 @@ class TestHappyPath:
         ]
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_adds_browser_install_after_setup(self) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-setup-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {"setup": ["npm install"], "pre_agent": ["node scripts/pre.js"]},
+                "database": {"generated_setup": ["python scripts/db_generated_setup.py"]},
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup", "pre_agent"))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "npm install"),
+            ("setup", "npx playwright install chromium"),
+            ("db_generated_setup", "python scripts/db_generated_setup.py"),
+            ("pre_agent", "node scripts/pre.js"),
+        ]
+
+    @pytest.mark.unit
+    def test_profile_phase_command_plan_adds_one_browser_install_for_multiple_browsers(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-setup-test",
+                "runtime": {"browsers": ["firefox", "CHROMIUM", "firefox"]},
+                "phases": {"setup": ["npm install"]},
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup",))
+
+        assert [command.command.command for command in commands] == [
+            "npm install",
+            "npx playwright install firefox chromium",
+        ]
+
+    @pytest.mark.unit
+    def test_profile_phase_command_plan_empty_browsers_preserves_non_web_setup(self) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "plain-setup-test",
+                "runtime": {"browsers": []},
+                "phases": {"setup": ["python scripts/setup.py"]},
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup",))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "python scripts/setup.py"),
+        ]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("setup_command", "expected"),
+        [
+            ("npm install", "npx playwright install chromium"),
+            ("pnpm install --frozen-lockfile", "pnpm exec playwright install chromium"),
+            ("yarn install --frozen-lockfile", "yarn playwright install chromium"),
+            ("bun install --frozen-lockfile", "bunx playwright install chromium"),
+        ],
+    )
+    def test_profile_phase_command_plan_browser_install_tracks_package_manager(
+        self,
+        setup_command: str,
+        expected: str,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-setup-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {"setup": [setup_command]},
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup",))
+
+        assert commands[-1].command.command == expected
+
+    @pytest.mark.unit
     async def test_runs_each_test_command_in_order(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:

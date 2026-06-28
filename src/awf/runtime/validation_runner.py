@@ -46,6 +46,12 @@ from awf.runtime.alembic_validation import (
     alembic_policy_metadata,
     validate_alembic_migration_chain,
 )
+from awf.runtime.browser_probe import (
+    ProbeExecResult as BrowserProbeExecResult,
+)
+from awf.runtime.browser_probe import (
+    probe_runtime_browsers,
+)
 from awf.runtime.logs import LogStore
 from awf.runtime.toolchain_probe import ProbeExecResult, probe_runtime_toolchains
 from awf.runtime.validation_coverage import (
@@ -422,6 +428,61 @@ class ValidationRunner:
             )
 
         return await probe_runtime_toolchains(profile=profile, exec_in_container=_exec)
+
+    async def probe_runtime_browser_findings(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        profile: WorkspaceProfile,
+    ) -> tuple[ProfileLintFinding, ...]:
+        """Discover declared Playwright browsers in the container; return findings."""
+        if not profile.runtime.browsers:
+            return ()
+
+        async def _exec(cli_args: list[str]) -> BrowserProbeExecResult:
+            invocation = build_tracked_compose_exec(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                cli_args=cli_args,
+                source="browser_probe",
+                label="browser_probe",
+            )
+            try:
+                result = await asyncio.wait_for(
+                    self._runner.run(invocation.args),
+                    timeout=_TOOLCHAIN_PROBE_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                with suppress(ComposeExecCleanupError, TimeoutError):
+                    await asyncio.wait_for(
+                        cleanup_compose_exec_invocation(
+                            self._runner,
+                            invocation,
+                            workspace_id=workspace_id,
+                        ),
+                        timeout=_TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                return BrowserProbeExecResult(
+                    returncode=124,
+                    stdout="",
+                    stderr=f"browser probe timed out after {_TOOLCHAIN_PROBE_TIMEOUT_SECONDS}s",
+                )
+            except asyncio.CancelledError:
+                await cleanup_compose_exec_invocation_after_cancellation(
+                    self._runner,
+                    invocation,
+                    workspace_id=workspace_id,
+                )
+                raise
+            return BrowserProbeExecResult(
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+
+        return await probe_runtime_browsers(profile=profile, exec_in_container=_exec)
 
     async def probe_validate_command_tools(
         self,

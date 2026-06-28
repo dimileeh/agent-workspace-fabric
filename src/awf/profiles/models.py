@@ -61,6 +61,8 @@ _TOOLCHAIN_LANGUAGE_PATTERN = re.compile(r"^[a-z][a-z0-9+_.-]*$")
 _TOOLCHAIN_VERSION_PATTERN = re.compile(r"^[0-9]+(\.[0-9]+){0,3}$")
 _MAX_TOOLCHAIN_LANGUAGES = 16
 _MAX_TOOLCHAIN_VERSIONS = 16
+_ALLOWED_RUNTIME_BROWSERS = frozenset({"chromium", "firefox", "webkit"})
+_MAX_RUNTIME_BROWSERS = 8
 
 
 class ProfileRuntime(BaseModel):
@@ -85,6 +87,13 @@ class ProfileRuntime(BaseModel):
             "``runtime_toolchain_findings`` lint seam yields a non-blocking "
             "``RUNTIME_TOOLCHAIN_UNAVAILABLE`` warning when a declared version is "
             "missing from the runtime image."
+        ),
+    )
+    browsers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Playwright browser binaries the workspace setup must install, e.g. "
+            '["chromium"]. Absent or empty means no browser provisioning is requested.'
         ),
     )
 
@@ -145,6 +154,32 @@ class ProfileRuntime(BaseModel):
                 seen.add(version)
             normalized[language] = versions
         return normalized
+
+    @field_validator("browsers", mode="before")
+    @classmethod
+    def _validate_browsers(cls, value: object) -> object:
+        """Normalize and bound declared Playwright browser requirements."""
+        if value is None:
+            return []
+        if isinstance(value, str) or not isinstance(value, (list, tuple)):
+            raise ValueError("runtime.browsers must be a list of browser names")
+        if len(value) > _MAX_RUNTIME_BROWSERS:
+            raise ValueError(
+                f"runtime.browsers declares too many browsers (max {_MAX_RUNTIME_BROWSERS})"
+            )
+        browsers: list[str] = []
+        seen: set[str] = set()
+        for raw_browser in value:
+            if not isinstance(raw_browser, str):
+                raise ValueError("runtime.browsers entries must be strings")
+            browser = raw_browser.lower()
+            if browser not in _ALLOWED_RUNTIME_BROWSERS:
+                raise ValueError(f"invalid runtime browser: {raw_browser!r}")
+            if browser in seen:
+                continue
+            browsers.append(browser)
+            seen.add(browser)
+        return browsers
 
 
 class ProfileDocker(BaseModel):
@@ -1005,6 +1040,10 @@ def _normalized_endpoint_env_name(name: str) -> str:
 # strings consumed by preflight/console, not part of the generated doctor catalog.
 RUNTIME_TOOLCHAIN_UNAVAILABLE = "RUNTIME_TOOLCHAIN_UNAVAILABLE"
 
+# Reason code emitted when a profile declares Playwright browser binaries that
+# were not present in the workspace after setup.
+RUNTIME_BROWSER_UNAVAILABLE = "RUNTIME_BROWSER_UNAVAILABLE"
+
 
 def runtime_toolchain_findings(
     profile: WorkspaceProfile,
@@ -1056,6 +1095,43 @@ def runtime_toolchain_findings(
                     },
                 )
             )
+    return tuple(findings)
+
+
+def runtime_browser_findings(
+    profile: WorkspaceProfile,
+    available: Mapping[str, bool] | None,
+) -> tuple[ProfileLintFinding, ...]:
+    """Warn about declared Playwright browsers missing after setup.
+
+    ``available is None`` means the browser state is unknown, so this helper
+    stays silent. For every declared browser absent from a reachable availability
+    mapping, return a non-blocking ``RUNTIME_BROWSER_UNAVAILABLE`` warning.
+    """
+    if available is None:
+        return ()
+    available_lower: dict[str, bool] = {}
+    for browser, is_available in available.items():
+        available_lower[browser.lower()] = bool(is_available)
+    available_browsers = sorted(
+        browser for browser, is_available in available_lower.items() if is_available
+    )
+    findings: list[ProfileLintFinding] = []
+    for browser in profile.runtime.browsers:
+        if available_lower.get(browser, False):
+            continue
+        findings.append(
+            ProfileLintFinding(
+                reason_code=RUNTIME_BROWSER_UNAVAILABLE,
+                message=f"runtime does not provide Playwright browser {browser}",
+                path="runtime.browsers",
+                severity=ProfileLintSeverity.warning,
+                details={
+                    "browser": browser,
+                    "available_browsers": available_browsers,
+                },
+            )
+        )
     return tuple(findings)
 
 
