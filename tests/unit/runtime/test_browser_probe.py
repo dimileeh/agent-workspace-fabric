@@ -87,6 +87,17 @@ class TestProbeRuntimeBrowsers:
         assert spy.calls[0][2].startswith('yarn node - "$@" <<')
         assert spy.calls[0][-1] == "chromium"
 
+    async def test_yarn_workspace_profile_runs_probe_through_workspace_node_hook(self) -> None:
+        profile = _profile_with_setup_and_browsers(["yarn workspaces focus web"])
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
+
+        findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+        assert len(spy.calls) == 1
+        assert spy.calls[0][2].startswith('yarn workspace web node - "$@" <<')
+        assert spy.calls[0][-1] == "chromium"
+
     async def test_pnpm_filter_profile_runs_probe_through_selected_package(self) -> None:
         profile = _profile_with_setup_and_browsers(["pnpm --filter @repo/web install"])
         spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])

@@ -395,6 +395,18 @@ def _node_dependency_install_package_manager_from_tokens(
         if token.startswith("-"):
             subcommand_index += 1
             continue
+        if executable == "yarn" and token == "workspace":
+            return _node_yarn_workspace_install_package_manager(
+                tokens,
+                subcommand_index,
+                inferred_location_tokens,
+            )
+        if executable == "yarn" and token == "workspaces":
+            return _node_yarn_workspaces_focus_package_manager(
+                tokens,
+                subcommand_index,
+                inferred_location_tokens,
+            )
         if token in _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS:
             dependency_install_seen = True
             subcommand_index += 1
@@ -407,6 +419,63 @@ def _node_dependency_install_package_manager_from_tokens(
     if executable == "yarn":
         return _node_package_manager_command(executable, inferred_location_tokens)
     return None
+
+
+def _node_yarn_workspace_install_package_manager(
+    tokens: list[str],
+    workspace_index: int,
+    location_tokens: list[str],
+) -> str | None:
+    workspace_name_index = workspace_index + 1
+    if workspace_name_index >= len(tokens):
+        return None
+    workspace_name = tokens[workspace_name_index]
+    if workspace_name in _SHELL_COMPOUND_CONTROL_TOKENS or workspace_name.startswith("-"):
+        return None
+    command_index = workspace_name_index + 1
+    while command_index < len(tokens):
+        token = tokens[command_index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return None
+        if token in _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS:
+            return _node_package_manager_command(
+                "yarn",
+                [*location_tokens, "workspace", workspace_name],
+            )
+        if token.startswith("-"):
+            command_index += 1
+            continue
+        return None
+    return None
+
+
+def _node_yarn_workspaces_focus_package_manager(
+    tokens: list[str],
+    workspaces_index: int,
+    location_tokens: list[str],
+) -> str | None:
+    focus_index = workspaces_index + 1
+    if focus_index >= len(tokens) or tokens[focus_index] != "focus":
+        return None
+    workspace_name: str | None = None
+    index = focus_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            break
+        if token.startswith("-"):
+            index += 1
+            continue
+        if workspace_name is not None:
+            return None
+        workspace_name = token
+        index += 1
+    if workspace_name is None:
+        return None
+    return _node_package_manager_command(
+        "yarn",
+        [*location_tokens, "workspace", workspace_name],
+    )
 
 
 def _leading_cd_package_scope(tokens: list[str], index: int) -> tuple[str, int] | None:
