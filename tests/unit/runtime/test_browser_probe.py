@@ -161,6 +161,14 @@ class TestProbeRuntimeBrowsers:
 
         assert findings == ()
 
+    async def test_reachable_probe_with_partial_statuses_is_silent(self) -> None:
+        profile = _profile_with_browsers(["chromium", "firefox"])
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
+
+        findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+
     def test_browser_probe_workdir_uses_scoped_npm_package_directory(self) -> None:
         profile = _profile_with_setup_and_browsers(["npm --prefix apps/web ci"])
 

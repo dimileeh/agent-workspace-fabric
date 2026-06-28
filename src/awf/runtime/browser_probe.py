@@ -154,4 +154,8 @@ async def probe_runtime_browsers(
         available[match.group("browser")] = match.group("status") == "OK"
     if not available:
         return runtime_browser_findings(profile, None)
+    declared_browsers = {browser.lower() for browser in profile.runtime.browsers}
+    reported_browsers = {browser.lower() for browser in available}
+    if not declared_browsers.issubset(reported_browsers):
+        return runtime_browser_findings(profile, None)
     return runtime_browser_findings(profile, available)
