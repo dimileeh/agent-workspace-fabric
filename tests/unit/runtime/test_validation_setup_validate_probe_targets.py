@@ -177,6 +177,15 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "npm --cwd apps/web exec -- playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace/apps/web"
 
+    def test_preserves_pnpm_package_directory_from_leading_cd_setup_install(self) -> None:
+        profile = _profile_with_setup_and_browsers(["cd apps/web && pnpm install"])
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "pnpm -C apps/web exec playwright install chromium"
+        assert browser_probe_workdir(profile) == "/workspace/apps/web"
+
     @pytest.mark.parametrize(
         ("setup_command", "expected"),
         [

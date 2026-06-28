@@ -300,11 +300,18 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     if scoped_install is None:
         return None
     package_dir, install_index = scoped_install
+    package_manager = tokens[install_index]
     return _node_dependency_install_package_manager_from_tokens(
         tokens,
         install_index,
-        ["--cwd", package_dir],
+        _node_package_manager_cd_location_tokens(package_manager, package_dir),
     )
+
+
+def _node_package_manager_cd_location_tokens(package_manager: str, package_dir: str) -> list[str]:
+    if package_manager == "pnpm":
+        return ["-C", package_dir]
+    return ["--cwd", package_dir]
 
 
 def _node_dependency_install_package_manager_from_tokens(
