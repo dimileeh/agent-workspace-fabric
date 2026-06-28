@@ -690,6 +690,8 @@ def test_saved_plan_command_snippets_do_not_count_as_handoff() -> None:
         "Rerun pytest under validation after updating ./tests/unit/test_widget.py.",
         "Run pytest during AWF validation and add validation tests.",
         "Run pytest during AWF validation and the feature needs tests.",
+        "AWF validation evidence is missing; git diff --check has not run and "
+        "tests/unit/test_cli.py needs assertions.",
     ),
 )
 def test_conformance_requires_awf_validation_rejects_mixed_named_command_test_path_work_gaps(
