@@ -839,7 +839,8 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     return _log_shows_docker_registry_timeout(log_text)
 
 
-def _ci_transient_rerun_failures(status: PRStatus) -> tuple[CheckFailure, ...]:
+def _ci_candidate_failures(status: PRStatus) -> tuple[CheckFailure, ...]:
+    """Return all CI failures as rerun candidates; callers gate on transient checks."""
     return status.ci_failures
 
 
@@ -856,31 +857,31 @@ def _ci_failure_action(
 ) -> MonitorAction:
     if not status.ci_failures:
         return NotifyHuman(message=_CI_MISSING_LOGS_HUMAN_MESSAGE)
-    rerun_failures = _ci_transient_rerun_failures(status)
+    candidate_failures = _ci_candidate_failures(status)
     if _should_rerun_transient_ci(status, state, config):
-        return RerunTransientCI(failures=rerun_failures)
-    if rerun_failures and all(_looks_like_transient_ci_failure(f) for f in rerun_failures):
+        return RerunTransientCI(failures=candidate_failures)
+    if candidate_failures and all(_looks_like_transient_ci_failure(f) for f in candidate_failures):
         if config.ci_transient_rerun_max_attempts <= 0:
             return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
-        if any(not failure.run_id for failure in rerun_failures):
+        if any(not failure.run_id for failure in candidate_failures):
             return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
-        if any(not _supports_failed_job_rerun(failure) for failure in rerun_failures):
+        if any(not _supports_failed_job_rerun(failure) for failure in candidate_failures):
             return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
-        if _ci_transient_infra_wait_exhausted(status, state, config, rerun_failures):
+        if _ci_transient_infra_wait_exhausted(status, state, config, candidate_failures):
             return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
         return WaitForTransientCI(
-            failures=rerun_failures,
+            failures=candidate_failures,
             wait_seconds=_ci_transient_infra_wait_seconds(
                 status,
                 state,
                 config,
-                rerun_failures,
+                candidate_failures,
             ),
             wait_count=(
                 _ci_transient_infra_wait_count(
                     state,
                     head_sha=status.head_sha,
-                    failures=rerun_failures,
+                    failures=candidate_failures,
                 )
                 + 1
             ),
@@ -901,20 +902,20 @@ def _should_rerun_transient_ci(
         return False
     if not status.ci_failures:
         return False
-    rerun_failures = _ci_transient_rerun_failures(status)
-    if not rerun_failures:
+    candidate_failures = _ci_candidate_failures(status)
+    if not candidate_failures:
         return False
-    if any(not failure.run_id for failure in rerun_failures):
+    if any(not failure.run_id for failure in candidate_failures):
         return False
-    if any(not _supports_failed_job_rerun(failure) for failure in rerun_failures):
+    if any(not _supports_failed_job_rerun(failure) for failure in candidate_failures):
         return False
-    if not all(_looks_like_transient_ci_failure(failure) for failure in rerun_failures):
+    if not all(_looks_like_transient_ci_failure(failure) for failure in candidate_failures):
         return False
     return (
         _ci_transient_rerun_count(
             state,
             head_sha=status.head_sha,
-            failures=rerun_failures,
+            failures=candidate_failures,
             legacy_failures=status.ci_failures,
         )
         < config.ci_transient_rerun_max_attempts
