@@ -105,6 +105,14 @@ class TestPlaywrightBrowserInstallCommand:
                 "npm --cwd apps/web install",
                 "npm --cwd apps/web exec -- playwright install chromium",
             ),
+            (
+                "npm ci --prefix apps/web",
+                "npm --prefix apps/web exec -- playwright install chromium",
+            ),
+            (
+                "npm install --prefix=apps/web",
+                "npm --prefix=apps/web exec -- playwright install chromium",
+            ),
         ],
     )
     def test_preserves_npm_package_directory_from_setup_install(

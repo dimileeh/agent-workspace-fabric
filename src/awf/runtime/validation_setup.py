@@ -292,9 +292,12 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     if executable not in _NODE_PACKAGE_MANAGERS:
         return None
     location_tokens: list[str] = []
+    dependency_install_seen = False
     subcommand_index = index + 1
     while subcommand_index < len(tokens):
         token = tokens[subcommand_index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            break
         if token in _NODE_PM_OPTION_VALUE_FLAGS:
             if token in _NODE_PM_LOCATION_OPTION_VALUE_FLAGS and subcommand_index + 1 < len(tokens):
                 location_tokens.extend((token, tokens[subcommand_index + 1]))
@@ -313,11 +316,15 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
         if token.startswith("-"):
             subcommand_index += 1
             continue
-        return (
-            _node_package_manager_command(executable, location_tokens)
-            if token in _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS
-            else None
-        )
+        if token in _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS:
+            dependency_install_seen = True
+            subcommand_index += 1
+            continue
+        if not dependency_install_seen:
+            return None
+        subcommand_index += 1
+    if dependency_install_seen:
+        return _node_package_manager_command(executable, location_tokens)
     if executable == "yarn":
         return _node_package_manager_command(executable, location_tokens)
     return None
