@@ -568,6 +568,10 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
             "build",
         )
     ) or (re.search(r"(?<![a-z0-9_])git\s+diff\s+--check(?![a-z0-9_])", text) is not None)
+    validation_command_run_noun = (
+        r"(?:pytest|ruff(?:\s+check)?|mypy|coverage|npm|lint|build|"
+        r"git\s+diff\s+--check)\s+run"
+    )
     instructional_validation_run = any(
         re.search(pattern, text) is not None
         for pattern in (
@@ -578,6 +582,11 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
             r"(?<![a-z0-9_])(?:must|should|needs?|required|requires?)\s+"
             r"(?:[a-z0-9_.:/\\`-]+\s+){1,8}(?:to\s+|be\s+)"
             r"(?:re-?run|run)(?![a-z0-9_])",
+            rf"(?<![a-z0-9_])(?:must|should|needs?|required|requires?)\s+"
+            rf"(?:a\s+|an\s+|the\s+)?{validation_command_run_noun}(?![a-z0-9_])",
+            rf"(?<![a-z0-9_])(?:a\s+|an\s+|the\s+)?"
+            rf"{validation_command_run_noun}\s+"
+            r"(?:is|are|was|were|be|been)\s+(?:required|needed)(?![a-z0-9_])",
         )
     )
     named_validation_command_handoff = (

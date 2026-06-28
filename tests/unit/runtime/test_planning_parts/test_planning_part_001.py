@@ -504,6 +504,8 @@ def test_conformance_requires_awf_validation_accepts_documentation_context_gaps(
         "rerun pytest under AWF.",
         "AWF validation needs pytest to run.",
         "AWF validation has to run pytest.",
+        "AWF validation still needs a pytest run.",
+        "A pytest run is required for AWF validation.",
     ),
 )
 def test_conformance_requires_awf_validation_accepts_named_validation_command_handoff_gaps(
