@@ -206,9 +206,6 @@ def profile_phase_command_plan(
     ):
         if phase == "setup":
             commands.extend(_phase_commands(profile, "setup"))
-            browser_install = playwright_browser_install_command(profile)
-            if browser_install is not None:
-                commands.append(ProfileExecutionCommand(phase="setup", command=browser_install))
             commands.extend(
                 ProfileExecutionCommand(
                     phase=DB_GENERATED_SETUP_PHASE,
@@ -218,6 +215,9 @@ def profile_phase_command_plan(
                 )
                 for command in profile.database.generated_setup
             )
+            browser_install = playwright_browser_install_command(profile)
+            if browser_install is not None:
+                commands.append(ProfileExecutionCommand(phase="setup", command=browser_install))
             continue
         if phase == "validate":
             commands.extend(
@@ -278,7 +278,7 @@ def node_package_manager_package_dir(profile: WorkspaceProfile) -> str | None:
 
 def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
     fallback_package_manager: str | None = None
-    for command in profile.phases.setup:
+    for command in (*profile.phases.setup, *profile.database.generated_setup):
         package_manager = _node_dependency_install_package_manager(command.command)
         if package_manager is not None:
             return package_manager

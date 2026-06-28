@@ -315,7 +315,7 @@ class TestHappyPath:
         ]
 
     @pytest.mark.unit
-    def test_profile_phase_command_plan_adds_browser_install_after_setup(self) -> None:
+    def test_profile_phase_command_plan_adds_browser_install_after_generated_setup(self) -> None:
         profile = WorkspaceProfile.model_validate(
             {
                 "name": "browser-setup-test",
@@ -329,11 +329,11 @@ class TestHappyPath:
 
         assert [(command.phase, command.command.command) for command in commands] == [
             ("setup", "npm install"),
-            ("setup", "npx playwright install chromium"),
             ("db_generated_setup", "python scripts/db_generated_setup.py"),
+            ("setup", "npx playwright install chromium"),
             ("pre_agent", "node scripts/pre.js"),
         ]
-        assert commands[1].command.required is False
+        assert commands[2].command.required is False
 
     @pytest.mark.unit
     def test_profile_phase_command_plan_adds_one_browser_install_for_multiple_browsers(
@@ -417,6 +417,27 @@ class TestHappyPath:
         commands = profile_phase_command_plan(profile, ("setup",))
 
         assert commands[-1].command.command == "pnpm exec playwright install chromium"
+
+    @pytest.mark.unit
+    def test_profile_phase_command_plan_browser_install_uses_generated_setup_package_manager(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-generated-setup-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {"setup": ["python scripts/setup.py"]},
+                "database": {"generated_setup": ["pnpm install --frozen-lockfile"]},
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup",))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "python scripts/setup.py"),
+            ("db_generated_setup", "pnpm install --frozen-lockfile"),
+            ("setup", "pnpm exec playwright install chromium"),
+        ]
 
     @pytest.mark.unit
     async def test_generated_browser_install_failure_is_non_blocking(
