@@ -190,7 +190,7 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
         wait=True,
         compose_up_timeout_seconds=300,
         force_recreate=True,
-        services=("agent",),
+        services=(),
     )
 
 
@@ -586,7 +586,7 @@ async def test_monitor_agent_idle_timeout_uses_workspace_compose_timeout_for_res
         wait=True,
         compose_up_timeout_seconds=900,
         force_recreate=True,
-        services=("agent",),
+        services=(),
     )
 
 
@@ -685,7 +685,7 @@ async def test_monitor_agent_cleanup_service_down_restarts_service_and_retries(
         wait=True,
         compose_up_timeout_seconds=300,
         force_recreate=True,
-        services=("agent",),
+        services=(),
     )
 
 
