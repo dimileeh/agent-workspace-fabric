@@ -508,7 +508,7 @@ async def test_agent_service_retry_guard_false_uses_recovery_abort_reason(
 
 
 @pytest.mark.unit
-async def test_agent_service_restart_recheck_failure_runs_terminal_callback(
+async def test_agent_service_restart_recheck_failure_skips_terminal_callback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -516,6 +516,8 @@ async def test_agent_service_restart_recheck_failure_runs_terminal_callback(
     executor._recheck_status.return_value = False
     callback_reason_codes: list[str | None] = []
     run_agent = AsyncMock(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT"), "validation-ok"])
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n")
 
     async def _service_down(*_args: object, **_kwargs: object) -> bool:
         return False
@@ -531,24 +533,26 @@ async def test_agent_service_restart_recheck_failure_runs_terminal_callback(
         workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=compose_file,
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
+        execution_owner_id="stale-owner",
         before_mark_failed=_before_mark_failed,
+        before_mark_failed_marks_workspace=True,
         expected_status=WorkspaceStatus.validating,
         failure_from_status=WorkspaceStatus.validating,
     )
 
     assert recovered is False
     assert result is None
-    assert callback_reason_codes == ["EXECUTOR_STALE_STATUS"]
+    assert callback_reason_codes == []
     executor._compose.ensure_project_up.assert_awaited_once()
     executor._recheck_status.assert_awaited_once_with(
         "ws_agent_service",
         expected=WorkspaceStatus.validating,
         action="agent_service_restart_recovery",
-        owner_id=None,
+        owner_id="stale-owner",
     )
     assert run_agent.await_count == 1
     executor._mark_failed.assert_not_awaited()
@@ -997,6 +1001,8 @@ async def test_validation_agent_service_recovery_callback_gets_terminal_details(
 ) -> None:
     executor = _executor(side_effect=[])
     callback_calls: list[dict[str, object]] = []
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n")
 
     async def _service_down(*_args: object, **_kwargs: object) -> bool:
         return False
@@ -1022,7 +1028,7 @@ async def test_validation_agent_service_recovery_callback_gets_terminal_details(
         workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
         profile=WorkspaceProfile(name="test"),
         compose_project="awf_ws_agent_service",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=compose_file,
         model="gpt-5.3-codex",
         command_evidence=[],
         workspace_id="ws_agent_service",
