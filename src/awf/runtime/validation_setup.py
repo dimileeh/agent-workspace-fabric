@@ -288,6 +288,7 @@ def profile_phase_command_plan(
                 )
                 for command in profile.database.pre_validation_refresh
             )
+            pending_validate_commands: list[ProfileExecutionCommand] = []
             for validate_command in _phase_commands(profile, "validate"):
                 if (
                     defer_browser_install_until_validate_install
@@ -297,10 +298,19 @@ def profile_phase_command_plan(
                 ):
                     commands.append(validate_command)
                     commands.append(deferred_browser_install)
+                    commands.extend(pending_validate_commands)
+                    pending_validate_commands = []
                     deferred_browser_install = None
                     defer_browser_install_until_validate_install = False
                     continue
+                if (
+                    defer_browser_install_until_validate_install
+                    and deferred_browser_install is not None
+                ):
+                    pending_validate_commands.append(validate_command)
+                    continue
                 commands.append(validate_command)
+            commands.extend(pending_validate_commands)
             continue
         if phase == "pre_agent":
             for pre_agent_command in _phase_commands(profile, phase):
@@ -309,6 +319,25 @@ def profile_phase_command_plan(
                 deferred_browser_install is not None
                 and not defer_browser_install_until_validate_install
             ):
+                commands.append(deferred_browser_install)
+                deferred_browser_install = None
+            continue
+        if phase == "post_agent":
+            if (
+                deferred_browser_install is None
+                and not _validate_node_dependency_install_exists(profile)
+                and _post_agent_node_dependency_install_exists(profile)
+            ):
+                browser_install = playwright_browser_install_command(profile)
+                if browser_install is not None:
+                    browser_install_package_manager = _infer_node_package_manager(profile)
+                    deferred_browser_install = ProfileExecutionCommand(
+                        phase="setup",
+                        command=browser_install,
+                    )
+            for post_agent_command in _phase_commands(profile, phase):
+                append_command_with_deferred_browser_install(post_agent_command)
+            if deferred_browser_install is not None:
                 commands.append(deferred_browser_install)
                 deferred_browser_install = None
             continue
@@ -375,6 +404,7 @@ def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
         *profile.phases.setup,
         *profile.database.generated_setup,
         *profile.phases.pre_agent,
+        *profile.phases.post_agent,
     ):
         package_manager = _node_dependency_install_package_manager(command.command)
         if package_manager is not None:
@@ -413,7 +443,9 @@ def _should_defer_browser_install_until_validate_install(
 ) -> bool:
     if _requested_pre_validate_node_dependency_install_exists(profile, requested_phases):
         return False
-    return _validate_node_dependency_install_exists(profile)
+    return _post_agent_node_dependency_install_exists(
+        profile
+    ) or _validate_node_dependency_install_exists(profile)
 
 
 def runtime_browser_probe_deferred_until_validate(profile: WorkspaceProfile) -> bool:
@@ -430,6 +462,13 @@ def _validate_node_dependency_install_exists(profile: WorkspaceProfile) -> bool:
     return any(
         _node_dependency_install_package_manager(command.command) is not None
         for command in profile.phases.validate_commands
+    )
+
+
+def _post_agent_node_dependency_install_exists(profile: WorkspaceProfile) -> bool:
+    return any(
+        _node_dependency_install_package_manager(command.command) is not None
+        for command in profile.phases.post_agent
     )
 
 
