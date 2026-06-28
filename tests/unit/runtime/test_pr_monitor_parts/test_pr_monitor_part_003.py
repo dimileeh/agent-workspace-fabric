@@ -21,6 +21,7 @@ from awf.runtime.pr_monitor import (
     RerunTransientCI,
     ReviewComment,
     ReviewThread,
+    WaitForCI,
     _log_shows_docker_registry_timeout,
     decide,
 )
@@ -73,6 +74,7 @@ def _status(
     base_behind: int = 0,
     merge_state_status: MergeStateStatus = MergeStateStatus.CLEAN,
     ci_failures: tuple[CheckFailure, ...] = (),
+    ci_runs_in_progress: bool = False,
     closed: bool = False,
     merged: bool = False,
 ) -> PRStatus:
@@ -91,12 +93,40 @@ def _status(
         base_behind_count=base_behind,
         merge_state_status=merge_state_status,
         ci_failures=ci_failures,
+        ci_runs_in_progress=ci_runs_in_progress,
         closed=closed,
         merged=merged,
     )
 
 
 class TestCiFailure:
+    @pytest.mark.unit
+    def test_failed_check_with_ci_run_in_progress_waits_before_missing_log_escalation(
+        self,
+    ) -> None:
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(),
+                ci_runs_in_progress=True,
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, WaitForCI)
+        assert action.reason == "ci_run_in_progress"
+
+    @pytest.mark.unit
+    def test_no_failure_without_ci_run_in_progress_keeps_existing_terminal_path(self) -> None:
+        action = decide(
+            _status(check_state=CheckState.SUCCESS, ci_runs_in_progress=False),
+            MonitorState(),
+            MonitorConfig(auto_merge=False),
+        )
+
+        assert isinstance(action, NotifyHuman)
+
     @pytest.mark.unit
     def test_transient_failure_dispatches_rerun_before_agent_repair(self) -> None:
         failure = CheckFailure(

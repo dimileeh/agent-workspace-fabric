@@ -220,7 +220,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -238,6 +238,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         assert failures[0].name == "python-coverage-shards (7)"
         assert failures[0].run_id == "123"
         assert "Docker pull failed" in failures[0].log_excerpt
+        assert runs_in_progress is False
         assert _run_view_calls(fake) == [
             ["gh", "run", "view", "123", "--repo", "o/r", "--log-failed"]
         ]
@@ -253,6 +254,7 @@ class TestFetchFailingCheckLogsRollupFallback:
                         "databaseId": 123,
                         "name": "python-coverage-shards (7)",
                         "conclusion": "FAILURE",
+                        "status": "completed",
                     }
                 ]
             ),
@@ -260,7 +262,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         fake.queue_result(returncode=0, stdout="HTTP status server error (502 Bad Gateway)")
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -275,7 +277,137 @@ class TestFetchFailingCheckLogsRollupFallback:
         )
 
         assert len(failures) == 1
+        assert runs_in_progress is False
         assert len(_run_view_calls(fake)) == 1
+
+    @pytest.mark.unit
+    async def test_rollup_fallback_skips_in_progress_actions_run_without_fetching_log(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 123,
+                        "name": "python-coverage-shards (7)",
+                        "conclusion": "",
+                        "status": "in_progress",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures, runs_in_progress = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (7)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert failures == ()
+        assert runs_in_progress is True
+        assert _run_view_calls(fake) == []
+
+    @pytest.mark.unit
+    async def test_run_list_skips_failed_in_progress_run_without_fetching_log(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 124,
+                        "name": "python-coverage-shards (8)",
+                        "conclusion": "FAILURE",
+                        "status": "in_progress",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures, runs_in_progress = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert failures == ()
+        assert runs_in_progress is True
+        assert _run_view_calls(fake) == []
+
+    @pytest.mark.unit
+    async def test_completed_empty_log_uses_check_run_annotations_fallback(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 125,
+                        "name": "lint-and-type",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="")
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "path": "src/awf/runtime/foo.py",
+                        "start_line": 10,
+                        "annotation_level": "failure",
+                        "message": "F401 imported but unused",
+                        "raw_details": "Error: Process completed with exit code 1.",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures, runs_in_progress = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="lint-and-type",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/125/job/789",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert runs_in_progress is False
+        assert len(failures) == 1
+        assert "src/awf/runtime/foo.py:10:1: F401 imported but unused" in failures[0].log_excerpt
+        assert "Process completed with exit code 1" in failures[0].log_excerpt
+        assert any("F401 imported" in item for item in failures[0].error_summaries)
+        assert any(
+            call.args
+            == [
+                "gh",
+                "api",
+                "repos/o/r/check-runs/789/annotations",
+                "--paginate",
+            ]
+            for call in fake.calls
+        )
 
     @pytest.mark.unit
     async def test_rollup_fallback_ignores_non_actions_evidence(self) -> None:
@@ -283,7 +415,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         fake.queue_result(returncode=0, stdout="[]")
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -327,6 +459,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         )
 
         assert failures == ()
+        assert runs_in_progress is False
         assert _run_view_calls(fake) == []
 
     @pytest.mark.unit
@@ -336,7 +469,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         fake.queue_result(returncode=1, stderr="gh network timeout with ghp_secret")
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -351,6 +484,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         )
 
         assert len(failures) == 1
+        assert runs_in_progress is False
         assert failures[0].log_excerpt == ""
         assert failures[0].evidence_warnings == (
             "GitHub Actions log unavailable for failed check python-coverage-shards (7).",

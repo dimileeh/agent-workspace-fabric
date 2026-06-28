@@ -1221,7 +1221,13 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if status.blocking_reviews:
         return NotifyHuman()
 
-    # 5. CI failures.
+    # 5. A failed shard can surface while the workflow run is still in progress.
+    # GitHub does not publish the downloadable failed-log archive until the run
+    # completes, so wait instead of classifying an empty evidence snapshot.
+    if status.ci_runs_in_progress:
+        return WaitForCI(reason="ci_run_in_progress")
+
+    # 5b. CI failures.
     if status.check_state == CheckState.FAILURE:
         return _ci_failure_action(status, state, config)
 

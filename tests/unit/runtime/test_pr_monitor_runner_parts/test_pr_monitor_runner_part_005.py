@@ -470,9 +470,10 @@ class TestMiscMonitorHelpers:
     @pytest.mark.unit
     def test_ci_failure_replacement_preserves_status_shape(self) -> None:
         failure = CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom")
-        updated = _with_ci_failures(_status(), (failure,))
+        updated = _with_ci_failures(_status(), ((failure,), True))
 
         assert updated.ci_failures == (failure,)
+        assert updated.ci_runs_in_progress is True
         assert updated.head_sha == "abc123"
 
     @pytest.mark.unit

@@ -193,6 +193,7 @@ class PRStatus:
     shipped PR #335 / #336 as "ready to merge" when they were BEHIND)."""
 
     ci_failures: tuple[CheckFailure, ...] = ()
+    ci_runs_in_progress: bool = False
     checks: tuple[CheckTiming, ...] = ()
     no_checks_observed: bool = False
     """Forge authoritatively reported an EMPTY check/status set for this head.

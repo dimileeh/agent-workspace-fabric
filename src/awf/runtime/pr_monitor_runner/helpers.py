@@ -481,12 +481,23 @@ def _monitor_state_verdict(verdict: str) -> Verdict:
     return "fix_committed"
 
 
-def _with_ci_failures(status: PRStatus, failures: tuple[CheckFailure, ...]) -> PRStatus:
-    """Immutable-replace ci_failures on a ``PRStatus`` (frozen dataclass)."""
-    # Import dataclasses.replace locally to keep the top-level imports tight.
-    from dataclasses import replace
-
-    return replace(status, ci_failures=failures)
+def _with_ci_failures(
+    status: PRStatus,
+    failures: tuple[CheckFailure, ...] | tuple[tuple[CheckFailure, ...], bool],
+) -> PRStatus:
+    """Immutable-replace CI failure evidence on a ``PRStatus``."""
+    ci_runs_in_progress = False
+    ci_failures: tuple[CheckFailure, ...]
+    if len(failures) == 2 and isinstance(failures[0], tuple) and isinstance(failures[1], bool):
+        ci_failures = failures[0]
+        ci_runs_in_progress = failures[1]
+    else:
+        ci_failures = failures
+    return replace(
+        status,
+        ci_failures=ci_failures,
+        ci_runs_in_progress=ci_runs_in_progress,
+    )
 
 
 @dataclass(frozen=True)

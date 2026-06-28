@@ -188,7 +188,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -232,7 +232,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -275,7 +275,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -320,7 +320,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -366,7 +366,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -402,7 +402,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -441,7 +441,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -478,7 +478,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -515,7 +515,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -552,7 +552,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -590,7 +590,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -627,7 +627,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -667,7 +667,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -697,7 +697,7 @@ class TestFetchFailingCheckLogs:
         fake.queue_result(returncode=1, stderr="log not found")
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
         )
 
@@ -740,7 +740,7 @@ class TestFetchFailingCheckLogs:
         # 3) gh run view 3 --log-failed (for unit-tests)
         fake.queue_result(returncode=0, stdout="timeout log")
         client = GitHubClient(fake)
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
@@ -778,7 +778,7 @@ class TestFetchFailingCheckLogs:
         )
         fake.queue_result(returncode=1, stderr="log not found")
         client = GitHubClient(fake)
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
         )
         assert len(failures) == 1
@@ -802,7 +802,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
         )
 
@@ -829,7 +829,7 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
         )
 
@@ -853,7 +853,7 @@ class TestFetchFailingCheckLogs:
             ),
         )
         client = GitHubClient(fake)
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
         )
         assert failures == ()
@@ -864,7 +864,7 @@ class TestFetchFailingCheckLogs:
         fake.queue_result(returncode=0, stdout="")
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        failures, _runs_in_progress = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
         )
 

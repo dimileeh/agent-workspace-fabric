@@ -127,8 +127,8 @@ class ForgeClient(Protocol):
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
         rollup_checks: Sequence[CheckTiming] = (),
-    ) -> tuple[CheckFailure, ...]:
-        """Return logs for failing/timed-out checks at ``head_sha``."""
+    ) -> tuple[CheckFailure, ...] | tuple[tuple[CheckFailure, ...], bool]:
+        """Return failing-check logs and, when available, an in-progress-run signal."""
         ...
 
     async def rerun_failed_workflow_jobs(self, *, repo: RepoRef, run_id: str) -> None:

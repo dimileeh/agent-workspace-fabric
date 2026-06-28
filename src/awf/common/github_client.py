@@ -63,7 +63,7 @@ _log = get_logger(__name__)
 # PR-number extraction would otherwise silently yield ``None`` and break the
 # monitor handoff.
 _PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
-_ACTIONS_RUN_JOB_PATH_RE = re.compile(r"/actions/runs/(?P<run_id>\d+)/job/\d+")
+_ACTIONS_RUN_JOB_PATH_RE = re.compile(r"/actions/runs/(?P<run_id>\d+)/job/(?P<job_id>\d+)")
 _FAILED_CHECK_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"})
 
 
@@ -900,7 +900,7 @@ class GitHubClient:
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
         rollup_checks: Sequence[CheckTiming] = (),
-    ) -> tuple[CheckFailure, ...]:
+    ) -> tuple[tuple[CheckFailure, ...], bool]:
         """Fetch logs for failing/timed-out checks via ``gh run view``.
 
         The GraphQL PR query only surfaces an aggregate ``statusCheckRollup``
@@ -929,12 +929,69 @@ class GitHubClient:
         )
         failures: list[CheckFailure] = []
         seen_run_ids: set[str] = set()
+        runs_in_progress = False
+        status_by_run = {
+            str(run["databaseId"]): str(run.get("status") or "").lower()
+            for run in runs_raw or []
+            if run.get("databaseId") is not None
+        }
+        check_run_id_by_run = {
+            run_id: check_run_id
+            for check in _rollup_action_run_failures(rollup_checks)
+            for run_id, check_run_id in (
+                (
+                    _actions_run_id_from_details_url(check.details_url),
+                    _actions_check_run_id_from_details_url(check.details_url),
+                ),
+            )
+            if run_id is not None and check_run_id is not None
+        }
+
+        async def _annotation_log_text(check_run_id: str | None) -> str:
+            if check_run_id is None:
+                return ""
+            result = await self._run_gh(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo.slug()}/check-runs/{check_run_id}/annotations",
+                    "--paginate",
+                ],
+                operation="check_run_annotations",
+                strict=False,
+            )
+            if not result.ok or not result.stdout.strip():
+                return ""
+            try:
+                payload = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                return ""
+            if not isinstance(payload, list):
+                return ""
+            lines: list[str] = []
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                message = _clean_optional_str(item.get("message"))
+                raw_details = _clean_optional_str(item.get("raw_details"))
+                path = _clean_optional_str(item.get("path"))
+                start_line = item.get("start_line")
+                start_column = item.get("start_column")
+                if path and isinstance(start_line, int) and message:
+                    column = start_column if isinstance(start_column, int) else 1
+                    lines.append(f"{path}:{start_line}:{column}: {message}")
+                elif message:
+                    lines.append(message)
+                if raw_details:
+                    lines.extend(raw_details.splitlines())
+            return "\n".join(lines)
 
         async def _append_failure(
             *,
             run_id: str | None,
             run_name: str,
             conclusion: str,
+            check_run_id: str | None = None,
         ) -> None:
             log = (
                 await self._run_gh(
@@ -954,6 +1011,8 @@ class GitHubClient:
                 else None
             )
             raw_log_text = log.stdout if log is not None else ""
+            if not raw_log_text.strip():
+                raw_log_text = await _annotation_log_text(check_run_id)
             log_text = redact_ci_log(raw_log_text)
             evidence = extract_ci_failure_evidence(
                 raw_log_text,
@@ -984,23 +1043,31 @@ class GitHubClient:
             run_id = str(database_id) if database_id is not None else None
             if run_id is not None:
                 seen_run_ids.add(run_id)
+            if str(run.get("status") or "").lower() != "completed":
+                runs_in_progress = True
+                continue
             run_name = run.get("name") or (f"run/{run_id}" if run_id is not None else "run/unknown")
             await _append_failure(
                 run_id=run_id,
                 run_name=run_name,
                 conclusion=conclusion_upper,
+                check_run_id=check_run_id_by_run.get(run_id or ""),
             )
         for check in _rollup_action_run_failures(rollup_checks):
             run_id = _actions_run_id_from_details_url(check.details_url)
             if run_id is None or run_id in seen_run_ids:
                 continue
             seen_run_ids.add(run_id)
+            if status_by_run.get(run_id) not in {None, "completed"}:
+                runs_in_progress = True
+                continue
             await _append_failure(
                 run_id=run_id,
                 run_name=check.name,
                 conclusion=(check.conclusion or "FAILURE").upper(),
+                check_run_id=_actions_check_run_id_from_details_url(check.details_url),
             )
-        return tuple(failures)
+        return (tuple(failures), runs_in_progress)
 
     async def rerun_failed_workflow_jobs(self, *, repo: RepoRef, run_id: str) -> None:
         """Rerun only failed jobs for a workflow run.
@@ -1389,6 +1456,18 @@ def _actions_run_id_from_details_url(details_url: str | None) -> str | None:
     if match is None:
         return None
     return match.group("run_id")
+
+
+def _actions_check_run_id_from_details_url(details_url: str | None) -> str | None:
+    if not details_url:
+        return None
+    parsed = urlsplit(details_url)
+    if parsed.netloc.lower() != "github.com":
+        return None
+    match = _ACTIONS_RUN_JOB_PATH_RE.search(parsed.path)
+    if match is None:
+        return None
+    return match.group("job_id")
 
 
 # ── Tiny helpers kept private to avoid accidental imports ──────────────────
