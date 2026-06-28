@@ -63,7 +63,8 @@ class ConformanceGap(str):
     detail: str
 
     def __new__(cls, kind: GapKind, detail: str) -> ConformanceGap:
-        assert isinstance(kind, GapKind)
+        if not isinstance(kind, GapKind):
+            raise TypeError(f"kind must be a GapKind, got {type(kind)!r}")
         return str.__new__(cls, detail)
 
 

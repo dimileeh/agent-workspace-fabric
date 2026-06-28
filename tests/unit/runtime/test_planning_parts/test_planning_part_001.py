@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -74,6 +76,27 @@ def test_conformance_gap_hash_matches_string_equality() -> None:
     assert hash(gap) == hash(detail)
     assert gap in {detail}
     assert {detail: "seen"}[gap] == "seen"
+
+
+@pytest.mark.unit
+def test_conformance_gap_rejects_invalid_kind_under_optimized_python() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-O",
+            "-c",
+            (
+                "from awf.runtime.planning import ConformanceGap\n"
+                "ConformanceGap('not-a-kind', 'detail')"
+            ),
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "TypeError: kind must be a GapKind" in result.stderr
 
 
 @pytest.mark.unit
