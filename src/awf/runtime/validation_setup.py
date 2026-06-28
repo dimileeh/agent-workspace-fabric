@@ -478,12 +478,25 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
             return package_manager
         scoped_install = _leading_cd_package_scope(tokens, index)
     package_dir, install_index = scoped_install
-    package_manager = tokens[install_index]
-    return _node_dependency_install_package_manager_from_tokens(
-        tokens,
-        install_index,
-        _node_package_manager_cd_location_tokens(package_manager, package_dir),
-    )
+    index = install_index
+    while index < len(tokens):
+        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+            index += 1
+        if index >= len(tokens):
+            return None
+        package_manager = tokens[index]
+        inferred_package_manager = _node_dependency_install_package_manager_from_tokens(
+            tokens,
+            index,
+            _node_package_manager_cd_location_tokens(package_manager, package_dir),
+        )
+        if inferred_package_manager is not None:
+            return inferred_package_manager
+        corepack_install_index = _corepack_preamble_next_command_index(tokens, index)
+        if corepack_install_index is None:
+            return None
+        index = corepack_install_index
+    return None
 
 
 def _corepack_preamble_next_command_index(tokens: list[str], index: int) -> int | None:
