@@ -170,6 +170,22 @@ async def run_validation_and_fix_cycle(
             worktree_path=worktree_path,
         )
 
+    async def _record_deferred_runtime_browser_findings() -> None:
+        record_browser_findings = getattr(
+            self,
+            "_record_runtime_browser_findings_safe",
+            None,
+        )
+        if callable(record_browser_findings) and runtime_browser_probe_deferred_until_validate(
+            profile
+        ):
+            await record_browser_findings(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+            )
+
     if not await self._transition_if_current(
         workspace_id,
         from_status=WorkspaceStatus.running,
@@ -833,20 +849,7 @@ async def run_validation_and_fix_cycle(
                     )
                     if post_conformance_head_sha:
                         successful_validation_workspace_head_sha = post_conformance_head_sha
-                record_browser_findings = getattr(
-                    self,
-                    "_record_runtime_browser_findings_safe",
-                    None,
-                )
-                if callable(
-                    record_browser_findings
-                ) and runtime_browser_probe_deferred_until_validate(profile):
-                    await record_browser_findings(
-                        workspace_id=workspace_id,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        profile=profile,
-                    )
+                await _record_deferred_runtime_browser_findings()
                 await self._finish_pending_validate_operations(
                     workspace_id=workspace_id,
                     status=OperationStatus.succeeded,
@@ -895,6 +898,7 @@ async def run_validation_and_fix_cycle(
             # If a post-validation conformance fix already consumed a
             # prior successful run, this terminal path intentionally
             # reports coverage from the fresh failing validation result.
+            await _record_deferred_runtime_browser_findings()
             await self._finish_pending_validate_operations(
                 workspace_id=workspace_id,
                 status=OperationStatus.failed,
