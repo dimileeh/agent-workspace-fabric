@@ -315,19 +315,33 @@ async def _record_runtime_browser_findings(
     workspace = await repo.get(workspace_id)
     if workspace is None:  # pragma: no cover - destroyed mid-flight
         return
+    recorded_browsers = {
+        browser.lower()
+        for event in workspace.events
+        if event.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
+        and event.reason_code == RUNTIME_BROWSER_UNAVAILABLE
+        and isinstance(event.payload, Mapping)
+        and isinstance(browser := event.payload.get("browser"), str)
+    }
     for finding in findings:
         details = dict(finding.details)
+        browser = details.get("browser")
+        browser_key = browser.lower() if isinstance(browser, str) else None
+        if browser_key is not None and browser_key in recorded_browsers:
+            continue
         await repo.add_event(
             workspace,
             event_type=RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE,
             reason_code=RUNTIME_BROWSER_UNAVAILABLE,
             payload={
-                "browser": details.get("browser"),
+                "browser": browser,
                 "available_browsers": details.get("available_browsers"),
                 "path": finding.path,
                 "message": finding.message,
             },
         )
+        if browser_key is not None:
+            recorded_browsers.add(browser_key)
     await session.flush()
 
 

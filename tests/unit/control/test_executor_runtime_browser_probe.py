@@ -123,6 +123,46 @@ class TestRecordRuntimeBrowserFindings:
             }
 
     @pytest.mark.unit
+    async def test_repeated_missing_browser_finding_records_single_event(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        validation = _FindingsValidation((_browser_finding("chromium"),))
+
+        class _Executor:
+            _session_factory = factory
+            _validation = validation
+
+        async with session_scope(factory) as session:
+            await _record_runtime_browser_findings(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+                session=session,
+            )
+            await _record_runtime_browser_findings(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+                session=session,
+            )
+
+        assert validation.calls == [ws_id, ws_id]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            events = [
+                e for e in ws.events if e.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
+            ]
+            assert len(events) == 1
+            assert events[0].payload["browser"] == "chromium"
+
+    @pytest.mark.unit
     async def test_legacy_validation_without_probe_is_noop(
         self,
         factory: async_sessionmaker[AsyncSession],
