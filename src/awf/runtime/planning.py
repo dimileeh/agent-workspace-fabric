@@ -636,8 +636,21 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         named_validation_command
         and any(has_marker(marker) for marker in ("not run", "has not run"))
     )
+    negated_saved_plan_scoped_check_record = (
+        re.search(
+            r"(?<![a-z0-9_])(?:focused|scoped)[-\s]+checks?"
+            r"(?:\s+(?:evidence|artifact))?\s+"
+            r"(?:(?:is|are|was|were|has|have|had|remains?)\s+)?"
+            r"(?:not\s+(?:yet\s+)?(?:been\s+)?recorded|unrecorded)(?![a-z0-9_])"
+            r"[^.;:]*\b(?:from|in|inside|within)\s+(?:the\s+)?"
+            r"(?:saved\s+)?plan(?![a-z0-9_])",
+            text,
+        )
+        is not None
+    )
     saved_plan_scoped_check_handoff = (
-        has_marker("saved plan")
+        not negated_saved_plan_scoped_check_record
+        and has_marker("saved plan")
         and named_validation_command_handoff
         and re.search(r"(?<![a-z0-9_])(?:focused|scoped)[-\s]+checks?(?![a-z0-9_])", text)
         is not None
