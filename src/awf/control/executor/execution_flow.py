@@ -108,6 +108,7 @@ from awf.runtime.ownership import (
 from awf.runtime.validation import (
     ValidationResult,
 )
+from awf.runtime.validation_setup import runtime_browser_probe_deferred_until_validate
 
 
 async def execute(
@@ -457,7 +458,9 @@ async def execute(
             profile=profile,
         )
         record_browser_findings = getattr(self, "_record_runtime_browser_findings_safe", None)
-        if callable(record_browser_findings):
+        if callable(record_browser_findings) and not runtime_browser_probe_deferred_until_validate(
+            profile
+        ):
             await record_browser_findings(
                 workspace_id=workspace_id,
                 compose_project=compose_project,

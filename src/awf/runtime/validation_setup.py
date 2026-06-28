@@ -426,6 +426,16 @@ def _should_defer_browser_install_until_validate_install(
     return _validate_node_dependency_install_exists(profile)
 
 
+def runtime_browser_probe_deferred_until_validate(profile: WorkspaceProfile) -> bool:
+    """Return whether setup-time browser probes would run before browser provisioning."""
+    if playwright_browser_install_command(profile) is None:
+        return False
+    return _should_defer_browser_install_until_validate_install(
+        profile,
+        {"setup", "pre_agent"},
+    )
+
+
 def _validate_node_dependency_install_exists(profile: WorkspaceProfile) -> bool:
     return any(
         _node_dependency_install_package_manager(command.command) is not None

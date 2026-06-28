@@ -60,6 +60,7 @@ from awf.control.executor.monitor_handoff_setup import (
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationResult
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
     _make_executor,
@@ -1076,6 +1077,59 @@ class TestHandoffSetupRunsBrowserProbe:
             "record_setup_dependency_network_events",
             "record_runtime_toolchain_findings",
             "record_runtime_browser_findings",
+        ]
+
+    @pytest.mark.unit
+    async def test_setup_skips_browser_findings_when_install_is_deferred_to_validate(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        browser_calls: list[str] = []
+        trace: list[str] = []
+        validation = _OkSetupValidation(trace=trace)
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-validate-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["node scripts/generate-config.js"],
+                    "validate": [
+                        "pnpm install --frozen-lockfile",
+                        "pnpm test",
+                    ],
+                },
+            }
+        )
+
+        class _Executor:
+            _validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                trace.append("record_setup_dependency_network_events")
+
+            async def _record_runtime_toolchain_findings(self, **_kwargs: Any) -> None:
+                trace.append("record_runtime_toolchain_findings")
+
+            async def _record_runtime_browser_findings(self, **_kwargs: Any) -> None:
+                trace.append("record_runtime_browser_findings")
+                browser_calls.append("called")
+
+        ok = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-browser-deferred",
+            profile=profile,
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert ok is True
+        assert validation.calls == [("setup", "pre_agent")]
+        assert browser_calls == []
+        assert trace == [
+            "run_profile_phases",
+            "record_setup_dependency_network_events",
+            "record_runtime_toolchain_findings",
         ]
 
     @pytest.mark.unit

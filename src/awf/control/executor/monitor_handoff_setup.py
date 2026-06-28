@@ -25,11 +25,13 @@ from awf.node.git_manager import (
     repair_mirror_hooks_path,
     verify_head_object_exists,
 )
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
+from awf.runtime.validation_setup import runtime_browser_probe_deferred_until_validate
 
 _log = get_logger(__name__)
 
@@ -390,7 +392,11 @@ async def _run_monitor_handoff_profile_setup(
                 error=redact_secrets(str(exc))[:1000],
             )
         record_browser_findings = getattr(self, "_record_runtime_browser_findings", None)
-        if callable(record_browser_findings):
+        browser_probe_deferred = isinstance(
+            profile,
+            WorkspaceProfile,
+        ) and runtime_browser_probe_deferred_until_validate(profile)
+        if callable(record_browser_findings) and not browser_probe_deferred:
             try:
                 await record_browser_findings(
                     workspace_id=workspace_id,
