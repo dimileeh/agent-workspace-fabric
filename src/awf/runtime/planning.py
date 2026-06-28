@@ -740,7 +740,7 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         r"need|needs|must|should|required|missing|absent|stale|outdated)",
         r"(?<![a-z0-9_])(?:add|create|edit|include|modify|update|write|revise)\s+"
         r"(?:the\s+)?(?:saved\s+)?plan(?![a-z0-9_])",
-        r"(?<![a-z0-9_])(?:add|create|edit|include|modify|update|write|revise)\b"
+        r"(?<![a-z0-9_])(?:add|create|edit|include|modify|record|update|write|revise)\b"
         r"[^.;:]*\b(?:to|in|inside|into|within)\s+(?:the\s+)?"
         r"(?:saved\s+)?plan(?![a-z0-9_])",
         r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
