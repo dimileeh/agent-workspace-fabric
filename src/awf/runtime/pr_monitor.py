@@ -651,6 +651,27 @@ _CI_TRANSIENT_FAILURE_MARKERS = (
     "lost communication with the server",
 )
 
+_CI_CODE_FAILURE_MARKERS = (
+    "traceback (most recent call last):",
+    "assertionerror",
+    "=== short test summary info ===",
+    "found type errors",
+    "--- fail:",
+    "panic:",
+)
+
+
+def _log_shows_code_failure(log_text: str) -> bool:
+    if any(marker in log_text for marker in _CI_CODE_FAILURE_MARKERS):
+        return True
+    for line in log_text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("failed ") and "::" in stripped:
+            return True
+        if ".py:" in stripped and ": error:" in stripped:
+            return True
+    return False
+
 
 def _ci_failure_identity(failure: CheckFailure) -> tuple[str, str, str]:
     """Stable identity for one failing check inside a retry-budget key.
@@ -834,7 +855,9 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     log_text = failure.log_excerpt.lower()
     if not log_text.strip():
         return bool(failure.run_id) and failure.conclusion.upper() == "TIMED_OUT"
-    if any(marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS):
+    if not _log_shows_code_failure(log_text) and any(
+        marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS
+    ):
         return True
     return _log_shows_docker_registry_timeout(log_text)
 

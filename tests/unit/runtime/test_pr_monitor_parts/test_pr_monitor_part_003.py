@@ -237,6 +237,32 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_generic_transient_text_inside_pytest_failure_reports_failure(self) -> None:
+        """Transient marker substrings inside real test failure output must not
+        turn the entire check into a rerunnable CI flake."""
+        failure = CheckFailure(
+            name="integration-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "tests/integration/test_fetch.py::test_download_prompt FAILED\n"
+                "E   AssertionError: failed to download prompt fixture\n"
+                "E   assert 'try again later' == 'ready'\n"
+                "=== short test summary info ===\n"
+                "FAILED tests/integration/test_fetch.py::test_download_prompt"
+            ),
+            run_id="25897584272",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_mixed_run_with_rollup_marker_and_code_evidence_reports_failure(
         self,
     ) -> None:
