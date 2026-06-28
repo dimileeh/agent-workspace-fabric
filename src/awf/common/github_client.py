@@ -64,6 +64,7 @@ _log = get_logger(__name__)
 # monitor handoff.
 _PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
 _ACTIONS_RUN_JOB_PATH_RE = re.compile(r"/actions/runs/(?P<run_id>\d+)/job/(?P<job_id>\d+)")
+_CHECK_RUN_API_PATH_RE = re.compile(r"/repos/[^/]+/[^/]+/check-runs/(?P<check_run_id>\d+)$")
 _FAILED_CHECK_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"})
 
 
@@ -935,21 +936,46 @@ class GitHubClient:
             for run in runs_raw or []
             if run.get("databaseId") is not None
         }
-        check_run_ids_by_run: dict[str, list[str]] = {}
+        job_ids_by_run: dict[str, list[str]] = {}
         for check in _rollup_action_run_failures(rollup_checks):
             run_id = _actions_run_id_from_details_url(check.details_url)
-            check_run_id = _actions_check_run_id_from_details_url(check.details_url)
-            if run_id is None or check_run_id is None:
+            job_id = _actions_job_id_from_details_url(check.details_url)
+            if run_id is None or job_id is None:
                 continue
-            check_run_ids = check_run_ids_by_run.setdefault(run_id, [])
-            if check_run_id not in check_run_ids:
-                check_run_ids.append(check_run_id)
+            job_ids = job_ids_by_run.setdefault(run_id, [])
+            if job_id not in job_ids:
+                job_ids.append(job_id)
 
-        async def _annotation_log_text(check_run_ids: Sequence[str]) -> str:
-            if not check_run_ids:
+        async def _check_run_id_for_job(job_id: str) -> str | None:
+            result = await self._run_gh(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo.slug()}/actions/jobs/{job_id}",
+                ],
+                operation="workflow_job",
+                strict=False,
+            )
+            if not result.ok or not result.stdout.strip():
+                return None
+            try:
+                payload = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(payload, dict):
+                return None
+            return _actions_check_run_id_from_api_url(
+                _clean_optional_str(payload.get("check_run_url"))
+            )
+
+        async def _annotation_log_text(job_ids: Sequence[str]) -> str:
+            if not job_ids:
                 return ""
             lines: list[str] = []
-            for check_run_id in check_run_ids:
+            for job_id in job_ids:
+                check_run_id = await _check_run_id_for_job(job_id)
+                if check_run_id is None:
+                    continue
                 result = await self._run_gh(
                     [
                         "gh",
@@ -995,7 +1021,7 @@ class GitHubClient:
             run_id: str | None,
             run_name: str,
             conclusion: str,
-            check_run_ids: Sequence[str] = (),
+            job_ids: Sequence[str] = (),
         ) -> None:
             log = (
                 await self._run_gh(
@@ -1016,7 +1042,7 @@ class GitHubClient:
             )
             raw_log_text = log.stdout if log is not None else ""
             if not raw_log_text.strip():
-                raw_log_text = await _annotation_log_text(check_run_ids)
+                raw_log_text = await _annotation_log_text(job_ids)
             log_text = redact_ci_log(raw_log_text)
             evidence = extract_ci_failure_evidence(
                 raw_log_text,
@@ -1055,7 +1081,7 @@ class GitHubClient:
                 run_id=run_id,
                 run_name=run_name,
                 conclusion=conclusion_upper,
-                check_run_ids=check_run_ids_by_run.get(run_id or "", ()),
+                job_ids=job_ids_by_run.get(run_id or "", ()),
             )
         for check in _rollup_action_run_failures(rollup_checks):
             run_id = _actions_run_id_from_details_url(check.details_url)
@@ -1069,7 +1095,7 @@ class GitHubClient:
                 run_id=run_id,
                 run_name=check.name,
                 conclusion=(check.conclusion or "FAILURE").upper(),
-                check_run_ids=check_run_ids_by_run.get(run_id, ()),
+                job_ids=job_ids_by_run.get(run_id, ()),
             )
         return (tuple(failures), runs_in_progress)
 
@@ -1462,7 +1488,7 @@ def _actions_run_id_from_details_url(details_url: str | None) -> str | None:
     return match.group("run_id")
 
 
-def _actions_check_run_id_from_details_url(details_url: str | None) -> str | None:
+def _actions_job_id_from_details_url(details_url: str | None) -> str | None:
     if not details_url:
         return None
     parsed = urlsplit(details_url)
@@ -1472,6 +1498,18 @@ def _actions_check_run_id_from_details_url(details_url: str | None) -> str | Non
     if match is None:
         return None
     return match.group("job_id")
+
+
+def _actions_check_run_id_from_api_url(check_run_url: str | None) -> str | None:
+    if not check_run_url:
+        return None
+    parsed = urlsplit(check_run_url)
+    if parsed.netloc.lower() != "api.github.com":
+        return None
+    match = _CHECK_RUN_API_PATH_RE.search(parsed.path)
+    if match is None:
+        return None
+    return match.group("check_run_id")
 
 
 # ── Tiny helpers kept private to avoid accidental imports ──────────────────

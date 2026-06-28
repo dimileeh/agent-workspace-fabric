@@ -367,6 +367,10 @@ class TestFetchFailingCheckLogsRollupFallback:
         fake.queue_result(returncode=0, stdout="")
         fake.queue_result(
             returncode=0,
+            stdout=json.dumps({"check_run_url": "https://api.github.com/repos/o/r/check-runs/456"}),
+        )
+        fake.queue_result(
+            returncode=0,
             stdout=json.dumps(
                 [
                     [
@@ -417,7 +421,16 @@ class TestFetchFailingCheckLogsRollupFallback:
             == [
                 "gh",
                 "api",
-                "repos/o/r/check-runs/789/annotations",
+                "repos/o/r/actions/jobs/789",
+            ]
+            for call in fake.calls
+        )
+        assert any(
+            call.args
+            == [
+                "gh",
+                "api",
+                "repos/o/r/check-runs/456/annotations",
                 "--paginate",
                 "--slurp",
             ]
@@ -445,6 +458,10 @@ class TestFetchFailingCheckLogsRollupFallback:
         fake.queue_result(returncode=0, stdout="")
         fake.queue_result(
             returncode=0,
+            stdout=json.dumps({"check_run_url": "https://api.github.com/repos/o/r/check-runs/456"}),
+        )
+        fake.queue_result(
+            returncode=0,
             stdout=json.dumps(
                 [
                     [
@@ -457,6 +474,10 @@ class TestFetchFailingCheckLogsRollupFallback:
                     ]
                 ]
             ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps({"check_run_url": "https://api.github.com/repos/o/r/check-runs/457"}),
         )
         fake.queue_result(
             returncode=0,
@@ -504,8 +525,8 @@ class TestFetchFailingCheckLogsRollupFallback:
             for call in fake.calls
             if call.args[:2] == ["gh", "api"] and call.args[2].endswith("/annotations")
         ] == [
-            "repos/o/r/check-runs/789/annotations",
-            "repos/o/r/check-runs/790/annotations",
+            "repos/o/r/check-runs/456/annotations",
+            "repos/o/r/check-runs/457/annotations",
         ]
 
     @pytest.mark.unit
