@@ -810,6 +810,7 @@ async def _run_agent_task_with_optional_planning(
     before_plan = await self._changed_paths(worktree_path)
     plan_file_digest_before = _digest_file_if_present(worktree_path / plan_path)
     plan_candidates_before = _plan_artifact_candidate_digests(worktree_path, plan_path)
+    skip_planning_for_existing_plan = accept_existing_plan and plan_file_digest_before is not None
     baseline_sha: str | None = None
     rev_r = await self._runner.run(
         [
@@ -827,14 +828,19 @@ async def _run_agent_task_with_optional_planning(
         if "dirty_paths" not in planning_retry_scope_baseline:
             planning_retry_scope_baseline["dirty_paths"] = set(before_plan)
             planning_retry_scope_baseline["head_sha"] = baseline_sha
-        elif accept_existing_plan:
+        elif accept_existing_plan and not (
+            # Once a prior attempt passed planning scope, skip-planning retries
+            # start from the recovered worktree so implementation deltas are not
+            # misclassified as planning-only scope violations.
+            skip_planning_for_existing_plan
+            and "post_planning_dirty_paths" in planning_retry_scope_baseline
+        ):
             preserved_dirty_paths = planning_retry_scope_baseline.get("dirty_paths")
             if isinstance(preserved_dirty_paths, set):
                 before_plan = {path for path in preserved_dirty_paths if isinstance(path, Path)}
             preserved_head_sha = planning_retry_scope_baseline.get("head_sha")
             if isinstance(preserved_head_sha, str) and preserved_head_sha:
                 baseline_sha = preserved_head_sha
-    skip_planning_for_existing_plan = accept_existing_plan and plan_file_digest_before is not None
     if not skip_planning_for_existing_plan:
         await self._update_subphase(workspace.id, "planning")
         plan_result = await adapter.run(
@@ -911,7 +917,6 @@ async def _run_agent_task_with_optional_planning(
                 offending_paths=extra,
                 summary=f"planning phase changed files outside `{plan_path}`",
             )
-
     gaps: tuple[str, ...] = ()
     last_report: PlanConformanceReport | None = None
     last_iteration = 0
@@ -937,6 +942,9 @@ async def _run_agent_task_with_optional_planning(
     #    empty digests, which would falsely trip
     #    ``classify_conformance_stall``'s repeated_output detector.
     implementation_baseline_sha = await self._git_rev_parse_head(worktree_path)
+    if planning_retry_scope_baseline is not None:
+        planning_retry_scope_baseline["post_planning_dirty_paths"] = set(after_plan)
+        planning_retry_scope_baseline["post_planning_head_sha"] = implementation_baseline_sha
     iteration_start_digest = self._digest_dirty_content(
         worktree_path, dirty_paths, head_sha=implementation_baseline_sha
     )

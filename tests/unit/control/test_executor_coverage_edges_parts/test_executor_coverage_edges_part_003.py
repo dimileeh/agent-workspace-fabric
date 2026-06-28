@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from awf.common.commands import FakeCommandRunner
+from awf.adapters.base import AgentRunError
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -407,6 +408,86 @@ async def test_planning_recovery_retry_accepts_existing_required_plan(
     assert len(adapter.prompts) == 2
     assert adapter.prompts[0].startswith("## Execution phase")
     assert adapter.prompts[1].startswith("## Conformance phase")
+
+
+@pytest.mark.unit
+async def test_planning_recovery_retry_skips_plan_scope_for_implementation_delta(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = worktree / "docs" / "awf-plans" / "ws_retry_impl.md"
+
+    class _InterruptedAfterPlanningAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                plan_path.parent.mkdir(parents=True, exist_ok=True)
+                plan_path.write_text("# Plan\n\nImplement after recovery.\n", encoding="utf-8")
+            if len(self.prompts) == 2:
+                raise AgentRunError(
+                    agent=AgentRuntime.codex,
+                    result=CommandResult(
+                        returncode=124,
+                        stdout="",
+                        stderr='service "agent" is not running',
+                    ),
+                    reason_code="AGENT_IDLE_TIMEOUT",
+                )
+            return result
+
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # initial before_plan
+    runner.queue_result(returncode=0, stdout="base_sha\n")  # initial baseline HEAD
+    runner.queue_result(returncode=0, stdout="")  # initial dirty_paths after planning
+    runner.queue_result(returncode=0, stdout="")  # initial committed_paths_since
+    runner.queue_result(returncode=0, stdout="post_plan_sha\n")  # implementation baseline
+    executor = _executor_with_runner(runner, tmp_path)
+    planning_retry_scope_baseline: dict[str, object] = {}
+
+    with pytest.raises(AgentRunError):
+        await executor._run_agent_task_with_optional_planning(
+            adapter=_InterruptedAfterPlanningAdapter("plan", "implementation"),  # type: ignore[arg-type]
+            workspace=SimpleNamespace(id="ws_retry_impl", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+            profile=_required_awf_plan_profile("planning-retry-implementation-delta"),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=worktree,
+            model=None,
+            planning_retry_scope_baseline=planning_retry_scope_baseline,
+        )
+
+    assert planning_retry_scope_baseline["post_planning_dirty_paths"] == {
+        Path("docs/awf-plans/ws_retry_impl.md")
+    }
+
+    runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # retry before_plan
+    runner.queue_result(returncode=0, stdout="impl_sha\n")  # retry baseline HEAD
+    runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # retry dirty_paths
+    runner.queue_result(returncode=0, stdout="")  # retry committed_paths_since
+    runner.queue_result(returncode=0, stdout="impl_sha\n")  # implementation baseline
+    runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # before_compare
+    runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # after_compare
+    runner.queue_result(returncode=0, stdout="impl_sha\n")  # post-compare HEAD
+    retry_adapter = _PlanningAdapter(
+        "implementation resumed",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=retry_adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_retry_impl", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-implementation-delta"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+        planning_retry_scope_baseline=planning_retry_scope_baseline,
+    )
+
+    assert message is None
+    assert len(retry_adapter.prompts) == 2
+    assert retry_adapter.prompts[0].startswith("## Execution phase")
 
 
 @pytest.mark.unit
