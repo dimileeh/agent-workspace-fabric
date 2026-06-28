@@ -332,6 +332,8 @@ async def _restart_monitor_agent_service_or_fail(
             workspace_id=workspace_id,
             wait=True,
             compose_up_timeout_seconds=compose_up_timeout_seconds,
+            force_recreate=True,
+            services=("agent",),
         )
     except ComposeOperationError as restart_exc:
         await _terminate_monitor_for_unhealthy_agent_service(

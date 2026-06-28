@@ -190,6 +190,8 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
         workspace_id=workspace_id,
         wait=True,
         compose_up_timeout_seconds=300,
+        force_recreate=True,
+        services=("agent",),
     )
 
 
