@@ -660,6 +660,9 @@ def build_conformance_stall_recovery_prompt(
     gap_lines = (
         "\n".join(f"- {gap}" for gap in prior_gaps if gap) or "- No prior gaps were captured."
     )
+    gap_kind_lines = "\n".join(
+        f"- `{kind.value}`: {_gap_kind_definition(kind)}" for kind in GapKind
+    )
     return (
         "## Retry after conformance stall\n\n"
         "The prior workspace stalled while generating the plan-conformance JSON. "
@@ -682,8 +685,12 @@ def build_conformance_stall_recovery_prompt(
         "The object must have this shape:\n\n"
         "```json\n"
         '{"status":"satisfied|needs_iteration","summary":"...",'
-        '"gaps":["..."],"reason_code":"optional reason code"}\n'
+        '"gaps":[{"kind":"awf_validation_evidence","detail":"..."}],'
+        '"reason_code":"optional reason code"}\n'
         "```\n\n"
+        "Each `gaps` item must be an object with a `kind` chosen from this list and "
+        "a human-readable `detail`:\n"
+        f"{gap_kind_lines}\n\n"
         f"### Prior gaps (advisory)\n{gap_lines}\n\n"
         f"### Original task\n{task_prompt}\n"
     )
