@@ -140,7 +140,7 @@ async def test_agent_service_down_timeout_restarts_and_retries(
     assert planning_failure == "planning-ok"
     executor._compose.ensure_project_up.assert_awaited_once()
     assert executor._compose.ensure_project_up.await_args.kwargs["force_recreate"] is True
-    assert executor._compose.ensure_project_up.await_args.kwargs["services"] == ("agent",)
+    assert executor._compose.ensure_project_up.await_args.kwargs["services"] == ()
     executor._recheck_status.assert_has_awaits(
         [
             call(
@@ -251,7 +251,7 @@ async def test_agent_service_restart_uses_companion_aware_timeout(
         executor._compose.ensure_project_up.await_args.kwargs["compose_up_timeout_seconds"] == 900
     )
     assert executor._compose.ensure_project_up.await_args.kwargs["force_recreate"] is True
-    assert executor._compose.ensure_project_up.await_args.kwargs["services"] == ("agent",)
+    assert executor._compose.ensure_project_up.await_args.kwargs["services"] == ()
 
 
 @pytest.mark.unit
