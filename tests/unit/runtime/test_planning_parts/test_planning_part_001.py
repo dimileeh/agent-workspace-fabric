@@ -324,6 +324,8 @@ def test_conformance_prompt_is_evidence_only_and_does_not_rerun_validation() -> 
 
     assert "Do not run validation commands" in prompt
     assert "Use existing validation evidence" in prompt
+    assert "Focused agent-run validation recorded in a saved validation artifact" in prompt
+    assert "contract delegates to AWF/GitHub after agent completion" in prompt
     assert "missing, stale, or insufficient" in prompt
     for command in (
         "pytest",
