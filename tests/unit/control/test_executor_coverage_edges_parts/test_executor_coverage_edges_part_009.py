@@ -299,6 +299,69 @@ async def test_recovery_conformance_success_keeps_prevalidation_head_when_recapt
 
 
 @pytest.mark.unit
+async def test_conformance_recovery_abort_marks_validating_workspace_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression PRRT_kwDOSJAM6s6MwuSg: conformance recovery abort is terminal."""
+    profile = WorkspaceProfile.model_validate({"name": "prof-conf-recovery-abort"})
+    workspace = _workspace("ws_conf_recovery_abort")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_passing_command(tmp_path)])
+
+    async def _abort_recovery(*_args: object, **kwargs: object) -> tuple[bool, object | None]:
+        before_mark_failed = kwargs["before_mark_failed"]
+        await before_mark_failed()
+        return False, None
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_run_agent_callable_with_service_recovery",
+        _abort_recovery,
+    )
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-conf-recovery-abort"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _run_post_validation_conformance_check=AsyncMock(),
+    )
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=SimpleNamespace(run=AsyncMock()),
+        planning_validation_handoff=_handoff(tmp_path),
+    )
+
+    assert result.stop
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["status"] == OperationStatus.failed
+    assert finish_kwargs["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
+    mark_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_kwargs["from_status"] is WorkspaceStatus.validating
+    assert mark_kwargs["failure_reason"] is FailureReason.infrastructure_failure
+    assert mark_kwargs["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
+
+
+@pytest.mark.unit
 async def test_fix_pass_status_recheck_race_before_agent_run_stops(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -360,6 +423,70 @@ async def test_fix_pass_status_recheck_race_before_agent_run_stops(
     last_recheck_kwargs = recheck.await_args.kwargs
     assert last_recheck_kwargs["action"] == "validation_fix_agent_run"
     assert deposit_calls == [workspace.id]
+
+
+@pytest.mark.unit
+async def test_fix_pass_recovery_abort_marks_validating_workspace_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression PRRT_kwDOSJAM6s6MwuSg: fix-pass recovery abort is terminal."""
+    profile = WorkspaceProfile.model_validate({"name": "prof-fix-recovery-abort"})
+    workspace = _workspace("ws_fix_recovery_abort")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_failing_command(tmp_path)])
+
+    async def _abort_recovery(*_args: object, **kwargs: object) -> tuple[bool, object | None]:
+        before_mark_failed = kwargs["before_mark_failed"]
+        await before_mark_failed()
+        return False, None
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_run_agent_callable_with_service_recovery",
+        _abort_recovery,
+    )
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=1,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-fix-recovery-abort"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _ensure_worktree_available=AsyncMock(return_value=True),
+    )
+    adapter = SimpleNamespace(run=AsyncMock())
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=adapter,
+    )
+
+    assert result.stop
+    adapter.run.assert_not_awaited()
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["status"] == OperationStatus.failed
+    assert finish_kwargs["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
+    mark_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_kwargs["from_status"] is WorkspaceStatus.validating
+    assert mark_kwargs["failure_reason"] is FailureReason.infrastructure_failure
+    assert mark_kwargs["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
 
 
 @pytest.mark.unit

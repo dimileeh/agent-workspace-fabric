@@ -627,7 +627,10 @@ async def run_validation_and_fix_cycle(
                         _validation_run_id: str = validation_run_id,
                         _validation_coverage: dict[str, object] | None = validation_coverage,
                     ) -> None:
-                        _deposit_planning_artifacts_if_required()
+                        message = (
+                            "agent compose service recovery failed during "
+                            "post-validation conformance"
+                        )
                         await self._finish_pending_validate_operations(
                             workspace_id=workspace_id,
                             status=OperationStatus.failed,
@@ -635,10 +638,14 @@ async def run_validation_and_fix_cycle(
                             requested_tier=validation_tier,
                             reason_code=AGENT_SERVICE_UNHEALTHY,
                             coverage=_validation_coverage,
-                            error_message=(
-                                "agent compose service recovery failed during "
-                                "post-validation conformance"
-                            ),
+                            error_message=message,
+                        )
+                        await _mark_failed_preserving_planning_artifacts(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=AGENT_SERVICE_UNHEALTHY,
                         )
 
                     (
@@ -1040,7 +1047,7 @@ async def run_validation_and_fix_cycle(
                 _validation_run_id: str = validation_run_id,
                 _val_result: ValidationResult = val_result,
             ) -> None:
-                _deposit_planning_artifacts_if_required()
+                message = "agent compose service recovery failed during validation fix pass"
                 await self._finish_pending_validate_operations(
                     workspace_id=workspace_id,
                     status=OperationStatus.failed,
@@ -1051,9 +1058,14 @@ async def run_validation_and_fix_cycle(
                         _val_result,
                         baseline_coverage=baseline_coverage,
                     ),
-                    error_message=(
-                        "agent compose service recovery failed during validation fix pass"
-                    ),
+                    error_message=message,
+                )
+                await _mark_failed_preserving_planning_artifacts(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=message,
+                    reason_code=AGENT_SERVICE_UNHEALTHY,
                 )
 
             fix_recovered, fix_result = await _run_agent_callable_with_service_recovery(
