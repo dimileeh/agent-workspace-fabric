@@ -107,6 +107,14 @@ def test_runtime_browsers_caps_declaration_count_before_deduping() -> None:
 
 
 @pytest.mark.unit
+def test_runtime_browsers_schema_exposes_allowlist_and_count_bound() -> None:
+    schema = ProfileRuntime.model_json_schema()["properties"]["browsers"]
+
+    assert schema["maxItems"] == 8
+    assert schema["items"]["enum"] == ["chromium", "firefox", "webkit"]
+
+
+@pytest.mark.unit
 def test_runtime_toolchains_rejects_non_string_language_key() -> None:
     with pytest.raises(ValidationError):
         ProfileRuntime.model_validate({"toolchains": {17: ["17"]}})

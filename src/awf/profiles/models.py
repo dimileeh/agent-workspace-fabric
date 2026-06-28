@@ -13,7 +13,7 @@ import shlex
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 from urllib.parse import urlparse, urlsplit
 
 from pydantic import (
@@ -61,7 +61,8 @@ _TOOLCHAIN_LANGUAGE_PATTERN = re.compile(r"^[a-z][a-z0-9+_.-]*$")
 _TOOLCHAIN_VERSION_PATTERN = re.compile(r"^[0-9]+(\.[0-9]+){0,3}$")
 _MAX_TOOLCHAIN_LANGUAGES = 16
 _MAX_TOOLCHAIN_VERSIONS = 16
-_ALLOWED_RUNTIME_BROWSERS = frozenset({"chromium", "firefox", "webkit"})
+_RuntimeBrowser = Literal["chromium", "firefox", "webkit"]
+_ALLOWED_RUNTIME_BROWSERS: frozenset[str] = frozenset(get_args(_RuntimeBrowser))
 _MAX_RUNTIME_BROWSERS = 8
 
 
@@ -89,7 +90,7 @@ class ProfileRuntime(BaseModel):
             "missing from the runtime image."
         ),
     )
-    browsers: list[str] = Field(
+    browsers: Annotated[list[_RuntimeBrowser], Field(max_length=_MAX_RUNTIME_BROWSERS)] = Field(
         default_factory=list,
         description=(
             "Playwright browser binaries the workspace setup must install, e.g. "
