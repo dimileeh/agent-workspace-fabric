@@ -1027,7 +1027,7 @@ def test_pending_check_and_defer_helpers_cover_unknown_and_review_paths() -> Non
     )
     with_failures = _with_ci_failures(
         _status_for_helpers(),
-        (CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="failed"),),
+        ((CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="failed"),), False),
     )
     assert with_failures.ci_failures[0].name == "pytest"
 

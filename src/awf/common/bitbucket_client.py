@@ -380,7 +380,7 @@ class BitbucketClient:
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
         rollup_checks: Sequence[CheckTiming] = (),  # noqa: ARG002 - GitHub-only fallback input
-    ) -> tuple[CheckFailure, ...]:
+    ) -> tuple[tuple[CheckFailure, ...], bool]:
         """Fetch logs for failing checks via the Bitbucket pipeline-lookup chain.
 
         Commit statuses do not carry pipeline/step UUIDs, so for FAILED statuses we
@@ -397,12 +397,16 @@ class BitbucketClient:
         )
         failed = [s for s in statuses if str(s.get("state") or "").upper() in {"FAILED", "STOPPED"}]
         if not failed:
-            return ()
+            return (), False
 
         pipeline = await self._find_pipeline_for_commit(repo, head_sha, pr_number, source_branch)
         if pipeline is None:
-            return tuple(
-                self._external_status_failure(status, pytest_fallback_commands) for status in failed
+            return (
+                tuple(
+                    self._external_status_failure(status, pytest_fallback_commands)
+                    for status in failed
+                ),
+                False,
             )
 
         pipeline_uuid = _clean_optional_str(pipeline.get("uuid"))
@@ -412,8 +416,12 @@ class BitbucketClient:
             else []
         )
         if not failing_steps:
-            return tuple(
-                self._external_status_failure(status, pytest_fallback_commands) for status in failed
+            return (
+                tuple(
+                    self._external_status_failure(status, pytest_fallback_commands)
+                    for status in failed
+                ),
+                False,
             )
 
         failures: list[CheckFailure] = []
@@ -454,7 +462,7 @@ class BitbucketClient:
             for status in failed
             if not is_pipeline_owned_status(status)
         )
-        return tuple(failures)
+        return tuple(failures), False
 
     async def rerun_failed_workflow_jobs(
         self,

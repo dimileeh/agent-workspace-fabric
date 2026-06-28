@@ -215,12 +215,12 @@ class _CapturingGH:
         head_sha: str,
         pytest_fallback_commands: Sequence[str] = (),
         rollup_checks: object = (),
-    ) -> tuple[CheckFailure, ...]:
+    ) -> tuple[tuple[CheckFailure, ...], bool]:
         del rollup_checks
         self.failing_log_requests.append(
             (repo, pr_number, head_sha, tuple(pytest_fallback_commands))
         )
-        return ()
+        return (), False
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         if self.post_errors:

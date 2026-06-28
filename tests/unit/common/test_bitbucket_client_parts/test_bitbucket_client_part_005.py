@@ -346,7 +346,9 @@ async def test_step_log_404_is_tolerated_as_empty() -> None:
     )
     fake.enqueue("GET", f"{_REPO}/pipelines/p1/steps/s1/log", status=404, json={"e": 1})
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     assert failures[0].log_excerpt == ""
 
 
@@ -379,7 +381,9 @@ async def test_step_log_follows_offorigin_307_redirect_without_forge_auth() -> N
     )
     fake.enqueue("GET", "/log-storage/s1", text="E   assert 1 == 2\nFAILED tests/test_x.py")
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     assert "assert 1 == 2" in failures[0].log_excerpt
     # The off-origin storage hop must not carry the forge credential.
     storage_call = next(r for r in fake.calls("GET") if r.url.path == "/log-storage/s1")
@@ -425,7 +429,9 @@ async def test_step_log_second_offorigin_redirect_is_refused_not_followed() -> N
     )
     fake.enqueue("GET", "/secret", text="leaked-internal-data")
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     assert failures[0].log_excerpt == ""
     # The second off-origin target must never be contacted.
     assert all(r.url.host != "evil.internal.example" for r in fake.calls("GET"))
@@ -466,7 +472,9 @@ async def test_step_log_transport_failure_yields_empty_log_not_raise() -> None:
         ),
         auth=BitbucketAuth(mode="bearer", api_token="bb-token-aaaaaaaaaaaa"),
     )
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     # The CI failure is still surfaced, just with no log evidence — not raised.
     assert failures[0].conclusion == "FAILURE"
     assert failures[0].log_excerpt == ""

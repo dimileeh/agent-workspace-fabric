@@ -63,9 +63,10 @@ async def test_failing_check_logs_pipeline_chain() -> None:
         text="E   assert 1 == 2\nFAILED tests/test_x.py::test_y\n",
     )
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
         repo=repo(), pr_number=42, head_sha=_HEAD, log_tail_chars=3000
     )
+    assert _runs_in_progress is False
     assert len(failures) == 1
     failure = failures[0]
     assert failure.name == "Test"
@@ -81,7 +82,9 @@ async def test_failing_check_logs_no_failed_statuses_returns_empty() -> None:
         values=[{"state": "SUCCESSFUL", "name": "ok"}],
     )
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     assert failures == ()
 
 
@@ -94,7 +97,7 @@ async def test_failing_check_logs_external_status_falls_back_to_pytest() -> None
     )
     fake.page("GET", _PIPELINES, values=[])  # no pipeline → external status
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
         repo=repo(),
         pr_number=42,
         head_sha=_HEAD,
@@ -121,7 +124,9 @@ async def test_failing_check_logs_pipeline_without_failing_step_falls_back() -> 
         values=[{"uuid": "s1", "name": "Build", "state": {"result": {"name": "SUCCESSFUL"}}}],
     )
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     assert len(failures) == 1
     assert failures[0].run_id is None  # external fallback path
 
@@ -163,7 +168,7 @@ async def test_failing_check_logs_stopped_pipeline_step_keeps_log_evidence() -> 
         text="E   infrastructure error\n",
     )
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
         repo=repo(), pr_number=42, head_sha=_HEAD, log_tail_chars=3000
     )
     by_name = {f.name: f for f in failures}
@@ -202,7 +207,7 @@ async def test_failing_check_logs_surfaces_external_status_alongside_failing_ste
         text="FAILED tests/test_x.py::test_y\n",
     )
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
         repo=repo(), pr_number=42, head_sha=_HEAD, pytest_fallback_commands=["uv run pytest -q"]
     )
     by_name = {f.name: f for f in failures}
@@ -239,7 +244,9 @@ async def test_failing_check_logs_skips_pipeline_status_identified_by_url() -> N
         text="FAILED tests/test_x.py::test_y\n",
     )
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     assert [f.name for f in failures] == ["Test"]  # no duplicate external row for the pipeline
 
 
@@ -277,7 +284,9 @@ async def test_failing_check_logs_omits_refname_without_pr_context() -> None:
         values=[{"state": "SUCCESSFUL", "name": "ok"}],
     )
     client = make_client(fake)
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     assert failures == ()
     statuses_call = next(
         r for r in fake.calls("GET") if r.url.path == f"{_REPO}/commit/{_HEAD}/statuses"
@@ -347,7 +356,9 @@ async def test_failing_check_logs_pipeline_scoped_to_pr_ref() -> None:
     )
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     assert [f.name for f in failures] == ["Test"]
     assert failures[0].run_id == "pipe-1"  # matched the PR ref, not the newer other-ref pipeline
 
@@ -369,7 +380,7 @@ async def test_failing_check_logs_pipeline_wrong_ref_falls_back_to_external() ->
     fake.page("GET", _PIPELINES, values=[{"uuid": "other-ref", "target": {"ref_name": "main"}}])
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
-    failures = await client.fetch_failing_check_logs(
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
         repo=repo(), pr_number=42, head_sha=_HEAD, pytest_fallback_commands=["uv run pytest -q"]
     )
     assert len(failures) == 1
@@ -400,7 +411,7 @@ async def test_failing_check_logs_other_pr_pipeline_falls_back_to_external() -> 
     )
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
-    failures = await client.fetch_failing_check_logs(
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
         repo=repo(), pr_number=42, head_sha=_HEAD, pytest_fallback_commands=["uv run pytest -q"]
     )
     assert len(failures) == 1
@@ -433,7 +444,9 @@ async def test_failing_check_logs_pipeline_without_ref_metadata_keeps_newest() -
     )
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     assert [f.name for f in failures] == ["Test"]
     assert failures[0].run_id == "pipe-1"
 
@@ -479,7 +492,9 @@ async def test_failing_check_logs_prefers_pr_pipeline_over_branch_pipeline() -> 
     )
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
-    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    failures, _runs_in_progress = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD
+    )
     assert [f.name for f in failures] == ["Test"]
     assert failures[0].run_id == "pr-pipe"  # PR pipeline, not the newer branch pipeline
 

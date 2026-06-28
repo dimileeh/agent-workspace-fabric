@@ -55,6 +55,7 @@ from awf.db.enums import ForgeKind
 from awf.runtime.pr_monitor import CheckFailure, CheckTiming, PRStatus
 
 FORGE_NOT_SUPPORTED_REASON_CODE = "FORGE_NOT_SUPPORTED"
+CheckFailureLogResult = tuple[tuple[CheckFailure, ...], bool]
 
 # Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (GitHub or
 # Bitbucket Cloud), but the GitHub-only ``BranchOpenPullRequestResolver`` cannot
@@ -127,8 +128,8 @@ class ForgeClient(Protocol):
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
         rollup_checks: Sequence[CheckTiming] = (),
-    ) -> tuple[CheckFailure, ...] | tuple[tuple[CheckFailure, ...], bool]:
-        """Return failing-check logs and, when available, an in-progress-run signal."""
+    ) -> CheckFailureLogResult:
+        """Return failing-check logs and whether relevant runs are still in progress."""
         ...
 
     async def rerun_failed_workflow_jobs(self, *, repo: RepoRef, run_id: str) -> None:

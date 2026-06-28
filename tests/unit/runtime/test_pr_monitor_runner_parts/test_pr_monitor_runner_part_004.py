@@ -197,12 +197,12 @@ class _CapturingGH:
         head_sha: str,
         pytest_fallback_commands: Sequence[str] = (),
         rollup_checks: object = (),
-    ) -> tuple[CheckFailure, ...]:
+    ) -> tuple[tuple[CheckFailure, ...], bool]:
         del rollup_checks
         self.failing_log_requests.append(
             (repo, pr_number, head_sha, tuple(pytest_fallback_commands))
         )
-        return ()
+        return (), False
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         if self.post_errors:
@@ -954,7 +954,7 @@ async def test_agent_service_recovery_sentinel_finishes_monitor_operation(
     elif case == "ci_repair":
         failures = (CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),)
         action = ReportCiFailure(failures=failures)
-        status = _with_ci_failures(status, failures)
+        status = _with_ci_failures(status, (failures, False))
         target_method = "_run_ci_fix"
         expected_type = "ci_repair"
         expected_result["failure_count"] = 1
@@ -1062,7 +1062,7 @@ async def test_superseded_agent_service_recovery_cancels_monitor_operation(
     elif case == "ci_repair":
         failures = (CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),)
         action = ReportCiFailure(failures=failures)
-        status = _with_ci_failures(status, failures)
+        status = _with_ci_failures(status, (failures, False))
         target_method = "_run_ci_fix"
         expected_type = "ci_repair"
         expected_result["failure_count"] = 1
@@ -1227,7 +1227,7 @@ async def test_ci_repair_provider_recovery_exceptions_finish_operation(
             repo_url="git@github.com:dimileeh/aira-web.git",
             repo=RepoRef(owner="dimileeh", name="aira-web"),
             pr_number=42,
-            status=_with_ci_failures(_green_status(), failures),
+            status=_with_ci_failures(_green_status(), (failures, False)),
             state=MonitorState(started_at=0.0),
             base_branch="development",
             remote_branch=f"awf/{workspace_id}",
