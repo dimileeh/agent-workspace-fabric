@@ -1053,6 +1053,108 @@ class TestHappyPathPart001:
         assert handoff_events
 
     @pytest.mark.unit
+    async def test_planning_validation_handoff_accepts_committed_implementation_changes(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 0,
+                    "enforce_plan_only_changes": True,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+
+        handoff_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Implementation appears complete; AWF validation evidence is missing.",
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": [
+                    {
+                        "kind": "awf_validation_evidence",
+                        "detail": "AWF-owned validation evidence is missing for the pytest gate.",
+                    }
+                ],
+            }
+        )
+        satisfied_report = json.dumps(
+            {
+                "status": "satisfied",
+                "summary": "implementation and validation satisfy plan",
+                "gaps": [],
+            }
+        )
+
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- implement foo\n", encoding="utf-8")
+
+        fake.queue_result(returncode=0, stdout="")  # changed paths before planning
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
+        fake.queue_result(returncode=0, stdout="")  # changed paths after planning
+        fake.queue_result(
+            returncode=0,
+            stdout=f"docs/awf-plans/{ws_id}.md\n",
+        )  # committed_paths_since planning baseline
+        fake.queue_result(returncode=0, stdout="post_planning_sha\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="implemented and committed")  # execution adapter
+        fake.queue_result(returncode=0, stdout="")  # clean changed paths before compare
+        fake.queue_result(
+            returncode=0, stdout="post_implementation_sha\n"
+        )  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
+        fake.queue_result(returncode=0, stdout="")  # clean changed paths after compare
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
+        fake.queue_result(
+            returncode=0, stdout="post_implementation_sha\n"
+        )  # rev-parse HEAD post-iter
+        fake.queue_result(
+            returncode=0,
+            stdout="src/x.py\n",
+        )  # committed paths since implementation baseline
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="")  # cached diff after already-committed work
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count includes committed work
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        _queue_validation_head(fake, head="post_implementation_sha")
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(
+            returncode=0, stdout="post_implementation_sha\n"
+        )  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
+        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        fake.queue_result(returncode=0, stdout="")  # git restore report path
+        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
+        _queue_pre_push_diagnostics(fake, head="post_implementation_sha")
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id, limit=20)
+
+        assert ws.status == WorkspaceStatus.completed.value
+        assert any(event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events)
+
+    @pytest.mark.unit
     async def test_validation_handoff_evidence_prefers_coverage_column_and_redacts(
         self,
         executor: WorkspaceExecutor,

@@ -1151,7 +1151,17 @@ async def _run_agent_task_with_optional_planning(
             )
             return None
 
-        if report is not None and conformance_requires_awf_validation(report, before_compare):
+        implementation_compare = before_compare
+        if report is not None and not implementation_compare:
+            implementation_compare = (
+                await self._committed_paths_since(worktree_path, implementation_baseline_sha)
+                if implementation_baseline_sha is not None
+                else set()
+            )
+        if report is not None and conformance_requires_awf_validation(
+            report,
+            implementation_compare,
+        ):
             _log.info(
                 "executor.planning_conformance_requires_awf_validation",
                 workspace_id=workspace.id,
