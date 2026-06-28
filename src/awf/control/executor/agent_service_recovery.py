@@ -104,6 +104,13 @@ async def _rerun_agent_pre_launch_guards(
     expected_status: WorkspaceStatus,
     failure_from_status: WorkspaceStatus,
 ) -> _RecoveryCallbackResult:
+    if not await self._recheck_status(
+        workspace_id,
+        expected=expected_status,
+        action="agent_run",
+        owner_id=execution_owner_id,
+    ):
+        return "EXECUTOR_STALE_STATUS"
     if not await self._run_agent_git_writability_preflight(
         workspace_id=workspace_id,
         compose_project=compose_project,
@@ -120,13 +127,6 @@ async def _rerun_agent_pre_launch_guards(
     )
     if ollama_result is not True:
         return _callback_abort_reason_code(ollama_result) or "OLLAMA_MODEL_PROBE_FAILED"
-    if not await self._recheck_status(
-        workspace_id,
-        expected=expected_status,
-        action="agent_run",
-        owner_id=execution_owner_id,
-    ):
-        return "EXECUTOR_STALE_STATUS"
     return await repair_mirror_hooks_path_or_mark_failed(
         failure_stage="before agent retry",
         before_mark_failed=deposit_planning_artifacts,

@@ -329,6 +329,56 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
 
 
 @pytest.mark.unit
+async def test_recovery_callbacks_fence_stale_owner_before_retry_preflights(
+    tmp_path: Path,
+) -> None:
+    executor = SimpleNamespace(
+        _run_agent_git_writability_preflight=AsyncMock(return_value=False),
+        _ensure_ollama_model_or_mark_failed=AsyncMock(return_value="OLLAMA_MODEL_PROBE_FAILED"),
+        _recheck_status=AsyncMock(return_value=False),
+    )
+    repair_mirror_hooks_path_or_mark_failed = AsyncMock(return_value=True)
+
+    async def _repair_hooks_after_agent_cleanup_failure(**_kwargs: object) -> bool:
+        return True
+
+    async def _recover_missing_head_after_cleanup_failure(
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        return True
+
+    before_agent_retry, _cleanup_repair = (
+        agent_service_recovery._build_agent_service_recovery_callbacks(
+            executor,
+            workspace_id="ws_agent_service",
+            workspace=SimpleNamespace(owned_paths=[]),
+            compose_project="awf_ws_agent_service",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+            execution_owner_id="worker-stale",
+            repair_mirror_hooks_path_or_mark_failed=repair_mirror_hooks_path_or_mark_failed,
+            repair_hooks_after_agent_cleanup_failure=_repair_hooks_after_agent_cleanup_failure,
+            recover_missing_head_after_cleanup_failure=(
+                _recover_missing_head_after_cleanup_failure
+            ),
+            deposit_planning_artifacts=lambda: None,
+        )
+    )
+
+    assert await before_agent_retry() == "EXECUTOR_STALE_STATUS"
+    executor._recheck_status.assert_awaited_once_with(
+        "ws_agent_service",
+        expected=WorkspaceStatus.running,
+        action="agent_run",
+        owner_id="worker-stale",
+    )
+    executor._run_agent_git_writability_preflight.assert_not_awaited()
+    executor._ensure_ollama_model_or_mark_failed.assert_not_awaited()
+    repair_mirror_hooks_path_or_mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_agent_service_retry_guard_failure_runs_terminal_callback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
