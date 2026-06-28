@@ -120,13 +120,13 @@ class TestRecordRuntimeBrowserFindings:
             ] == []
 
     @pytest.mark.unit
-    async def test_probe_exception_is_swallowed(
+    async def test_expected_probe_infra_exception_is_swallowed(
         self,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
         ws_id = await _seed_ready_workspace(factory)
 
-        class _ProbeError(RuntimeError):
+        class _ProbeError(OSError):
             reason_code = "RUNTIME_BROWSER_PROBE_BROKE"
 
         class _ExplodingValidation:
@@ -159,6 +159,49 @@ class TestRecordRuntimeBrowserFindings:
             assert [
                 e for e in ws.events if e.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
             ] == []
+
+    @pytest.mark.unit
+    async def test_unexpected_probe_exception_propagates_to_safe_wrapper(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+
+        class _ExplodingValidation:
+            async def probe_runtime_browser_findings(self, **_kwargs: Any) -> Any:
+                raise RuntimeError("probe regression ghp_FAKESECRET0000000")
+
+        class _Executor:
+            _session_factory = factory
+            _validation = _ExplodingValidation()
+            _record_runtime_browser_findings = _record_runtime_browser_findings
+
+        with pytest.raises(RuntimeError, match="probe regression"):
+            await _record_runtime_browser_findings(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+            )
+
+        with structlog.testing.capture_logs() as captured:
+            await _record_runtime_browser_findings_safe(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+            )
+
+        assert not [e for e in captured if e["event"] == "executor.runtime_browser_probe_failed"]
+        entry = next(
+            e for e in captured if e["event"] == "executor.runtime_browser_probe_record_failed"
+        )
+        assert entry["log_level"] == "warning"
+        assert entry["reason_code"] is None
+        assert "ghp_FAKESECRET0000000" not in entry["error"]
+        assert "<redacted>" in entry["error"]
 
     @pytest.mark.unit
     async def test_no_findings_are_noop(

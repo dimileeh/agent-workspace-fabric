@@ -296,7 +296,7 @@ async def _record_runtime_browser_findings(
             compose_file=compose_file,
             profile=profile,
         )
-    except Exception as exc:
+    except OSError as exc:
         _log.warning(
             "executor.runtime_browser_probe_failed",
             workspace_id=workspace_id,
