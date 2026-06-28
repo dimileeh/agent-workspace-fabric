@@ -142,6 +142,17 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_prepares_writable_cursor_config_home() -> None:
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "mkdir -p /workspace /home/agent/.config/cursor" in dockerfile
+    assert "chown -R agent:agent /workspace /home/agent/.config" in dockerfile
+    assert dockerfile.index("mkdir -p /workspace /home/agent/.config/cursor") < dockerfile.index(
+        "USER agent"
+    )
+
+
+@pytest.mark.unit
 def test_agent_runtime_links_gemini_bundled_ripgrep() -> None:
     dockerfile = _agent_runtime_dockerfile()
 
