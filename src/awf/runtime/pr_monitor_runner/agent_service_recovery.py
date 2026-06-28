@@ -317,6 +317,13 @@ async def _restart_monitor_agent_service_or_fail(
             message="agent compose service stayed unhealthy after restart attempts",
         )
     restart_attempts += 1
+    await _raise_if_monitor_agent_service_recovery_was_superseded(
+        self,
+        workspace_id=workspace_id,
+        source_reason_code=exc.reason_code,
+        service_healthy=service_healthy,
+        restart_attempts=restart_attempts,
+    )
     manager = ComposeManager(
         work_dir=self._work_dir,
         template_path=_monitor_agent_service_recovery_template_sentinel(self._work_dir),
