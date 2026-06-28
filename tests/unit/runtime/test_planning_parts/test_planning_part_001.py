@@ -560,6 +560,8 @@ def test_conformance_requires_awf_validation_rejects_mixed_named_command_handoff
         "No AWF-owned validation evidence is present; please run during validation: "
         "uv run --python 3.12 --extra dev ruff check tests src/awf; "
         "uv run --python 3.12 --extra dev mypy src/awf.",
+        "No AWF-owned validation evidence is present; please run during validation: "
+        "ruff check tests src.",
     ),
 )
 def test_conformance_requires_awf_validation_accepts_named_command_handoff_with_paths(
