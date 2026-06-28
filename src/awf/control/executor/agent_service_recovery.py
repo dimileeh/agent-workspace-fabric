@@ -599,7 +599,11 @@ async def _mark_agent_service_unhealthy(
         "restart_attempts": restart_attempts,
     }
     if before_mark_failed is not None:
-        await _run_before_mark_failed(before_mark_failed, reason_code=AGENT_SERVICE_UNHEALTHY)
+        await _run_before_mark_failed(
+            before_mark_failed,
+            reason_code=AGENT_SERVICE_UNHEALTHY,
+            details=details,
+        )
     await self._mark_failed(
         workspace_id=workspace_id,
         from_status=from_status,
@@ -614,13 +618,16 @@ async def _run_before_mark_failed(
     before_mark_failed: _BeforeMarkFailed | None,
     *,
     reason_code: str | None = None,
+    details: Mapping[str, Any] | None = None,
 ) -> None:
     if before_mark_failed is None:
         return
-    if reason_code is not None and _accepts_reason_code(before_mark_failed):
-        result = before_mark_failed(reason_code=reason_code)
-    else:
-        result = before_mark_failed()
+    kwargs: dict[str, Any] = {}
+    if reason_code is not None and _accepts_keyword(before_mark_failed, "reason_code"):
+        kwargs["reason_code"] = reason_code
+    if details is not None and _accepts_keyword(before_mark_failed, "details"):
+        kwargs["details"] = details
+    result = before_mark_failed(**kwargs) if kwargs else before_mark_failed()
     if isawaitable(result):
         await result
 
@@ -632,7 +639,7 @@ def _callback_abort_reason_code(result: _RecoveryCallbackResult) -> str | None:
     return stripped or None
 
 
-def _accepts_reason_code(callback: _BeforeMarkFailed) -> bool:
+def _accepts_keyword(callback: _BeforeMarkFailed, name: str) -> bool:
     try:
         parameters = signature(callback).parameters.values()
     except (TypeError, ValueError):  # pragma: no cover - uncommon callable objects
@@ -640,7 +647,7 @@ def _accepts_reason_code(callback: _BeforeMarkFailed) -> bool:
     for parameter in parameters:
         if parameter.kind is Parameter.VAR_KEYWORD:
             return True
-        if parameter.name == "reason_code" and parameter.kind in {
+        if parameter.name == name and parameter.kind in {
             Parameter.POSITIONAL_OR_KEYWORD,
             Parameter.KEYWORD_ONLY,
         }:

@@ -626,6 +626,7 @@ async def run_validation_and_fix_cycle(
                     async def _finish_conformance_recovery_failure(
                         *,
                         reason_code: str = AGENT_SERVICE_RECOVERY_ABORTED,
+                        details: Mapping[str, Any] | None = None,
                         _validation_run_id: str = validation_run_id,
                         _validation_coverage: dict[str, object] | None = validation_coverage,
                     ) -> None:
@@ -648,6 +649,7 @@ async def run_validation_and_fix_cycle(
                             failure_reason=FailureReason.infrastructure_failure,
                             message=message,
                             reason_code=reason_code,
+                            details=details,
                         )
 
                     (
@@ -1047,6 +1049,7 @@ async def run_validation_and_fix_cycle(
             async def _finish_fix_recovery_failure(
                 *,
                 reason_code: str = AGENT_SERVICE_UNHEALTHY,
+                details: Mapping[str, Any] | None = None,
                 _validation_run_id: str = validation_run_id,
                 _val_result: ValidationResult = val_result,
             ) -> None:
@@ -1069,6 +1072,7 @@ async def run_validation_and_fix_cycle(
                     failure_reason=FailureReason.infrastructure_failure,
                     message=message,
                     reason_code=reason_code,
+                    details=details,
                 )
 
             fix_recovered, fix_result = await _run_agent_callable_with_service_recovery(

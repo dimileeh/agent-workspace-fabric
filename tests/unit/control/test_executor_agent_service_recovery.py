@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -936,6 +937,61 @@ async def test_agent_service_down_restart_budget_exhaustion_terminal_callback_ge
     assert recovered is False
     assert planning_failure is None
     assert callback_reason_codes == ["AGENT_SERVICE_UNHEALTHY"]
+    executor._mark_failed.assert_awaited_once()
+
+
+@pytest.mark.unit
+async def test_validation_agent_service_recovery_callback_gets_terminal_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[])
+    callback_calls: list[dict[str, object]] = []
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _before_mark_failed(
+        *,
+        reason_code: str | None = None,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        callback_calls.append({"reason_code": reason_code, "details": details})
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, result = await agent_service_recovery._run_agent_callable_with_service_recovery(
+        executor,
+        run_agent=AsyncMock(
+            side_effect=[
+                _timeout_error("AGENT_IDLE_TIMEOUT"),
+                _timeout_error("AGENT_IDLE_TIMEOUT"),
+                _timeout_error("AGENT_IDLE_TIMEOUT"),
+            ]
+        ),
+        workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=tmp_path / "compose.yml",
+        model="gpt-5.3-codex",
+        command_evidence=[],
+        workspace_id="ws_agent_service",
+        before_mark_failed=_before_mark_failed,
+        expected_status=WorkspaceStatus.validating,
+        failure_from_status=WorkspaceStatus.validating,
+    )
+
+    assert recovered is False
+    assert result is None
+    assert len(callback_calls) == 1
+    callback = callback_calls[0]
+    assert callback["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
+    details = callback["details"]
+    assert isinstance(details, Mapping)
+    assert details["provider_recovery"]["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
+    recovery_details = details["agent_service_recovery"]
+    assert recovery_details["source_reason_code"] == "AGENT_IDLE_TIMEOUT"
+    assert recovery_details["restart_attempts"] == 2
     executor._mark_failed.assert_awaited_once()
 
 
