@@ -271,8 +271,30 @@ async def remove_orphan_worktree(
                 ),
             ),
         )
-    mirror_path = git_context_mirror_path_for_worktree(path, work_dir=work_dir)
-    if mirror_path is None and is_existing_non_git_worktree(path, work_dir=work_dir):
+    from awf.node.git_manager import GitOperationError
+
+    try:
+        mirror_path = git_context_mirror_path_for_worktree(path, work_dir=work_dir)
+        is_non_git_worktree = mirror_path is None and is_existing_non_git_worktree(
+            path, work_dir=work_dir
+        )
+    except GitOperationError as exc:
+        error = str(exc)
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code=exc.reason_code,
+            error=error,
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=worktree_id,
+                    status="failed",
+                    reason_code=exc.reason_code,
+                    error=error,
+                ),
+            ),
+        )
+
+    if is_non_git_worktree:
         return WorkspaceGCWorktreeRemoveResult(
             status="skipped",
             reason_code="WORKTREE_NOT_GIT_MANAGED",
