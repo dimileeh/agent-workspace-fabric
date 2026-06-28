@@ -84,6 +84,7 @@ from awf.runtime.validation import (
     ValidationResult,
     profile_phase_command_plan,
 )
+from awf.runtime.validation_setup import runtime_browser_probe_deferred_until_validate
 from awf.runtime.validation_worktree import (
     VALIDATION_INFRASTRUCTURE_ERROR,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
@@ -832,6 +833,20 @@ async def run_validation_and_fix_cycle(
                     )
                     if post_conformance_head_sha:
                         successful_validation_workspace_head_sha = post_conformance_head_sha
+                record_browser_findings = getattr(
+                    self,
+                    "_record_runtime_browser_findings_safe",
+                    None,
+                )
+                if callable(
+                    record_browser_findings
+                ) and runtime_browser_probe_deferred_until_validate(profile):
+                    await record_browser_findings(
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        profile=profile,
+                    )
                 await self._finish_pending_validate_operations(
                     workspace_id=workspace_id,
                     status=OperationStatus.succeeded,

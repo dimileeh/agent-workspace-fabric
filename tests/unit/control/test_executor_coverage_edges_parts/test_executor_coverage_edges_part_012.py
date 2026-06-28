@@ -185,3 +185,127 @@ async def test_validation_conformance_failure_still_deposits_before_mark_failed(
     assert result.stop
     # Terminal conformance failure path still deposits before marking FAILED.
     assert order == ["deposit", "mark_failed"]
+
+
+@pytest.mark.unit
+async def test_validation_records_deferred_browser_findings_after_validate_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "browser-validate-install-test",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["node scripts/generate-config.js"],
+                "validate": [
+                    "pnpm install --frozen-lockfile",
+                    "pnpm test",
+                ],
+            },
+        }
+    )
+    workspace = SimpleNamespace(
+        resolved_profile=profile.model_dump(mode="json"),
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="Browser task",
+        agent="codex",
+        owned_paths=(),
+        id="ws_browser_validate",
+        pr_url=None,
+        task_tag=None,
+    )
+
+    from awf.control.executor import execution_validation as executor_execution_validation
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(executor_execution_validation, "_sync_resolved_profile", _sync_profile)
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=True,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref="c" * 40,
+            )
+        ),
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_passing_validation_command(tmp_path)])
+
+    browser_calls: list[dict[str, object]] = []
+
+    async def _record_runtime_browser_findings_safe(**kwargs: object) -> None:
+        browser_calls.append(kwargs)
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-browser-validate"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _record_runtime_browser_findings_safe=_record_runtime_browser_findings_safe,
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,
+        worktree_path=tmp_path / "worktree",
+        compose_project=f"awf_{workspace.id}",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch=f"awf/{workspace.id}",
+        adapter=SimpleNamespace(run=AsyncMock()),
+        run_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert not result.stop
+    assert browser_calls == [
+        {
+            "workspace_id": workspace.id,
+            "compose_project": f"awf_{workspace.id}",
+            "compose_file": tmp_path / "compose.yml",
+            "profile": profile,
+        }
+    ]
