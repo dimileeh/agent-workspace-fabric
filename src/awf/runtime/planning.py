@@ -345,7 +345,7 @@ def build_execution_prompt(
     task_prompt: str,
     plan_path: Path,
     iteration: int,
-    gaps: tuple[str, ...],
+    gaps: tuple[ConformanceGap | str, ...],
     coordination_warnings: Sequence[Mapping[str, Any]] = (),
     workspace_runtime_context: str = "",
     task_tag: str | None = None,

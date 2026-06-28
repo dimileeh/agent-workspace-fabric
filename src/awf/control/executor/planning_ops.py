@@ -54,6 +54,7 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
+    ConformanceGap,
     ConformanceIterationRecord,
     ConformanceStallEvidence,
     ConformanceStallKind,
@@ -937,7 +938,7 @@ async def _run_agent_task_with_optional_planning(
                 offending_paths=extra,
                 summary=f"planning phase changed files outside `{plan_path}`",
             )
-    gaps: tuple[str, ...] = ()
+    gaps: tuple[ConformanceGap | str, ...] = ()
     last_report: PlanConformanceReport | None = None
     last_iteration = 0
     stall_policy = ConformanceStallPolicy(
