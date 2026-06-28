@@ -360,6 +360,21 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == expected
         assert browser_probe_workdir(profile) == expected_workdir
 
+    def test_browser_install_scans_past_prep_preamble_before_dependency_install(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_and_browsers(["node scripts/write-npmrc.js && pnpm install"])
+
+        command = playwright_browser_install_command(profile)
+        commands = profile_phase_command_plan(profile, ["setup"])
+
+        assert command is not None
+        assert command.command == "pnpm exec playwright install chromium"
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "node scripts/write-npmrc.js && pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+        ]
+
     @pytest.mark.parametrize(
         ("setup_command", "expected"),
         [
@@ -374,6 +389,8 @@ class TestPlaywrightBrowserInstallCommand:
             ("corepack disable && yarn install --immutable", "npx playwright install chromium"),
             ("corepack enable || yarn install --immutable", "npx playwright install chromium"),
             ("corepack enable", "npx playwright install chromium"),
+            ("node scripts/write-npmrc.js || pnpm install", "npx playwright install chromium"),
+            ("node scripts/write-npmrc.js & pnpm install", "npx playwright install chromium"),
         ],
     )
     def test_browser_install_defaults_or_accepts_edge_setup_forms(
@@ -402,6 +419,20 @@ class TestPlaywrightBrowserInstallCommand:
 
     def test_dependency_install_parser_ignores_unpreserved_equals_option(self) -> None:
         assert _node_dependency_install_package_manager("npm --userconfig=.npmrc ci") == "npm"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "node scripts/write-npmrc.js || pnpm install",
+            "node scripts/write-npmrc.js | pnpm install",
+            "node scripts/write-npmrc.js & pnpm install",
+        ],
+    )
+    def test_dependency_install_parser_does_not_scan_past_unsafe_preambles(
+        self,
+        command: str,
+    ) -> None:
+        assert _node_dependency_install_package_manager(command) is None
 
     @pytest.mark.parametrize(
         ("command", "expected"),

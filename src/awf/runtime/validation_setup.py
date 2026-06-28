@@ -296,10 +296,10 @@ def profile_phase_command_plan(
                     and _node_dependency_install_package_manager(validate_command.command.command)
                     is not None
                 ):
-                    commands.append(validate_command)
-                    commands.append(deferred_browser_install)
                     commands.extend(pending_validate_commands)
                     pending_validate_commands = []
+                    commands.append(validate_command)
+                    commands.append(deferred_browser_install)
                     deferred_browser_install = None
                     defer_browser_install_until_validate_install = False
                     continue
@@ -655,9 +655,14 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     scoped_install = _leading_cd_package_scope(tokens, index)
     while scoped_install is None:
         corepack_install_index = _corepack_preamble_next_command_index(tokens, index)
-        if corepack_install_index is None:
+        next_command_index: int | None
+        if corepack_install_index is not None:
+            next_command_index = corepack_install_index
+        else:
+            next_command_index = _setup_preamble_next_command_index(tokens, index)
+        if next_command_index is None:
             return None
-        index = corepack_install_index
+        index = next_command_index
         while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
             index += 1
         package_manager = _node_dependency_install_package_manager_from_tokens(tokens, index, [])
@@ -680,9 +685,28 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
         if inferred_package_manager is not None:
             return inferred_package_manager
         corepack_install_index = _corepack_preamble_next_command_index(tokens, index)
-        if corepack_install_index is None:
+        next_scoped_command_index: int | None
+        if corepack_install_index is not None:
+            next_scoped_command_index = corepack_install_index
+        else:
+            next_scoped_command_index = _setup_preamble_next_command_index(tokens, index)
+        if next_scoped_command_index is None:
             return None
-        index = corepack_install_index
+        index = next_scoped_command_index
+    return None
+
+
+def _setup_preamble_next_command_index(tokens: list[str], index: int) -> int | None:
+    if index >= len(tokens) or tokens[index] == "corepack":
+        return None
+    command_index = index + 1
+    while command_index < len(tokens):
+        token = tokens[command_index]
+        if token in {"&&", ";"}:
+            return command_index + 1 if command_index + 1 < len(tokens) else None
+        if token in {"||", "|", "|&", "&"}:
+            return None
+        command_index += 1
     return None
 
 
