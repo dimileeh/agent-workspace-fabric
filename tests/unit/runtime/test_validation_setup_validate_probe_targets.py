@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.browser_probe import browser_probe_workdir
 from awf.runtime.validation import (
     _leading_executable,
     _leading_executables,
@@ -133,6 +134,15 @@ class TestPlaywrightBrowserInstallCommand:
 
         assert command is not None
         assert command.command == "npx playwright install chromium"
+
+    def test_preserves_pnpm_filter_scope_from_setup_install(self) -> None:
+        profile = _profile_with_setup_and_browsers(["pnpm --filter web install"])
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "pnpm --filter web exec playwright install chromium"
+        assert browser_probe_workdir(profile) == "/workspace/web"
 
 
 @pytest.mark.unit
