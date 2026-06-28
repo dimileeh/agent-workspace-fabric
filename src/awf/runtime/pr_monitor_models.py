@@ -176,8 +176,13 @@ class CheckFailureLogResult:
                 self.failures == other.failures and self.runs_in_progress == other.runs_in_progress
             )
         if isinstance(other, tuple) and not other:
-            return not self.failures
+            return not self.failures and not self.runs_in_progress
         return NotImplemented
+
+    def __hash__(self) -> int:
+        if not self.failures and not self.runs_in_progress:
+            return hash(())
+        return hash((self.failures, self.runs_in_progress))
 
 
 @dataclass(frozen=True)
