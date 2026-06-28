@@ -75,6 +75,13 @@ def executor(
     )
 
 
+def _write_workspace_compose_file(executor: WorkspaceExecutor, workspace_id: str) -> Path:
+    compose_file = executor._config.compose_projects_root / workspace_id / "compose.yml"
+    compose_file.parent.mkdir(parents=True, exist_ok=True)
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    return compose_file
+
+
 class TestAgentServiceRecoveryPlanningArtifactDeposits:
     @pytest.mark.unit
     async def test_agent_service_recovery_exhaustion_deposits_planning_artifacts(
@@ -97,6 +104,7 @@ class TestAgentServiceRecoveryPlanningArtifactDeposits:
                 "phases": {"validate": ["pytest -q"]},
             },
         )
+        _write_workspace_compose_file(executor, ws_id)
         worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
         worktree_plans.mkdir(parents=True, exist_ok=True)
         (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- do work\n", encoding="utf-8")
@@ -169,6 +177,7 @@ class TestAgentServiceRecoveryPlanningArtifactDeposits:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await _seed_ready_workspace(factory)
+        _write_workspace_compose_file(executor, ws_id)
         calls: list[str] = []
         accept_existing_plan_values: list[bool] = []
         planning_retry_scope_baselines: list[object] = []
@@ -249,9 +258,9 @@ class TestAgentServiceRecoveryPlanningArtifactDeposits:
 
         retry_agent_index = calls.index("agent_run", calls.index("compose_restart"))
         assert calls[retry_agent_index - 4 : retry_agent_index] == [
+            "status:agent_run",
             "git_preflight",
             "ollama",
-            "status:agent_run",
             "mirror:before agent retry",
         ]
         assert accept_existing_plan_values == [False, True]
