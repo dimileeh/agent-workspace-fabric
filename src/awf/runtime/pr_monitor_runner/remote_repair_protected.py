@@ -933,6 +933,7 @@ async def _repair_protected_scope_changes_before_commit(
     except AgentRunError as exc:
         agent_run_err = exc
     except (
+        ProviderRecoveryRetryError,
         _MonitorAgentServiceRecoveryFailedError,
         _MonitorAgentServiceRecoverySupersededError,
     ):

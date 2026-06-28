@@ -924,10 +924,22 @@ async def test_protected_scope_repair_cleans_mirror_after_cleanup_failure(
 
 
 @pytest.mark.unit
-async def test_protected_scope_repair_superseded_recovery_reraises_without_cleanup(
+@pytest.mark.parametrize(
+    ("recovery_exc", "match"),
+    [
+        (ProviderRecoveryRetryError(), None),
+        (
+            _MonitorAgentServiceRecoverySupersededError("agent service recovery superseded"),
+            "agent service recovery superseded",
+        ),
+    ],
+)
+async def test_protected_scope_repair_recovery_control_flow_reraises_without_cleanup(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    recovery_exc: Exception,
+    match: str | None,
 ) -> None:
     runner = make_runner(
         factory=factory,
@@ -960,7 +972,7 @@ async def test_protected_scope_repair_superseded_recovery_reraises_without_clean
 
     async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> None:
         events.append("service-recovery")
-        raise _MonitorAgentServiceRecoverySupersededError("agent service recovery superseded")
+        raise recovery_exc
 
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
         events.append("verify-head")
@@ -995,10 +1007,7 @@ async def test_protected_scope_repair_superseded_recovery_reraises_without_clean
         _verify_head_object_exists,
     )
 
-    with pytest.raises(
-        _MonitorAgentServiceRecoverySupersededError,
-        match="agent service recovery superseded",
-    ):
+    with pytest.raises(type(recovery_exc), match=match):
         await runner._repair_protected_scope_changes_before_commit(
             workspace_id="ws_delta",
             status_stdout=" M .github/workflows/ci.yml\n",
