@@ -289,6 +289,22 @@ class TestPlaywrightBrowserInstallCommand:
                 "/workspace/apps/web",
             ),
             (
+                "corepack enable && corepack prepare pnpm@9 --activate && "
+                "pnpm install --frozen-lockfile",
+                "pnpm exec playwright install chromium",
+                "/workspace",
+            ),
+            (
+                "corepack install -g pnpm@9 && pnpm install --frozen-lockfile",
+                "pnpm exec playwright install chromium",
+                "/workspace",
+            ),
+            (
+                "corepack use yarn@4 && yarn install --immutable",
+                "yarn playwright install chromium",
+                "/workspace",
+            ),
+            (
                 "corepack enable && bun install --frozen-lockfile",
                 "bunx playwright install chromium",
                 "/workspace",

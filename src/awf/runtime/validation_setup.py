@@ -109,7 +109,7 @@ _SETUP_DEPENDENCY_NETWORK_DEFAULT_BACKOFF_SECONDS = (1.0, 3.0)
 _UV_DEV_VALIDATION_TOOLS = frozenset({"mypy", "pre-commit", "pytest", "ruff"})
 _NODE_PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun"})
 _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS = frozenset({"ci", "i", "install"})
-_COREPACK_PREAMBLE_SUBCOMMANDS = frozenset({"enable"})
+_COREPACK_PREAMBLE_SUBCOMMANDS = frozenset({"enable", "install", "prepare", "use"})
 _NODE_PM_OPTION_VALUE_FLAGS = frozenset(
     {
         "--cache",
@@ -309,18 +309,15 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     if package_manager is not None:
         return package_manager
     scoped_install = _leading_cd_package_scope(tokens, index)
-    if scoped_install is None:
+    while scoped_install is None:
         corepack_install_index = _corepack_preamble_next_command_index(tokens, index)
         if corepack_install_index is None:
             return None
-        package_manager = _node_dependency_install_package_manager_from_tokens(
-            tokens, corepack_install_index, []
-        )
+        index = corepack_install_index
+        package_manager = _node_dependency_install_package_manager_from_tokens(tokens, index, [])
         if package_manager is not None:
             return package_manager
-        scoped_install = _leading_cd_package_scope(tokens, corepack_install_index)
-        if scoped_install is None:
-            return None
+        scoped_install = _leading_cd_package_scope(tokens, index)
     package_dir, install_index = scoped_install
     package_manager = tokens[install_index]
     return _node_dependency_install_package_manager_from_tokens(
