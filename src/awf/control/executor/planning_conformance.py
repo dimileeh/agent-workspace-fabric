@@ -81,7 +81,6 @@ class _PostValidationConformanceScopeBaseline:
     before_compare: set[Path]
     before_compare_head: str | None
     before_dirty_digests: dict[Path, str]
-    before_report_digest: str | None
 
 
 async def _capture_post_validation_conformance_scope_baseline(
@@ -101,15 +100,10 @@ async def _capture_post_validation_conformance_scope_baseline(
         path: self._digest_dirty_content(worktree_path, {path})
         for path in before_compare - allowed_paths
     }
-    # A stale handoff report may still be present at this path; prefer
-    # stdout unless the conformance rerun actually refreshed the file.
-    before_report_text = _read_text_if_present(worktree_path / report_path)
-    before_report_digest = _digest_text(before_report_text) if before_report_text else None
     return _PostValidationConformanceScopeBaseline(
         before_compare=before_compare,
         before_compare_head=before_compare_head,
         before_dirty_digests=before_dirty_digests,
-        before_report_digest=before_report_digest,
     )
 
 
@@ -270,7 +264,12 @@ async def _run_post_validation_conformance_check(
     allowed_paths = {handoff.report_path}
     before_dirty_digests = dict(conformance_scope_baseline.before_dirty_digests)
     report_path = worktree_path / handoff.report_path
-    before_report_digest = conformance_scope_baseline.before_report_digest
+    # The path-scope baseline is intentionally preserved across service-recovery
+    # retries, but report freshness is per attempt. A failed cleanup attempt can
+    # leave a report behind; treating the original pre-retry digest as current
+    # would let that leftover file override the retry's stdout.
+    before_report_text = _read_text_if_present(report_path)
+    before_report_digest = _digest_text(before_report_text) if before_report_text else None
     # Hand the agent worktree-root-anchored artifact paths so the report lands
     # at the repo root even if the agent cd's into a task subdir during this
     # rerun (#620). The relative ``handoff.plan_path``/``handoff.report_path``
