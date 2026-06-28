@@ -270,6 +270,27 @@ async def execute(
         verify_head_object_exists_fn=verify_head_object_exists,
     )
 
+    before_agent_retry = None
+    cleanup_repair = None
+    if recovery is None:
+        before_agent_retry, cleanup_repair = _build_agent_service_recovery_callbacks(
+            self,
+            workspace_id=workspace_id,
+            workspace=ws,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+            execution_owner_id=execution_owner_id,
+            repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
+            repair_hooks_after_agent_cleanup_failure=(
+                _repair_mirror_hooks_path_after_cleanup_failure
+            ),
+            recover_missing_head_after_cleanup_failure=(
+                _recover_missing_head_after_cleanup_failure
+            ),
+            deposit_planning_artifacts=_deposit_planning_artifacts,
+        )
+
     try:
         agent = AgentRuntime(ws.agent)
         defaults = self._defaults_for(agent)
@@ -456,8 +477,6 @@ async def execute(
                 )[:2000],
             )
             return
-        before_agent_retry = None
-        cleanup_repair = None
         if recovery is None and not resume_skip_agent:
             if not await self._run_agent_git_writability_preflight(
                 workspace_id=workspace_id,
@@ -518,23 +537,6 @@ async def execute(
             ):
                 return
             try:
-                before_agent_retry, cleanup_repair = _build_agent_service_recovery_callbacks(
-                    self,
-                    workspace_id=workspace_id,
-                    workspace=ws,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    worktree_path=worktree_path,
-                    execution_owner_id=execution_owner_id,
-                    repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
-                    repair_hooks_after_agent_cleanup_failure=(
-                        _repair_mirror_hooks_path_after_cleanup_failure
-                    ),
-                    recover_missing_head_after_cleanup_failure=(
-                        _recover_missing_head_after_cleanup_failure
-                    ),
-                    deposit_planning_artifacts=_deposit_planning_artifacts,
-                )
                 (
                     agent_service_recovered,
                     planning_failure,

@@ -317,6 +317,7 @@ async def test_blocked_resume_grant_does_not_invoke_agent_on_precommit_repair(
     executor: WorkspaceExecutor,
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Regression for PRRT_kwDOSJAM6s6J5SDf: an approve-and-keep grant resume
     # skips the agent task ("no tokens") and keeps the approved protected change
@@ -329,6 +330,15 @@ async def test_blocked_resume_grant_does_not_invoke_agent_on_precommit_repair(
     fake.queue_result(returncode=0)  # git add -A
     fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff (non-empty)
     fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # git commit fails
+
+    repair_calls: list[dict[str, Any]] = []
+    real_repair = executor._run_post_agent_commit_repair
+
+    async def _record_post_agent_repair(**kwargs: Any) -> bool:
+        repair_calls.append(kwargs)
+        return await real_repair(**kwargs)
+
+    monkeypatch.setattr(executor, "_run_post_agent_commit_repair", _record_post_agent_repair)
 
     await executor.resume_blocked_execution(ws_id)
 
@@ -346,6 +356,9 @@ async def test_blocked_resume_grant_does_not_invoke_agent_on_precommit_repair(
     # The agent semantic repair was gated off, not run.
     assert commit_details["repair_strategy"] == "agent_skipped"
     assert commit_details["precommit_repair_attempted"] is False
+    assert len(repair_calls) == 1
+    assert repair_calls[0]["before_agent_retry"] is not None
+    assert repair_calls[0]["after_agent_cleanup_failure_repair"] is not None
     # The agent CLI was never invoked: only the single failed commit ran, with
     # no targeted-repair agent run and no retry commit.
     commit_calls = [call for call in fake.calls if "commit" in call.args]
