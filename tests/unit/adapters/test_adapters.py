@@ -670,6 +670,33 @@ class TestClaudeCodeAdapter:
         assert _claude_effort_for_awf_effort("MAX") == "max"
 
 
+class TestCursorAdapter:
+    """Cursor adapter contract tests."""
+
+    @pytest.mark.unit
+    async def test_produces_correct_cli_invocation(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = CursorAdapter(runner=runner, default_model="composer")
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        _assert_docker_exec_prefix(args)
+
+        cursor_start = args.index("cursor-agent")
+        cursor_args = args[cursor_start:]
+        assert cursor_args[:3] == ["cursor-agent", "-p", "--force"]
+        assert cursor_args[cursor_args.index("--model") + 1] == "composer"
+        assert "-m" not in cursor_args
+        assert cursor_args[cursor_args.index("--output-format") + 1] == "text"
+        _assert_prompt_not_in_argv(args)
+        _assert_prompt_sent_on_stdin(runner)
+
+
 class TestGeminiAdapter:
     """Gemini adapter contract tests."""
 

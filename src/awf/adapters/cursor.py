@@ -42,7 +42,7 @@ class CursorAdapter(AgentAdapter):
         selected_model = self._selected_model_for_run(model=model)
         args = ["cursor-agent", "-p", "--force"]
         if selected_model:
-            args.extend(["-m", selected_model])
+            args.extend(["--model", selected_model])
         args.extend(["--output-format", "text"])
         return args
 
