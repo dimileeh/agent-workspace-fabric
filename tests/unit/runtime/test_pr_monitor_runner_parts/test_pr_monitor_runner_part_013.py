@@ -196,6 +196,57 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
 
 
 @pytest.mark.unit
+async def test_monitor_agent_idle_timeout_with_healthy_service_is_not_recovered(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    timeout_error = AgentRunError(
+        agent=AgentRuntime.claude_code,
+        result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="monitor idle timeout with service still healthy",
+        ),
+        reason_code=AGENT_IDLE_TIMEOUT,
+        details={"provider": "google", "model": "gemini-2.5-pro"},
+    )
+    adapter = FakeAdapter()
+    adapter.queue(exc=timeout_error)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=True,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+    command_evidence: list[str] = []
+
+    with pytest.raises(AgentRunError) as raised:
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=_write_compose_file(tmp_path),
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=command_evidence,
+        )
+
+    assert raised.value is timeout_error
+    assert command_evidence == []
+    ensure_project_up.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_monitor_agent_service_recovery_reruns_pre_launch_guards_before_retry(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -747,6 +798,138 @@ async def test_monitor_agent_cleanup_service_down_stops_when_missing_head_repair
 
 
 @pytest.mark.unit
+async def test_monitor_agent_cleanup_service_down_stops_when_mirror_repair_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=ComposeExecCleanupError(
+            invocation_id="awf-test-cleanup",
+            source="agent",
+            label="monitor",
+            message='service "agent" is not running',
+            cleanup_result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr='service "agent" is not running',
+            ),
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    repair_error = GitOperationError(
+        operation="mirror.hooks_path_repair",
+        returncode=1,
+        stdout="",
+        stderr="fatal: could not unset hooksPath",
+        reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.mirror_path_for_worktree",
+        return_value=tmp_path / "mirror.git",
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_mirror_hooks_path",
+        side_effect=repair_error,
+    )
+
+    with pytest.raises(_MonitorMirrorHooksPathRepairFailedError):
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    assert adapter.calls == ["fix the comment"]
+    ensure_project_up.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_monitor_agent_cleanup_service_down_stops_when_no_recovery_head_exists(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=ComposeExecCleanupError(
+            invocation_id="awf-test-cleanup",
+            source="agent",
+            label="monitor",
+            message='service "agent" is not running',
+            cleanup_result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr='service "agent" is not running',
+            ),
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _open_merge_candidate_head_sha(_workspace_id: str) -> None:
+        return None
+
+    runner._open_merge_candidate_head_sha = _open_merge_candidate_head_sha  # type: ignore[method-assign]
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.mirror_path_for_worktree",
+        return_value=None,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.verify_head_object_exists",
+        return_value=False,
+        create=True,
+    )
+
+    with pytest.raises(_MonitorHeadObjectMissingError) as raised:
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    assert raised.value.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert adapter.calls == ["fix the comment"]
+    ensure_project_up.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_monitor_agent_cleanup_service_down_uses_exception_message_when_output_empty(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1231,3 +1414,60 @@ async def test_monitor_agent_service_recovery_exhaustion_terminates_workspace(
         "service_healthy": False,
         "restart_attempts": 2,
     }
+
+
+@pytest.mark.unit
+async def test_monitor_agent_service_recovery_superseded_when_workspace_missing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError) as raised:
+        await agent_service_recovery._raise_if_monitor_agent_service_recovery_was_superseded(
+            runner,
+            workspace_id="ws_missing",
+            source_reason_code=AGENT_IDLE_TIMEOUT,
+            service_healthy=False,
+            restart_attempts=1,
+        )
+
+    assert raised.value.details == {
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "source_reason_code": AGENT_IDLE_TIMEOUT,
+        "service_healthy": False,
+        "restart_attempts": 1,
+        "superseded_reason": "workspace_missing",
+    }
+
+
+@pytest.mark.unit
+def test_monitor_agent_recovery_helpers_ignore_invalid_timeout_details() -> None:
+    timeout_error = AgentRunError(
+        agent=AgentRuntime.claude_code,
+        result=CommandResult(returncode=1, stdout="", stderr="timeout"),
+        reason_code=AGENT_IDLE_TIMEOUT,
+        details=None,
+    )
+
+    assert agent_service_recovery._provider_from_error(timeout_error) is None
+    assert agent_service_recovery._model_from_error(timeout_error) is None
+
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="awf-test-cleanup",
+        source="agent",
+        label="monitor",
+        message='service "agent" is not running',
+        cleanup_result=CommandResult(
+            returncode=1, stdout="", stderr='service "agent" is not running'
+        ),
+    )
+    cleanup_error.reason_code = "OTHER_REASON"  # type: ignore[attr-defined]
+
+    assert not agent_service_recovery._cleanup_failure_indicates_agent_service_down(cleanup_error)

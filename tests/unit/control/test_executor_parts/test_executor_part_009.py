@@ -12,17 +12,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
 from awf.adapters.base import AgentRunError
+from awf.adapters.provider_failures import AGENT_SERVICE_UNHEALTHY
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
     agent_service_recovery,
     execution_flow,
 )
+from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.node.compose_manager import ComposeManager
+from awf.node.compose_manager import ComposeManager, ComposeOperationError
+from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationRunner
 from tests.postgres import postgres_test_engine
@@ -266,3 +270,233 @@ class TestAgentServiceRecoveryPlanningArtifactDeposits:
         assert accept_existing_plan_values == [False, True]
         assert len(planning_retry_scope_baselines) == 2
         assert planning_retry_scope_baselines[0] is planning_retry_scope_baselines[1]
+
+
+@pytest.mark.unit
+async def test_agent_recovery_preflight_returns_git_writability_failure(
+    executor: WorkspaceExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def _recheck_status(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def _git_preflight(**_kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+    monkeypatch.setattr(executor, "_run_agent_git_writability_preflight", _git_preflight)
+
+    result = await agent_service_recovery._rerun_agent_pre_launch_guards(
+        executor,
+        workspace_id="ws",
+        workspace=object(),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        execution_owner_id=None,
+        repair_mirror_hooks_path_or_mark_failed=AsyncMock(),
+        deposit_planning_artifacts=lambda: None,
+        expected_status=WorkspaceStatus.running,
+        failure_from_status=WorkspaceStatus.running,
+    )
+
+    assert result == "GIT_AGENT_WRITABILITY_FAILED"
+
+
+@pytest.mark.unit
+async def test_agent_recovery_preflight_returns_ollama_abort_reason(
+    executor: WorkspaceExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def _recheck_status(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def _git_preflight(**_kwargs: Any) -> bool:
+        return True
+
+    async def _ensure_ollama(**_kwargs: Any) -> str:
+        return "OLLAMA_MODEL_UNAVAILABLE"
+
+    repair = AsyncMock(return_value=True)
+    monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+    monkeypatch.setattr(executor, "_run_agent_git_writability_preflight", _git_preflight)
+    monkeypatch.setattr(executor, "_ensure_ollama_model_or_mark_failed", _ensure_ollama)
+
+    result = await agent_service_recovery._rerun_agent_pre_launch_guards(
+        executor,
+        workspace_id="ws",
+        workspace=object(),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        execution_owner_id=None,
+        repair_mirror_hooks_path_or_mark_failed=repair,
+        deposit_planning_artifacts=lambda: None,
+        expected_status=WorkspaceStatus.running,
+        failure_from_status=WorkspaceStatus.running,
+    )
+
+    assert result == "OLLAMA_MODEL_UNAVAILABLE"
+    repair.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_restart_agent_service_returns_false_when_restart_failure_goes_stale(
+    tmp_path: Path,
+) -> None:
+    class Compose:
+        async def ensure_project_up(self, **_kwargs: Any) -> None:
+            raise ComposeOperationError(
+                operation="up",
+                returncode=1,
+                stdout="",
+                stderr="compose failed",
+            )
+
+    class Executor:
+        _compose = Compose()
+
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        async def _recheck_status(self, *_args: Any, action: str, **_kwargs: Any) -> bool:
+            self.actions.append(action)
+            return action != "agent_service_restart_terminal"
+
+        async def _mark_failed(self, **_kwargs: Any) -> None:
+            raise AssertionError("stale restart must not mark failed")
+
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=124, stdout="", stderr="timeout"),
+        reason_code="AGENT_IDLE_TIMEOUT",
+        details={"provider": "openai", "model": "gpt-5"},
+    )
+    executor = Executor()
+
+    (
+        restart_attempts,
+        restarted,
+    ) = await agent_service_recovery._restart_agent_service_or_mark_unhealthy(
+        executor,
+        workspace_id="ws",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        exc=exc,
+        service_healthy=False,
+        restart_attempts=0,
+        compose_up_timeout_seconds=30,
+    )
+
+    assert (restart_attempts, restarted) == (1, False)
+    assert executor.actions == ["agent_service_restart_prepare", "agent_service_restart_terminal"]
+
+
+@pytest.mark.unit
+async def test_restart_agent_service_returns_false_when_recovery_status_goes_stale(
+    tmp_path: Path,
+) -> None:
+    class Compose:
+        async def ensure_project_up(self, **_kwargs: Any) -> None:
+            return None
+
+    class Executor:
+        _compose = Compose()
+
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        async def _recheck_status(self, *_args: Any, action: str, **_kwargs: Any) -> bool:
+            self.actions.append(action)
+            return action != "agent_service_restart_recovery"
+
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=124, stdout="", stderr="timeout"),
+        reason_code="AGENT_IDLE_TIMEOUT",
+        details={"provider": "openai", "model": "gpt-5"},
+    )
+    executor = Executor()
+
+    (
+        restart_attempts,
+        restarted,
+    ) = await agent_service_recovery._restart_agent_service_or_mark_unhealthy(
+        executor,
+        workspace_id="ws",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        exc=exc,
+        service_healthy=False,
+        restart_attempts=0,
+        compose_up_timeout_seconds=30,
+    )
+
+    assert (restart_attempts, restarted) == (1, False)
+    assert executor.actions == ["agent_service_restart_prepare", "agent_service_restart_recovery"]
+
+
+@pytest.mark.unit
+async def test_mark_agent_service_unhealthy_honors_callback_that_marks_workspace() -> None:
+    class Executor:
+        async def _mark_failed(self, **_kwargs: Any) -> None:
+            raise AssertionError("callback marked workspace, so _mark_failed must not run")
+
+    seen: dict[str, Any] = {}
+
+    async def _before_mark_failed(**kwargs: Any) -> None:
+        seen.update(kwargs)
+
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=124, stdout="", stderr="timeout"),
+        reason_code="AGENT_IDLE_TIMEOUT",
+        details={"provider": "openai", "model": "gpt-5"},
+    )
+
+    await agent_service_recovery._mark_agent_service_unhealthy(
+        Executor(),
+        workspace_id="ws",
+        exc=exc,
+        service_healthy=False,
+        restart_attempts=2,
+        message="agent service stayed down",
+        before_mark_failed=_before_mark_failed,
+        before_mark_failed_marks_workspace=True,
+    )
+
+    assert seen["reason_code"] == AGENT_SERVICE_UNHEALTHY
+    assert seen["details"]["agent_service_recovery"] == {
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "source_reason_code": "AGENT_IDLE_TIMEOUT",
+        "service_healthy": False,
+        "restart_attempts": 2,
+    }
+
+
+@pytest.mark.unit
+def test_agent_service_recovery_helper_rejects_non_matching_cleanup_and_conformance() -> None:
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="awf-test-cleanup",
+        source="agent",
+        label="executor",
+        message='service "agent" is not running',
+        cleanup_result=CommandResult(
+            returncode=1, stdout="", stderr='service "agent" is not running'
+        ),
+    )
+    cleanup_error.reason_code = "OTHER_REASON"  # type: ignore[attr-defined]
+    conformance_failure = _PlanningRunFailure(
+        message="stalled",
+        reason_code=AGENT_STALLED_IN_CONFORMANCE,
+        details={"conformance_stall": "not-a-mapping"},
+    )
+
+    assert not agent_service_recovery._cleanup_failure_indicates_agent_service_down(cleanup_error)
+    assert agent_service_recovery._conformance_stall_timeout_source_reason_code(object()) is None
+    assert (
+        agent_service_recovery._conformance_stall_timeout_source_reason_code(conformance_failure)
+        is None
+    )
