@@ -987,6 +987,10 @@ class TestHappyPathPart003:
             fake.queue_result(returncode=0, stdout=clean_paths)  # after_compare
             fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
             fake.queue_result(returncode=0, stdout=f"{sha}\n")  # rev-parse HEAD iter post
+            fake.queue_result(
+                returncode=0,
+                stdout="src/x.py\n",
+            )  # committed implementation paths since post-planning HEAD
 
         # Fourth iteration: agent finally satisfies the plan (commits + report flips)
         fake.queue_result(returncode=0, stdout="execute output")  # execute
