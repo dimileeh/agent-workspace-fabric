@@ -680,6 +680,26 @@ def test_conformance_requires_awf_validation_accepts_saved_plan_scoped_check_han
 
 
 @pytest.mark.unit
+def test_conformance_accepts_saved_plan_scoped_check_missing_handoff() -> None:
+    gap = (
+        "Focused-check evidence is missing from the saved plan for scoped validation "
+        "commands: `uv run --python 3.12 --extra dev pytest "
+        "tests/unit/runtime/test_planning_parts/test_planning_part_001.py -q`; "
+        "`uv run --python 3.12 --extra dev ruff check src/awf tests`; "
+        "`uv run --python 3.12 --extra dev mypy src/awf`; `git diff --check`. "
+        "The AWF validation phase must run and record scoped checks."
+    )
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Implementation is complete; only AWF-owned validation evidence is missing.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(gap,),
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
 def test_saved_plan_command_snippets_do_not_count_as_handoff() -> None:
     gap = (
         "Missing focused-check evidence from the saved plan for scoped validation "

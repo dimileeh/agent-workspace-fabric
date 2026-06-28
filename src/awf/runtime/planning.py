@@ -648,10 +648,19 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         )
         is not None
     )
+    saved_plan_scoped_check_evidence = (
+        re.search(
+            r"(?<![a-z0-9_])(?:focused|scoped)[-\s]+checks?"
+            r"\s+(?:evidence|artifact)(?![a-z0-9_])",
+            text,
+        )
+        is not None
+    )
     saved_plan_scoped_check_handoff = (
         not negated_saved_plan_scoped_check_record
         and has_marker("saved plan")
         and named_validation_command_handoff
+        and saved_plan_scoped_check_evidence
         and re.search(r"(?<![a-z0-9_])(?:focused|scoped)[-\s]+checks?(?![a-z0-9_])", text)
         is not None
         and any(
@@ -679,6 +688,19 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         return False
     if has_marker("schema") and not migration_validation_evidence_gap:
         return False
+    saved_plan_scoped_check_missing_pattern = (
+        r"(?<![a-z0-9_])(?:focused|scoped)[-\s]+checks?"
+        r"(?:\s+(?:evidence|artifact))?\s+"
+        r"(?:is|are|was|were|remains?)?\s*"
+        r"(?:missing|absent|unavailable|not available|not found)(?![a-z0-9_])"
+        r"[^.;:]*\b(?:from|in|inside|within)\s+(?:the\s+)?"
+        r"(?:saved\s+)?plan(?![a-z0-9_])"
+    )
+    if not saved_plan_scoped_check_handoff and re.search(
+        saved_plan_scoped_check_missing_pattern,
+        text,
+    ):
+        return False
     deterministic_gap_patterns = (
         r"(?:^|[.;:]\s*|(?<![a-z0-9_])please\s+)document(?![a-z0-9_])"
         r"\s+(?:the\s+)?",
@@ -697,12 +719,6 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
         r"\s+(?:gap|gaps|task|tasks|todo|todos|update|updates|change|changes|"
         r"need|needs|must|should|required|missing|absent|stale|outdated|lacks?)",
-        r"(?<![a-z0-9_])(?:focused|scoped)[-\s]+checks?"
-        r"(?:\s+(?:evidence|artifact))?\s+"
-        r"(?:is|are|was|were|remains?)?\s*"
-        r"(?:missing|absent|unavailable|not available|not found)(?![a-z0-9_])"
-        r"[^.;:]*\b(?:from|in|inside|within)\s+(?:the\s+)?"
-        r"(?:saved\s+)?plan(?![a-z0-9_])",
         r"(?<![a-z0-9_])(?:from|in|inside|within)\s+(?:the\s+)?"
         r"(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])",
         r"(?<![a-z0-9_])(?:docs|documentation|document|doc|guide|readme)"
