@@ -197,6 +197,76 @@ def test_reaper_uses_git_aware_remover_for_git_managed_worktree(
 
 
 @pytest.mark.unit
+def test_reaper_uses_scanned_companion_worktree_id_for_git_aware_remover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_parent__companion__backend"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(
+        "gitdir: ../mirrors/backend.git/worktrees/ws_parent__companion__backend\n",
+        encoding="utf-8",
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+    calls: list[tuple[str, Path]] = []
+
+    async def _git_aware_remover(
+        *, workspace_id: str, path: Path, work_dir: Path
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        calls.append((workspace_id, path))
+        assert work_dir == tmp_path.resolve()
+        return WorkspaceGCWorktreeRemoveResult(
+            status="succeeded",
+            reason_code="WORKTREE_REMOVE_SUCCEEDED",
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="succeeded",
+                    reason_code="WORKTREE_REMOVE_SUCCEEDED",
+                ),
+            ),
+        )
+
+    def _direct_delete_forbidden(
+        kind: str, path: Path, *, work_dir: Path
+    ) -> tuple[bool, str | None, str | None]:
+        raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
+
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
+    )
+
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            min_age_hours=0,
+            worktree_remover=_git_aware_remover,
+        )
+    )
+
+    assert result.status == "ok"
+    assert calls == [("ws_parent__companion__backend", worktree)]
+    assert [outcome.to_dict() for outcome in result.reaped] == [
+        {
+            "kind": "worktree",
+            "workspace_id": "ws_parent",
+            "status": "reaped",
+            "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+        }
+    ]
+
+
+@pytest.mark.unit
 def test_reaper_reports_git_aware_worktree_remover_failure_without_direct_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -969,7 +969,7 @@ async def reap_classified_orphans(
             worktree_path, work_dir=resolved_work_dir
         ):
             removal = await resolved_worktree_remover(
-                workspace_id=record.workspace_id,
+                workspace_id=worktree_path.name,
                 path=worktree_path,
                 work_dir=resolved_work_dir,
             )
