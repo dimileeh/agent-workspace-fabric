@@ -315,6 +315,7 @@ async def test_conformance_recovery_abort_marks_validating_workspace_failed(
             return ValidationResult(commands=[_passing_command(tmp_path)])
 
     async def _abort_recovery(*_args: object, **kwargs: object) -> tuple[bool, object | None]:
+        assert kwargs["before_mark_failed_marks_workspace"] is True
         before_mark_failed = kwargs["before_mark_failed"]
         await before_mark_failed(reason_code="GIT_AGENT_WRITABILITY_FAILED")
         return False, None
@@ -377,6 +378,7 @@ async def test_conformance_recovery_abort_without_reason_is_not_marked_unhealthy
             return ValidationResult(commands=[_passing_command(tmp_path)])
 
     async def _abort_recovery(*_args: object, **kwargs: object) -> tuple[bool, object | None]:
+        assert kwargs["before_mark_failed_marks_workspace"] is True
         before_mark_failed = kwargs["before_mark_failed"]
         await before_mark_failed()
         return False, None
@@ -501,6 +503,7 @@ async def test_fix_pass_recovery_abort_marks_validating_workspace_failed(
             return ValidationResult(commands=[_failing_command(tmp_path)])
 
     async def _abort_recovery(*_args: object, **kwargs: object) -> tuple[bool, object | None]:
+        assert kwargs["before_mark_failed_marks_workspace"] is True
         before_mark_failed = kwargs["before_mark_failed"]
         await before_mark_failed(reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED")
         return False, None

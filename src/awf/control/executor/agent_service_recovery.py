@@ -200,6 +200,7 @@ async def _run_agent_callable_with_service_recovery(
     workspace_id: str,
     execution_owner_id: str | None = None,
     before_mark_failed: _BeforeMarkFailed | None = None,
+    before_mark_failed_marks_workspace: bool = False,
     before_agent_retry: Callable[[], Awaitable[_RecoveryCallbackResult]] | None = None,
     after_agent_cleanup_failure_repair: (
         Callable[[ComposeExecCleanupError], Awaitable[_RecoveryCallbackResult]] | None
@@ -240,6 +241,7 @@ async def _run_agent_callable_with_service_recovery(
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
+                before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
                 expected_status=expected_status,
                 failure_from_status=failure_from_status,
             )
@@ -279,6 +281,7 @@ async def _run_agent_callable_with_service_recovery(
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
+                before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
                 expected_status=expected_status,
                 failure_from_status=failure_from_status,
             )
@@ -322,6 +325,7 @@ async def _run_agent_callable_with_service_recovery(
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
+                before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
                 expected_status=expected_status,
                 failure_from_status=failure_from_status,
             )
@@ -404,6 +408,7 @@ async def _restart_after_conformance_timeout_failure(
     compose_up_timeout_seconds: int,
     execution_owner_id: str | None = None,
     before_mark_failed: _BeforeMarkFailed | None = None,
+    before_mark_failed_marks_workspace: bool = False,
     expected_status: WorkspaceStatus = WorkspaceStatus.running,
     failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
 ) -> tuple[int, bool] | None:
@@ -434,6 +439,7 @@ async def _restart_after_conformance_timeout_failure(
         source_reason_code=source_reason_code,
         execution_owner_id=execution_owner_id,
         before_mark_failed=before_mark_failed,
+        before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
         expected_status=expected_status,
         failure_from_status=failure_from_status,
     )
@@ -504,6 +510,7 @@ async def _restart_agent_service_or_mark_unhealthy(
     source_reason_code: str | None = None,
     execution_owner_id: str | None = None,
     before_mark_failed: _BeforeMarkFailed | None = None,
+    before_mark_failed_marks_workspace: bool = False,
     expected_status: WorkspaceStatus = WorkspaceStatus.running,
     failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
 ) -> tuple[int, bool]:
@@ -524,6 +531,7 @@ async def _restart_agent_service_or_mark_unhealthy(
             source_reason_code=source_reason_code,
             message="agent compose service stayed unhealthy after restart attempts",
             before_mark_failed=before_mark_failed,
+            before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
             from_status=failure_from_status,
         )
         return restart_attempts, False
@@ -553,6 +561,7 @@ async def _restart_agent_service_or_mark_unhealthy(
             source_reason_code=source_reason_code,
             message=f"agent compose service restart failed: {restart_exc!r}"[:2000],
             before_mark_failed=before_mark_failed,
+            before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
             from_status=failure_from_status,
         )
         return restart_attempts, False
@@ -580,6 +589,7 @@ async def _mark_agent_service_unhealthy(
     message: str,
     source_reason_code: str | None = None,
     before_mark_failed: _BeforeMarkFailed | None = None,
+    before_mark_failed_marks_workspace: bool = False,
     from_status: WorkspaceStatus = WorkspaceStatus.running,
 ) -> None:
     exc_details = getattr(exc, "details", None)
@@ -604,6 +614,8 @@ async def _mark_agent_service_unhealthy(
             reason_code=AGENT_SERVICE_UNHEALTHY,
             details=details,
         )
+        if before_mark_failed_marks_workspace:
+            return
     await self._mark_failed(
         workspace_id=workspace_id,
         from_status=from_status,

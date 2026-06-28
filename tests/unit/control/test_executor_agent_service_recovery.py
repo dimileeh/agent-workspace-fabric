@@ -977,6 +977,7 @@ async def test_validation_agent_service_recovery_callback_gets_terminal_details(
         command_evidence=[],
         workspace_id="ws_agent_service",
         before_mark_failed=_before_mark_failed,
+        before_mark_failed_marks_workspace=True,
         expected_status=WorkspaceStatus.validating,
         failure_from_status=WorkspaceStatus.validating,
     )
@@ -992,7 +993,7 @@ async def test_validation_agent_service_recovery_callback_gets_terminal_details(
     recovery_details = details["agent_service_recovery"]
     assert recovery_details["source_reason_code"] == "AGENT_IDLE_TIMEOUT"
     assert recovery_details["restart_attempts"] == 2
-    executor._mark_failed.assert_awaited_once()
+    executor._mark_failed.assert_not_awaited()
 
 
 @pytest.mark.unit
