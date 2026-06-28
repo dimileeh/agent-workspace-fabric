@@ -117,6 +117,32 @@ class TestRepairMirrorHooksPath:
         assert started is True
 
     @pytest.mark.unit
+    async def test_repo_url_derived_mirror_uses_same_lock_as_actual_mirror(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "origin"
+        repo.mkdir()
+        _git(["init", "-q", "-b", "main"], repo)
+        _git(["config", "user.name", "AWF Test"], repo)
+        _git(["config", "user.email", "awf@test.local"], repo)
+        (repo / "README.md").write_text("initial\n", encoding="utf-8")
+        _git(["add", "."], repo)
+        _git(["commit", "-q", "-m", "init"], repo)
+
+        manager = git_module.GitManager(tmp_path / "git")
+        repo_url = str(repo)
+        actual_mirror = await manager.ensure_mirror(repo_url)
+
+        origin_url = await git_module.read_mirror_origin_url(actual_mirror)
+        assert origin_url == repo_url
+        url_derived_mirror = manager._mirror_path(origin_url)  # noqa: SLF001
+
+        assert url_derived_mirror.resolve() == actual_mirror.resolve()
+        assert git_module.GitManager._lock_for_mirror(  # noqa: SLF001
+            url_derived_mirror
+        ) is git_module.GitManager._lock_for_mirror(actual_mirror)  # noqa: SLF001
+
+    @pytest.mark.unit
     async def test_remove_worktree_waits_for_same_mirror_lock_as_repair(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
