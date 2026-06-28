@@ -16,6 +16,7 @@ from awf.profiles.models import (
 from awf.runtime.browser_probe import (
     _BROWSER_PROBE_SCRIPT,
     ProbeExecResult,
+    _browser_probe_node_runtime,
     browser_probe_workdir,
     probe_runtime_browsers,
 )
@@ -84,6 +85,17 @@ class TestProbeRuntimeBrowsers:
         assert findings == ()
         assert len(spy.calls) == 1
         assert spy.calls[0][2].startswith('yarn node - "$@" <<')
+        assert spy.calls[0][-1] == "chromium"
+
+    async def test_pnpm_filter_profile_runs_probe_through_selected_package(self) -> None:
+        profile = _profile_with_setup_and_browsers(["pnpm --filter @repo/web install"])
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
+
+        findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+        assert len(spy.calls) == 1
+        assert spy.calls[0][2].startswith("pnpm --filter @repo/web exec node")
         assert spy.calls[0][-1] == "chromium"
 
     async def test_declared_browser_missing_warns(self) -> None:
@@ -223,3 +235,22 @@ exports.firefox = {{
 
         assert result.returncode == 0
         assert result.stdout.splitlines() == ["OK chromium", "MISSING firefox"]
+
+    @pytest.mark.parametrize(
+        ("package_manager", "expected"),
+        [
+            ("npm", "node"),
+            ("pnpm", "node"),
+            ("yarn", "yarn node"),
+            ("pnpm --filter @repo/web", "pnpm --filter @repo/web exec node"),
+            ("pnpm -F @repo/web", "pnpm -F @repo/web exec node"),
+            ("npm --workspace @repo/web", "npm --workspace @repo/web exec -- node"),
+            ('npm "unterminated', "node"),
+        ],
+    )
+    def test_browser_probe_node_runtime_uses_scoped_package_manager(
+        self,
+        package_manager: str,
+        expected: str,
+    ) -> None:
+        assert _browser_probe_node_runtime(package_manager) == expected

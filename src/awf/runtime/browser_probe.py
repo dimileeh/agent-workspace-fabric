@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+import shlex
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -14,7 +15,7 @@ from awf.profiles.models import (
     runtime_browser_findings,
 )
 from awf.runtime.validation_setup import (
-    node_package_manager_executable,
+    node_package_manager_command,
     node_package_manager_package_dir,
 )
 
@@ -71,6 +72,21 @@ def _browser_probe_script(node_runtime: str) -> str:
     return _BROWSER_PROBE_SCRIPT_TEMPLATE.replace("__NODE_RUNTIME__", node_runtime, 1)
 
 
+def _browser_probe_node_runtime(package_manager: str) -> str:
+    try:
+        package_manager_tokens = shlex.split(package_manager)
+    except ValueError:
+        return "node"
+    executable = package_manager_tokens[0] if package_manager_tokens else "npm"
+    if executable == "yarn":
+        return shlex.join([*package_manager_tokens, "node"])
+    if executable == "pnpm" and len(package_manager_tokens) > 1:
+        return shlex.join([*package_manager_tokens, "exec", "node"])
+    if executable == "npm" and len(package_manager_tokens) > 1:
+        return shlex.join([*package_manager_tokens, "exec", "--", "node"])
+    return "node"
+
+
 _BROWSER_PROBE_SCRIPT = _browser_probe_script("node")
 _BROWSER_STATUS_RE = re.compile(r"^(?P<status>OK|MISSING) (?P<browser>\S+)$", re.MULTILINE)
 
@@ -94,7 +110,7 @@ async def probe_runtime_browsers(
     if not profile.runtime.browsers:
         return ()
     try:
-        node_runtime = "yarn node" if node_package_manager_executable(profile) == "yarn" else "node"
+        node_runtime = _browser_probe_node_runtime(node_package_manager_command(profile))
         result = await exec_in_container(
             [
                 "sh",
