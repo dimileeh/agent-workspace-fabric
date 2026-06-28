@@ -656,6 +656,9 @@ _CI_CODE_FAILURE_MARKERS = (
     "assertionerror",
     "=== short test summary info ===",
     "found type errors",
+    "expect(received)",
+    "test result: failed",
+    "panicked at",
     "--- fail:",
     "panic:",
 )

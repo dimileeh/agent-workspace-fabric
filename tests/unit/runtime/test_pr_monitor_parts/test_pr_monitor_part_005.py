@@ -98,6 +98,47 @@ class TestCiFailure:
     """Tests for CI-failure decide() paths (overflow from part_003)."""
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "log_excerpt",
+        (
+            (
+                "FAIL src/cache/client.test.ts\n"
+                "  cache client\n"
+                "    x retries failed requests\n\n"
+                "  expect(received).toEqual(expected)\n\n"
+                '  Expected: "connection reset handled"\n'
+                '  Received: "failed to download"\n'
+            ),
+            (
+                "thread 'retry_downloads' panicked at src/lib.rs:42:9:\n"
+                "assertion `left == right` failed\n"
+                "failed to download fixture: connection reset\n"
+                "test result: FAILED. 0 passed; 1 failed\n"
+            ),
+        ),
+    )
+    def test_assertion_with_transient_phrase_reports_ci_failure(self, log_excerpt: str) -> None:
+        """A completed test assertion that mentions transient vocabulary must be
+        reported to the agent instead of consuming transient rerun budget.
+
+        Regression for PRRT_kwDOSJAM6s6M1Z-M."""
+        failure = CheckFailure(
+            name="frontend-tests",
+            conclusion="FAILURE",
+            log_excerpt=log_excerpt,
+            run_id="27091023777",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrelated_permanent_daemon_error_after_transient_pull_dispatches_rerun(
         self,
     ) -> None:
