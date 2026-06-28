@@ -679,6 +679,21 @@ def test_saved_plan_command_snippets_do_not_count_as_handoff() -> None:
 
 
 @pytest.mark.unit
+def test_saved_plan_scoped_check_handoff_rejects_saved_plan_edits() -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Implementation is complete, but saved-plan artifact work remains.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(
+            "Saved plan evidence is missing; add scoped checks to the saved plan. "
+            "The AWF validation phase must run pytest and record scoped checks.",
+        ),
+    )
+
+    assert not conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "gap",
     (
