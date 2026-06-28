@@ -350,6 +350,9 @@ async def _restart_monitor_agent_service_or_fail(
     await _raise_if_monitor_agent_service_recovery_was_superseded(
         self,
         workspace_id=workspace_id,
+        source_reason_code=exc.reason_code,
+        service_healthy=service_healthy,
+        restart_attempts=restart_attempts,
     )
     return restart_attempts
 
@@ -358,6 +361,9 @@ async def _raise_if_monitor_agent_service_recovery_was_superseded(
     self: Any,
     *,
     workspace_id: str,
+    source_reason_code: str,
+    service_healthy: bool | None,
+    restart_attempts: int,
 ) -> None:
     async with self._deps.session_factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
@@ -368,7 +374,16 @@ async def _raise_if_monitor_agent_service_recovery_was_superseded(
                 workspace_id=workspace_id,
                 reason="workspace_missing",
             )
-            raise _MonitorAgentServiceRecoverySupersededError(message)
+            raise _MonitorAgentServiceRecoverySupersededError(
+                message,
+                reason_code=AGENT_SERVICE_UNHEALTHY,
+                details=_agent_service_recovery_source_details(
+                    source_reason_code=source_reason_code,
+                    service_healthy=service_healthy,
+                    restart_attempts=restart_attempts,
+                    superseded_reason="workspace_missing",
+                ),
+            )
         if workspace.status != WorkspaceStatus.monitoring_pr.value:
             message = "agent compose service recovery superseded: workspace left monitoring_pr"
             _log.warning(
@@ -377,7 +392,16 @@ async def _raise_if_monitor_agent_service_recovery_was_superseded(
                 reason="status_changed",
                 status=workspace.status,
             )
-            raise _MonitorAgentServiceRecoverySupersededError(message)
+            raise _MonitorAgentServiceRecoverySupersededError(
+                message,
+                reason_code=AGENT_SERVICE_UNHEALTHY,
+                details=_agent_service_recovery_source_details(
+                    source_reason_code=source_reason_code,
+                    service_healthy=service_healthy,
+                    restart_attempts=restart_attempts,
+                    superseded_reason="status_changed",
+                ),
+            )
         monitor_owner_id = getattr(self, "_monitor_owner_id", None)
         superseded_claimed_runner = (
             monitor_owner_id is not None and workspace.monitor_claimed_by != monitor_owner_id
@@ -394,7 +418,16 @@ async def _raise_if_monitor_agent_service_recovery_was_superseded(
                 monitor_owner_id=monitor_owner_id,
                 monitor_claimed_by=workspace.monitor_claimed_by,
             )
-            raise _MonitorAgentServiceRecoverySupersededError(message)
+            raise _MonitorAgentServiceRecoverySupersededError(
+                message,
+                reason_code=AGENT_SERVICE_UNHEALTHY,
+                details=_agent_service_recovery_source_details(
+                    source_reason_code=source_reason_code,
+                    service_healthy=service_healthy,
+                    restart_attempts=restart_attempts,
+                    superseded_reason="monitor_claim_changed",
+                ),
+            )
 
 
 async def _monitor_agent_service_restart_timeout_seconds(
@@ -423,6 +456,24 @@ async def _monitor_agent_service_restart_timeout_seconds(
         return _MONITOR_AGENT_SERVICE_RESTART_TIMEOUT_SECONDS
 
 
+def _agent_service_recovery_source_details(
+    *,
+    source_reason_code: str,
+    service_healthy: bool | None,
+    restart_attempts: int,
+    superseded_reason: str | None = None,
+) -> dict[str, object]:
+    details: dict[str, object] = {
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "source_reason_code": source_reason_code,
+        "service_healthy": service_healthy,
+        "restart_attempts": restart_attempts,
+    }
+    if superseded_reason is not None:
+        details["superseded_reason"] = superseded_reason
+    return details
+
+
 async def _terminate_monitor_for_unhealthy_agent_service(
     self: Any,
     *,
@@ -442,19 +493,23 @@ async def _terminate_monitor_for_unhealthy_agent_service(
         "failure_fingerprint": "",
         "fallback_allowed": False,
     }
-    details["agent_service_recovery"] = {
-        "reason_code": AGENT_SERVICE_UNHEALTHY,
-        "source_reason_code": exc.reason_code,
-        "service_healthy": service_healthy,
-        "restart_attempts": restart_attempts,
-    }
+    agent_service_recovery_details = _agent_service_recovery_source_details(
+        source_reason_code=exc.reason_code,
+        service_healthy=service_healthy,
+        restart_attempts=restart_attempts,
+    )
+    details["agent_service_recovery"] = agent_service_recovery_details
     await self._terminate_failed(
         workspace_id,
         message=message,
         reason_code=AGENT_SERVICE_UNHEALTHY,
         details=details,
     )
-    raise _MonitorAgentServiceRecoveryFailedError(message)
+    raise _MonitorAgentServiceRecoveryFailedError(
+        message,
+        reason_code=AGENT_SERVICE_UNHEALTHY,
+        details=agent_service_recovery_details,
+    )
 
 
 def _monitor_agent_service_recovery_template_sentinel(work_dir: Path) -> Path:

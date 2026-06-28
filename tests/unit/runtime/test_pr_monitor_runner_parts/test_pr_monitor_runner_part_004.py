@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
+from awf.adapters.provider_failures import AGENT_SERVICE_UNHEALTHY
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
@@ -932,10 +933,17 @@ async def test_agent_service_recovery_sentinel_finishes_monitor_operation(
     )
     status = _green_status()
     state = MonitorState(started_at=0.0)
+    recovery_details: dict[str, object] = {
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "source_reason_code": "AGENT_IDLE_TIMEOUT",
+        "service_healthy": False,
+        "restart_attempts": 2,
+    }
     expected_result: dict[str, object] = {
         "status": "failed",
         "outcome": "agent_service_recovery_failed",
-        "reason_code": "MONITOR_RECOVERY_FAILED",
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "agent_service_recovery": recovery_details,
         "pushed": False,
     }
 
@@ -977,7 +985,11 @@ async def test_agent_service_recovery_sentinel_finishes_monitor_operation(
         expected_type = "comment_repair"
 
     async def _raise_agent_service_recovery_failed(**_kwargs: object) -> object:
-        raise _MonitorAgentServiceRecoveryFailedError("agent service unhealthy")
+        raise _MonitorAgentServiceRecoveryFailedError(
+            "agent service unhealthy",
+            reason_code=AGENT_SERVICE_UNHEALTHY,
+            details=recovery_details,
+        )
 
     mocker.patch.object(runner, target_method, _raise_agent_service_recovery_failed)
 
@@ -1003,7 +1015,7 @@ async def test_agent_service_recovery_sentinel_finishes_monitor_operation(
     assert operation.type == expected_type
     assert operation.status == OperationStatus.failed.value
     assert operation.result == expected_result
-    assert operation.error_code == "MONITOR_RECOVERY_FAILED"
+    assert operation.error_code == AGENT_SERVICE_UNHEALTHY
     assert operation.error_message == "agent service unhealthy"
 
 
@@ -1028,10 +1040,18 @@ async def test_superseded_agent_service_recovery_cancels_monitor_operation(
     )
     status = _green_status()
     state = MonitorState(started_at=0.0)
+    recovery_details: dict[str, object] = {
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "source_reason_code": "AGENT_IDLE_TIMEOUT",
+        "service_healthy": False,
+        "restart_attempts": 1,
+        "superseded_reason": "monitor_claim_changed",
+    }
     expected_result: dict[str, object] = {
         "status": "cancelled",
         "outcome": "agent_service_recovery_superseded",
-        "reason_code": "MONITOR_RECOVERY_SUPERSEDED",
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "agent_service_recovery": recovery_details,
         "pushed": False,
     }
 
@@ -1073,7 +1093,11 @@ async def test_superseded_agent_service_recovery_cancels_monitor_operation(
         expected_type = "comment_repair"
 
     async def _raise_agent_service_recovery_superseded(**_kwargs: object) -> object:
-        raise _MonitorAgentServiceRecoverySupersededError("agent service recovery superseded")
+        raise _MonitorAgentServiceRecoverySupersededError(
+            "agent service recovery superseded",
+            reason_code=AGENT_SERVICE_UNHEALTHY,
+            details=recovery_details,
+        )
 
     mocker.patch.object(runner, target_method, _raise_agent_service_recovery_superseded)
 
@@ -1099,7 +1123,7 @@ async def test_superseded_agent_service_recovery_cancels_monitor_operation(
     assert operation.type == expected_type
     assert operation.status == OperationStatus.cancelled.value
     assert operation.result == expected_result
-    assert operation.error_code == "MONITOR_RECOVERY_SUPERSEDED"
+    assert operation.error_code == AGENT_SERVICE_UNHEALTHY
     assert operation.error_message == "agent service recovery superseded"
 
 
