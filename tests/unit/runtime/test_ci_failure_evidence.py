@@ -180,6 +180,24 @@ def test_ci_failure_evidence_ignores_github_step_prefix_for_marker_matching() ->
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_preserves_ruff_diagnostics_without_tail_marker() -> None:
+    diagnostic = (
+        "python\tLint (ruff)\t"
+        "src/awf/runtime/ci_failure_evidence.py:15:5: F401 `re` imported but unused"
+    )
+    boilerplate = [
+        f"python\tLint (ruff)\t2026-06-28T20:35:{second:02d}Z setup line" for second in range(10)
+    ]
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join([*boilerplate, diagnostic]),
+        check_name="Lint (ruff)",
+    )
+
+    assert evidence.error_summaries == (diagnostic.replace("\t", " "),)
+
+
+@pytest.mark.unit
 def test_ci_failure_evidence_preserves_prefixed_github_error_annotations() -> None:
     """Timestamped check-name prefixes do not hide coverage annotations."""
     prefixed_annotation = (

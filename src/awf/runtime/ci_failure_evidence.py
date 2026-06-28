@@ -13,6 +13,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _PYTHON_DIAGNOSTIC_RE = re.compile(
     r"\b(?:src|tests)/[^\s:]+\.py:\d+(?::\d+)?:\s*(?:error|warning):"
 )
+_RUFF_DIAGNOSTIC_RE = re.compile(r"\b(?:src|tests)/[^\s:]+\.py:\d+:\d+:\s*[A-Z][A-Z0-9]+\b")
 _COMMAND_MARKERS = (
     "uv run ",
     "python -m pytest",
@@ -268,6 +269,7 @@ def _extract_error_summaries(lines: Iterable[str]) -> list[str]:
             or "::error" in message
             or "Process completed with exit code" in message
             or _PYTHON_DIAGNOSTIC_RE.search(message)
+            or _RUFF_DIAGNOSTIC_RE.search(message)
             or message.lower().startswith(("error ", "error:", "fatal:"))
         ):
             generic_summaries.append(line)
