@@ -142,6 +142,13 @@ def test_readiness_route_is_public_for_service_probing() -> None:
 
 
 @pytest.mark.unit
+def test_core_discovery_route_is_public_for_service_discovery() -> None:
+    route = rest_routes().get(("GET", "/.well-known/awf-core.json"))
+    assert route is not None
+    assert "require_api_token" not in route.dependencies
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("method, path", WORKSPACE_METADATA_ROUTES_REQUIRING_AUTH)
 def test_workspace_metadata_routes_remain_auth_protected(method: str, path: str) -> None:
     route = rest_routes().get((method, path))

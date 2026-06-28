@@ -17,6 +17,7 @@ from awf.common.audit import REDACTION_MARKER
 from awf.common.config import Settings
 from awf.node.companion_images import CompanionImageBuilder
 from awf.profiles.models import ProfileMonitor, ProfileRuntime, ProfileService, WorkspaceProfile
+from awf.runtime.driver import LocalRuntimeDriver
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
 from awf.service import worker as worker_mod
 from awf.service.config import ServiceSettings, resolve_service_settings
@@ -509,6 +510,140 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         ),
     )
     assert created["feature_monitor_kwargs"]["awaiting_required_checks_grace_seconds"] == 0
+
+
+@pytest.mark.unit
+def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_worker_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created: dict[str, Any] = {}
+
+    class _Engine:
+        pass
+
+    class _Runner:
+        pass
+
+    class _LogStore:
+        def __init__(self, *, root: Path, session_factory: object) -> None:
+            created["log_store"] = self
+            created["log_root"] = root
+            created["log_session_factory"] = session_factory
+
+    class _ValidationRunner:
+        def __init__(self, *, runner: object, artifacts_dir: Path, log_store: object) -> None:
+            created["validation"] = self
+            created["validation_runner"] = runner
+            created["validation_artifacts_dir"] = artifacts_dir
+            created["validation_log_store"] = log_store
+
+    class _PullRequestCreator:
+        def __init__(self, runner: object) -> None:
+            created["pr_creator"] = self
+            created["pr_creator_runner"] = runner
+
+    class _BranchOpenPullRequestResolver:
+        def __init__(self, runner: object) -> None:
+            created["open_pr_resolver"] = self
+            created["open_pr_resolver_runner"] = runner
+
+    class _GitManager:
+        def __init__(self, work_dir: Path, **kwargs: object) -> None:
+            created["git"] = self
+            created["git_work_dir"] = work_dir
+            created["git_kwargs"] = kwargs
+
+    class _ComposeManager:
+        def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+            created["compose"] = self
+            created["compose_work_dir"] = work_dir
+            created["compose_template_path"] = template_path
+
+    class _WorkspaceCleaner:
+        def __init__(self, *, git: object, compose: object) -> None:
+            created["runtime_cleaner"] = self
+            created["cleaner_git"] = git
+            created["cleaner_compose"] = compose
+
+    class _LocalSecretLeaseMountResolver:
+        def __init__(self, **kwargs: object) -> None:
+            created["secret_lease_resolver"] = self
+            created["secret_lease_kwargs"] = kwargs
+
+    class _ComposeStackLauncher:
+        def __init__(self, **kwargs: object) -> None:
+            created["stack_launcher"] = self
+            created["stack_launcher_kwargs"] = kwargs
+
+    class _Provisioner:
+        def __init__(self, **kwargs: object) -> None:
+            created["provisioner"] = self
+            created["provisioner_kwargs"] = kwargs
+
+    class _WorkspaceExecutor:
+        def __init__(self, **kwargs: object) -> None:
+            created["executor"] = self
+            created["executor_kwargs"] = kwargs
+
+    class _ControlWorker:
+        def __init__(self, **kwargs: object) -> None:
+            created["worker"] = self
+            created["worker_kwargs"] = kwargs
+
+    engine = _Engine()
+    session_factory = object()
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: engine)
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: session_factory)
+    monkeypatch.setattr(worker_mod, "AsyncioSubprocessRunner", _Runner)
+    monkeypatch.setattr(worker_mod, "LogStore", _LogStore)
+    monkeypatch.setattr(worker_mod, "ValidationRunner", _ValidationRunner)
+    monkeypatch.setattr(worker_mod, "PullRequestCreator", _PullRequestCreator)
+    monkeypatch.setattr(worker_mod, "BranchOpenPullRequestResolver", _BranchOpenPullRequestResolver)
+    monkeypatch.setattr(worker_mod, "GitManager", _GitManager)
+    monkeypatch.setattr(worker_mod, "ComposeManager", _ComposeManager)
+    monkeypatch.setattr(worker_mod, "WorkspaceCleaner", _WorkspaceCleaner)
+    monkeypatch.setattr(worker_mod, "LocalSecretLeaseMountResolver", _LocalSecretLeaseMountResolver)
+    monkeypatch.setattr(worker_mod, "ComposeStackLauncher", _ComposeStackLauncher)
+    monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
+    monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _WorkspaceExecutor)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+    monkeypatch.setattr(
+        worker_mod, "_companion_image_builder_for", lambda _settings, _compose: None
+    )
+    monkeypatch.setattr(
+        worker_mod,
+        "_apply_service_git_environment",
+        lambda env: created.setdefault("applied_git_env", env),
+    )
+    monkeypatch.setattr(
+        worker_mod,
+        "_merge_coordinator_for_database_url",
+        _in_process_merge_coordinator,
+    )
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+
+    runtime = worker_mod.build_worker_runtime(_settings(tmp_path))
+
+    assert runtime.engine is engine
+    assert runtime.worker is created["worker"]
+    assert isinstance(runtime.runtime_driver, LocalRuntimeDriver)
+    assert runtime.runtime_driver.provisioner is created["provisioner"]
+    assert runtime.runtime_driver.executor is created["executor"]
+    assert runtime.runtime_driver.cleaner is created["runtime_cleaner"]
+    assert runtime.runtime_driver.validation_runner is created["validation"]
+    assert runtime.runtime_driver.runtime_inspector.__class__ is worker_mod.RuntimeInspector
+    assert runtime.runtime_driver.capabilities == ("workspace.execution.v1",)
+    assert created["worker_kwargs"]["provisioner"] is created["provisioner"]
+    assert created["worker_kwargs"]["executor"] is created["executor"]
+    assert created["worker_kwargs"]["runtime_cleaner"] is created["runtime_cleaner"]
+    assert created["worker_kwargs"]["open_pr_resolver"] is created["open_pr_resolver"]
+    assert created["executor_kwargs"]["compose"] is created["compose"]
+    assert created["executor_kwargs"]["validation"] is created["validation"]
+    assert created["provisioner_kwargs"]["service_diagnostics"] is created["compose"]
+    assert created["cleaner_git"] is created["git"]
+    assert created["cleaner_compose"] is created["compose"]
 
 
 @pytest.mark.unit
