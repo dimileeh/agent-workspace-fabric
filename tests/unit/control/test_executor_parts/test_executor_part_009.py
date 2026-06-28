@@ -26,6 +26,7 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationRunner
@@ -436,6 +437,93 @@ async def test_restart_agent_service_returns_false_when_recovery_status_goes_sta
 
     assert (restart_attempts, restarted) == (1, False)
     assert executor.actions == ["agent_service_restart_prepare", "agent_service_restart_recovery"]
+
+
+@pytest.mark.unit
+async def test_cleanup_repair_is_fenced_by_status_and_owner_before_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Compose:
+        async def ensure_project_up(self, **_kwargs: Any) -> None:
+            raise AssertionError("stale cleanup repair must not restart service")
+
+    class Executor:
+        _compose = Compose()
+
+        def __init__(self) -> None:
+            self.rechecks: list[dict[str, Any]] = []
+
+        async def _recheck_status(
+            self,
+            workspace_id: str,
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+            owner_id: str | None,
+        ) -> bool:
+            self.rechecks.append(
+                {
+                    "workspace_id": workspace_id,
+                    "expected": expected,
+                    "action": action,
+                    "owner_id": owner_id,
+                }
+            )
+            return False
+
+        async def _mark_failed(self, **_kwargs: Any) -> None:
+            raise AssertionError("stale cleanup repair must not mark failed")
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _run_agent(_accept_existing_plan: bool) -> None:
+        raise ComposeExecCleanupError(
+            invocation_id="awf_agent_cleanup",
+            source="agent",
+            label="agent",
+            message='service "agent" is not running',
+            cleanup_result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr='service "agent" is not running',
+            ),
+        )
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+    cleanup_repair = AsyncMock(return_value=True)
+    before_mark_failed = AsyncMock()
+    executor = Executor()
+
+    result = await agent_service_recovery._run_agent_callable_with_service_recovery(
+        executor,
+        run_agent=_run_agent,
+        workspace=object(),
+        profile=WorkspaceProfile(name="cleanup-repair-fence"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        model="gpt-5",
+        command_evidence=[],
+        workspace_id="ws",
+        execution_owner_id="worker-A",
+        before_mark_failed=before_mark_failed,
+        after_agent_cleanup_failure_repair=cleanup_repair,
+        expected_status=WorkspaceStatus.validating,
+        failure_from_status=WorkspaceStatus.validating,
+    )
+
+    assert result == (False, None)
+    cleanup_repair.assert_not_awaited()
+    before_mark_failed.assert_not_awaited()
+    assert executor.rechecks == [
+        {
+            "workspace_id": "ws",
+            "expected": WorkspaceStatus.validating,
+            "action": "agent_cleanup_failure_repair",
+            "owner_id": "worker-A",
+        }
+    ]
 
 
 @pytest.mark.unit

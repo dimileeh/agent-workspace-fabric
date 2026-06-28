@@ -306,6 +306,13 @@ async def _run_agent_callable_with_service_recovery(
                 stderr=cleanup_result.stderr if cleanup_result is not None else str(exc),
             )
             if after_agent_cleanup_failure_repair is not None:
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=expected_status,
+                    action="agent_cleanup_failure_repair",
+                    owner_id=execution_owner_id,
+                ):
+                    return False, None
                 cleanup_repaired = await after_agent_cleanup_failure_repair(exc)
                 if cleanup_repaired is not True:
                     await _run_before_mark_failed(
