@@ -13,7 +13,10 @@ from awf.profiles.models import (
     WorkspaceProfile,
     runtime_browser_findings,
 )
-from awf.runtime.validation_setup import node_package_manager_package_dir
+from awf.runtime.validation_setup import (
+    node_package_manager_executable,
+    node_package_manager_package_dir,
+)
 
 
 @dataclass(frozen=True)
@@ -27,8 +30,9 @@ class ProbeExecResult:
 
 ExecInContainer = Callable[[list[str]], Awaitable[ProbeExecResult]]
 
-_BROWSER_PROBE_SCRIPT = r"""
-node - "$@" <<'NODE' || true
+
+_BROWSER_PROBE_SCRIPT_TEMPLATE = r"""
+__NODE_RUNTIME__ - "$@" <<'NODE' || true
 const fs = require("fs");
 function loadPlaywright() {
   for (const moduleName of ["playwright", "@playwright/test"]) {
@@ -61,6 +65,13 @@ for (const name of process.argv.slice(2)) {
 NODE
 true
 """.strip()
+
+
+def _browser_probe_script(node_runtime: str) -> str:
+    return _BROWSER_PROBE_SCRIPT_TEMPLATE.replace("__NODE_RUNTIME__", node_runtime, 1)
+
+
+_BROWSER_PROBE_SCRIPT = _browser_probe_script("node")
 _BROWSER_STATUS_RE = re.compile(r"^(?P<status>OK|MISSING) (?P<browser>\S+)$", re.MULTILINE)
 
 
@@ -83,8 +94,15 @@ async def probe_runtime_browsers(
     if not profile.runtime.browsers:
         return ()
     try:
+        node_runtime = "yarn node" if node_package_manager_executable(profile) == "yarn" else "node"
         result = await exec_in_container(
-            ["sh", "-lc", _BROWSER_PROBE_SCRIPT, "browser_probe", *profile.runtime.browsers]
+            [
+                "sh",
+                "-lc",
+                _browser_probe_script(node_runtime),
+                "browser_probe",
+                *profile.runtime.browsers,
+            ]
         )
     except OSError:
         return runtime_browser_findings(profile, None)
