@@ -36,6 +36,13 @@ _HTTP_EXCEPTION_ERROR_RESPONSE_REF = "#/components/schemas/HttpExceptionErrorRes
 _CALLBACK_HTTP_EXCEPTION_ERROR_RESPONSE_REF = "#/components/schemas/HTTPExceptionErrorResponse"
 _ERROR_RESPONSE_REF = "#/components/schemas/ErrorResponse"
 _RELEASE_READINESS_RESPONSE_REF = "#/components/schemas/ReleaseReadinessResponse"
+_PUBLIC_PROBE_AND_DISCOVERY_OPERATIONS = frozenset(
+    {
+        ("get", "/.well-known/awf-core.json"),
+        ("get", "/healthz"),
+        ("get", "/readyz"),
+    }
+)
 
 _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
     {
@@ -108,6 +115,7 @@ def test_spec_is_valid_openapi_3x(openapi_spec: dict) -> None:
 @pytest.mark.unit
 def test_all_route_prefixes_present(openapi_spec: dict) -> None:
     expected_prefixes = [
+        "/.well-known/awf-core.json",
         "/healthz",
         "/readyz",
         "/release-readiness",
@@ -220,6 +228,7 @@ def test_key_endpoint_methods_exist(openapi_spec: dict) -> None:
         ("GET", "/release-readiness"),
         ("POST", "/v1/workspaces/{workspace_id}/cancel"),
         ("DELETE", "/v1/workspaces/{workspace_id}"),
+        ("GET", "/.well-known/awf-core.json"),
     ]
     for method, path in expected_methods:
         assert path in paths, (
@@ -429,6 +438,21 @@ def test_api_token_routes_are_documented_as_bearer_authenticated(
     assert (
         auth_error_schema.get("properties", {}).get("detail", {}).get("$ref") == _ERROR_RESPONSE_REF
     )
+
+
+@pytest.mark.unit
+def test_public_probe_and_discovery_routes_do_not_advertise_bearer_auth(
+    openapi_spec: dict,
+) -> None:
+    paths = openapi_spec.get("paths", {})
+
+    for method, path in sorted(_PUBLIC_PROBE_AND_DISCOVERY_OPERATIONS):
+        operation = paths[path][method]
+        assert operation.get("security") in (None, []), (
+            f"{method.upper()} {path} must remain public for service probes/discovery"
+        )
+        assert "401" not in operation.get("responses", {})
+        assert "503" not in operation.get("responses", {})
 
 
 @pytest.mark.unit
