@@ -417,6 +417,8 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
         if corepack_install_index is None:
             return None
         index = corepack_install_index
+        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+            index += 1
         package_manager = _node_dependency_install_package_manager_from_tokens(tokens, index, [])
         if package_manager is not None:
             return package_manager
