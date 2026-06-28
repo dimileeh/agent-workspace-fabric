@@ -234,8 +234,8 @@ RUN python -m pip install --upgrade pip \
 
 # ── Stage 7: non-root user + workspace mount point ─────────────────────────
 RUN useradd --create-home --shell /bin/bash agent \
-    && mkdir -p /workspace \
-    && chown -R agent:agent /workspace
+    && mkdir -p /workspace /home/agent/.config/cursor \
+    && chown -R agent:agent /workspace /home/agent/.config
 
 USER agent
 WORKDIR /workspace
