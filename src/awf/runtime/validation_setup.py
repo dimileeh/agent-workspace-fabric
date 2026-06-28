@@ -262,6 +262,23 @@ def profile_phase_command_plan(
                 deferred_browser_install = None
             continue
         if phase == "validate":
+            if (
+                deferred_browser_install is None
+                and not _pre_validate_node_dependency_install_exists(profile)
+            ):
+                browser_install = playwright_browser_install_command(profile)
+                if (
+                    browser_install is not None
+                    and _should_defer_browser_install_until_validate_install(
+                        profile,
+                        requested_phases,
+                    )
+                ):
+                    deferred_browser_install = ProfileExecutionCommand(
+                        phase="setup",
+                        command=browser_install,
+                    )
+                    defer_browser_install_until_validate_install = True
             commands.extend(
                 ProfileExecutionCommand(
                     phase=DB_REFRESH_PHASE,
@@ -404,13 +421,22 @@ def _should_defer_browser_install_until_validate_install(
     profile: WorkspaceProfile,
     requested_phases: set[str],
 ) -> bool:
-    if "validate" not in requested_phases:
-        return False
     if _requested_pre_validate_node_dependency_install_exists(profile, requested_phases):
         return False
+    return _validate_node_dependency_install_exists(profile)
+
+
+def _validate_node_dependency_install_exists(profile: WorkspaceProfile) -> bool:
     return any(
         _node_dependency_install_package_manager(command.command) is not None
         for command in profile.phases.validate_commands
+    )
+
+
+def _pre_validate_node_dependency_install_exists(profile: WorkspaceProfile) -> bool:
+    return _requested_pre_validate_node_dependency_install_exists(
+        profile,
+        {"setup", "pre_agent"},
     )
 
 

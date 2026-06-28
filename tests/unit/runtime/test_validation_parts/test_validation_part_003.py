@@ -394,6 +394,41 @@ class TestHappyPath:
         assert commands[2].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_defers_browser_install_across_production_batches(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-split-validate-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["node scripts/generate-config.js"],
+                    "pre_agent": ["node scripts/pre.js"],
+                    "post_agent": ["ruff format --check"],
+                    "validate": [
+                        "pnpm install --frozen-lockfile",
+                        "pnpm test",
+                    ],
+                },
+            }
+        )
+
+        setup_commands = profile_phase_command_plan(profile, ("setup", "pre_agent"))
+        validate_commands = profile_phase_command_plan(profile, ("post_agent", "validate"))
+
+        assert [(command.phase, command.command.command) for command in setup_commands] == [
+            ("setup", "node scripts/generate-config.js"),
+            ("pre_agent", "node scripts/pre.js"),
+        ]
+        assert [(command.phase, command.command.command) for command in validate_commands] == [
+            ("post_agent", "ruff format --check"),
+            ("validate", "pnpm install --frozen-lockfile"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm test"),
+        ]
+        assert validate_commands[2].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_runs_validate_install_before_browser_tests(
         self,
     ) -> None:
