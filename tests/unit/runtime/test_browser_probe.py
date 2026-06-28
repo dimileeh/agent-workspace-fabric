@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+
 import pytest
 
 from awf.profiles.models import (
@@ -9,7 +13,11 @@ from awf.profiles.models import (
     ProfileLintSeverity,
     WorkspaceProfile,
 )
-from awf.runtime.browser_probe import ProbeExecResult, probe_runtime_browsers
+from awf.runtime.browser_probe import (
+    _BROWSER_PROBE_SCRIPT,
+    ProbeExecResult,
+    probe_runtime_browsers,
+)
 
 
 def _profile_with_browsers(browsers: list[str]) -> WorkspaceProfile:
@@ -107,3 +115,23 @@ class TestProbeRuntimeBrowsers:
         findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
 
         assert findings == ()
+
+    def test_embedded_probe_reports_declared_browsers_missing_without_playwright(
+        self, tmp_path
+    ) -> None:
+        if shutil.which("node") is None:
+            pytest.skip("node is required to exercise the embedded probe script")
+        env = os.environ.copy()
+        env.pop("NODE_PATH", None)
+
+        result = subprocess.run(
+            ["sh", "-lc", _BROWSER_PROBE_SCRIPT, "browser_probe", "chromium", "firefox"],
+            cwd=tmp_path,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.splitlines() == ["MISSING chromium", "MISSING firefox"]
