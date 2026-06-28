@@ -603,12 +603,19 @@ async def run_validation_and_fix_cycle(
                             max_fix_passes=post_validation_conformance_fix_pass_budget,
                             will_retry=False,
                         )
+                    conformance_scope_baseline = (
+                        await self._capture_post_validation_conformance_scope_baseline(
+                            worktree_path,
+                            conformance_handoff.report_path,
+                        )
+                    )
 
                     async def _run_conformance_agent(
                         _accept_existing_plan: bool,
                         *,
                         _handoff: _PlanningValidationHandoff = conformance_handoff,
                         _validation_run_id: str = validation_run_id,
+                        _conformance_scope_baseline: Any = conformance_scope_baseline,
                     ) -> Any:
                         return await self._run_post_validation_conformance_check(
                             adapter=adapter,
@@ -621,6 +628,7 @@ async def run_validation_and_fix_cycle(
                             handoff=_handoff,
                             validation_run_id=_validation_run_id,
                             base_commit=base_commit,
+                            conformance_scope_baseline=_conformance_scope_baseline,
                         )
 
                     async def _finish_conformance_recovery_failure(

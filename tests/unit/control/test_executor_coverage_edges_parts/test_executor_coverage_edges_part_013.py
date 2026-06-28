@@ -24,6 +24,67 @@ from tests.unit.control.test_executor_coverage_edges_parts.test_executor_coverag
 
 
 @pytest.mark.unit
+async def test_post_validation_conformance_preserved_baseline_rejects_retry_source_edit(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    runner = _GitRestoreFakeRunner(worktree_path)
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    runner.queue_result(returncode=0, stdout="")  # original before_compare
+    runner.queue_result(returncode=0, stdout="validated-head\n")  # original HEAD
+    executor = _executor_with_runner(runner, tmp_path)
+    baseline = await executor._capture_post_validation_conformance_scope_baseline(
+        worktree_path,
+        report_path,
+    )
+
+    source_path = worktree_path / "src" / "app.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("print('dirty from failed cleanup')\n", encoding="utf-8")
+    runner.queue_result(
+        returncode=0,
+        stdout=(" M src/app.py\n?? docs/awf-plans/ws_post.conformance.json\n"),
+    )  # retry after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed paths since original HEAD
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+        conformance_scope_baseline=baseline,
+    )
+
+    assert failure is not None
+    assert failure.details["planning_scope"]["offending_paths"] == ["src/app.py"]
+
+
+@pytest.mark.unit
 async def test_satisfied_post_validation_conformance_report_restores_tracked_report_from_base_commit(
     tmp_path: Path,
 ) -> None:

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from awf.common.commands import CommandResult
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import quality_methods as executor_quality_methods
 from awf.control.executor.agent_service_recovery import AGENT_SERVICE_RECOVERY_ABORTED
@@ -161,6 +162,8 @@ async def _run_cycle(
     git_in_worktree: Any | None = None,
     resume_disable_fix_passes: bool = False,
 ) -> Any:
+    if not hasattr(executor, "_capture_post_validation_conformance_scope_baseline"):
+        executor._capture_post_validation_conformance_scope_baseline = AsyncMock(return_value=None)
     return await executor_execution_validation.run_validation_and_fix_cycle(
         executor,
         workspace_id=workspace.id,
@@ -421,6 +424,95 @@ async def test_conformance_recovery_abort_without_reason_is_not_marked_unhealthy
     assert finish_kwargs["reason_code"] == AGENT_SERVICE_RECOVERY_ABORTED
     mark_kwargs = executor._mark_failed.await_args.kwargs
     assert mark_kwargs["reason_code"] == AGENT_SERVICE_RECOVERY_ABORTED
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_cleanup_retry_reuses_original_scope_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile.model_validate({"name": "prof-conf-retry-scope"})
+    workspace = _workspace("ws_conf_retry_scope")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+    baseline = object()
+    seen_baselines: list[object] = []
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_passing_command(tmp_path)])
+
+    async def _retry_after_cleanup_failure(*_args: object, **kwargs: object) -> tuple[bool, Any]:
+        run_agent = kwargs["run_agent"]
+        try:
+            await run_agent(False)
+        except ComposeExecCleanupError:
+            return True, await run_agent(True)
+        raise AssertionError("first conformance attempt should fail cleanup")
+
+    async def _conformance_check(**kwargs: object) -> _PlanningRunFailure | None:
+        seen_baselines.append(kwargs["conformance_scope_baseline"])
+        if len(seen_baselines) == 1:
+            raise ComposeExecCleanupError(
+                invocation_id="conf-1",
+                source="agent",
+                label="post-validation conformance",
+                message='service "agent" is not running',
+                cleanup_result=CommandResult(
+                    returncode=1,
+                    stdout="",
+                    stderr='service "agent" is not running',
+                ),
+            )
+        return _PlanningRunFailure(
+            message="post-validation conformance phase changed files outside `report.md`",
+            reason_code="PLAN_CONFORMANCE_SCOPE_VIOLATION",
+            details={"offending_paths": ["src/app.py"]},
+        )
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_run_agent_callable_with_service_recovery",
+        _retry_after_cleanup_failure,
+    )
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=2,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-conf-retry-scope"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _capture_post_validation_conformance_scope_baseline=AsyncMock(return_value=baseline),
+        _run_post_validation_conformance_check=_conformance_check,
+    )
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=SimpleNamespace(run=AsyncMock()),
+        planning_validation_handoff=_handoff(tmp_path, iteration=2, max_iterations=2),
+    )
+
+    assert result.stop
+    assert seen_baselines == [baseline, baseline]
+    executor._capture_post_validation_conformance_scope_baseline.assert_awaited_once_with(
+        tmp_path / "worktree",
+        (tmp_path / "report.md"),
+    )
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["reason_code"] == "PLAN_CONFORMANCE_SCOPE_VIOLATION"
+    executor._mark_failed.assert_awaited_once()
 
 
 @pytest.mark.unit
