@@ -194,7 +194,7 @@ class TestPlaywrightBrowserInstallCommand:
         command = playwright_browser_install_command(profile)
 
         assert command is not None
-        assert command.command == "npm --cwd apps/web exec -- playwright install chromium"
+        assert command.command == "npm --prefix apps/web exec -- playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace/apps/web"
 
     def test_preserves_pnpm_package_directory_from_leading_cd_setup_install(self) -> None:
@@ -212,7 +212,7 @@ class TestPlaywrightBrowserInstallCommand:
         command = playwright_browser_install_command(profile)
 
         assert command is not None
-        assert command.command == "npm --cwd apps/web exec -- playwright install chromium"
+        assert command.command == "npm --prefix apps/web exec -- playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace/apps/web"
 
     def test_preserves_compact_pnpm_package_directory_flag(self) -> None:

@@ -316,6 +316,8 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
 def _node_package_manager_cd_location_tokens(package_manager: str, package_dir: str) -> list[str]:
     if package_manager == "pnpm":
         return ["-C", package_dir]
+    if package_manager == "npm":
+        return ["--prefix", package_dir]
     return ["--cwd", package_dir]
 
 
