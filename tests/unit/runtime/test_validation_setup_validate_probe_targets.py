@@ -23,6 +23,7 @@ from awf.runtime.validation_setup import (
     _node_package_manager_package_dir,
     playwright_browser_install_command,
     playwright_command,
+    profile_phase_command_plan,
 )
 
 
@@ -494,6 +495,25 @@ class TestPlaywrightBrowserInstallCommand:
         assert command is not None
         assert command.command == expected
         assert browser_probe_workdir(profile) == "/workspace"
+
+    def test_validate_browser_install_preserves_pre_install_validate_order(self) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[
+                "node scripts/write-npmrc.js",
+                "pnpm install",
+                "pnpm test",
+            ],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "node scripts/write-npmrc.js"),
+            ("validate", "pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm test"),
+        ]
 
 
 @pytest.mark.unit
