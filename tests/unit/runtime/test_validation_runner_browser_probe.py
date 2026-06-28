@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from awf.common.commands import FakeCommandRunner
+import awf.runtime.validation_runner as validation_runner_module
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.profiles.models import RUNTIME_BROWSER_UNAVAILABLE, WorkspaceProfile
 from awf.runtime.validation_runner import ValidationRunner
 
@@ -25,6 +28,27 @@ def _profile_with_browsers(
 
 def _runner(fake: FakeCommandRunner, tmp_path: Path) -> ValidationRunner:
     return ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+
+
+class _SleepingCommandRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+        self.calls.append(args)
+        await asyncio.sleep(60)
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+
+class _CancellingCommandRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+        self.calls.append(args)
+        if len(self.calls) == 1:
+            raise asyncio.CancelledError
+        return CommandResult(returncode=0, stdout="awf cleanup: absent\n", stderr="")
 
 
 @pytest.mark.unit
@@ -96,3 +120,48 @@ class TestProbeRuntimeBrowserFindings:
         )
 
         assert findings == ()
+
+    async def test_probe_timeout_cleans_up_and_returns_unknown_availability(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        fake = _SleepingCommandRunner()
+        runner = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+        monkeypatch.setattr(validation_runner_module, "_TOOLCHAIN_PROBE_TIMEOUT_SECONDS", 0.001)
+        monkeypatch.setattr(
+            validation_runner_module,
+            "_TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS",
+            0.001,
+        )
+
+        findings = await runner.probe_runtime_browser_findings(
+            workspace_id="ws-1",
+            compose_project="awf_ws1",
+            compose_file=tmp_path / "compose.yml",
+            profile=_profile_with_browsers(["chromium"]),
+        )
+
+        assert findings == ()
+        invocation_id = fake.calls[0][fake.calls[0].index("awf-exec") + 1]
+        assert len(fake.calls) == 2
+        assert fake.calls[1][-2:] == ["awf-cleanup", invocation_id]
+
+    async def test_probe_cancellation_runs_cleanup_and_propagates(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        fake = _CancellingCommandRunner()
+        runner = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+
+        with pytest.raises(asyncio.CancelledError):
+            await runner.probe_runtime_browser_findings(
+                workspace_id="ws-1",
+                compose_project="awf_ws1",
+                compose_file=tmp_path / "compose.yml",
+                profile=_profile_with_browsers(["chromium"]),
+            )
+
+        assert len(fake.calls) == 2
+        invocation_id = fake.calls[0][fake.calls[0].index("awf-exec") + 1]
+        assert fake.calls[1][-2:] == ["awf-cleanup", invocation_id]

@@ -18,7 +18,12 @@ from awf.runtime.validation import (
     _leading_executables,
     validate_command_probe_targets,
 )
-from awf.runtime.validation_setup import playwright_browser_install_command
+from awf.runtime.validation_setup import (
+    _node_dependency_install_package_manager,
+    _node_package_manager_package_dir,
+    playwright_browser_install_command,
+    playwright_command,
+)
 
 
 def _profile_with_validate(commands: list[str]) -> WorkspaceProfile:
@@ -95,6 +100,21 @@ def _profile_with_coverage_gate(
 
 @pytest.mark.unit
 class TestPlaywrightBrowserInstallCommand:
+    @pytest.mark.parametrize(
+        ("package_manager", "expected"),
+        [
+            ("yarn --cwd apps/web", "yarn --cwd apps/web playwright test"),
+            ("bun --cwd apps/web", "bun --cwd apps/web x playwright test"),
+            ('npm "unterminated', "npx playwright test"),
+        ],
+    )
+    def test_playwright_command_handles_scoped_and_unparseable_package_managers(
+        self,
+        package_manager: str,
+        expected: str,
+    ) -> None:
+        assert playwright_command(package_manager, "test") == expected
+
     @pytest.mark.parametrize(
         ("setup_command", "expected"),
         [
@@ -185,6 +205,76 @@ class TestPlaywrightBrowserInstallCommand:
         assert command is not None
         assert command.command == "pnpm -C apps/web exec playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace/apps/web"
+
+    def test_preserves_package_directory_from_leading_cd_with_double_dash(self) -> None:
+        profile = _profile_with_setup_and_browsers(["cd -- apps/web && npm ci"])
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "npm --cwd apps/web exec -- playwright install chromium"
+        assert browser_probe_workdir(profile) == "/workspace/apps/web"
+
+    def test_preserves_compact_pnpm_package_directory_flag(self) -> None:
+        profile = _profile_with_setup_and_browsers(["pnpm -Capps/web install"])
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "pnpm -Capps/web exec playwright install chromium"
+        assert browser_probe_workdir(profile) == "/workspace/apps/web"
+
+    def test_preserves_absolute_package_directory_from_setup_install(self) -> None:
+        profile = _profile_with_setup_and_browsers(["npm --prefix /workspace/apps/web ci"])
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert (
+            command.command
+            == "npm --prefix /workspace/apps/web exec -- playwright install chromium"
+        )
+        assert browser_probe_workdir(profile) == "/workspace/apps/web"
+
+    @pytest.mark.parametrize(
+        ("setup_command", "expected"),
+        [
+            ("'unterminated", "npx playwright install chromium"),
+            ("FOO=bar", "npx playwright install chromium"),
+            ("npm install && echo done", "npx playwright install chromium"),
+            ("npm install @playwright/test", "npx playwright install chromium"),
+            ("yarn", "yarn playwright install chromium"),
+            ("cd", "npx playwright install chromium"),
+            ("cd - && npm ci", "npx playwright install chromium"),
+            ("cd apps/web npm ci", "npx playwright install chromium"),
+        ],
+    )
+    def test_browser_install_defaults_or_accepts_edge_setup_forms(
+        self,
+        setup_command: str,
+        expected: str,
+    ) -> None:
+        command = playwright_browser_install_command(
+            _profile_with_setup_and_browsers([setup_command])
+        )
+
+        assert command is not None
+        assert command.command == expected
+
+    def test_malformed_package_manager_location_is_unknown(self) -> None:
+        assert _node_package_manager_package_dir('npm "unterminated') is None
+
+    def test_package_manager_location_skips_incomplete_location_flag(self) -> None:
+        assert _node_package_manager_package_dir("npm --prefix") is None
+
+    def test_package_manager_location_ignores_non_location_equals_option(self) -> None:
+        assert _node_package_manager_package_dir("npm --cache=.npm-cache") is None
+
+    def test_dependency_install_parser_skips_incomplete_location_flag(self) -> None:
+        assert _node_dependency_install_package_manager("npm --prefix") is None
+
+    def test_dependency_install_parser_ignores_unpreserved_equals_option(self) -> None:
+        assert _node_dependency_install_package_manager("npm --userconfig=.npmrc ci") == "npm"
 
     @pytest.mark.parametrize(
         ("setup_command", "expected"),
