@@ -290,14 +290,101 @@ def node_package_manager_executable(profile: WorkspaceProfile) -> str:
 
 def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
     fallback_package_manager: str | None = None
+    dependency_install_package_manager: str | None = None
     for command in (*profile.phases.setup, *profile.database.generated_setup):
         package_manager = _node_dependency_install_package_manager(command.command)
         if package_manager is not None:
-            return package_manager
+            if _node_package_manager_has_scope(package_manager):
+                return package_manager
+            if dependency_install_package_manager is None:
+                dependency_install_package_manager = package_manager
+            continue
         executable = _leading_executable(command.command)
         if executable in _NODE_PACKAGE_MANAGERS and fallback_package_manager is None:
             fallback_package_manager = executable
-    return fallback_package_manager or "npm"
+    for command in profile.phases.validate_commands:
+        package_manager = _node_scoped_validation_package_manager(command.command)
+        if package_manager is not None:
+            return package_manager
+    return dependency_install_package_manager or fallback_package_manager or "npm"
+
+
+def _node_package_manager_has_scope(package_manager: str) -> bool:
+    try:
+        return len(shlex.split(package_manager)) > 1
+    except ValueError:
+        return False
+
+
+def _node_scoped_validation_package_manager(command: str) -> str | None:
+    tokens = _shell_tokens(command, comments=True)
+    if tokens is None:
+        return None
+    return _node_scoped_package_manager_from_tokens(
+        tokens,
+        _first_non_assignment_token_index(tokens),
+    )
+
+
+def _node_scoped_package_manager_from_tokens(tokens: list[str], index: int) -> str | None:
+    if index >= len(tokens):
+        return None
+    executable = tokens[index]
+    if executable not in _NODE_PACKAGE_MANAGERS:
+        return None
+    location_tokens: list[str] = []
+    command_index = index + 1
+    while command_index < len(tokens):
+        token = tokens[command_index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            break
+        if token in _NODE_PM_OPTION_VALUE_FLAGS:
+            if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
+                if command_index + 1 >= len(tokens):
+                    return None
+                location_tokens.extend((token, tokens[command_index + 1]))
+            command_index += 2
+            continue
+        if token.startswith("-C") and len(token) > 2:
+            location_tokens.append(token)
+            command_index += 1
+            continue
+        if token.startswith("--") and "=" in token:
+            option_name, _, _ = token.partition("=")
+            if option_name in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
+                location_tokens.append(token)
+            command_index += 1
+            continue
+        if token.startswith("-"):
+            command_index += 1
+            continue
+        if executable == "yarn" and token == "workspace":
+            return _node_yarn_validation_workspace_package_manager(
+                tokens,
+                command_index,
+                location_tokens,
+            )
+        break
+    if location_tokens:
+        return _node_package_manager_command(executable, location_tokens)
+    return None
+
+
+def _node_yarn_validation_workspace_package_manager(
+    tokens: list[str],
+    workspace_index: int,
+    location_tokens: list[str],
+) -> str | None:
+    workspace_name_index = workspace_index + 1
+    if workspace_name_index >= len(tokens):
+        return None
+    workspace_name = tokens[workspace_name_index]
+    if workspace_name in _SHELL_COMPOUND_CONTROL_TOKENS or workspace_name.startswith("-"):
+        return None
+    return _node_package_manager_command(
+        "yarn",
+        [*location_tokens, "workspace", workspace_name],
+    )
 
 
 def _node_dependency_install_package_manager(command: str) -> str | None:

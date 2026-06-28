@@ -42,6 +42,20 @@ def _profile_with_setup_and_browsers(commands: list[str]) -> WorkspaceProfile:
     )
 
 
+def _profile_with_setup_validate_and_browsers(
+    *,
+    setup: list[str],
+    validate: list[str],
+) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "browser-profile",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": setup, "validate": validate},
+        }
+    )
+
+
 def _profile_with_validate_objects(commands: list[dict[str, object]]) -> WorkspaceProfile:
     return WorkspaceProfile.model_validate(
         {"name": "validate-profile", "phases": {"validate": commands}}
@@ -392,6 +406,18 @@ class TestPlaywrightBrowserInstallCommand:
 
         assert command is not None
         assert command.command == expected
+        assert browser_probe_workdir(profile) == "/workspace"
+
+    def test_root_pnpm_setup_uses_filtered_validate_scope_for_browser_install(self) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["pnpm install --frozen-lockfile"],
+            validate=["pnpm --filter web test:e2e"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "pnpm --filter web exec playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace"
 
 
