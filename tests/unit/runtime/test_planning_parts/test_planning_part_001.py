@@ -860,6 +860,27 @@ def test_conformance_requires_awf_validation_rejects_mixed_named_command_test_pa
 @pytest.mark.parametrize(
     "gap",
     (
+        "Run git diff --check under AWF validation and fix whitespace errors.",
+        "Run git diff --check during validation and fix trailing whitespace.",
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_git_diff_handoff_with_whitespace_work(
+    gap: str,
+) -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Validation command handoff and whitespace work remain.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(gap,),
+    )
+
+    assert not conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
         "Add tests/unit/test_widget.py to cover the new case.",
         "Update assertions in tests/unit/test_widget.py after the refactor.",
     ),
