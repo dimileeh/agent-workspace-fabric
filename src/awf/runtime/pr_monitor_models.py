@@ -171,8 +171,6 @@ class CheckFailureLogResult:
         return bool(self.failures)
 
     def __eq__(self, other: object) -> bool:
-        if isinstance(other, tuple):
-            return self.failures == other
         if isinstance(other, CheckFailureLogResult):
             return (
                 self.failures == other.failures and self.runs_in_progress == other.runs_in_progress
