@@ -397,6 +397,27 @@ class TestHappyPath:
         assert commands[-1].command.command == expected
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_browser_install_prefers_dependency_install_runner(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-setup-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": [
+                        "npm run generate-schema",
+                        "pnpm install --frozen-lockfile",
+                    ]
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup",))
+
+        assert commands[-1].command.command == "pnpm exec playwright install chromium"
+
+    @pytest.mark.unit
     async def test_runs_each_test_command_in_order(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:

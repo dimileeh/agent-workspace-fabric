@@ -107,6 +107,18 @@ _SETUP_DEPENDENCY_NETWORK_FAILURE_BLOCK_RADIUS = 6
 _SETUP_DEPENDENCY_NETWORK_DEFAULT_RETRY_BUDGET = 2
 _SETUP_DEPENDENCY_NETWORK_DEFAULT_BACKOFF_SECONDS = (1.0, 3.0)
 _UV_DEV_VALIDATION_TOOLS = frozenset({"mypy", "pre-commit", "pytest", "ruff"})
+_NODE_PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun"})
+_NODE_DEPENDENCY_INSTALL_SUBCOMMANDS = frozenset({"ci", "i", "install"})
+_NODE_PM_OPTION_VALUE_FLAGS = frozenset(
+    {
+        "--cache",
+        "--cwd",
+        "--prefix",
+        "--registry",
+        "--userconfig",
+        "-C",
+    }
+)
 _UV_OPTION_VALUE_FLAGS = frozenset(
     {
         "--config-setting",
@@ -238,11 +250,41 @@ def playwright_browser_install_command(profile: WorkspaceProfile) -> ProfileComm
 
 
 def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
+    fallback_package_manager: str | None = None
     for command in profile.phases.setup:
+        package_manager = _node_dependency_install_package_manager(command.command)
+        if package_manager is not None:
+            return package_manager
         executable = _leading_executable(command.command)
-        if executable in {"npm", "pnpm", "yarn", "bun"}:
-            return executable
-    return "npm"
+        if executable in _NODE_PACKAGE_MANAGERS and fallback_package_manager is None:
+            fallback_package_manager = executable
+    return fallback_package_manager or "npm"
+
+
+def _node_dependency_install_package_manager(command: str) -> str | None:
+    tokens = _shell_tokens(command, comments=True)
+    if tokens is None:
+        return None
+    index = _first_non_assignment_token_index(tokens)
+    if index >= len(tokens):
+        return None
+    executable = tokens[index]
+    if executable not in _NODE_PACKAGE_MANAGERS:
+        return None
+    subcommand_index = index + 1
+    while subcommand_index < len(tokens):
+        token = tokens[subcommand_index]
+        if token in _NODE_PM_OPTION_VALUE_FLAGS:
+            subcommand_index += 2
+            continue
+        if token.startswith("--") and "=" in token:
+            subcommand_index += 1
+            continue
+        if token.startswith("-"):
+            subcommand_index += 1
+            continue
+        return executable if token in _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS else None
+    return executable if executable == "yarn" else None
 
 
 def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecutionCommand]:
