@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -141,11 +141,21 @@ async def test_agent_service_down_timeout_restarts_and_retries(
     executor._compose.ensure_project_up.assert_awaited_once()
     assert executor._compose.ensure_project_up.await_args.kwargs["force_recreate"] is True
     assert executor._compose.ensure_project_up.await_args.kwargs["services"] == ("agent",)
-    executor._recheck_status.assert_awaited_once_with(
-        "ws_agent_service",
-        expected=WorkspaceStatus.running,
-        action="agent_service_restart_recovery",
-        owner_id=None,
+    executor._recheck_status.assert_has_awaits(
+        [
+            call(
+                "ws_agent_service",
+                expected=WorkspaceStatus.running,
+                action="agent_service_restart_prepare",
+                owner_id=None,
+            ),
+            call(
+                "ws_agent_service",
+                expected=WorkspaceStatus.running,
+                action="agent_service_restart_recovery",
+                owner_id=None,
+            ),
+        ]
     )
     executor._mark_failed.assert_not_awaited()
     executor._prepare_provider_recovery.assert_not_awaited()
@@ -182,11 +192,21 @@ async def test_agent_callable_service_recovery_uses_validation_status(
     assert result == "validation-ok"
     assert run_agent.await_count == 2
     executor._compose.ensure_project_up.assert_awaited_once()
-    executor._recheck_status.assert_awaited_once_with(
-        "ws_agent_service",
-        expected=WorkspaceStatus.validating,
-        action="agent_service_restart_recovery",
-        owner_id=None,
+    executor._recheck_status.assert_has_awaits(
+        [
+            call(
+                "ws_agent_service",
+                expected=WorkspaceStatus.validating,
+                action="agent_service_restart_prepare",
+                owner_id=None,
+            ),
+            call(
+                "ws_agent_service",
+                expected=WorkspaceStatus.validating,
+                action="agent_service_restart_recovery",
+                owner_id=None,
+            ),
+        ]
     )
     executor._mark_failed.assert_not_awaited()
 
@@ -255,11 +275,11 @@ async def test_agent_service_restart_rechecks_running_status_before_retry(
 
     assert recovered is False
     assert planning_failure is None
-    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._compose.ensure_project_up.assert_not_awaited()
     executor._recheck_status.assert_awaited_once_with(
         "ws_agent_service",
         expected=WorkspaceStatus.running,
-        action="agent_service_restart_recovery",
+        action="agent_service_restart_prepare",
         owner_id="worker-1",
     )
     assert executor._run_agent_task_with_optional_planning.await_count == 1
@@ -558,11 +578,11 @@ async def test_agent_service_restart_recheck_failure_skips_terminal_callback(
     assert recovered is False
     assert result is None
     assert callback_reason_codes == []
-    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._compose.ensure_project_up.assert_not_awaited()
     executor._recheck_status.assert_awaited_once_with(
         "ws_agent_service",
         expected=WorkspaceStatus.validating,
-        action="agent_service_restart_recovery",
+        action="agent_service_restart_prepare",
         owner_id="stale-owner",
     )
     assert run_agent.await_count == 1
@@ -1074,7 +1094,7 @@ async def test_agent_service_down_restart_budget_exhaustion_respects_stale_owner
             _timeout_error("AGENT_IDLE_TIMEOUT"),
         ]
     )
-    executor._recheck_status.side_effect = [True, True, False]
+    executor._recheck_status.side_effect = [True, True, True, True, False]
 
     async def _service_down(*_args: object, **_kwargs: object) -> bool:
         return False
@@ -1089,8 +1109,8 @@ async def test_agent_service_down_restart_budget_exhaustion_respects_stale_owner
 
     assert recovered is False
     assert planning_failure is None
-    executor._compose.ensure_project_up.assert_awaited()
-    assert executor._recheck_status.await_count == 3
+    assert executor._compose.ensure_project_up.await_count == 2
+    assert executor._recheck_status.await_count == 5
     executor._recheck_status.assert_awaited_with(
         "ws_agent_service",
         expected=WorkspaceStatus.running,
@@ -1141,7 +1161,7 @@ async def test_agent_service_down_restart_failure_marks_infra_failure(
 
 
 @pytest.mark.unit
-async def test_agent_service_down_restart_failure_respects_stale_owner_fence(
+async def test_agent_service_down_restart_respects_stale_owner_fence_before_recreate(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1167,11 +1187,11 @@ async def test_agent_service_down_restart_failure_respects_stale_owner_fence(
 
     assert recovered is False
     assert planning_failure is None
-    executor._compose.ensure_project_up.assert_awaited_once()
+    executor._compose.ensure_project_up.assert_not_awaited()
     executor._recheck_status.assert_awaited_once_with(
         "ws_agent_service",
         expected=WorkspaceStatus.running,
-        action="agent_service_restart_terminal",
+        action="agent_service_restart_prepare",
         owner_id="worker-stale",
     )
     executor._mark_failed.assert_not_awaited()

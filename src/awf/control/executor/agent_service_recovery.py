@@ -540,6 +540,13 @@ async def _restart_agent_service_or_mark_unhealthy(
             from_status=failure_from_status,
         )
         return restart_attempts, False
+    if not await self._recheck_status(
+        workspace_id,
+        expected=expected_status,
+        action="agent_service_restart_prepare",
+        owner_id=execution_owner_id,
+    ):
+        return restart_attempts, False
     restart_attempts += 1
     try:
         await self._compose.ensure_project_up(
