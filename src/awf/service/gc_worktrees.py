@@ -95,6 +95,32 @@ def worktree_id_for_gc_path(candidate: WorkspaceGCCandidate, path: WorkspaceGCPa
     return path.path.name
 
 
+def _is_existing_non_git_worktree_result(
+    path: Path,
+    *,
+    work_dir: Path,
+    worktree_id: str,
+    target_results: list[WorkspaceGCWorktreeRemoveTargetResult],
+    errors: list[str],
+) -> bool | None:
+    from awf.node.git_manager import GitOperationError
+
+    try:
+        return is_existing_non_git_worktree(path, work_dir=work_dir)
+    except GitOperationError as exc:
+        error = str(exc)
+        errors.append(f"{worktree_id}: {error}")
+        target_results.append(
+            WorkspaceGCWorktreeRemoveTargetResult(
+                worktree_id=worktree_id,
+                status="failed",
+                reason_code=exc.reason_code,
+                error=error,
+            )
+        )
+        return None
+
+
 async def default_worktree_remover(
     candidate: WorkspaceGCCandidate,
     *,
@@ -113,8 +139,18 @@ async def default_worktree_remover(
     git_manager = GitManager(work_dir / "git")
     worktree_targets: list[tuple[str, str, bool]] = []
     target_results: list[WorkspaceGCWorktreeRemoveTargetResult] = []
+    errors: list[str] = []
     primary_path_exists = candidate.worktree.exists or candidate.worktree.path.exists()
-    if is_existing_non_git_worktree(candidate.worktree.path, work_dir=work_dir):
+    primary_non_git = _is_existing_non_git_worktree_result(
+        candidate.worktree.path,
+        work_dir=work_dir,
+        worktree_id=candidate.workspace_id,
+        target_results=target_results,
+        errors=errors,
+    )
+    if primary_non_git is None:
+        pass
+    elif primary_non_git:
         target_results.append(
             WorkspaceGCWorktreeRemoveTargetResult(
                 worktree_id=candidate.workspace_id,
@@ -130,9 +166,20 @@ async def default_worktree_remover(
         companion_path_exists = companion_path is not None and (
             companion_path.exists or companion_path.path.exists()
         )
-        if companion_path is not None and is_existing_non_git_worktree(
-            companion_path.path, work_dir=work_dir
-        ):
+        companion_non_git = (
+            _is_existing_non_git_worktree_result(
+                companion_path.path,
+                work_dir=work_dir,
+                worktree_id=worktree_id,
+                target_results=target_results,
+                errors=errors,
+            )
+            if companion_path is not None
+            else False
+        )
+        if companion_non_git is None:
+            continue
+        if companion_non_git:
             target_results.append(
                 WorkspaceGCWorktreeRemoveTargetResult(
                     worktree_id=worktree_id,
@@ -143,12 +190,18 @@ async def default_worktree_remover(
             continue
         worktree_targets.append((worktree_id, repo_url, companion_path_exists))
     if not worktree_targets:
+        if errors:
+            return WorkspaceGCWorktreeRemoveResult(
+                status="failed",
+                reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                error="; ".join(errors)[:1000],
+                target_results=tuple(target_results),
+            )
         return WorkspaceGCWorktreeRemoveResult(
             status="skipped",
             reason_code="WORKTREE_NOT_GIT_MANAGED",
             target_results=tuple(target_results),
         )
-    errors: list[str] = []
     existing_path_successes: set[str] = set()
     for worktree_id, repo_url, path_existed in worktree_targets:
         try:
