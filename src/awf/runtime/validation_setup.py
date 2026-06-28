@@ -113,6 +113,7 @@ _NODE_PM_OPTION_VALUE_FLAGS = frozenset(
     {
         "--cache",
         "--cwd",
+        "--dir",
         "--filter",
         "--prefix",
         "--registry",
@@ -124,9 +125,9 @@ _NODE_PM_OPTION_VALUE_FLAGS = frozenset(
     }
 )
 _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS = frozenset(
-    {"--cwd", "--filter", "--prefix", "--workspace", "-C", "-F", "-w"}
+    {"--cwd", "--dir", "--filter", "--prefix", "--workspace", "-C", "-F", "-w"}
 )
-_NODE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset({"--cwd", "--prefix", "-C"})
+_NODE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset({"--cwd", "--dir", "--prefix", "-C"})
 _UV_OPTION_VALUE_FLAGS = frozenset(
     {
         "--config-setting",
