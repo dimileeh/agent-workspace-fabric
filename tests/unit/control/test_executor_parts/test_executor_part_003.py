@@ -593,6 +593,7 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=handoff_report)
         fake.queue_result(
             returncode=0,
@@ -602,6 +603,7 @@ class TestHappyPathPart002:
                 " M src/x.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -729,11 +731,13 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
         fake.queue_result(
             returncode=0,
             stdout=(f"?? docs/awf-plans/{ws_id}.md\n?? {report_path}\n M src/x.py\n"),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -875,11 +879,13 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
         fake.queue_result(
             returncode=0,
             stdout=(f"?? docs/awf-plans/{ws_id}.md\n?? {report_path}\n M src/x.py\n"),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -981,19 +987,23 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(  # compare says not done
             returncode=0,
             stdout='{"status":"needs_iteration","summary":"gap","gaps":["add tests"]}',
         )
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
         fake.queue_result(returncode=0, stdout="fixed gap")  # iteration execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(  # compare satisfied
             returncode=0,
             stdout='{"status":"satisfied","summary":"done","gaps":[]}',
         )
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 1 post
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
         fake.queue_result(returncode=0)
@@ -1051,16 +1061,20 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=mixed_report)
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
         fake.queue_result(returncode=0, stdout="fixed api")  # iteration execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(
             returncode=0,
             stdout='{"status":"satisfied","summary":"done","gaps":[]}',
         )
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 1 post
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
         fake.queue_result(returncode=0)
@@ -1121,6 +1135,7 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(
             returncode=0,
             stdout='{"status":"needs_iteration","summary":"still short","gaps":["add tests"]}',
@@ -1133,6 +1148,7 @@ class TestHappyPathPart002:
                 " M src/x.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
 
         await executor.execute(ws_id)

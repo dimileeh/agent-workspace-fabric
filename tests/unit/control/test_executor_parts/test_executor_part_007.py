@@ -397,6 +397,7 @@ class TestPlanningArtifactDeposits:
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(
             returncode=0,
             stdout='{"status":"needs_iteration","summary":"still short","gaps":["add tests"]}',
@@ -409,6 +410,7 @@ class TestPlanningArtifactDeposits:
                 " M src/x.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
 
         await executor.execute(ws_id)
@@ -473,6 +475,7 @@ class TestPlanningArtifactDeposits:
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=handoff_report)
         fake.queue_result(
             returncode=0,
@@ -482,6 +485,7 @@ class TestPlanningArtifactDeposits:
                 " M src/x.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch (drift)
         fake.queue_result(returncode=1, stderr="permission denied")  # git add -A fails
@@ -553,6 +557,7 @@ class TestPlanningArtifactDeposits:
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=handoff_report)
         fake.queue_result(
             returncode=0,
@@ -562,6 +567,7 @@ class TestPlanningArtifactDeposits:
                 " M src/x.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch (drift)
         fake.queue_result(returncode=0)  # git add -A
@@ -633,6 +639,7 @@ class TestPlanningArtifactDeposits:
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=handoff_report)
         fake.queue_result(
             returncode=0,
@@ -642,6 +649,7 @@ class TestPlanningArtifactDeposits:
                 " M src/x.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch (drift)
         fake.queue_result(returncode=0)  # git add -A
@@ -1132,6 +1140,7 @@ class TestPlanningArtifactDeposits:
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=handoff_report)
         fake.queue_result(
             returncode=0,
@@ -1141,6 +1150,7 @@ class TestPlanningArtifactDeposits:
                 " M src/x.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch (drift)
         fake.queue_result(returncode=0)  # git add -A
