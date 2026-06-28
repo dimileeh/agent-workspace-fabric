@@ -608,6 +608,7 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "not found",
         "not run",
         "has not run",
+        "never run",
         "run validation",
         "validation run",
         "profile gate",
@@ -659,7 +660,7 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         named_validation_command
         and (
             named_validation_run_evidence_gap
-            or any(has_marker(marker) for marker in ("not run", "has not run"))
+            or any(has_marker(marker) for marker in ("not run", "has not run", "never run"))
         )
     )
     negated_saved_plan_scoped_check_record = (
@@ -750,7 +751,7 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         r"(?<![a-z0-9_])(?:docs|documentation|document|doc|guide|readme)"
         r"(?![a-z0-9_])[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
         r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
-        r"not found|not run|has not run)\b",
+        r"not found|not run|has not run|never run)\b",
     )
     if any(re.search(pattern, text) for pattern in deterministic_gap_patterns):
         return False
@@ -760,7 +761,7 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
         r"[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
         r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
-        r"not found|not run|has not run)\b",
+        r"not found|not run|has not run|never run)\b",
     )
     if not saved_plan_scoped_check_handoff and any(
         re.search(pattern, text) for pattern in saved_plan_artifact_patterns
@@ -822,7 +823,7 @@ def _is_test_directory_command_target(
         return False
     if (
         re.search(
-            r"(?<![a-z0-9_])(?:has\s+not\s+run|not\s+run)(?![a-z0-9_])",
+            r"(?<![a-z0-9_])(?:has\s+not\s+run|not\s+run|never\s+run)(?![a-z0-9_])",
             command_segment,
         )
         is not None
