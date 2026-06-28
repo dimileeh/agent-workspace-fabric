@@ -23,6 +23,7 @@ from awf.common.git_identity import (
 from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor.agent_service_recovery import (
+    AGENT_SERVICE_RECOVERY_ABORTED,
     _run_agent_callable_with_service_recovery,
 )
 from awf.control.executor.constants import (
@@ -624,7 +625,7 @@ async def run_validation_and_fix_cycle(
 
                     async def _finish_conformance_recovery_failure(
                         *,
-                        reason_code: str = AGENT_SERVICE_UNHEALTHY,
+                        reason_code: str = AGENT_SERVICE_RECOVERY_ABORTED,
                         _validation_run_id: str = validation_run_id,
                         _validation_coverage: dict[str, object] | None = validation_coverage,
                     ) -> None:

@@ -13,6 +13,7 @@ import pytest
 from awf.common.commands import CommandResult
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import quality_methods as executor_quality_methods
+from awf.control.executor.agent_service_recovery import AGENT_SERVICE_RECOVERY_ABORTED
 from awf.control.executor.constants import (
     POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
 )
@@ -359,6 +360,65 @@ async def test_conformance_recovery_abort_marks_validating_workspace_failed(
     assert mark_kwargs["from_status"] is WorkspaceStatus.validating
     assert mark_kwargs["failure_reason"] is FailureReason.infrastructure_failure
     assert mark_kwargs["reason_code"] == "GIT_AGENT_WRITABILITY_FAILED"
+
+
+@pytest.mark.unit
+async def test_conformance_recovery_abort_without_reason_is_not_marked_unhealthy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile.model_validate({"name": "prof-conf-recovery-abort-no-reason"})
+    workspace = _workspace("ws_conf_recovery_abort_no_reason")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_passing_command(tmp_path)])
+
+    async def _abort_recovery(*_args: object, **kwargs: object) -> tuple[bool, object | None]:
+        before_mark_failed = kwargs["before_mark_failed"]
+        await before_mark_failed()
+        return False, None
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_run_agent_callable_with_service_recovery",
+        _abort_recovery,
+    )
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-conf-recovery-abort-no-reason"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _run_post_validation_conformance_check=AsyncMock(),
+    )
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=SimpleNamespace(run=AsyncMock()),
+        planning_validation_handoff=_handoff(tmp_path),
+    )
+
+    assert result.stop
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["reason_code"] == AGENT_SERVICE_RECOVERY_ABORTED
+    mark_kwargs = executor._mark_failed.await_args.kwargs
+    assert mark_kwargs["reason_code"] == AGENT_SERVICE_RECOVERY_ABORTED
 
 
 @pytest.mark.unit

@@ -33,6 +33,7 @@ from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
 from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
+AGENT_SERVICE_RECOVERY_ABORTED = "AGENT_SERVICE_RECOVERY_ABORTED"
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
 _BeforeMarkFailed = Callable[..., None | Awaitable[None]]
 _RecoveryCallbackResult = bool | str
@@ -220,7 +221,10 @@ async def _run_agent_callable_with_service_recovery(
                 if retry_result is not True:
                     await _run_before_mark_failed(
                         before_mark_failed,
-                        reason_code=_callback_abort_reason_code(retry_result),
+                        reason_code=(
+                            _callback_abort_reason_code(retry_result)
+                            or AGENT_SERVICE_RECOVERY_ABORTED
+                        ),
                     )
                     return False, None
         try:
@@ -301,7 +305,10 @@ async def _run_agent_callable_with_service_recovery(
                 if cleanup_repaired is not True:
                     await _run_before_mark_failed(
                         before_mark_failed,
-                        reason_code=_callback_abort_reason_code(cleanup_repaired),
+                        reason_code=(
+                            _callback_abort_reason_code(cleanup_repaired)
+                            or AGENT_SERVICE_RECOVERY_ABORTED
+                        ),
                     )
                     return False, None
             restart_attempts, restarted = await _restart_agent_service_or_mark_unhealthy(
@@ -592,7 +599,7 @@ async def _mark_agent_service_unhealthy(
         "restart_attempts": restart_attempts,
     }
     if before_mark_failed is not None:
-        await _run_before_mark_failed(before_mark_failed)
+        await _run_before_mark_failed(before_mark_failed, reason_code=AGENT_SERVICE_UNHEALTHY)
     await self._mark_failed(
         workspace_id=workspace_id,
         from_status=from_status,
