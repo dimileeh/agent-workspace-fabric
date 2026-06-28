@@ -629,6 +629,10 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         has_marker(marker) for marker in validation_subject_markers
     ):
         return False
+    named_validation_command_evidence = named_validation_command_handoff or (
+        named_validation_command
+        and any(has_marker(marker) for marker in ("not run", "has not run"))
+    )
     saved_plan_scoped_check_handoff = (
         has_marker("saved plan")
         and named_validation_command_handoff
@@ -704,11 +708,11 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
     # Test work is deterministic agent work; only coverage artifact phrases
     # around test/test(s) remain validation evidence.
     for match in re.finditer(r"(?<![a-z0-9_])tests?(?![a-z0-9_])", text):
-        if named_validation_command_handoff and text[match.end() :].startswith(("/", "\\")):
+        if named_validation_command_evidence and text[match.end() :].startswith(("/", "\\")):
             if _has_test_path_work_context(text, match.start()):
                 return False
             continue
-        if named_validation_command_handoff and _is_test_directory_command_target(
+        if named_validation_command_evidence and _is_test_directory_command_target(
             text, match.start(), match.end()
         ):
             if _has_test_path_work_context(text, match.start()):
