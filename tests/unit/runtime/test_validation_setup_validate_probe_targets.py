@@ -221,6 +221,7 @@ class TestPlaywrightBrowserInstallCommand:
 
         assert command is not None
         assert command.command == "npx playwright install chromium"
+        assert command.timeout_seconds == 900
 
     def test_preserves_package_directory_from_leading_cd_setup_install(self) -> None:
         profile = _profile_with_setup_and_browsers(["cd apps/web && npm ci"])

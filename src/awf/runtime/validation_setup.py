@@ -78,6 +78,7 @@ _COVERAGE_HEADER_RE = re.compile(r"(?i)Name\s+Stmts\s+Miss\s+Cover")
 _PYTEST_FAILURE_SUMMARY_RE = re.compile(r"^(?P<kind>FAILED|ERROR)\s+(?P<rest>.+)$")
 _PYTEST_PROGRESS_PREFIX_RE = re.compile(r"^(?:\[[^\]]+\]\s+)+(?=(?:FAILED|ERROR)\s+)")
 _PYTEST_NODE_COMPONENT = r"(?:[^\s:\[]+|\[[^\]]*\])+"
+_PLAYWRIGHT_BROWSER_INSTALL_TIMEOUT_SECONDS = 900
 _PYTEST_NODE_ID_RE = re.compile(rf"^(?P<node>[^\s:]+\.py(?:::{_PYTEST_NODE_COMPONENT})*)")
 _PYTEST_EVIDENCE_LIMIT = 20
 _PYTEST_NODE_ID_LIMIT = 20
@@ -283,6 +284,7 @@ def playwright_browser_install_command(profile: WorkspaceProfile) -> ProfileComm
     package_manager = _infer_node_package_manager(profile)
     return ProfileCommand(
         command=playwright_command(package_manager, "install", *profile.runtime.browsers),
+        timeout_seconds=_PLAYWRIGHT_BROWSER_INSTALL_TIMEOUT_SECONDS,
         required=False,
     )
 
