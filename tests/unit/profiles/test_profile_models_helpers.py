@@ -269,6 +269,53 @@ def test_normalize_inline_profile_snapshot_preserves_present_monitor_grace() -> 
 
 
 @pytest.mark.unit
+def test_normalize_inline_profile_snapshot_backfills_missing_runtime_browsers() -> None:
+    """A legacy snapshot's ``runtime`` lacks ``browsers``; normalization adds the
+    input default so it compares equal to a fresh replay that dumps
+    ``runtime.browsers=[]``."""
+    legacy = {
+        "name": "inline",
+        "forge": "auto",
+        "runtime": {"environment": {"NODE_ENV": "test"}},
+    }
+
+    normalized = normalize_inline_profile_snapshot(legacy)
+
+    assert normalized == {
+        "name": "inline",
+        "forge": "auto",
+        "runtime": {"environment": {"NODE_ENV": "test"}, "browsers": []},
+    }
+    assert legacy == {
+        "name": "inline",
+        "forge": "auto",
+        "runtime": {"environment": {"NODE_ENV": "test"}},
+    }
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_preserves_present_runtime_browsers() -> None:
+    explicit = {"name": "inline", "forge": "auto", "runtime": {"browsers": ["chromium"]}}
+
+    normalized = normalize_inline_profile_snapshot(explicit)
+
+    assert normalized == explicit
+    assert normalized is not explicit
+    assert normalized["runtime"] == explicit["runtime"]
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_skips_runtime_when_not_a_dict() -> None:
+    """A malformed ``runtime`` must not crash normalization; it is passed through
+    untouched so downstream validation surfaces the problem."""
+    malformed = {"name": "inline", "forge": "auto", "runtime": "not-a-dict"}
+
+    normalized = normalize_inline_profile_snapshot(malformed)
+
+    assert normalized == malformed
+
+
+@pytest.mark.unit
 def test_normalize_inline_profile_snapshot_backfills_both_forge_and_monitor_grace() -> None:
     """A truly legacy snapshot (pre-forge AND pre-#655) gets both backfills so it
     compares equal to a fresh replay."""

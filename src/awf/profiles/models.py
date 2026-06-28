@@ -1012,8 +1012,10 @@ def normalize_inline_profile_snapshot(
     added after some inline-profile workspaces were persisted, so their stored
     ``monitor`` sub-dict lacks the key while an otherwise-identical replay now
     dumps the ``600.0`` default. Backfill a missing value there too so legacy
-    inline-profile replays stay idempotent. Returns a shallow copy; the input is
-    never mutated (the ``monitor`` sub-dict is copied only when backfilled).
+    inline-profile replays stay idempotent. ``runtime.browsers`` was added later
+    with an empty-list default, so missing values in legacy ``runtime`` sub-dicts
+    are backfilled the same way. Returns a shallow copy; the input is never
+    mutated (nested sub-dicts are copied only when backfilled).
     """
     if profile is None:
         return None
@@ -1028,6 +1030,9 @@ def normalize_inline_profile_snapshot(
                 _MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT
             ),
         }
+    runtime = result.get("runtime")
+    if isinstance(runtime, dict) and "browsers" not in runtime:
+        result["runtime"] = {**runtime, "browsers": []}
     return result
 
 
