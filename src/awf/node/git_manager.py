@@ -965,6 +965,38 @@ def mirror_path_for_worktree(worktree_path: Path) -> Path | None:
     return linked_git_dir.parent.parent.resolve()
 
 
+def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) -> Path | None:
+    """Return the bare mirror path from mirror-side linked-worktree metadata.
+
+    This is the fallback for an AWF-managed worktree directory whose ``.git``
+    file was already removed, but whose bare mirror still has
+    ``worktrees/<id>/gitdir`` pointing back to that directory.
+    """
+    if not mirrors_dir.exists():
+        return None
+    try:
+        mirror_paths = sorted(path for path in mirrors_dir.iterdir() if path.is_dir())
+    except OSError:
+        return None
+
+    worktree_name = worktree_path.name
+    try:
+        resolved_worktree = worktree_path.resolve()
+    except RuntimeError:
+        resolved_worktree = worktree_path.absolute()
+    for mirror_path in mirror_paths:
+        linked_git_dir = mirror_path / "worktrees" / worktree_name
+        if not linked_git_dir.is_dir():
+            continue
+        try:
+            registered_worktree = _linked_worktree_path_from_git_dir(linked_git_dir)
+        except GitOperationError:
+            continue
+        if registered_worktree == resolved_worktree:
+            return mirror_path.resolve()
+    return None
+
+
 def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
     """Return the Git metadata directory linked from a worktree's ``.git`` file."""
     git_file = worktree_path / ".git"

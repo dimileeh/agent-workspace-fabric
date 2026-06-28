@@ -965,7 +965,9 @@ async def reap_classified_orphans(
         if not path_text:  # pragma: no cover - worktree records always carry a path.
             continue
         worktree_path = Path(path_text)
-        if worktree_path.exists() and not is_existing_non_git_worktree(worktree_path):
+        if worktree_path.exists() and not is_existing_non_git_worktree(
+            worktree_path, work_dir=resolved_work_dir
+        ):
             removal = await resolved_worktree_remover(
                 workspace_id=record.workspace_id,
                 path=worktree_path,

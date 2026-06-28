@@ -261,6 +261,71 @@ def test_reaper_reports_git_aware_worktree_remover_failure_without_direct_fallba
 
 
 @pytest.mark.unit
+def test_reaper_uses_git_aware_remover_for_worktree_missing_gitfile_with_mirror_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    linked_git_dir = tmp_path / "git" / "mirrors" / "repo.git" / "worktrees" / "ws_dead"
+    linked_git_dir.mkdir(parents=True)
+    (linked_git_dir / "gitdir").write_text(str(worktree / ".git"), encoding="utf-8")
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+    calls: list[tuple[str, Path]] = []
+
+    async def _git_aware_remover(
+        *, workspace_id: str, path: Path, work_dir: Path
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        calls.append((workspace_id, path))
+        assert work_dir == tmp_path.resolve()
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="ORPHAN_WORKTREE_REPO_URL_UNRESOLVED",
+            error="repo URL missing",
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="failed",
+                    reason_code="ORPHAN_WORKTREE_REPO_URL_UNRESOLVED",
+                    error="repo URL missing",
+                ),
+            ),
+        )
+
+    def _direct_delete_forbidden(
+        kind: str, path: Path, *, work_dir: Path
+    ) -> tuple[bool, str | None, str | None]:
+        raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
+
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
+    )
+
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            min_age_hours=0,
+            worktree_remover=_git_aware_remover,
+        )
+    )
+
+    assert result.status == "partial"
+    assert calls == [("ws_dead", worktree)]
+    assert result.errors[0].reason_code == "ORPHAN_WORKTREE_REPO_URL_UNRESOLVED"
+    assert worktree.exists()
+
+
+@pytest.mark.unit
 def test_reaper_flag_off_is_dry_run_and_noop(tmp_path: Path) -> None:
     from awf.service.orphan_resources import reap_classified_orphans
 

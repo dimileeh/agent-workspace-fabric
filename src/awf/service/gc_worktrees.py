@@ -114,7 +114,7 @@ async def default_worktree_remover(
     worktree_targets: list[tuple[str, str, bool]] = []
     target_results: list[WorkspaceGCWorktreeRemoveTargetResult] = []
     primary_path_exists = candidate.worktree.exists or candidate.worktree.path.exists()
-    if is_existing_non_git_worktree(candidate.worktree.path):
+    if is_existing_non_git_worktree(candidate.worktree.path, work_dir=work_dir):
         target_results.append(
             WorkspaceGCWorktreeRemoveTargetResult(
                 worktree_id=candidate.workspace_id,
@@ -130,7 +130,9 @@ async def default_worktree_remover(
         companion_path_exists = companion_path is not None and (
             companion_path.exists or companion_path.path.exists()
         )
-        if companion_path is not None and is_existing_non_git_worktree(companion_path.path):
+        if companion_path is not None and is_existing_non_git_worktree(
+            companion_path.path, work_dir=work_dir
+        ):
             target_results.append(
                 WorkspaceGCWorktreeRemoveTargetResult(
                     worktree_id=worktree_id,
@@ -201,7 +203,7 @@ async def remove_orphan_worktree(
     origin URL, then call ``GitManager.remove_worktree`` so removal serializes
     on the same mirror lock as hook repair.
     """
-    from awf.node.git_manager import GitManager, mirror_path_for_worktree
+    from awf.node.git_manager import GitManager
 
     if not path.exists():
         return WorkspaceGCWorktreeRemoveResult(
@@ -215,7 +217,8 @@ async def remove_orphan_worktree(
                 ),
             ),
         )
-    if is_existing_non_git_worktree(path):
+    mirror_path = git_context_mirror_path_for_worktree(path, work_dir=work_dir)
+    if mirror_path is None and is_existing_non_git_worktree(path, work_dir=work_dir):
         return WorkspaceGCWorktreeRemoveResult(
             status="skipped",
             reason_code="WORKTREE_NOT_GIT_MANAGED",
@@ -228,7 +231,6 @@ async def remove_orphan_worktree(
             ),
         )
 
-    mirror_path = mirror_path_for_worktree(path)
     if mirror_path is None:
         return WorkspaceGCWorktreeRemoveResult(
             status="failed",
@@ -306,8 +308,22 @@ async def _repo_url_from_mirror(mirror_path: Path) -> str | None:
     return repo_url or None
 
 
-def is_existing_non_git_worktree(path: Path) -> bool:
-    return path.exists() and not (path / ".git").exists()
+def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path | None:
+    from awf.node.git_manager import mirror_path_for_registered_worktree, mirror_path_for_worktree
+
+    return mirror_path_for_worktree(path) or mirror_path_for_registered_worktree(
+        path, work_dir / "git" / "mirrors"
+    )
+
+
+def is_existing_non_git_worktree(path: Path, *, work_dir: Path | None = None) -> bool:
+    if not path.exists():
+        return False
+    if (path / ".git").exists():
+        return False
+    return not (
+        work_dir is not None and git_context_mirror_path_for_worktree(path, work_dir=work_dir)
+    )
 
 
 async def run_worktree_remove(
