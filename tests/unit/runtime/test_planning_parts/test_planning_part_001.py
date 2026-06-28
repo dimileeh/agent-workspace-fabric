@@ -65,6 +65,18 @@ def test_parse_conformance_report_accepts_json_object() -> None:
 
 
 @pytest.mark.unit
+def test_conformance_gap_hash_matches_string_equality() -> None:
+    gap = ConformanceGap(kind=GapKind.unknown, detail="wire API")
+    detail = "wire API"
+
+    assert gap == detail
+    assert detail == gap
+    assert hash(gap) == hash(detail)
+    assert gap in {detail}
+    assert {detail: "seen"}[gap] == "seen"
+
+
+@pytest.mark.unit
 def test_parse_conformance_report_marks_invalid_json_as_needs_iteration() -> None:
     report = parse_conformance_report("not json")
 

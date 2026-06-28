@@ -55,7 +55,7 @@ class GapKind(StrEnum):
     unknown = "unknown"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ConformanceGap(str):
     """A structured conformance gap that remains string-compatible."""
 
