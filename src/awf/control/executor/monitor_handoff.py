@@ -237,7 +237,6 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             wait=True,
             compose_up_timeout_seconds=compose_up_timeout_seconds,
             force_recreate=True,
-            services=("agent",),
         )
     except CompanionEnvSecretPrecheckError as exc:
         _log.error(
