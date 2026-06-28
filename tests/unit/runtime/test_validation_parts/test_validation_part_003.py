@@ -315,7 +315,9 @@ class TestHappyPath:
         ]
 
     @pytest.mark.unit
-    def test_profile_phase_command_plan_adds_browser_install_after_generated_setup(self) -> None:
+    def test_profile_phase_command_plan_adds_browser_install_after_pre_agent_when_batched(
+        self,
+    ) -> None:
         profile = WorkspaceProfile.model_validate(
             {
                 "name": "browser-setup-test",
@@ -330,8 +332,32 @@ class TestHappyPath:
         assert [(command.phase, command.command.command) for command in commands] == [
             ("setup", "npm install"),
             ("db_generated_setup", "python scripts/db_generated_setup.py"),
-            ("setup", "npx playwright install chromium"),
             ("pre_agent", "node scripts/pre.js"),
+            ("setup", "npx playwright install chromium"),
+        ]
+        assert commands[3].command.required is False
+
+    @pytest.mark.unit
+    def test_profile_phase_command_plan_uses_pre_agent_dependency_install_for_browser_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-pre-agent-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["node scripts/generate-config.js"],
+                    "pre_agent": ["pnpm install --frozen-lockfile"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup", "pre_agent"))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "node scripts/generate-config.js"),
+            ("pre_agent", "pnpm install --frozen-lockfile"),
+            ("setup", "pnpm exec playwright install chromium"),
         ]
         assert commands[2].command.required is False
 
@@ -445,8 +471,8 @@ class TestHappyPath:
     ) -> None:
         fake, val = runner
         fake.queue_result(returncode=0, stdout="dependencies installed")
-        fake.queue_result(returncode=1, stderr="browser download failed")
         fake.queue_result(returncode=0, stdout="pre-agent ok")
+        fake.queue_result(returncode=1, stderr="browser download failed")
         profile = WorkspaceProfile.model_validate(
             {
                 "name": "browser-setup-test",
@@ -466,7 +492,7 @@ class TestHappyPath:
         assert result.all_passed
         assert result.first_failure is None
         assert len(fake.calls) == 3
-        browser_install = result.commands[1]
+        browser_install = result.commands[2]
         assert browser_install.command == "npx playwright install chromium"
         assert browser_install.returncode == 1
         assert browser_install.required is False

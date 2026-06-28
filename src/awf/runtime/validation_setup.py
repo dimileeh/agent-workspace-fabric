@@ -199,6 +199,8 @@ def profile_phase_command_plan(
 ) -> list[ProfileExecutionCommand]:
     """Return normal phase commands plus DB hooks in runtime execution order."""
     commands: list[ProfileExecutionCommand] = []
+    requested_phases = set(phase_names)
+    deferred_browser_install: ProfileExecutionCommand | None = None
     for phase in sorted(
         phase_names,
         key=lambda phase: _PROFILE_PHASE_EXECUTION_ORDER.get(
@@ -219,7 +221,14 @@ def profile_phase_command_plan(
             )
             browser_install = playwright_browser_install_command(profile)
             if browser_install is not None:
-                commands.append(ProfileExecutionCommand(phase="setup", command=browser_install))
+                browser_install_command = ProfileExecutionCommand(
+                    phase="setup",
+                    command=browser_install,
+                )
+                if "pre_agent" in requested_phases:
+                    deferred_browser_install = browser_install_command
+                else:
+                    commands.append(browser_install_command)
             continue
         if phase == "validate":
             commands.extend(
@@ -234,6 +243,9 @@ def profile_phase_command_plan(
             commands.extend(_phase_commands(profile, "validate"))
             continue
         commands.extend(_phase_commands(profile, phase))
+        if phase == "pre_agent" and deferred_browser_install is not None:
+            commands.append(deferred_browser_install)
+            deferred_browser_install = None
     return commands
 
 
@@ -291,7 +303,11 @@ def node_package_manager_executable(profile: WorkspaceProfile) -> str:
 def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
     fallback_package_manager: str | None = None
     dependency_install_package_manager: str | None = None
-    for command in (*profile.phases.setup, *profile.database.generated_setup):
+    for command in (
+        *profile.phases.setup,
+        *profile.database.generated_setup,
+        *profile.phases.pre_agent,
+    ):
         package_manager = _node_dependency_install_package_manager(command.command)
         if package_manager is not None:
             if _node_package_manager_has_scope(package_manager):
