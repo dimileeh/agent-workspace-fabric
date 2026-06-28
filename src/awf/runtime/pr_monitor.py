@@ -654,6 +654,7 @@ _CI_TRANSIENT_FAILURE_MARKERS = (
 _CI_CODE_FAILURE_MARKERS = (
     "traceback (most recent call last):",
     "assertionerror",
+    "assertionfailederror",
     "=== short test summary info ===",
     "found type errors",
     "expect(received)",

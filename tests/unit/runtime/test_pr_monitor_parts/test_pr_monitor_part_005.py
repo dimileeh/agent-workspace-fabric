@@ -115,13 +115,18 @@ class TestCiFailure:
                 "failed to download fixture: connection reset\n"
                 "test result: FAILED. 0 passed; 1 failed\n"
             ),
+            (
+                "org.opentest4j.AssertionFailedError: expected <connection reset handled> "
+                "but was <failed to download>\n"
+                "\tat com.example.RetryTest.reportsCompletedFailures(RetryTest.java:42)\n"
+            ),
         ),
     )
     def test_assertion_with_transient_phrase_reports_ci_failure(self, log_excerpt: str) -> None:
         """A completed test assertion that mentions transient vocabulary must be
         reported to the agent instead of consuming transient rerun budget.
 
-        Regression for PRRT_kwDOSJAM6s6M1Z-M."""
+        Regression for PRRT_kwDOSJAM6s6M1Z-M and PRRT_kwDOSJAM6s6M1dCY."""
         failure = CheckFailure(
             name="frontend-tests",
             conclusion="FAILURE",
