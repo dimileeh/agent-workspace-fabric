@@ -293,12 +293,31 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     if tokens is None:
         return None
     index = _first_non_assignment_token_index(tokens)
+    package_manager = _node_dependency_install_package_manager_from_tokens(tokens, index, [])
+    if package_manager is not None:
+        return package_manager
+    scoped_install = _leading_cd_package_scope(tokens, index)
+    if scoped_install is None:
+        return None
+    package_dir, install_index = scoped_install
+    return _node_dependency_install_package_manager_from_tokens(
+        tokens,
+        install_index,
+        ["--cwd", package_dir],
+    )
+
+
+def _node_dependency_install_package_manager_from_tokens(
+    tokens: list[str],
+    index: int,
+    location_tokens: list[str],
+) -> str | None:
     if index >= len(tokens):
         return None
     executable = tokens[index]
     if executable not in _NODE_PACKAGE_MANAGERS:
         return None
-    location_tokens: list[str] = []
+    inferred_location_tokens = list(location_tokens)
     dependency_install_seen = False
     subcommand_index = index + 1
     while subcommand_index < len(tokens):
@@ -309,17 +328,17 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
             if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS and subcommand_index + 1 < len(
                 tokens
             ):
-                location_tokens.extend((token, tokens[subcommand_index + 1]))
+                inferred_location_tokens.extend((token, tokens[subcommand_index + 1]))
             subcommand_index += 2
             continue
         if token.startswith("-C") and len(token) > 2:
-            location_tokens.append(token)
+            inferred_location_tokens.append(token)
             subcommand_index += 1
             continue
         if token.startswith("--") and "=" in token:
             option_name, _, _ = token.partition("=")
             if option_name in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
-                location_tokens.append(token)
+                inferred_location_tokens.append(token)
             subcommand_index += 1
             continue
         if token.startswith("-"):
@@ -333,10 +352,27 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
             return None
         subcommand_index += 1
     if dependency_install_seen:
-        return _node_package_manager_command(executable, location_tokens)
+        return _node_package_manager_command(executable, inferred_location_tokens)
     if executable == "yarn":
-        return _node_package_manager_command(executable, location_tokens)
+        return _node_package_manager_command(executable, inferred_location_tokens)
     return None
+
+
+def _leading_cd_package_scope(tokens: list[str], index: int) -> tuple[str, int] | None:
+    if index >= len(tokens) or tokens[index] != "cd":
+        return None
+    package_dir_index = index + 1
+    if package_dir_index < len(tokens) and tokens[package_dir_index] == "--":
+        package_dir_index += 1
+    if package_dir_index >= len(tokens):
+        return None
+    package_dir = tokens[package_dir_index]
+    if package_dir in _SHELL_COMPOUND_CONTROL_TOKENS or package_dir.startswith("-"):
+        return None
+    install_index = package_dir_index + 1
+    if install_index >= len(tokens) or tokens[install_index] != "&&":
+        return None
+    return package_dir, install_index + 1
 
 
 def _node_package_manager_command(executable: str, location_tokens: list[str]) -> str:
