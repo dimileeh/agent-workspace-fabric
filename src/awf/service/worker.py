@@ -37,6 +37,8 @@ from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.secret_mounts import LocalSecretLeaseMountResolver
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.driver import LocalRuntimeDriver, WorkspaceRuntimeDriver
+from awf.runtime.inspection import RuntimeInspector
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import (
     InProcessMergeCoordinator,
@@ -82,6 +84,7 @@ _log = get_logger(__name__)
 class WorkerRuntime:
     engine: AsyncEngine
     worker: ControlWorker
+    runtime_driver: WorkspaceRuntimeDriver
 
 
 # Tasks scheduled by _release_forge_client_after_build_error are kept referenced
@@ -298,6 +301,13 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,
         usage_sampler=usage_collector,
+    )
+    runtime_driver = LocalRuntimeDriver(
+        provisioner=provisioner,
+        executor=executor,
+        cleaner=runtime_cleaner,
+        validation_runner=validation,
+        runtime_inspector=RuntimeInspector(),
     )
     orphan_dir_teardown = build_default_compose_teardown(compose)
     classified_orphan_teardown = build_orphan_compose_teardown(compose)
@@ -568,7 +578,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             workspace_peak_memory_gb=settings.workspace_peak_memory_gb,
         ),
     )
-    return WorkerRuntime(engine=engine, worker=worker)
+    return WorkerRuntime(engine=engine, worker=worker, runtime_driver=runtime_driver)
 
 
 def _companion_image_builder_for(

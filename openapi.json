@@ -731,6 +731,38 @@
         "title": "CoordinationOverlapResponse",
         "type": "object"
       },
+      "CoreDiscoveryResponse": {
+        "description": "Public, secret-free Core discovery response.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "git_commit": {
+            "title": "Git Commit",
+            "type": "string"
+          },
+          "package_name": {
+            "title": "Package Name",
+            "type": "string"
+          },
+          "package_version": {
+            "title": "Package Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "package_name",
+          "package_version",
+          "git_commit",
+          "capabilities"
+        ],
+        "title": "CoreDiscoveryResponse",
+        "type": "object"
+      },
       "DiskCheckResponse": {
         "properties": {
           "checked_path": {
@@ -11687,6 +11719,27 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/.well-known/awf-core.json": {
+      "get": {
+        "operationId": "core_discovery__well_known_awf_core_json_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoreDiscoveryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Core Discovery",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/healthz": {
       "get": {
         "operationId": "healthz_healthz_get",
