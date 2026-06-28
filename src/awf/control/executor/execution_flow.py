@@ -258,16 +258,24 @@ async def execute(
         before_mark_failed=_deposit_planning_artifacts,
     )
 
-    # Capture ``verify_head_object_exists`` here so test monkeypatches still apply.
-    _recover_missing_head_after_cleanup_failure = partial(
-        recover_missing_head_after_cleanup_failure,
-        executor=self,
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        base_commit=ws.base_commit,
-        branch_name=expected_branch,
-        task_tag=ws.task_tag,
-        verify_head_object_exists_fn=verify_head_object_exists,
+    def _missing_head_cleanup_recovery_callback(
+        *,
+        current_base_commit: str | None,
+    ) -> Any:
+        # Capture ``verify_head_object_exists`` here so test monkeypatches still apply.
+        return partial(
+            recover_missing_head_after_cleanup_failure,
+            executor=self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_commit=current_base_commit,
+            branch_name=expected_branch,
+            task_tag=ws.task_tag,
+            verify_head_object_exists_fn=verify_head_object_exists,
+        )
+
+    _recover_missing_head_after_cleanup_failure = _missing_head_cleanup_recovery_callback(
+        current_base_commit=ws.base_commit,
     )
 
     before_agent_retry = None
@@ -1224,7 +1232,9 @@ async def execute(
         execution_owner_id=execution_owner_id,
         repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
         repair_hooks_after_agent_cleanup_failure=_repair_mirror_hooks_path_after_cleanup_failure,
-        recover_missing_head_after_cleanup_failure=(_recover_missing_head_after_cleanup_failure),
+        recover_missing_head_after_cleanup_failure=(
+            _missing_head_cleanup_recovery_callback(current_base_commit=base_commit)
+        ),
         deposit_planning_artifacts=_deposit_planning_artifacts,
         expected_status=WorkspaceStatus.validating,
         cleanup_failure_from_status=WorkspaceStatus.validating,

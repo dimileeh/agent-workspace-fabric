@@ -21,11 +21,14 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populates registry
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
+from awf.control.executor import execution_flow as execution_flow_mod
+from awf.control.executor.validation_cleanup_guards import ExecutionValidationResult
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace as WorkspaceModel
 from awf.db.repositories import (
@@ -1380,6 +1383,81 @@ async def test_rebase_only_recovery_rebases_pushes_and_skips_pr_recreate(
             "rebased": True,
         },
     }
+
+
+@pytest.mark.unit
+async def test_rebase_only_validation_cleanup_recovery_uses_rebased_base(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(factory, recovery_mode="rebase_only")
+    captured_base_commits: list[str | None] = []
+
+    async def _repair_hooks_after_cleanup_failure(**_kwargs: object) -> bool:
+        return True
+
+    async def _recover_missing_head_after_cleanup_failure(
+        _exc: ComposeExecCleanupError,
+        **kwargs: object,
+    ) -> bool:
+        captured_base_commits.append(kwargs["base_commit"])
+        return True
+
+    async def _run_validation_and_fix_cycle(
+        *_args: object,
+        **kwargs: object,
+    ) -> ExecutionValidationResult:
+        cleanup_repair = kwargs["after_agent_cleanup_failure_repair"]
+        assert callable(cleanup_repair)
+        repaired = await cleanup_repair(
+            ComposeExecCleanupError(
+                invocation_id="awf_validation_cleanup",
+                source="validation",
+                label="fix-pass",
+                message='service "agent" is not running',
+                cleanup_result=CommandResult(
+                    returncode=1,
+                    stdout="",
+                    stderr='service "agent" is not running',
+                ),
+            )
+        )
+        assert repaired is True
+        return ExecutionValidationResult(
+            stop=True,
+            successful_validation_run_id=None,
+            successful_validation_workspace_head_sha=None,
+        )
+
+    monkeypatch.setattr(
+        execution_flow_mod,
+        "repair_mirror_hooks_path_or_mark_failed",
+        _repair_hooks_after_cleanup_failure,
+    )
+    monkeypatch.setattr(
+        execution_flow_mod,
+        "repair_mirror_hooks_path_after_agent_cleanup_failure",
+        _repair_hooks_after_cleanup_failure,
+    )
+    monkeypatch.setattr(
+        execution_flow_mod,
+        "recover_missing_head_after_cleanup_failure",
+        _recover_missing_head_after_cleanup_failure,
+    )
+    monkeypatch.setattr(
+        execution_flow_mod._execution_validation,
+        "run_validation_and_fix_cycle",
+        _run_validation_and_fix_cycle,
+    )
+
+    _queue_rebase_recovery(fake)
+
+    await executor.execute(ws_id)
+
+    assert captured_base_commits == ["b" * 40]
 
 
 @pytest.mark.unit
