@@ -614,6 +614,20 @@ def test_conformance_requires_awf_validation_accepts_not_run_evidence_with_test_
 
 
 @pytest.mark.unit
+def test_conformance_requires_awf_validation_accepts_validation_run_evidence_with_test_command_path() -> (
+    None
+):
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Implementation is complete; AWF validation evidence is missing.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=("AWF validation run evidence is missing for pytest tests/unit/test_cli.py.",),
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
 def test_conformance_requires_awf_validation_rejects_not_run_evidence_with_missing_test_path() -> (
     None
 ):

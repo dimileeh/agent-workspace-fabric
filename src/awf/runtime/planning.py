@@ -632,9 +632,35 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         has_marker(marker) for marker in validation_subject_markers
     ):
         return False
+    named_validation_run_evidence_gap = named_validation_command and (
+        any(
+            has_marker(marker)
+            for marker in (
+                "validation run evidence",
+                "validation run provenance",
+                "validation run log",
+                "validation run logs",
+            )
+        )
+        and any(
+            has_marker(marker)
+            for marker in (
+                "missing",
+                "stale",
+                "insufficient",
+                "absent",
+                "unavailable",
+                "not available",
+                "not found",
+            )
+        )
+    )
     named_validation_command_evidence = named_validation_command_handoff or (
         named_validation_command
-        and any(has_marker(marker) for marker in ("not run", "has not run"))
+        and (
+            named_validation_run_evidence_gap
+            or any(has_marker(marker) for marker in ("not run", "has not run"))
+        )
     )
     negated_saved_plan_scoped_check_record = (
         re.search(
