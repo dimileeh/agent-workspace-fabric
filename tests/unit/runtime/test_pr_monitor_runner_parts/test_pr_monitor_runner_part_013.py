@@ -724,6 +724,89 @@ async def test_monitor_agent_cleanup_service_down_repairs_git_before_restart(
 
 
 @pytest.mark.unit
+async def test_monitor_agent_cleanup_service_down_checks_claim_before_git_repair(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-new"
+        await session.commit()
+
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=ComposeExecCleanupError(
+            invocation_id="awf-test-cleanup",
+            source="agent",
+            label="monitor",
+            message='service "agent" is not running',
+            cleanup_result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr='service "agent" is not running',
+            ),
+        )
+    )
+    adapter.queue(stdout="AWF-VERDICT: FIXED: should not run")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = "worker-old"
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        pytest.fail("superseded cleanup recovery must not repair git")
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        pytest.fail("superseded cleanup recovery must not inspect HEAD")
+
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+    repair_mirror_hooks_path = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_mirror_hooks_path",
+        side_effect=_repair_mirror_hooks_path,
+    )
+    verify_head_object_exists = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.verify_head_object_exists",
+        side_effect=_verify_head_object_exists,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.mirror_path_for_worktree",
+        return_value=tmp_path / "mirror.git",
+    )
+    compose_file = _write_compose_file(tmp_path)
+
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError) as raised:
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=compose_file,
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    assert adapter.calls == ["fix the comment"]
+    repair_mirror_hooks_path.assert_not_awaited()
+    verify_head_object_exists.assert_not_awaited()
+    ensure_project_up.assert_not_awaited()
+    assert raised.value.details["superseded_reason"] == "monitor_claim_changed"
+    assert raised.value.details["restart_attempts"] == 1
+
+
+@pytest.mark.unit
 async def test_monitor_agent_cleanup_service_down_stops_when_missing_head_repair_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

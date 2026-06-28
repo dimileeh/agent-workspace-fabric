@@ -214,6 +214,13 @@ async def _recover_monitor_agent_service_after_cleanup_error(
         stdout=cleanup_result.stdout if cleanup_result is not None else "",
         stderr=cleanup_result.stderr if cleanup_result is not None else str(exc),
     )
+    await _raise_if_monitor_agent_service_recovery_was_superseded(
+        self,
+        workspace_id=workspace_id,
+        source_reason_code=exc.reason_code,
+        service_healthy=service_healthy,
+        restart_attempts=restart_attempts + 1,
+    )
     await _repair_monitor_git_after_recoverable_agent_cleanup_failure(
         self,
         workspace_id=workspace_id,
