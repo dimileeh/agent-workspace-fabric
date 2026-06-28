@@ -144,6 +144,13 @@ _DEFAULT_MAX_REDIRECTS = 5
 # that poll loop so a stuck task cannot hang the monitor.
 _DEFAULT_MAX_MERGE_POLLS = 30
 _DEFAULT_MERGE_POLL_DELAY_SECONDS = 2.0
+_TERMINAL_STATUS_STATES = frozenset({"FAILED", "STOPPED", "SUCCESSFUL"})
+
+
+def _has_non_terminal_status(statuses: Sequence[Mapping[str, Any]]) -> bool:
+    return any(
+        str(status.get("state") or "").upper() not in _TERMINAL_STATUS_STATES for status in statuses
+    )
 
 
 class BitbucketClient:
@@ -395,9 +402,10 @@ class BitbucketClient:
             operation="bitbucket fetch_failing_check_logs statuses",
             params={"refname": source_branch} if source_branch else None,
         )
+        runs_in_progress = _has_non_terminal_status(statuses)
         failed = [s for s in statuses if str(s.get("state") or "").upper() in {"FAILED", "STOPPED"}]
         if not failed:
-            return CheckFailureLogResult()
+            return CheckFailureLogResult(runs_in_progress=runs_in_progress)
 
         pipeline = await self._find_pipeline_for_commit(repo, head_sha, pr_number, source_branch)
         if pipeline is None:
@@ -405,7 +413,8 @@ class BitbucketClient:
                 failures=tuple(
                     self._external_status_failure(status, pytest_fallback_commands)
                     for status in failed
-                )
+                ),
+                runs_in_progress=runs_in_progress,
             )
 
         pipeline_uuid = _clean_optional_str(pipeline.get("uuid"))
@@ -419,7 +428,8 @@ class BitbucketClient:
                 failures=tuple(
                     self._external_status_failure(status, pytest_fallback_commands)
                     for status in failed
-                )
+                ),
+                runs_in_progress=runs_in_progress,
             )
 
         failures: list[CheckFailure] = []
@@ -460,7 +470,10 @@ class BitbucketClient:
             for status in failed
             if not is_pipeline_owned_status(status)
         )
-        return CheckFailureLogResult(failures=tuple(failures))
+        return CheckFailureLogResult(
+            failures=tuple(failures),
+            runs_in_progress=runs_in_progress,
+        )
 
     async def rerun_failed_workflow_jobs(
         self,
