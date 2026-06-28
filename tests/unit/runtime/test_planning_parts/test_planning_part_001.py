@@ -839,6 +839,8 @@ def test_saved_plan_scoped_check_handoff_rejects_saved_plan_edits(gap: str) -> N
         "tests/unit/test_cli.py needs assertions.",
         "AWF validation evidence is missing; git diff --check has not run and "
         "tests/unit/test_cli.py needs to be added.",
+        "AWF validation evidence is missing; git diff --check has not run and "
+        "tests/unit/test_cli.py needs to cover the new case.",
     ),
 )
 def test_conformance_requires_awf_validation_rejects_mixed_named_command_test_path_work_gaps(

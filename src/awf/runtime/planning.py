@@ -948,6 +948,7 @@ def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
     path_suffix = text[path_match_start:]
     test_path_pattern = r"tests?(?:[/\\][^\s`),;]*)?"
     post_path_work_lead_pattern = (
+        r"(?:needs?|requires?)\s+to\s+(?:add|include|cover|exercise)|"
         r"needs?|requires?|lacks?|missing|"
         r"(?:must|should)\s+(?:add|include|cover|exercise)"
     )
