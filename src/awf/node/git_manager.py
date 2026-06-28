@@ -713,11 +713,20 @@ class GitManager:
                 except GitOperationError as exc:
                     # Idempotent removal: a directory left behind with stale git
                     # metadata makes ``git worktree remove`` fail with
-                    # ``fatal: '<path>' is not a working tree``. That is an
-                    # already-removed condition from git's point of view, not a
-                    # failure. Re-raise any genuine removal error (we match only
-                    # this condition).
-                    if "is not a working tree" not in exc.stderr.lower():
+                    # ``fatal: '<path>' is not a working tree``. If the worktree
+                    # ``.git`` file was already removed but mirror metadata still
+                    # points to it, Git instead reports that validation failed
+                    # because ``<path>/.git`` does not exist. Both are
+                    # already-removed conditions from git's point of view, not
+                    # failures. Re-raise any genuine removal error (we match only
+                    # these conditions).
+                    stderr = exc.stderr.lower()
+                    missing_git_file = (
+                        "validation failed, cannot remove working tree" in stderr
+                        and ".git" in stderr
+                        and "does not exist" in stderr
+                    )
+                    if "is not a working tree" not in stderr and not missing_git_file:
                         raise
                     # ``git worktree remove`` never ran, so the physical
                     # directory and its contents are still on disk; ``worktree
