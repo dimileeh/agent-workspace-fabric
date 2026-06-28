@@ -832,6 +832,7 @@ class TestHappyPathPart001:
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/awf/foo.py\n",
         )
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
         fake.queue_result(  # conformance adapter
             returncode=0,
             stdout='{"status":"satisfied","summary":"plan achieved","gaps":[]}',
@@ -844,6 +845,7 @@ class TestHappyPathPart001:
                 " M src/awf/foo.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
