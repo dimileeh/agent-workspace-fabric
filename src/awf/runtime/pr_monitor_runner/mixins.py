@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from awf.runtime.pr_monitor_runner import agent_service_recovery as _agent_service_recovery
 from awf.runtime.pr_monitor_runner import ci_ops as _ci_ops
 from awf.runtime.pr_monitor_runner import comments as _comments
 from awf.runtime.pr_monitor_runner import feedback_state as _feedback_state
@@ -29,6 +30,10 @@ from awf.runtime.pr_monitor_runner import transient_ops as _transient_ops
 
 class RunnerDelegatesMixin:
     """Methods mechanically delegated to focused implementation modules."""
+
+    _run_monitor_agent_with_service_recovery = (
+        _agent_service_recovery._run_monitor_agent_with_service_recovery
+    )
 
     _run_ci_fix = _ci_ops._run_ci_fix
 

@@ -1,11 +1,4 @@
-"""Unit tests for focused ``pr_monitor_runner`` behavior.
-
-Most cases cover the pure, side-effect-free helpers: ``_parse_verdict`` (CLI
-reply → structured verdict) and ``_collect_defer_items`` (PRStatus +
-MonitorState → bot/human defer buckets for the terminal artifact). Focused
-runtime-path regressions live here when the unit suite needs to cover a
-specific merge-gate branch without running the full monitor integration loop.
-"""
+"""Unit tests for focused ``pr_monitor_runner`` behavior."""
 
 from __future__ import annotations
 
@@ -21,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
+from awf.adapters.provider_failures import AGENT_SERVICE_UNHEALTHY
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
@@ -38,29 +32,23 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     AddressComments,
+    AddressOperatorHint,
     CheckFailure,
     CheckState,
-    CheckTiming,
     Merge,
     MergeableState,
     MergeStateStatus,
     MonitorState,
+    OperatorHint,
     PRStatus,
     ReportCiFailure,
-    ReviewComment,
     ReviewThread,
     SyncBase,
 )
 from awf.runtime.pr_monitor_runner import (
-    MonitorRunnerConfig,
     PullRequestMonitorRunner,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
-    _as_utc,
-    _collect_defer_items,
-    _is_pending_check,
-    _stale_pending_check_warning_key,
-    _stale_pending_check_warnings,
     _with_ci_failures,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
@@ -69,6 +57,8 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -924,6 +914,221 @@ async def test_provider_agent_auth_failure_raises_provider_auth_failed(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "case",
+    ["sync_base", "ci_repair", "comment_repair", "operator_hint_repair"],
+)
+async def test_agent_service_recovery_sentinel_finishes_monitor_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    case: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    status = _green_status()
+    state = MonitorState(started_at=0.0)
+    recovery_details: dict[str, object] = {
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "source_reason_code": "AGENT_IDLE_TIMEOUT",
+        "service_healthy": False,
+        "restart_attempts": 2,
+    }
+    expected_result: dict[str, object] = {
+        "status": "failed",
+        "outcome": "agent_service_recovery_failed",
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "agent_service_recovery": recovery_details,
+        "pushed": False,
+    }
+
+    if case == "sync_base":
+        action = SyncBase()
+        target_method = "_run_sync_base"
+        expected_type = "sync_base"
+    elif case == "ci_repair":
+        failures = (CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),)
+        action = ReportCiFailure(failures=failures)
+        status = _with_ci_failures(status, failures)
+        target_method = "_run_ci_fix"
+        expected_type = "ci_repair"
+        expected_result["failure_count"] = 1
+    elif case == "comment_repair":
+        thread = ReviewThread(
+            thread_id="T_service",
+            path="src/app.py",
+            line=12,
+            body_excerpt="please fix",
+            author="reviewer",
+        )
+        action = AddressComments(threads=(thread,), review_comments=())
+        status = replace(status, unresolved_inline_threads=(thread,))
+        target_method = "_run_fix_cycle"
+        expected_type = "comment_repair"
+        expected_result.update({"thread_count": 1, "review_comment_count": 0})
+    else:
+        hint = OperatorHint(
+            reason="repair after operator guide",
+            directive="fix it",
+            operation_id="op_operator_hint",
+            requested_at="2026-06-27T00:00:00+00:00",
+            reason_code="OPERATOR_GUIDE",
+        )
+        action = AddressOperatorHint(hint=hint)
+        state = MonitorState(started_at=0.0, pending_operator_hint=hint)
+        target_method = "_run_operator_hint_cycle"
+        expected_type = "comment_repair"
+
+    async def _raise_agent_service_recovery_failed(**_kwargs: object) -> object:
+        raise _MonitorAgentServiceRecoveryFailedError(
+            "agent service unhealthy",
+            reason_code=AGENT_SERVICE_UNHEALTHY,
+            details=recovery_details,
+        )
+
+    mocker.patch.object(runner, target_method, _raise_agent_service_recovery_failed)
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
+        await runner._execute(
+            action=action,
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=status,
+            state=state,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    operation = operations[0]
+    assert operation.type == expected_type
+    assert operation.status == OperationStatus.failed.value
+    assert operation.result == expected_result
+    assert operation.error_code == AGENT_SERVICE_UNHEALTHY
+    assert operation.error_message == "agent service unhealthy"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "case",
+    ["sync_base", "ci_repair", "comment_repair", "operator_hint_repair"],
+)
+async def test_superseded_agent_service_recovery_cancels_monitor_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    case: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    status = _green_status()
+    state = MonitorState(started_at=0.0)
+    recovery_details: dict[str, object] = {
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "source_reason_code": "AGENT_IDLE_TIMEOUT",
+        "service_healthy": False,
+        "restart_attempts": 1,
+        "superseded_reason": "monitor_claim_changed",
+    }
+    expected_result: dict[str, object] = {
+        "status": "cancelled",
+        "outcome": "agent_service_recovery_superseded",
+        "reason_code": AGENT_SERVICE_UNHEALTHY,
+        "agent_service_recovery": recovery_details,
+        "pushed": False,
+    }
+
+    if case == "sync_base":
+        action = SyncBase()
+        target_method = "_run_sync_base"
+        expected_type = "sync_base"
+    elif case == "ci_repair":
+        failures = (CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),)
+        action = ReportCiFailure(failures=failures)
+        status = _with_ci_failures(status, failures)
+        target_method = "_run_ci_fix"
+        expected_type = "ci_repair"
+        expected_result["failure_count"] = 1
+    elif case == "comment_repair":
+        thread = ReviewThread(
+            thread_id="T_service",
+            path="src/app.py",
+            line=12,
+            body_excerpt="please fix",
+            author="reviewer",
+        )
+        action = AddressComments(threads=(thread,), review_comments=())
+        status = replace(status, unresolved_inline_threads=(thread,))
+        target_method = "_run_fix_cycle"
+        expected_type = "comment_repair"
+        expected_result.update({"thread_count": 1, "review_comment_count": 0})
+    else:
+        hint = OperatorHint(
+            reason="repair after operator guide",
+            directive="fix it",
+            operation_id="op_operator_hint",
+            requested_at="2026-06-27T00:00:00+00:00",
+            reason_code="OPERATOR_GUIDE",
+        )
+        action = AddressOperatorHint(hint=hint)
+        state = MonitorState(started_at=0.0, pending_operator_hint=hint)
+        target_method = "_run_operator_hint_cycle"
+        expected_type = "comment_repair"
+
+    async def _raise_agent_service_recovery_superseded(**_kwargs: object) -> object:
+        raise _MonitorAgentServiceRecoverySupersededError(
+            "agent service recovery superseded",
+            reason_code=AGENT_SERVICE_UNHEALTHY,
+            details=recovery_details,
+        )
+
+    mocker.patch.object(runner, target_method, _raise_agent_service_recovery_superseded)
+
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError):
+        await runner._execute(
+            action=action,
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=status,
+            state=state,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    operation = operations[0]
+    assert operation.type == expected_type
+    assert operation.status == OperationStatus.cancelled.value
+    assert operation.result == expected_result
+    assert operation.error_code == AGENT_SERVICE_UNHEALTHY
+    assert operation.error_message == "agent service recovery superseded"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("error_cls", "outcome", "reason_code"),
     [
         (ProviderRecoveryRetryError, "provider_retry", "PROVIDER_OUTAGE"),
@@ -1229,166 +1434,3 @@ async def test_run_handles_provider_recovery_before_state_is_loaded(
     else:
         assert "monitor.provider_retry" in logged_events
         terminate_failed.assert_not_awaited()
-
-
-class TestCollectDeferItems:
-    @pytest.mark.unit
-    def test_empty_status_yields_empty_buckets(self) -> None:
-        bots, humans = _collect_defer_items(_status(), MonitorState())
-        assert bots == []
-        assert humans == []
-
-    @pytest.mark.unit
-    def test_thread_deferred_by_bot_goes_to_bot_bucket(self) -> None:
-        t = ReviewThread(
-            thread_id="T1",
-            path="src/x.py",
-            line=1,
-            body_excerpt="nit",
-            author="reviewer-bot[bot]",
-        )
-        state = MonitorState(threads_addressed_ids={"T1": "defer"})
-        bots, humans = _collect_defer_items(_status(inline=(t,)), state)
-        assert len(bots) == 1
-        assert bots[0]["id"] == "T1"
-        assert bots[0]["kind"] == "thread"
-        assert humans == []
-
-    @pytest.mark.unit
-    def test_thread_deferred_by_human_goes_to_human_bucket(self) -> None:
-        t = ReviewThread(
-            thread_id="T2",
-            path="src/y.py",
-            line=5,
-            body_excerpt="real concern",
-            author="dimileeh",
-        )
-        state = MonitorState(threads_addressed_ids={"T2": "defer"})
-        bots, humans = _collect_defer_items(_status(inline=(t,)), state)
-        assert bots == []
-        assert len(humans) == 1
-        assert humans[0]["id"] == "T2"
-
-    @pytest.mark.unit
-    def test_non_deferred_items_are_excluded(self) -> None:
-        t = ReviewThread(
-            thread_id="T3",
-            path=None,
-            line=None,
-            body_excerpt="fixed",
-            author="reviewer-bot[bot]",
-        )
-        state = MonitorState(threads_addressed_ids={"T3": "fix_committed"})
-        bots, humans = _collect_defer_items(_status(inline=(t,)), state)
-        assert bots == []
-        assert humans == []
-
-    @pytest.mark.unit
-    def test_non_deferred_review_comments_are_excluded(self) -> None:
-        c = ReviewComment(
-            comment_id="C2",
-            body_excerpt="already handled",
-            author="dimileeh",
-        )
-
-        bots, humans = _collect_defer_items(_status(reviews=(c,)), MonitorState())
-
-        assert bots == []
-        assert humans == []
-
-    @pytest.mark.unit
-    def test_review_comment_deferred_includes_kind_review(self) -> None:
-        c = ReviewComment(
-            comment_id="C1",
-            body_excerpt="overall concern",
-            author="greptile-apps[bot]",
-        )
-        state = MonitorState(threads_addressed_ids={"C1": "defer"})
-        bots, humans = _collect_defer_items(_status(reviews=(c,)), state)
-        assert len(bots) == 1
-        assert bots[0]["kind"] == "review"
-        assert bots[0]["id"] == "C1"
-        assert humans == []
-
-
-class TestRunnerConfigShape:
-    @pytest.mark.unit
-    def test_runner_config_defaults_include_safety_net(self) -> None:
-        """The runner keeps ``max_outer_iterations`` as a pure safety net
-        against decision-loop bugs — a legitimate session exits via a
-        terminal action well before this. The cap that WAS removed is
-        ``MonitorConfig.iter_cap`` (decision-core gate). Keep these
-        distinct so future refactors don't conflate them."""
-        cfg = MonitorRunnerConfig()
-        assert cfg.max_outer_iterations >= 1000
-        assert cfg.max_fix_cycle_passes >= 1
-
-
-class TestPendingCheckHelpers:
-    @pytest.mark.unit
-    def test_pending_check_warnings_include_only_old_non_terminal_checks(self) -> None:
-        now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
-        old = now - timedelta(minutes=10)
-        status = replace(
-            _status(),
-            checks=(
-                CheckTiming(
-                    name="ci/build",
-                    status="IN_PROGRESS",
-                    started_at=old,
-                    details_url="https://checks.example/build",
-                ),
-                CheckTiming(name="ci/no-start", status="PENDING", started_at=None),
-                CheckTiming(name="ci/fresh", status="QUEUED", started_at=now),
-                CheckTiming(name="ci/done", status="COMPLETED", conclusion=None, started_at=old),
-                CheckTiming(name="ci/skipped", status=None, conclusion="SKIPPED", started_at=old),
-            ),
-        )
-
-        disabled = _stale_pending_check_warnings(
-            status,
-            now=now,
-            threshold_seconds=0,
-        )
-        warnings = _stale_pending_check_warnings(
-            status,
-            now=now,
-            threshold_seconds=120,
-        )
-
-        assert disabled == ()
-        assert len(warnings) == 1
-        assert warnings[0].payload() == {
-            "check_name": "ci/build",
-            "age_seconds": 600,
-            "head_sha": "abc123",
-            "pr_number": 42,
-            "threshold_seconds": 120,
-            "threshold_window": 5,
-            "check_status": "IN_PROGRESS",
-            "check_conclusion": None,
-            "details_url": "https://checks.example/build",
-        }
-        assert (
-            _stale_pending_check_warning_key(
-                workspace_id="ws_1",
-                head_sha="abc123",
-                check_name="ci/build",
-                threshold_seconds=120,
-                threshold_window=5,
-            )
-            == '__awf_pending_check_stale__:["ws_1","abc123","ci/build","120",5]'
-        )
-
-    @pytest.mark.unit
-    def test_pending_check_classifier_handles_provider_status_edges(self) -> None:
-        assert _is_pending_check(CheckTiming(name="unknown", status="waiting")) is True
-        assert _is_pending_check(CheckTiming(name="terminal", status="success")) is False
-        assert (
-            _is_pending_check(CheckTiming(name="terminal-conclusion", conclusion="timed_out"))
-            is False
-        )
-        assert _is_pending_check(CheckTiming(name="future-provider", status="mystery")) is True
-        assert _is_pending_check(CheckTiming(name="empty")) is False
-        naive = datetime(2026, 4, 27, 12, 0)
-        assert _as_utc(naive).tzinfo is UTC

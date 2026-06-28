@@ -92,6 +92,8 @@ from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _ProtectedScopeRollbackDeltaEvidence,
@@ -920,15 +922,25 @@ async def _repair_protected_scope_changes_before_commit(
     await _repair_recovery_mirror_hooks_path()
     agent_run_err = None
     try:
-        await self._deps.adapter.run(
+        await self._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
             prompt=prompt,
-            workspace_id=workspace_id,
             log_source="recovery",
+            operation_start_head=pre_repair_head,
         )
     except AgentRunError as exc:
         agent_run_err = exc
+    except (
+        ProviderRecoveryRetryError,
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorAgentServiceRecoveryFailedError,
+        _MonitorAgentServiceRecoverySupersededError,
+        _MonitorHeadObjectMissingError,
+        _MonitorMirrorHooksPathRepairFailedError,
+    ):
+        raise
     except Exception:
         await _repair_recovery_mirror_hooks_path()
         await _verify_repair_head_object_exists()

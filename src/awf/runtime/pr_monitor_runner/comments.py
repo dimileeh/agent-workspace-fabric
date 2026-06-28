@@ -35,6 +35,9 @@ from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failu
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
+    _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
 
@@ -306,19 +309,16 @@ async def _invoke_cli_for_verdict_result(
             raise _MonitorMirrorHooksPathRepairFailedError() from exc
     agent_run_err = None
     try:
-        result = await runner._deps.adapter.run(
+        result = await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
             prompt=prompt,
-            workspace_id=workspace_id,
             log_source="recovery",
+            command_evidence=command_evidence,
+            operation_start_head=operation_start_head,
         )
         result_stdout = result.stdout
-        append_command_evidence(
-            command_evidence,
-            stdout=result.stdout,
-            stderr=result.stderr,
-        )
     except AgentRunError as exc:
         cli_failed = True
         result_stdout = exc.result.stdout
@@ -328,6 +328,16 @@ async def _invoke_cli_for_verdict_result(
             stdout=exc.result.stdout,
             stderr=exc.result.stderr,
         )
+    except (ProviderRecoveryRetryError, _MonitorAgentServiceRecoverySupersededError):
+        raise
+    except _MonitorAgentServiceRecoveryFailedError:
+        raise
+    except (
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorHeadObjectMissingError,
+        _MonitorMirrorHooksPathRepairFailedError,
+    ):
+        raise
     except Exception:
         if mirror_path is not None:
             try:

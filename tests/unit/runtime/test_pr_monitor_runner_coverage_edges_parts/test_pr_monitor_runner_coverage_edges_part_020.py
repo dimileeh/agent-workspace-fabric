@@ -12,7 +12,9 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.node.git_manager import GitOperationError
 from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_REASON
-from awf.runtime.pr_monitor_runner.types import _MonitorHeadObjectMissingError
+from awf.runtime.pr_monitor_runner.types import (
+    _MonitorHeadObjectMissingError,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,

@@ -25,6 +25,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
     ollama_model,
 )
+from awf.control.executor import execution_validation as execution_validation_mod
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
@@ -831,6 +832,7 @@ class TestHappyPathPart001:
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/awf/foo.py\n",
         )
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
         fake.queue_result(  # conformance adapter
             returncode=0,
             stdout='{"status":"satisfied","summary":"plan achieved","gaps":[]}',
@@ -843,6 +845,7 @@ class TestHappyPathPart001:
                 " M src/awf/foo.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -881,6 +884,7 @@ class TestHappyPathPart001:
     @pytest.mark.unit
     async def test_planning_validation_handoff_runs_validation_then_conformance_only_check(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -924,6 +928,7 @@ class TestHappyPathPart001:
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
         fake.queue_result(
             returncode=0,
@@ -933,6 +938,7 @@ class TestHappyPathPart001:
                 " M src/x.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -953,6 +959,19 @@ class TestHappyPathPart001:
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        recovery_calls: list[dict[str, object]] = []
+        original_recovery = execution_validation_mod._run_agent_callable_with_service_recovery
+
+        async def _spy_recovery(*args: object, **kwargs: object) -> tuple[bool, object]:
+            recovery_calls.append(kwargs)
+            return await original_recovery(*args, **kwargs)
+
+        monkeypatch.setattr(
+            execution_validation_mod,
+            "_run_agent_callable_with_service_recovery",
+            _spy_recovery,
+        )
 
         await executor.execute(ws_id)
 
@@ -977,6 +996,11 @@ class TestHappyPathPart001:
 
         assert phase_names == ["planning", "execution", "conformance", "conformance"]
         assert conformance_call_indexes[-1] > validation_call_index
+        assert recovery_calls
+        assert recovery_calls[-1]["expected_status"] is WorkspaceStatus.validating
+        assert recovery_calls[-1]["failure_from_status"] is WorkspaceStatus.validating
+        assert callable(recovery_calls[-1]["before_agent_retry"])
+        assert callable(recovery_calls[-1]["after_agent_cleanup_failure_repair"])
         assert "Validation evidence" in prompts[-1]
         assert "VALIDATION_OK" in prompts[-1]
         assert "validation.01_validate.stdout" in prompts[-1]

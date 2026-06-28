@@ -9,6 +9,7 @@ import pytest
 import pytest_mock
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.base import AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.quality_gates_common import QualityGateViolation
@@ -23,9 +24,10 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner import remote_repair_protected as pr_remote_repair_protected
 from awf.runtime.pr_monitor_runner.types import (
-    BaseFetchError,
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
@@ -471,8 +473,9 @@ async def test_protected_scope_repair_repairs_mirror_before_launch(
         events.append("mirror-repair")
         return True
 
-    async def _adapter_run(**_kwargs: object) -> None:
+    async def _adapter_run(**_kwargs: object) -> AgentRunResult:
         events.append("adapter.run")
+        return AgentRunResult(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
     monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
@@ -642,6 +645,95 @@ async def test_protected_scope_repair_cleans_mirror_before_provider_retry(
         )
 
     assert events == ["mirror-repair", "mirror-repair", "provider-recovery"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "guard_exc",
+    [
+        _MonitorAgentRuntimeOwnershipRepairFailedError("AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"),
+        _MonitorHeadObjectMissingError(
+            "HEAD_OBJECT_MISSING_UNRECOVERABLE",
+            "HEAD object missing during protected-scope repair recovery",
+        ),
+        _MonitorMirrorHooksPathRepairFailedError(),
+    ],
+)
+async def test_protected_scope_repair_propagates_recovery_guard_errors_without_cleanup_masking(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    guard_exc: Exception,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    violation = _protected_workflow_violation()
+    events: list[str] = []
+
+    async def _violations_for_status(**_kwargs: object) -> tuple[QualityGateViolation, ...]:
+        return (violation,)
+
+    async def _prompt(**_kwargs: object) -> str:
+        return "repair protected scope"
+
+    async def _suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    def _mirror_path_for_worktree(_worktree_path: Path) -> Path:
+        return tmp_path / "mirrors" / "repo.git"
+
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        events.append("mirror-repair")
+        if len(events) == 1:
+            return True
+        raise OSError("fallback cleanup would mask guard")
+
+    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> object:
+        raise guard_exc
+
+    monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
+    monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
+    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _suppresses_cli)
+    monkeypatch.setattr(
+        runner,
+        "_run_monitor_agent_with_service_recovery",
+        _run_monitor_agent_with_service_recovery,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_agent_runtime_ownership",
+        _repair_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "mirror_path_for_worktree",
+        _mirror_path_for_worktree,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+
+    with pytest.raises(type(guard_exc)) as exc_info:
+        await runner._repair_protected_scope_changes_before_commit(
+            workspace_id="ws_delta",
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="awf_ws_delta",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
+
+    assert exc_info.value is guard_exc
+    assert events == ["mirror-repair"]
 
 
 @pytest.mark.unit
@@ -921,18 +1013,23 @@ async def test_protected_scope_repair_cleans_mirror_after_cleanup_failure(
 
 
 @pytest.mark.unit
-async def test_protected_scope_status_check_wraps_diff_read_failures(
+@pytest.mark.parametrize(
+    ("recovery_exc", "match"),
+    [
+        (ProviderRecoveryRetryError(), None),
+        (
+            _MonitorAgentServiceRecoverySupersededError("agent service recovery superseded"),
+            "agent service recovery superseded",
+        ),
+    ],
+)
+async def test_protected_scope_repair_recovery_control_flow_reraises_without_cleanup(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    recovery_exc: Exception,
+    match: str | None,
 ) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        workspace.owned_paths = ["src/**"]
-        await session.commit()
-
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
@@ -940,489 +1037,72 @@ async def test_protected_scope_status_check_wraps_diff_read_failures(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+    violation = _protected_workflow_violation()
+    events: list[str] = []
 
-    async def _raise_diff_read_failure(**_kwargs: object) -> dict[str, object]:
-        raise RuntimeError("could not read protected file")
+    async def _violations_for_status(**_kwargs: object) -> tuple[QualityGateViolation, ...]:
+        return (violation,)
 
-    monkeypatch.setattr(
-        runner,
-        "_protected_file_diffs_for_status_paths",
-        _raise_diff_read_failure,
-    )
+    async def _prompt(**_kwargs: object) -> str:
+        return "repair protected scope"
 
-    with pytest.raises(ProtectedScopeDiffError, match="Could not read dirty protected-scope"):
-        await runner._protected_scope_violations_for_status(
-            workspace_id=workspace_id,
-            status_stdout=" M .github/workflows/ci.yml\n",
-        )
-
-
-@pytest.mark.unit
-async def test_sync_base_protected_scope_covers_missing_and_empty_diff_edges(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    worktree = tmp_path / "worktree"
-
-    with pytest.raises(ProtectedScopeDiffError, match="Workspace row ws_missing"):
-        await runner._protected_scope_violations_for_sync_base_push(
-            workspace_id="ws_missing",
-            worktree_path=worktree,
-            remote_branch="awf/ws_missing",
-            base_branch="development",
-        )
-
-    async def _no_remote_changes(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
-        return ("remote-base", ())
-
-    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _no_remote_changes)
-    assert (
-        await runner._protected_scope_violations_for_sync_base_push(
-            workspace_id=workspace_id,
-            worktree_path=worktree,
-            remote_branch=f"awf/{workspace_id}",
-            base_branch="development",
-        )
-        == []
-    )
-
-    async def _remote_changes(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
-        return ("remote-base", ("src/remote.py",))
-
-    async def _base_fetch_fails(**_kwargs: object) -> None:
-        raise BaseFetchError("network reset")
-
-    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _remote_changes)
-    monkeypatch.setattr(runner, "_fetch_base", _base_fetch_fails)
-    with pytest.raises(ProtectedScopeDiffError, match="Could not refresh the base branch"):
-        await runner._protected_scope_violations_for_sync_base_push(
-            workspace_id=workspace_id,
-            worktree_path=worktree,
-            remote_branch=f"awf/{workspace_id}",
-            base_branch="development",
-        )
-
-    async def _fetch_base_ok(**_kwargs: object) -> None:
-        return None
-
-    async def _merged_base(**_kwargs: object) -> str:
-        return "merged-base"
-
-    async def _no_base_changes(**_kwargs: object) -> tuple[str, ...]:
-        return ()
-
-    monkeypatch.setattr(runner, "_fetch_base", _fetch_base_ok)
-    monkeypatch.setattr(runner, "_merge_base_with_head", _merged_base)
-    monkeypatch.setattr(runner, "_changed_paths_between_ref_and_head", _no_base_changes)
-    assert (
-        await runner._protected_scope_violations_for_sync_base_push(
-            workspace_id=workspace_id,
-            worktree_path=worktree,
-            remote_branch=f"awf/{workspace_id}",
-            base_branch="development",
-        )
-        == []
-    )
-
-    async def _different_base_changes(**_kwargs: object) -> tuple[str, ...]:
-        return ("src/base.py",)
-
-    monkeypatch.setattr(runner, "_changed_paths_between_ref_and_head", _different_base_changes)
-    assert (
-        await runner._protected_scope_violations_for_sync_base_push(
-            workspace_id=workspace_id,
-            worktree_path=worktree,
-            remote_branch=f"awf/{workspace_id}",
-            base_branch="development",
-        )
-        == []
-    )
-
-
-@pytest.mark.unit
-async def test_sync_base_protected_scope_wraps_committed_diff_read_failure(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    async def _remote_changes(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
-        return ("remote-base", (".github/workflows/ci.yml",))
-
-    async def _fetch_base_ok(**_kwargs: object) -> None:
-        return None
-
-    async def _merged_base(**_kwargs: object) -> str:
-        return "merged-base"
-
-    async def _base_changes(**_kwargs: object) -> tuple[str, ...]:
-        return (".github/workflows/ci.yml",)
-
-    async def _raise_committed_diff_read(*_args: object, **_kwargs: object) -> dict[str, object]:
-        raise RuntimeError("show failed")
-
-    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _remote_changes)
-    monkeypatch.setattr(runner, "_fetch_base", _fetch_base_ok)
-    monkeypatch.setattr(runner, "_merge_base_with_head", _merged_base)
-    monkeypatch.setattr(runner, "_changed_paths_between_ref_and_head", _base_changes)
-    monkeypatch.setattr(
-        pr_remote_repair_protected,
-        "protected_file_diffs_for_committed_paths",
-        _raise_committed_diff_read,
-    )
-
-    with pytest.raises(ProtectedScopeDiffError, match="sync-base protected-scope"):
-        await runner._protected_scope_violations_for_sync_base_push(
-            workspace_id=workspace_id,
-            worktree_path=tmp_path / "worktree",
-            remote_branch=f"awf/{workspace_id}",
-            base_branch="development",
-        )
-
-
-@pytest.mark.unit
-async def test_repair_operation_start_head_uses_fallback_when_worktree_missing(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    mirror_path = tmp_path / "mirror.git"
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0)
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    monkeypatch.setattr(
-        pr_remote_repair,
-        "mirror_path_for_worktree",
-        lambda _worktree_path: mirror_path,
-    )
-
-    head, result = await runner._repair_operation_start_head_result(
-        workspace_id="ws_missing_worktree",
-        worktree_path=tmp_path / "does-not-exist",
-        operation_type="review_fix",
-        fallback_head_sha="f" * 40,
-    )
-
-    assert head == "f" * 40
-    assert result is None
-    assert len(cmd.calls) == 1
-    assert cmd.calls[0].args == [
-        "git",
-        "--git-dir",
-        str(mirror_path),
-        "cat-file",
-        "-e",
-        f"{'f' * 40}^{{commit}}",
-    ]
-
-
-@pytest.mark.unit
-async def test_repair_operation_start_head_uses_fallback_when_rev_parse_fails(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    mirror_path = tmp_path / "mirror.git"
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=128, stderr="fatal: not a git repository\n")
-    cmd.queue_result(returncode=0)
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    monkeypatch.setattr(
-        pr_remote_repair,
-        "mirror_path_for_worktree",
-        lambda _worktree_path: mirror_path,
-    )
-
-    head, result = await runner._repair_operation_start_head_result(
-        workspace_id="ws_bad_worktree_head",
-        worktree_path=worktree,
-        operation_type="sync_base",
-        fallback_head_sha="b" * 40,
-    )
-
-    assert head == "b" * 40
-    assert result is None
-    assert len(cmd.calls) == 2
-    assert cmd.calls[1].args == [
-        "git",
-        "--git-dir",
-        str(mirror_path),
-        "cat-file",
-        "-e",
-        f"{'b' * 40}^{{commit}}",
-    ]
-
-
-@pytest.mark.unit
-async def test_repair_operation_start_head_uses_candidate_when_rev_parse_fails(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    mirror_path = tmp_path / "mirror.git"
-    candidate_head = "c" * 40
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=128, stderr="fatal: not a git repository\n")
-    cmd.queue_result(returncode=0)
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    async def _open_merge_candidate_head_sha(_workspace_id: str) -> str:
-        return candidate_head
-
-    monkeypatch.setattr(
-        runner,
-        "_open_merge_candidate_head_sha",
-        _open_merge_candidate_head_sha,
-    )
-    monkeypatch.setattr(
-        pr_remote_repair,
-        "mirror_path_for_worktree",
-        lambda _worktree_path: mirror_path,
-    )
-
-    head, result = await runner._repair_operation_start_head_result(
-        workspace_id="ws_bad_worktree_candidate_head",
-        worktree_path=worktree,
-        operation_type="sync_base",
-    )
-
-    assert head == candidate_head
-    assert result is None
-    assert len(cmd.calls) == 2
-    assert cmd.calls[1].args == [
-        "git",
-        "--git-dir",
-        str(mirror_path),
-        "cat-file",
-        "-e",
-        f"{candidate_head}^{{commit}}",
-    ]
-
-
-@pytest.mark.unit
-async def test_repair_operation_start_head_accepts_mocked_no_mirror_fallback(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fallback_head = "e" * 40
-    checked_paths: list[Path] = []
-    cmd = FakeCommandRunner()
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    async def _fallback_exists(worktree_path: Path) -> bool:
-        checked_paths.append(worktree_path)
-        return True
-
-    monkeypatch.setattr(
-        pr_remote_repair,
-        "mirror_path_for_worktree",
-        lambda _worktree_path: None,
-    )
-    monkeypatch.setattr(
-        pr_remote_repair,
-        "verify_head_object_exists",
-        _fallback_exists,
-    )
-
-    worktree = tmp_path / "does-not-exist"
-    head, result = await runner._repair_operation_start_head_result(
-        workspace_id="ws_no_mirror_fallback",
-        worktree_path=worktree,
-        operation_type="comment_repair",
-        fallback_head_sha=fallback_head,
-    )
-
-    assert head == fallback_head
-    assert result is None
-    assert checked_paths == [worktree]
-    assert cmd.calls == []
-
-
-@pytest.mark.unit
-async def test_repair_operation_start_head_rejects_no_mirror_fallback_when_guard_fails(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fallback_head = "e" * 40
-    cmd = FakeCommandRunner()
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    async def _fallback_missing(_worktree_path: Path) -> bool:
+    async def _suppresses_cli(_workspace_id: str) -> bool:
         return False
 
-    monkeypatch.setattr(
-        pr_remote_repair,
-        "mirror_path_for_worktree",
-        lambda _worktree_path: None,
-    )
-    monkeypatch.setattr(
-        pr_remote_repair,
-        "verify_head_object_exists",
-        _fallback_missing,
-    )
+    async def _repair_runtime_ownership(**_kwargs: object) -> bool:
+        return True
 
-    head, result = await runner._repair_operation_start_head_result(
-        workspace_id="ws_no_mirror_missing_fallback",
-        worktree_path=tmp_path / "does-not-exist",
-        operation_type="comment_repair",
-        fallback_head_sha=fallback_head,
-    )
+    def _mirror_path_for_worktree(_worktree_path: Path) -> Path:
+        return tmp_path / "mirrors" / "repo.git"
 
-    assert head == ""
-    assert result is not None
-    assert result.failed is True
-    assert result.reason_code == "REPAIR_START_HEAD_UNAVAILABLE"
-    assert result.details["fallback_head_sha"] == fallback_head
-    assert result.details["fallback_source"] == "status"
-    assert cmd.calls == []
+    async def _repair_mirror_hooks_path(_mirror_path: Path) -> bool:
+        events.append("mirror-repair")
+        return True
 
+    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> None:
+        events.append("service-recovery")
+        raise recovery_exc
 
-@pytest.mark.unit
-async def test_repair_operation_start_head_rejects_dangling_candidate_fallback(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    mirror_path = tmp_path / "mirror.git"
-    candidate_head = "c" * 40
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=1, stderr="missing commit\n")
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        events.append("verify-head")
+        return True
 
-    async def _open_merge_candidate_head_sha(_workspace_id: str) -> str:
-        return candidate_head
-
+    monkeypatch.setattr(runner, "_protected_scope_violations_for_status", _violations_for_status)
+    monkeypatch.setattr(runner, "_protected_scope_repair_prompt", _prompt)
+    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _suppresses_cli)
     monkeypatch.setattr(
         runner,
-        "_open_merge_candidate_head_sha",
-        _open_merge_candidate_head_sha,
+        "_run_monitor_agent_with_service_recovery",
+        _run_monitor_agent_with_service_recovery,
     )
     monkeypatch.setattr(
-        pr_remote_repair,
-        "mirror_path_for_worktree",
-        lambda _worktree_path: mirror_path,
-    )
-
-    head, result = await runner._repair_operation_start_head_result(
-        workspace_id="ws_dangling_candidate",
-        worktree_path=tmp_path / "does-not-exist",
-        operation_type="sync_base",
-    )
-
-    assert head == ""
-    assert result is not None
-    assert result.failed is True
-    assert result.reason_code == "REPAIR_START_HEAD_UNAVAILABLE"
-    assert result.details["fallback_head_sha"] == candidate_head
-    assert result.details["fallback_source"] == "candidate"
-    assert cmd.calls[0].args[-3:] == [
-        "cat-file",
-        "-e",
-        f"{candidate_head}^{{commit}}",
-    ]
-
-
-@pytest.mark.unit
-async def test_repair_operation_start_head_rejects_dangling_status_fallback(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    mirror_path = tmp_path / "mirror.git"
-    status_head = "d" * 40
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=128, stderr="fatal: bad object HEAD\n")
-    cmd.queue_result(returncode=1, stderr="missing commit\n")
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
+        pr_remote_repair_protected,
+        "repair_agent_runtime_ownership",
+        _repair_runtime_ownership,
     )
     monkeypatch.setattr(
-        pr_remote_repair,
+        pr_remote_repair_protected,
         "mirror_path_for_worktree",
-        lambda _worktree_path: mirror_path,
+        _mirror_path_for_worktree,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "repair_mirror_hooks_path",
+        _repair_mirror_hooks_path,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair_protected,
+        "verify_head_object_exists",
+        _verify_head_object_exists,
     )
 
-    head, result = await runner._repair_operation_start_head_result(
-        workspace_id="ws_dangling_status",
-        worktree_path=worktree,
-        operation_type="ci_fix",
-        fallback_head_sha=status_head,
-    )
+    with pytest.raises(type(recovery_exc), match=match):
+        await runner._repair_protected_scope_changes_before_commit(
+            workspace_id="ws_delta",
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="awf_ws_delta",
+            compose_file=tmp_path / "compose.yml",
+            state=MonitorState(),
+        )
 
-    assert head == ""
-    assert result is not None
-    assert result.failed is True
-    assert result.reason_code == "REPAIR_START_HEAD_UNAVAILABLE"
-    assert result.details["fallback_head_sha"] == status_head
-    assert result.details["fallback_source"] == "status"
-    assert len(cmd.calls) == 2
-    assert cmd.calls[1].args[-3:] == [
-        "cat-file",
-        "-e",
-        f"{status_head}^{{commit}}",
-    ]
+    assert events == ["mirror-repair", "service-recovery"]

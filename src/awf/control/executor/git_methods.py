@@ -134,6 +134,7 @@ async def _run_agent_git_writability_preflight(
     compose_project: str,
     compose_file: Path,
     worktree_path: Path,
+    from_status: WorkspaceStatus = WorkspaceStatus.running,
 ) -> bool:
     # Unit tests often use a plain temp directory as a fake worktree. Real
     # AWF-linked worktrees always have a .git control file, so keep the
@@ -149,7 +150,7 @@ async def _run_agent_git_writability_preflight(
     ):
         await self._mark_failed(
             workspace_id=workspace_id,
-            from_status=WorkspaceStatus.running,
+            from_status=from_status,
             failure_reason=FailureReason.infrastructure_failure,
             message=(
                 "agent Git writability preflight failed before container "
@@ -180,7 +181,7 @@ async def _run_agent_git_writability_preflight(
     output = (result.stderr.strip() or result.stdout.strip() or "<no output>")[:1200]
     await self._mark_failed(
         workspace_id=workspace_id,
-        from_status=WorkspaceStatus.running,
+        from_status=from_status,
         failure_reason=FailureReason.infrastructure_failure,
         message=(f"agent Git writability preflight failed (exit={result.returncode}): {output}")[
             :2000

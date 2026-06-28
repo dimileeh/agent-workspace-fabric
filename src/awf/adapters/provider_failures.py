@@ -18,6 +18,7 @@ AGENT_AUTH_FAILED = "AGENT_AUTH_FAILED"
 AGENT_PROVIDER_CAPACITY_EXHAUSTED = "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
 AGENT_TIMEOUT = "AGENT_TIMEOUT"
 AGENT_IDLE_TIMEOUT = "AGENT_IDLE_TIMEOUT"
+AGENT_SERVICE_UNHEALTHY = "AGENT_SERVICE_UNHEALTHY"
 
 ProviderFailureType = Literal[
     "auth",
@@ -26,7 +27,9 @@ ProviderFailureType = Literal[
     "usage_limit",
     "timeout",
     "idle_timeout",
+    "runtime_unhealthy",
 ]
+FailureScope = Literal["provider", "infra"]
 
 _AUTH_FAILURE_MARKERS = (
     "not logged in",
@@ -120,11 +123,13 @@ class ProviderFailureClassification:
     failure_fingerprint: str
     recommended_action: str
     fallback_allowed: bool
+    failure_scope: FailureScope = "provider"
 
     def to_metadata(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "reason_code": self.reason_code,
             "failure_type": self.failure_type,
+            "failure_scope": self.failure_scope,
             "provider": self.provider,
             "model": self.model,
             "retryable": self.retryable,
@@ -144,6 +149,7 @@ def classify_provider_failure(
     stderr: str | None,
     provider: str | None,
     model: str | None,
+    service_healthy: bool | None = None,
 ) -> ProviderFailureClassification | None:
     """Classify a provider failure from reason code plus output fingerprints."""
 
@@ -176,6 +182,22 @@ def classify_provider_failure(
 
     if failure_type is None:
         return None
+    if service_healthy is False and failure_type in {"timeout", "idle_timeout"}:
+        return ProviderFailureClassification(
+            reason_code=AGENT_SERVICE_UNHEALTHY,
+            failure_type="runtime_unhealthy",
+            failure_scope="infra",
+            provider=inferred_provider,
+            model=normalized_model,
+            retryable=True,
+            retry_after_seconds=None,
+            cooldown_seconds=None,
+            failure_fingerprint="",
+            recommended_action=(
+                "Restart the workspace agent runtime service before retrying this workspace."
+            ),
+            fallback_allowed=False,
+        )
     if failure_type in {"timeout", "idle_timeout"} and not (inferred_provider or normalized_model):
         return None
 

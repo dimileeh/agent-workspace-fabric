@@ -54,6 +54,8 @@ from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
@@ -919,20 +921,51 @@ async def _run_sync_base(
                     details=repair_details,
                 )
         try:
-            result = await runner._deps.adapter.run(
+            await runner._run_monitor_agent_with_service_recovery(
+                workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 prompt=prompt,
-                workspace_id=workspace_id,
                 log_source="recovery",
+                command_evidence=command_evidence,
+                operation_start_head=operation_start_head,
             )
-            append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
         except AgentRunError as exc:
             agent_run_err = exc
             append_command_evidence(
                 command_evidence,
                 stdout=exc.result.stdout,
                 stderr=exc.result.stderr,
+            )
+        except (
+            ProviderRecoveryRetryError,
+            _MonitorAgentServiceRecoveryFailedError,
+            _MonitorAgentServiceRecoverySupersededError,
+        ):
+            raise
+        except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
+        except _MonitorHeadObjectMissingError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
+        except _MonitorMirrorHooksPathRepairFailedError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
             )
         except Exception as exc:
             # Runtime plumbing can fail outside ``AgentRunError`` after the agent

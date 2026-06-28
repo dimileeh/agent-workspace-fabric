@@ -87,6 +87,21 @@ async def _seed_running(
         return ws.id
 
 
+async def _seed_validating(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    agent: str = "opencode",
+) -> str:
+    workspace_id = await _seed_running(factory, agent=agent)
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await s.commit()
+    return workspace_id
+
+
 async def _get_status(factory: async_sessionmaker[AsyncSession], workspace_id: str) -> Any:
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
@@ -188,6 +203,37 @@ async def test_opencode_pull_failure_marks_failed_not_agent_cli_failed(
     reason_codes = [reason for _, reason in snap.events]
     assert "OLLAMA_MODEL_PULL_FAILED" in reason_codes
     assert "AGENT_CLI_FAILED" not in reason_codes
+
+
+@pytest.mark.unit
+async def test_opencode_pull_failure_honors_from_status_override(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_validating(factory)
+    executor = _make_executor(factory, tmp_path)
+
+    monkeypatch.setattr(
+        ollama_model,
+        "ensure_ollama_model_available",
+        lambda **_kwargs: {
+            "status": "fail",
+            "reason_code": "OLLAMA_MODEL_PULL_FAILED",
+            "message": "Ollama pull of 'llama4:70b' did not complete successfully.",
+        },
+    )
+
+    proceed = await executor._ensure_ollama_model_or_mark_failed(
+        workspace_id=workspace_id,
+        ws=SimpleNamespace(agent="opencode", task_policy={"agent_model": "ollama/llama4:70b"}),
+        from_status=WorkspaceStatus.validating,
+    )
+
+    assert proceed is False
+    snap = await _get_status(factory, workspace_id)
+    assert snap.status == WorkspaceStatus.failed.value
+    assert "OLLAMA_MODEL_PULL_FAILED" in [reason for _, reason in snap.events]
 
 
 @pytest.mark.unit

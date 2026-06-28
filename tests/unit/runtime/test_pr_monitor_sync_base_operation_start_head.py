@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from awf.adapters.base import AgentRunError
+from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
@@ -19,7 +20,32 @@ from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
+    _MonitorAgentServiceRecoverySupersededError,
 )
+
+
+class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
+    async def _run_monitor_agent_with_service_recovery(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        log_source: str,
+        command_evidence: list[str] | None = None,
+        operation_start_head: str | None = None,
+    ) -> object:
+        del operation_start_head
+        result = await self._deps.adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=prompt,
+            workspace_id=workspace_id,
+            log_source=log_source,
+        )
+        append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+        return result
 
 
 @pytest.mark.unit
@@ -482,7 +508,7 @@ async def test_run_sync_base_threads_compose_context_to_conflict_commit(
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -605,7 +631,7 @@ async def test_run_sync_base_repairs_mirror_hooks_before_conflict_agent_launch(
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -728,7 +754,7 @@ async def test_run_sync_base_fails_closed_when_conflict_prelaunch_mirror_repair_
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -858,7 +884,7 @@ async def test_run_sync_base_repairs_mirror_hooks_after_conflict_agent_cleanup_f
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -994,7 +1020,7 @@ async def test_run_sync_base_fails_closed_when_post_agent_mirror_hooks_repair_fa
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -1044,6 +1070,101 @@ async def test_run_sync_base_fails_closed_when_post_agent_mirror_hooks_repair_fa
         "adapter.run",
         "repair-hooks",
     ]
+
+
+@pytest.mark.unit
+async def test_run_sync_base_reraises_superseded_recovery_before_commit_sink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Superseded sync-base agents must not commit after losing the monitor claim."""
+
+    superseded = _MonitorAgentServiceRecoverySupersededError("monitor claim lost")
+
+    class _FakeCommandRunner:
+        def __init__(self) -> None:
+            self.results = [
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=1, stdout="", stderr="merge conflict"),
+                CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+            ]
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
+            return self.results.pop(0)
+
+    async def _repair_operation_start_head_result(
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_type: str,
+        fallback_head_sha: str | None = None,
+    ) -> tuple[str, None]:
+        del workspace_id, worktree_path, operation_type, fallback_head_sha
+        return "operation-start-sha", None
+
+    async def _resolve_task_tag(_workspace_id: str) -> str | None:
+        return None
+
+    async def _fetch_base(**_kwargs: object) -> None:
+        return None
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> object:
+        raise superseded
+
+    async def _unexpected_commit_dirty_worktree(**_kwargs: object) -> bool:
+        pytest.fail("superseded recovery must re-raise before committing dirty worktree")
+
+    async def _unexpected_protected_scope(**_kwargs: object) -> None:
+        pytest.fail("superseded recovery must re-raise before protected-scope checks")
+
+    async def _unexpected_validated_push(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("superseded recovery must re-raise before push")
+
+    monkeypatch.setattr(
+        remote_ops,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _workspace_runtime_context="",
+        _repair_operation_start_head_result=_repair_operation_start_head_result,
+        _resolve_task_tag=_resolve_task_tag,
+        _fetch_base=_fetch_base,
+        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
+        _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
+        _commit_dirty_worktree=_unexpected_commit_dirty_worktree,
+        _protected_scope_push_block=_unexpected_protected_scope,
+        _validated_git_push_result=_unexpected_validated_push,
+        _deps=SimpleNamespace(runner=_FakeCommandRunner()),
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError) as exc_info:
+        await remote_ops._run_sync_base(
+            runner,
+            workspace_id="ws-sync",
+            repo=SimpleNamespace(slug=lambda: "owner/repo"),
+            pr_number=614,
+            base_branch="main",
+            remote_branch="awf/ws-sync",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    assert exc_info.value is superseded
 
 
 @pytest.mark.unit
@@ -1126,7 +1247,7 @@ async def test_run_sync_base_runs_post_agent_guard_before_provider_retry(
         _repair_agent_runtime_ownership,
     )
 
-    runner = SimpleNamespace(
+    runner = _MonitorAgentServiceRecoveryRunner(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
         _repair_operation_start_head_result=_repair_operation_start_head_result,
@@ -1154,3 +1275,98 @@ async def test_run_sync_base_runs_post_agent_guard_before_provider_retry(
 
     assert events == ["commit", "provider-recovery"]
     assert captured_command_evidence == [["stdout evidence", "retry me"]]
+
+
+@pytest.mark.unit
+async def test_run_sync_base_reraises_provider_retry_before_commit_sink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Service-recovery provider retry control flow must not create sync-base commits."""
+
+    provider_retry = ProviderRecoveryRetryError()
+
+    class _FakeCommandRunner:
+        def __init__(self) -> None:
+            self.results = [
+                CommandResult(returncode=0, stdout="", stderr=""),
+                CommandResult(returncode=1, stdout="", stderr="merge conflict"),
+                CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+            ]
+
+        async def run(
+            self,
+            _args: list[str],
+            *,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            del env
+            return self.results.pop(0)
+
+    async def _repair_operation_start_head_result(
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_type: str,
+        fallback_head_sha: str | None = None,
+    ) -> tuple[str, None]:
+        del workspace_id, worktree_path, operation_type, fallback_head_sha
+        return "operation-start-sha", None
+
+    async def _resolve_task_tag(_workspace_id: str) -> str | None:
+        return None
+
+    async def _fetch_base(**_kwargs: object) -> None:
+        return None
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        return False
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _run_monitor_agent_with_service_recovery(**_kwargs: object) -> object:
+        raise provider_retry
+
+    async def _unexpected_commit_dirty_worktree(**_kwargs: object) -> bool:
+        pytest.fail("provider retry must re-raise before committing dirty worktree")
+
+    async def _unexpected_protected_scope(**_kwargs: object) -> None:
+        pytest.fail("provider retry must re-raise before protected-scope checks")
+
+    async def _unexpected_validated_push(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("provider retry must re-raise before push")
+
+    monkeypatch.setattr(
+        remote_ops,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    runner = SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _workspace_runtime_context="",
+        _repair_operation_start_head_result=_repair_operation_start_head_result,
+        _resolve_task_tag=_resolve_task_tag,
+        _fetch_base=_fetch_base,
+        _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
+        _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
+        _commit_dirty_worktree=_unexpected_commit_dirty_worktree,
+        _protected_scope_push_block=_unexpected_protected_scope,
+        _validated_git_push_result=_unexpected_validated_push,
+        _deps=SimpleNamespace(runner=_FakeCommandRunner()),
+    )
+
+    with pytest.raises(ProviderRecoveryRetryError) as exc_info:
+        await remote_ops._run_sync_base(
+            runner,
+            workspace_id="ws-sync",
+            repo=SimpleNamespace(slug=lambda: "owner/repo"),
+            pr_number=614,
+            base_branch="main",
+            remote_branch="awf/ws-sync",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    assert exc_info.value is provider_retry

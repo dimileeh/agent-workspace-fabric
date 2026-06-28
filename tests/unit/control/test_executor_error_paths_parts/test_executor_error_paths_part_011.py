@@ -106,6 +106,8 @@ class TestExecutorCoverageEdgesPart011:
                 workspace_id: str,
                 wait: bool = True,
                 compose_up_timeout_seconds: int = 300,
+                force_recreate: bool = False,
+                services: tuple[str, ...] = (),
             ) -> None:
                 captured.update(
                     {
@@ -114,6 +116,8 @@ class TestExecutorCoverageEdgesPart011:
                         "workspace_id": workspace_id,
                         "wait": wait,
                         "compose_up_timeout_seconds": compose_up_timeout_seconds,
+                        "force_recreate": force_recreate,
+                        "services": services,
                     }
                 )
 

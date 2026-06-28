@@ -81,12 +81,16 @@ async def _ensure_ollama_model_or_mark_failed(
     *,
     workspace_id: str,
     ws: Any,
-) -> bool:
+    from_status: WorkspaceStatus = WorkspaceStatus.running,
+    return_reason_code: bool = False,
+) -> bool | str:
     """Ensure the OpenCode/Ollama model is available; pull it if needed.
 
     Returns ``True`` when the agent run may proceed (model in ``/api/tags``,
     ``:cloud`` model, or a successful pull) and ``False`` after marking the
-    workspace failed. A no-op (returns ``True``) for non-OpenCode runtimes.
+    workspace failed. When ``return_reason_code`` is set, failure returns the
+    terminal reason code instead of ``False``. A no-op (returns ``True``) for
+    non-OpenCode runtimes.
     """
 
     agent = AgentRuntime(ws.agent)
@@ -188,7 +192,7 @@ async def _ensure_ollama_model_or_mark_failed(
         message = f"{message} {detail}"
     await self._mark_failed(
         workspace_id=workspace_id,
-        from_status=WorkspaceStatus.running,
+        from_status=from_status,
         failure_reason=FailureReason.infrastructure_failure,
         message=message[:2000],
         reason_code=reason_code,
@@ -197,7 +201,7 @@ async def _ensure_ollama_model_or_mark_failed(
             "progress": list(progress),
         },
     )
-    return False
+    return reason_code if return_reason_code else False
 
 
 async def _record_ollama_model_event(

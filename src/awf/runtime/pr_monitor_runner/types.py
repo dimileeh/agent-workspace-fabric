@@ -98,6 +98,38 @@ class _MonitorAgentRuntimeOwnershipRepairFailedError(RuntimeError):
         return AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 
 
+class _MonitorAgentServiceRecoveryFailedError(RuntimeError):
+    """Raised after monitor records terminal unhealthy agent-service recovery."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason_code: str | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        """Store the source recovery reason and details when available."""
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.details = dict(details) if details is not None else None
+
+
+class _MonitorAgentServiceRecoverySupersededError(RuntimeError):
+    """Raised when agent-service recovery is abandoned by a superseded monitor."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason_code: str | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        """Store the source recovery reason and details when available."""
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.details = dict(details) if details is not None else None
+
+
 class _MonitorMirrorHooksPathRepairFailedError(RuntimeError):
     """Raised when monitor cannot repair a poisoned ``core.hooksPath`` on the shared mirror."""
 

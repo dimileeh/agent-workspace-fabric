@@ -25,7 +25,8 @@ async def repair_mirror_hooks_path_or_mark_failed(
     failure_stage: str,
     failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
     before_mark_failed: Callable[[], None] | None = None,
-) -> bool:
+    return_reason_code: bool = False,
+) -> bool | str:
     if mirror_path is None:
         return True
     mirror_repair_failure_reason_code: str | None = None
@@ -65,7 +66,7 @@ async def repair_mirror_hooks_path_or_mark_failed(
             message=failure_message,
             reason_code=mirror_repair_failure_reason_code,
         )
-        return False
+        return mirror_repair_failure_reason_code if return_reason_code else False
     return True
 
 
@@ -79,7 +80,8 @@ async def repair_mirror_hooks_path_after_agent_cleanup_failure(
     failure_stage: str = "after agent cleanup failure",
     failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
     before_mark_failed: Callable[[], None] | None = None,
-) -> bool:
+    return_reason_code: bool = False,
+) -> bool | str:
     return await repair_mirror_hooks_path_or_mark_failed(
         executor=executor,
         workspace_id=workspace_id,
@@ -89,4 +91,5 @@ async def repair_mirror_hooks_path_after_agent_cleanup_failure(
         failure_stage=failure_stage,
         failure_from_status=failure_from_status,
         before_mark_failed=before_mark_failed,
+        return_reason_code=return_reason_code,
     )

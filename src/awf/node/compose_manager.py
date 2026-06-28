@@ -413,6 +413,8 @@ class ComposeManager:
         workspace_id: str,
         wait: bool = True,
         compose_up_timeout_seconds: int = 300,
+        force_recreate: bool = False,
+        services: tuple[str, ...] = (),
     ) -> None:
         """Start an already-rendered compose project without re-rendering.
 
@@ -422,14 +424,19 @@ class ComposeManager:
         drifting from the stack the monitor originally owned.
         """
         args = ["up", "-d", "--remove-orphans"]
+        if force_recreate:
+            args.append("--force-recreate")
         if wait:
             args.extend(["--wait", "--wait-timeout", str(compose_up_timeout_seconds)])
+        args.extend(services)
         _log.info(
             "compose.ensure_project_up",
             workspace_id=workspace_id,
             project_name=project_name,
             compose_file=str(compose_file),
             wait=wait,
+            force_recreate=force_recreate,
+            services=services,
         )
         await self._compose(
             project_name,

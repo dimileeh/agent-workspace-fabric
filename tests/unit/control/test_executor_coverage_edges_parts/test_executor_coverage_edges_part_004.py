@@ -153,12 +153,14 @@ async def test_agent_git_writability_preflight_records_container_failure(
         compose_project="awf_ws_git_fail",
         compose_file=compose_file,
         worktree_path=worktree_path,
+        from_status=WorkspaceStatus.validating,
     )
 
     assert ok is False
     executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
     kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
     assert kwargs["reason_code"] == "GIT_AGENT_WRITABILITY_FAILED"
+    assert kwargs["from_status"] is WorkspaceStatus.validating
     assert kwargs["details"]["stderr"] == "fatal: cannot write object"
 
 
