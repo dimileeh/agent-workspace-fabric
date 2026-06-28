@@ -246,6 +246,50 @@ class TestPlaywrightBrowserInstallCommand:
         assert browser_probe_workdir(profile) == "/workspace/apps/web"
 
     @pytest.mark.parametrize(
+        ("setup_command", "expected", "expected_workdir"),
+        [
+            (
+                "corepack enable && yarn install --immutable",
+                "yarn playwright install chromium",
+                "/workspace",
+            ),
+            (
+                "corepack enable && yarn --cwd apps/web install --immutable",
+                "yarn --cwd apps/web playwright install chromium",
+                "/workspace/apps/web",
+            ),
+            (
+                "corepack enable && cd apps/web && yarn install --immutable",
+                "yarn --cwd apps/web playwright install chromium",
+                "/workspace/apps/web",
+            ),
+            (
+                "corepack enable && pnpm --dir apps/web install --frozen-lockfile",
+                "pnpm --dir apps/web exec playwright install chromium",
+                "/workspace/apps/web",
+            ),
+            (
+                "corepack enable && bun install --frozen-lockfile",
+                "bunx playwright install chromium",
+                "/workspace",
+            ),
+        ],
+    )
+    def test_browser_install_scans_past_corepack_preamble(
+        self,
+        setup_command: str,
+        expected: str,
+        expected_workdir: str,
+    ) -> None:
+        profile = _profile_with_setup_and_browsers([setup_command])
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == expected
+        assert browser_probe_workdir(profile) == expected_workdir
+
+    @pytest.mark.parametrize(
         ("setup_command", "expected"),
         [
             ("'unterminated", "npx playwright install chromium"),
@@ -256,6 +300,9 @@ class TestPlaywrightBrowserInstallCommand:
             ("cd", "npx playwright install chromium"),
             ("cd - && npm ci", "npx playwright install chromium"),
             ("cd apps/web npm ci", "npx playwright install chromium"),
+            ("corepack disable && yarn install --immutable", "npx playwright install chromium"),
+            ("corepack enable || yarn install --immutable", "npx playwright install chromium"),
+            ("corepack enable", "npx playwright install chromium"),
         ],
     )
     def test_browser_install_defaults_or_accepts_edge_setup_forms(
