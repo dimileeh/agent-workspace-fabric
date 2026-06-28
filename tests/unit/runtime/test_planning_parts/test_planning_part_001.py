@@ -789,6 +789,11 @@ def test_saved_plan_command_snippets_do_not_count_as_handoff() -> None:
             "needs updates. The AWF validation phase must run pytest and record "
             "scoped checks."
         ),
+        (
+            "Scoped-check evidence is missing from the saved plan; the saved plan "
+            "does not include scoped checks yet. The AWF validation phase must run "
+            "pytest."
+        ),
     ),
 )
 def test_saved_plan_scoped_check_handoff_rejects_saved_plan_edits(gap: str) -> None:
