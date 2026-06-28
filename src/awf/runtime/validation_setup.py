@@ -119,12 +119,14 @@ _NODE_PM_OPTION_VALUE_FLAGS = frozenset(
         "--userconfig",
         "--workspace",
         "-C",
+        "-F",
         "-w",
     }
 )
-_NODE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset(
-    {"--cwd", "--filter", "--prefix", "--workspace", "-C", "-w"}
+_NODE_PM_PRESERVED_OPTION_VALUE_FLAGS = frozenset(
+    {"--cwd", "--filter", "--prefix", "--workspace", "-C", "-F", "-w"}
 )
+_NODE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset({"--cwd", "--prefix", "-C"})
 _UV_OPTION_VALUE_FLAGS = frozenset(
     {
         "--config-setting",
@@ -304,7 +306,9 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
         if token in _SHELL_COMPOUND_CONTROL_TOKENS:
             break
         if token in _NODE_PM_OPTION_VALUE_FLAGS:
-            if token in _NODE_PM_LOCATION_OPTION_VALUE_FLAGS and subcommand_index + 1 < len(tokens):
+            if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS and subcommand_index + 1 < len(
+                tokens
+            ):
                 location_tokens.extend((token, tokens[subcommand_index + 1]))
             subcommand_index += 2
             continue
@@ -314,7 +318,7 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
             continue
         if token.startswith("--") and "=" in token:
             option_name, _, _ = token.partition("=")
-            if option_name in _NODE_PM_LOCATION_OPTION_VALUE_FLAGS:
+            if option_name in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
                 location_tokens.append(token)
             subcommand_index += 1
             continue

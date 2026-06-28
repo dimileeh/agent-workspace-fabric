@@ -137,6 +137,23 @@ class TestProbeRuntimeBrowsers:
 
         assert browser_probe_workdir(profile) == "/workspace"
 
+    @pytest.mark.parametrize(
+        "setup_command",
+        [
+            "npm --filter @repo/web install",
+            "npm --workspace @repo/web ci",
+            "pnpm --filter @repo/web install",
+            "pnpm -F @repo/web install",
+        ],
+    )
+    def test_browser_probe_workdir_keeps_workspace_root_for_package_selectors(
+        self,
+        setup_command: str,
+    ) -> None:
+        profile = _profile_with_setup_and_browsers([setup_command])
+
+        assert browser_probe_workdir(profile) == "/workspace"
+
     def test_embedded_probe_reports_declared_browsers_missing_without_playwright(
         self, tmp_path
     ) -> None:
