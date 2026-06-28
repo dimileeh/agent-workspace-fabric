@@ -8,6 +8,8 @@ import pytest
 
 from awf.runtime import ci_failure_evidence
 
+_COVERAGE_FAIL_UNDER_LINE = "Coverage failure: total of 98.94 is less than fail-under=99.00"
+
 
 @pytest.mark.unit
 def test_ci_failure_evidence_handles_empty_logs_with_warning() -> None:
@@ -96,6 +98,66 @@ def test_ci_failure_evidence_preserves_github_error_annotations() -> None:
     ) in evidence.error_summaries
     assert timestamped_annotation in evidence.error_summaries
     assert "Error: Process completed with exit code 1." in evidence.error_summaries
+
+
+@pytest.mark.unit
+def test_ci_failure_evidence_preserves_coverage_fail_under_summary() -> None:
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                "Name                     Stmts   Miss  Cover",
+                "src/awf/runtime/foo.py      100      2    98%",
+                _COVERAGE_FAIL_UNDER_LINE,
+                "Error: Process completed with exit code 1.",
+            ]
+        ),
+        check_name="python-full-coverage",
+    )
+
+    assert _COVERAGE_FAIL_UNDER_LINE in evidence.error_summaries
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("marker", ci_failure_evidence.CI_CODE_FAILURE_MARKERS)
+def test_ci_failure_evidence_preserves_every_code_failure_marker(marker: str) -> None:
+    marker_line = f"CI marker evidence: {marker}"
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        marker_line,
+        check_name="marker-consistency",
+    )
+
+    assert marker_line in evidence.error_summaries
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "summary_line",
+    (
+        "would reformat: src/awf/runtime/pr_monitor.py",
+        "Found type errors",
+    ),
+)
+def test_ci_failure_evidence_preserves_black_and_mypy_summaries(summary_line: str) -> None:
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        summary_line,
+        check_name="lint-and-type",
+    )
+
+    assert summary_line in evidence.error_summaries
+
+
+@pytest.mark.unit
+def test_ci_failure_evidence_prioritizes_marker_summaries_within_cap() -> None:
+    generic_errors = [f"Error: generic failure {index}" for index in range(10)]
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join([*generic_errors, _COVERAGE_FAIL_UNDER_LINE]),
+        check_name="python-full-coverage",
+    )
+
+    assert len(evidence.error_summaries) == ci_failure_evidence._MAX_SUMMARIES  # noqa: SLF001
+    assert _COVERAGE_FAIL_UNDER_LINE in evidence.error_summaries
 
 
 @pytest.mark.unit

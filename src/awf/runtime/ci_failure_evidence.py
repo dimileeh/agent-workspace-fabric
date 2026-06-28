@@ -32,6 +32,22 @@ _MAX_SUMMARIES = 8
 _MAX_LINE_CHARS = 500
 _DEFAULT_PYTEST_REPRO_COMMAND = "uv run --python 3.12 --extra dev pytest"
 
+CI_CODE_FAILURE_MARKERS = (
+    "failed test",
+    "pytest failed",
+    "assertionerror",
+    "assert failed",
+    "coverage failure",
+    "fail-under",
+    "typecheck",
+    "type check",
+    "would reformat:",
+    "found lint errors",
+    "found type errors",
+    "syntaxerror",
+    "traceback (most recent call last)",
+)
+
 
 @dataclass(frozen=True)
 class CiFailureEvidence:
@@ -237,9 +253,12 @@ def _extract_assertion_snippets(lines: Iterable[str]) -> list[str]:
 
 def _extract_error_summaries(lines: Iterable[str]) -> list[str]:
     """Collect concise error summary lines from displayed CI log output."""
-    summaries: list[str] = []
+    marker_summaries: list[str] = []
+    generic_summaries: list[str] = []
     for line in lines:
-        if (
+        if _line_has_code_failure_marker(line):
+            marker_summaries.append(line)
+        elif (
             line.startswith("FAILED ")
             or "AssertionError" in line
             or line.startswith("Error:")
@@ -248,8 +267,13 @@ def _extract_error_summaries(lines: Iterable[str]) -> list[str]:
             or _RUFF_DIAGNOSTIC_RE.search(line)
             or line.lower().startswith(("error ", "error:", "fatal:"))
         ):
-            summaries.append(line)
-    return summaries
+            generic_summaries.append(line)
+    return [*marker_summaries, *generic_summaries]
+
+
+def _line_has_code_failure_marker(line: str) -> bool:
+    lowered = line.lower()
+    return any(marker in lowered for marker in CI_CODE_FAILURE_MARKERS)
 
 
 def _suggest_repro_commands(

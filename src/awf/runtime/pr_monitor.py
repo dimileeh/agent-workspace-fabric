@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from awf.runtime._docker_pull_detection import _log_shows_docker_registry_timeout
+from awf.runtime.ci_failure_evidence import CI_CODE_FAILURE_MARKERS
 from awf.runtime.monitor_state_keys import (
     _merge_method_blocked_key,
     _outdated_resolve_requeued_key,
@@ -620,22 +621,6 @@ _CI_TRANSIENT_INFRA_WAIT_KEY_PREFIX = "__awf_ci_infra_wait:"
 
 _CI_FAILED_JOB_RERUN_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT"})
 
-_CI_CODE_FAILURE_MARKERS = (
-    "failed test",
-    "pytest failed",
-    "assertionerror",
-    "assert failed",
-    "coverage failure",
-    "fail-under",
-    "typecheck",
-    "type check",
-    "would reformat:",
-    "found lint errors",
-    "found type errors",
-    "syntaxerror",
-    "traceback (most recent call last)",
-)
-
 _CI_CODE_FAILURE_PATTERNS = (
     re.compile(r"(?m)^[^\n:]+:\d+:\d+:\s+[A-Z]\d{3}\b"),
     re.compile(r"(?m)^[^\n:]+:\d+:\s+error:\s+.+\[[a-z0-9-]+\]"),
@@ -907,7 +892,7 @@ def _has_structured_code_failure_evidence(failure: CheckFailure) -> bool:
 
 
 def _looks_like_code_failure_text(text: str) -> bool:
-    if any(marker in text for marker in _CI_CODE_FAILURE_MARKERS):
+    if any(marker in text for marker in CI_CODE_FAILURE_MARKERS):
         return True
     return any(pattern.search(text) for pattern in _CI_CODE_FAILURE_PATTERNS)
 

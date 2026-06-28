@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from awf.runtime import ci_failure_evidence
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
@@ -21,6 +22,7 @@ from awf.runtime.pr_monitor import (
     RerunTransientCI,
     ReviewComment,
     ReviewThread,
+    _has_actionable_ci_failure_evidence,
     _log_shows_docker_registry_timeout,
     decide,
 )
@@ -214,6 +216,73 @@ class TestCiFailure:
         assert isinstance(action, NotifyHuman)
         assert action.message is not None
         assert "without actionable code-failure evidence" in action.message
+
+    @pytest.mark.unit
+    def test_coverage_fail_under_summary_reports_ci_failure_when_tail_is_truncated(
+        self,
+    ) -> None:
+        coverage_line = "Coverage failure: total of 98.94 is less than fail-under=99.00"
+        evidence = ci_failure_evidence.extract_ci_failure_evidence(
+            "\n".join(
+                [
+                    "python-full-coverage\tRun coverage report\tcoverage report --fail-under=99",
+                    coverage_line,
+                    "Error: Process completed with exit code 1.",
+                ]
+            ),
+            check_name="python-full-coverage",
+        )
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt="Error: Process completed with exit code 1.",
+            run_id="25897584271",
+            failing_commands=evidence.failing_commands,
+            error_summaries=evidence.error_summaries,
+            suggested_repro_commands=evidence.suggested_repro_commands,
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert coverage_line in evidence.error_summaries
+        assert _has_actionable_ci_failure_evidence(failure)
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "summary_line",
+        (
+            "Coverage failure: total of 98.94 is less than fail-under=99.00",
+            "would reformat: src/awf/runtime/pr_monitor.py",
+            "Found type errors",
+        ),
+    )
+    def test_structured_code_failure_summary_reports_ci_failure_without_tail_marker(
+        self,
+        summary_line: str,
+    ) -> None:
+        failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt="Error: Process completed with exit code 1.",
+            run_id="25897584271",
+            error_summaries=(summary_line,),
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert _has_actionable_ci_failure_evidence(failure)
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
 
     @pytest.mark.unit
     def test_mixed_run_with_rollup_marker_and_code_evidence_reports_failure(
