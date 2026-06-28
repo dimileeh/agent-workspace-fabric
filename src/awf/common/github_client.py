@@ -935,7 +935,10 @@ class GitHubClient:
         for run in runs_raw or []:
             database_id = run.get("databaseId")
             if database_id is not None:
-                status_by_run[str(database_id)] = str(run.get("status") or "").lower()
+                status = str(run.get("status") or "").lower()
+                status_by_run[str(database_id)] = status
+                if status not in ("", "completed"):
+                    runs_in_progress = True
 
         async def _append_failure(
             *,
