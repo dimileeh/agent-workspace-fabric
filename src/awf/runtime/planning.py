@@ -575,7 +575,7 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
     instructional_validation_run = any(
         re.search(pattern, text) is not None
         for pattern in (
-            r"(?:^|[.;:]\s*|(?<![a-z0-9_])"
+            r"(?:^|[.;:,]\s*|(?<![a-z0-9_])"
             r"(?:please\s+|(?:(?:must|should|needs?|required|requires?)\s+"
             r"(?:to\s+|be\s+)?|has\s+to\s+)))"
             r"(?:re-?run|run)(?![a-z0-9_])",
