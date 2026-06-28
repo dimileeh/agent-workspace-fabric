@@ -10,8 +10,7 @@ needed from that report.
 from __future__ import annotations
 
 import json
-import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -44,14 +43,52 @@ class PlanConformanceStatus(StrEnum):
     needs_iteration = "needs_iteration"
 
 
-@dataclass(frozen=True)
+class GapKind(StrEnum):
+    """Structured kind for a plan-conformance gap."""
+
+    awf_validation_evidence = "awf_validation_evidence"
+    implementation = "implementation"
+    test_work = "test_work"
+    documentation = "documentation"
+    saved_plan_edit = "saved_plan_edit"
+    migration = "migration"
+    unknown = "unknown"
+
+
+@dataclass(frozen=True, eq=False)
+class ConformanceGap(str):
+    """A structured conformance gap that remains string-compatible."""
+
+    kind: GapKind
+    detail: str
+
+    def __new__(cls, kind: GapKind, detail: str) -> ConformanceGap:
+        if not isinstance(kind, GapKind):
+            raise TypeError(f"kind must be a GapKind, got {type(kind)!r}")
+        return str.__new__(cls, detail)
+
+
+@dataclass(frozen=True, init=False)
 class PlanConformanceReport:
     """Parsed plan-conformance report."""
 
     status: PlanConformanceStatus
     summary: str
-    gaps: tuple[str, ...]
+    gaps: tuple[ConformanceGap, ...]
     reason_code: str = PLAN_CONFORMANCE_REPORTED
+
+    def __init__(
+        self,
+        *,
+        status: PlanConformanceStatus,
+        summary: str,
+        gaps: Sequence[ConformanceGap | str] = (),
+        reason_code: str = PLAN_CONFORMANCE_REPORTED,
+    ) -> None:
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "summary", summary)
+        object.__setattr__(self, "gaps", _normalize_conformance_gaps(gaps))
+        object.__setattr__(self, "reason_code", reason_code)
 
     @property
     def satisfied(self) -> bool:
@@ -308,7 +345,7 @@ def build_execution_prompt(
     task_prompt: str,
     plan_path: Path,
     iteration: int,
-    gaps: tuple[str, ...],
+    gaps: tuple[ConformanceGap | str, ...],
     coordination_warnings: Sequence[Mapping[str, Any]] = (),
     workspace_runtime_context: str = "",
     task_tag: str | None = None,
@@ -354,6 +391,9 @@ def build_conformance_prompt(
         if validation_evidence and validation_evidence.strip()
         else ""
     )
+    gap_kind_lines = "\n".join(
+        f"- `{kind.value}`: {_gap_kind_definition(kind)}" for kind in GapKind
+    )
     return (
         "## Conformance phase\n\n"
         f"Compare the current workspace implementation against `{plan_path.as_posix()}`.\n"
@@ -361,10 +401,15 @@ def build_conformance_prompt(
         "Do not run validation commands or implementation commands during conformance. "
         "That includes pytest, ruff, mypy, coverage, npm, lint commands, build commands, "
         "git add, and git commit. Use existing validation evidence from the workspace "
-        "logs, validation summaries, git diff, and artifacts instead. If validation "
-        "evidence is missing, stale, or insufficient, report `needs_iteration` with "
-        "a specific gap asking AWF to run the missing validation under the validation "
-        "phase. Set `reason_code` to `CONFORMANCE_REQUIRES_AWF_VALIDATION` only when "
+        "logs, validation summaries, git diff, and artifacts instead. Focused agent-run "
+        "validation recorded in a saved validation artifact can satisfy focused test "
+        "requirements. Broad coverage, CI, and full-suite gates that the workspace "
+        "contract delegates to AWF/GitHub after agent completion are not agent-phase "
+        "implementation gaps by themselves. If AWF-owned validation evidence is missing, "
+        "stale, or insufficient for a gate this validation phase is responsible for "
+        "producing, report `needs_iteration` with a specific gap asking AWF to run the "
+        "missing validation under the validation phase. Set `reason_code` to "
+        "`CONFORMANCE_REQUIRES_AWF_VALIDATION` only when "
         "every remaining gap is missing, stale, or insufficient AWF-owned validation "
         "evidence. Do not use it for implementation, API, plan, or documentation gaps.\n\n"
         f"{validation_evidence_section}"
@@ -372,8 +417,12 @@ def build_conformance_prompt(
         "as your final response. The object must have this shape:\n\n"
         "```json\n"
         '{"status":"satisfied|needs_iteration","summary":"...",'
-        '"gaps":["..."],"reason_code":"optional reason code"}\n'
+        '"gaps":[{"kind":"awf_validation_evidence","detail":"..."}],'
+        '"reason_code":"optional reason code"}\n'
         "```\n\n"
+        "Each `gaps` item must be an object with a `kind` chosen from this list and "
+        "a human-readable `detail`:\n"
+        f"{gap_kind_lines}\n\n"
         "Use `satisfied` only when the implementation fully achieves the saved plan. "
         "Use `needs_iteration` when any planned behavior, test, validation, or documented "
         "non-goal handling is missing. Keep gaps actionable and specific.\n\n"
@@ -394,7 +443,7 @@ def build_conformance_failure_evidence(
 
     return {
         "summary": _safe_conformance_text(report.summary),
-        "gaps": [_safe_conformance_text(gap) for gap in report.gaps[:MAX_CONFORMANCE_GAPS]],
+        "gaps": [_safe_conformance_text(gap.detail) for gap in report.gaps[:MAX_CONFORMANCE_GAPS]],
         "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
         "report_reason_code": report.reason_code,
         "iterations_used": iterations_used,
@@ -404,7 +453,10 @@ def build_conformance_failure_evidence(
     }
 
 
-def conformance_requires_awf_validation(report: PlanConformanceReport) -> bool:
+def conformance_requires_awf_validation(
+    report: PlanConformanceReport,
+    before_compare: Collection[Path],
+) -> bool:
     """Return true only for explicit validation-evidence-only conformance gaps."""
 
     if report.status != PlanConformanceStatus.needs_iteration:
@@ -414,7 +466,9 @@ def conformance_requires_awf_validation(report: PlanConformanceReport) -> bool:
         return False
     if not report.gaps:
         return False
-    return all(_is_awf_validation_evidence_gap(gap) for gap in report.gaps)
+    if not all(gap.kind is GapKind.awf_validation_evidence for gap in report.gaps):
+        return False
+    return bool(before_compare)
 
 
 def classify_conformance_stall(
@@ -550,225 +604,6 @@ def classify_conformance_stall(
     return None
 
 
-def _is_awf_validation_evidence_gap(gap: str) -> bool:
-    text = gap.strip().lower()
-
-    def has_marker(marker: str) -> bool:
-        return re.search(rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])", text) is not None
-
-    named_validation_command_handoff = (
-        re.search(r"(?<![a-z0-9_])(?:re-?run|run)(?![a-z0-9_])", text) is not None
-        and any(
-            has_marker(marker)
-            for marker in (
-                "awf",
-                "validation",
-                "validation phase",
-                "profile gate",
-                "profile gates",
-            )
-        )
-        and any(
-            has_marker(marker)
-            for marker in (
-                "pytest",
-                "ruff",
-                "mypy",
-                "coverage",
-                "npm",
-                "lint",
-                "build",
-            )
-        )
-    )
-    evidence_markers = (
-        "evidence",
-        "provenance",
-        "log",
-        "logs",
-        "missing",
-        "stale",
-        "insufficient",
-        "absent",
-        "unavailable",
-        "not available",
-        "not found",
-        "not run",
-        "has not run",
-        "run validation",
-        "validation run",
-        "profile gate",
-        "profile gates",
-    )
-    if not named_validation_command_handoff and not any(
-        has_marker(marker) for marker in evidence_markers
-    ):
-        return False
-    validation_subject_markers = (
-        "validation",
-        "coverage",
-        "profile",
-        "profile gate",
-        "profile gates",
-        "evidence",
-        "provenance",
-        "log",
-        "logs",
-    )
-    if not named_validation_command_handoff and not any(
-        has_marker(marker) for marker in validation_subject_markers
-    ):
-        return False
-    # Migration implementation gaps stay agent-owned; migration-gate evidence
-    # gaps are AWF-owned because the profile gate must produce that evidence.
-    migration_validation_evidence_gap = has_marker(
-        "migration"
-    ) and _has_migration_validation_evidence_context(text)
-    if has_marker("migration") and not migration_validation_evidence_gap:
-        return False
-    deterministic_markers = (
-        "api",
-        "endpoint",
-        "implement",
-        "implementation",
-        "wire",
-        "function",
-        "class",
-    )
-    if any(has_marker(marker) for marker in deterministic_markers):
-        return False
-    if has_marker("schema") and not migration_validation_evidence_gap:
-        return False
-    deterministic_gap_patterns = (
-        r"(?:^|[.;:]\s*|(?<![a-z0-9_])please\s+)document(?![a-z0-9_])"
-        r"\s+(?:the\s+)?",
-        r"(?<![a-z0-9_])(?:must|should|need|needs|required)\s+"
-        r"(?:to\s+)?document(?![a-z0-9_])",
-        r"(?<![a-z0-9_])(?:add|create|update|write|revise)\s+"
-        r"(?:the\s+)?(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])",
-        r"(?<![a-z0-9_])(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])"
-        r"\s+(?:gap|gaps|task|tasks|todo|todos|update|updates|change|changes|"
-        r"need|needs|must|should|required|missing|absent|stale|outdated)",
-        r"(?<![a-z0-9_])(?:add|create|update|write|revise)\s+"
-        r"(?:the\s+)?(?:saved\s+)?plan(?![a-z0-9_])",
-        r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
-        r"\s+(?:gap|gaps|task|tasks|todo|todos|update|updates|change|changes|"
-        r"need|needs|must|should|required|missing|absent|stale|outdated|lacks?)",
-        r"(?<![a-z0-9_])(?:from|in|inside|within)\s+(?:the\s+)?"
-        r"(?:saved\s+)?plan(?![a-z0-9_])",
-        r"(?<![a-z0-9_])(?:from|in|inside|within)\s+(?:the\s+)?"
-        r"(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])",
-        r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
-        r"[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
-        r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
-        r"not found|not run|has not run)\b",
-        r"(?<![a-z0-9_])(?:docs|documentation|document|doc|guide|readme)"
-        r"(?![a-z0-9_])[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
-        r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
-        r"not found|not run|has not run)\b",
-    )
-    if any(re.search(pattern, text) for pattern in deterministic_gap_patterns):
-        return False
-    # Mixed mentions remain agent-owned: only "code coverage" is AWF-validation
-    # evidence, while any other standalone "code" use is a deterministic gap.
-    for match in re.finditer(r"(?<![a-z0-9_])code(?![a-z0-9_])", text):
-        if re.match(r"[\s-]+coverage\b", text[match.end() :]):
-            continue
-        return False
-    # Test work is deterministic agent work; only coverage artifact phrases
-    # around test/test(s) remain validation evidence.
-    for match in re.finditer(r"(?<![a-z0-9_])tests?(?![a-z0-9_])", text):
-        if named_validation_command_handoff and text[match.end() :].startswith(("/", "\\")):
-            if _has_test_path_work_context(text, match.start()):
-                return False
-            continue
-        if re.match(
-            r"[\s\-,:]+(?:coverage|evidence|provenance|logs?|"
-            r"(?:suites?|runners?|runs?|reports?)[\s\-,:]+"
-            r"(?:coverage|evidence|provenance|logs?))\b",
-            text[match.end() :],
-        ):
-            continue
-        return False
-    return True
-
-
-def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
-    work_verbs = (
-        "add",
-        "adding",
-        "create",
-        "creating",
-        "edit",
-        "editing",
-        "modify",
-        "modifying",
-        "revise",
-        "revising",
-        "update",
-        "updating",
-        "write",
-        "writing",
-    )
-    modifiers = (
-        "a",
-        "an",
-        "the",
-        "new",
-        "missing",
-        "additional",
-        "focused",
-        "regression",
-        "targeted",
-        "unit",
-        "integration",
-    )
-    work_objects = (
-        "assertion",
-        "assertions",
-        "case",
-        "cases",
-        "fixture",
-        "fixtures",
-        "scenario",
-        "scenarios",
-    )
-    location_prepositions = ("for", "in", "inside", "into", "to", "under", "within")
-    work_verb_pattern = rf"(?<![a-z0-9_])(?:{'|'.join(work_verbs)})"
-    modifier_pattern = rf"(?:\s+(?:{'|'.join(modifiers)}))*"
-    path_prefix = r"(?:(?:\./|\.\\)|[a-z0-9_.-]+[/\\])*"
-    prefix = text[:path_match_start]
-    if (
-        re.search(
-            rf"{work_verb_pattern}{modifier_pattern}\s+{path_prefix}$",
-            prefix,
-            flags=re.IGNORECASE,
-        )
-        is not None
-    ):
-        return True
-    return (
-        re.search(
-            rf"{work_verb_pattern}{modifier_pattern}\s+"
-            rf"(?:{'|'.join(work_objects)})\s+"
-            rf"(?:{'|'.join(location_prepositions)})\s+{path_prefix}$",
-            prefix,
-            flags=re.IGNORECASE,
-        )
-        is not None
-    )
-
-
-def _has_migration_validation_evidence_context(text: str) -> bool:
-    patterns = (
-        r"(?<![a-z0-9_])migration\s+validation\s+"
-        r"(?:evidence|provenance|logs?|runs?)(?![a-z0-9_])",
-        r"(?<![a-z0-9_])(?:(?:alembic(?:[/ -]profile)?|profile)\s+)?"
-        r"migration\s+(?:profile\s+)?gates?(?![a-z0-9_])",
-    )
-    return any(re.search(pattern, text) for pattern in patterns)
-
-
 def build_conformance_stall_failure_evidence(
     *,
     stall: ConformanceStallEvidence,
@@ -825,6 +660,9 @@ def build_conformance_stall_recovery_prompt(
     gap_lines = (
         "\n".join(f"- {gap}" for gap in prior_gaps if gap) or "- No prior gaps were captured."
     )
+    gap_kind_lines = "\n".join(
+        f"- `{kind.value}`: {_gap_kind_definition(kind)}" for kind in GapKind
+    )
     return (
         "## Retry after conformance stall\n\n"
         "The prior workspace stalled while generating the plan-conformance JSON. "
@@ -847,8 +685,12 @@ def build_conformance_stall_recovery_prompt(
         "The object must have this shape:\n\n"
         "```json\n"
         '{"status":"satisfied|needs_iteration","summary":"...",'
-        '"gaps":["..."],"reason_code":"optional reason code"}\n'
+        '"gaps":[{"kind":"awf_validation_evidence","detail":"..."}],'
+        '"reason_code":"optional reason code"}\n'
         "```\n\n"
+        "Each `gaps` item must be an object with a `kind` chosen from this list and "
+        "a human-readable `detail`:\n"
+        f"{gap_kind_lines}\n\n"
         f"### Prior gaps (advisory)\n{gap_lines}\n\n"
         f"### Original task\n{task_prompt}\n"
     )
@@ -970,12 +812,62 @@ def _status_from_payload(value: Any) -> PlanConformanceStatus:
     return PlanConformanceStatus.needs_iteration
 
 
-def _gaps_from_payload(value: Any) -> tuple[str, ...]:
+def _gaps_from_payload(value: Any) -> tuple[ConformanceGap, ...]:
     if isinstance(value, list):
-        return tuple(str(item).strip() for item in value if str(item).strip())
+        return tuple(
+            gap for item in value if (gap := _conformance_gap_from_payload(item)) is not None
+        )
     if isinstance(value, str) and value.strip():
-        return (value.strip(),)
+        return (ConformanceGap(kind=GapKind.unknown, detail=value.strip()),)
     return ()
+
+
+def _conformance_gap_from_payload(value: object) -> ConformanceGap | None:
+    if isinstance(value, ConformanceGap):
+        return value if value.detail.strip() else None
+    if isinstance(value, Mapping):
+        detail = str(value.get("detail") or "").strip()
+        if not detail:
+            return None
+        return ConformanceGap(kind=_gap_kind_from_payload(value.get("kind")), detail=detail)
+    detail = str(value).strip()
+    if not detail:
+        return None
+    return ConformanceGap(kind=GapKind.unknown, detail=detail)
+
+
+def _gap_kind_from_payload(value: object) -> GapKind:
+    if isinstance(value, GapKind):
+        return value
+    if not isinstance(value, str):
+        return GapKind.unknown
+    try:
+        return GapKind(value.strip())
+    except ValueError:
+        return GapKind.unknown
+
+
+def _normalize_conformance_gaps(
+    gaps: Sequence[ConformanceGap | str],
+) -> tuple[ConformanceGap, ...]:
+    return tuple(gap for item in gaps if (gap := _conformance_gap_from_payload(item)) is not None)
+
+
+def _gap_kind_definition(kind: GapKind) -> str:
+    definitions = {
+        GapKind.awf_validation_evidence: (
+            "the implementation is complete; the only thing missing/stale/insufficient "
+            "is AWF-owned validation RUN evidence (pytest/ruff/mypy/coverage/build output "
+            "the AWF validation phase must produce)."
+        ),
+        GapKind.implementation: "source behavior or wiring required by the saved plan remains.",
+        GapKind.test_work: "agent-authored tests or test assertions required by the saved plan remain.",
+        GapKind.documentation: "documentation content required by the saved plan remains.",
+        GapKind.saved_plan_edit: "the saved implementation plan itself must be corrected or updated.",
+        GapKind.migration: "schema, migration, or generated migration artifact work remains.",
+        GapKind.unknown: "the gap cannot be confidently classified into a structured kind.",
+    }
+    return definitions[kind]
 
 
 def _reason_code_from_payload(value: Any) -> str:

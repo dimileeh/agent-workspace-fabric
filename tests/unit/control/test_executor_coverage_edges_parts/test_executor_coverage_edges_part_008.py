@@ -30,6 +30,7 @@ from awf.db.enums import (
 from awf.profiles.models import ProfilePlanning, WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    CONFORMANCE_REQUIRES_AWF_VALIDATION,
     PLAN_CONFORMANCE_UNSATISFIED,
     PlanConformanceReport,
     PlanConformanceStatus,
@@ -452,6 +453,58 @@ async def test_conformance_stall_failure_records_diff_and_event_failures(
     assert salvage_hint["implementation_commit_count"] == 2
     assert salvage_hint["changed_paths"] == []
     assert failure.details["conformance"]["gaps"] == ["rerun tests"]
+
+
+@pytest.mark.unit
+async def test_conformance_validation_handoff_diff_failure_fails_closed(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    worktree = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_diff.md")
+    executor._changed_paths = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            set(),
+            {plan_path},
+            set(),
+            set(),
+        ]
+    )
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[set(), RuntimeError("diff failed")]
+    )
+    executor._git_rev_parse_head = AsyncMock(return_value="head-sha")  # type: ignore[method-assign]
+
+    executor._runner.queue_result(returncode=0, stdout="base-sha\n")
+    report = (
+        '{"status":"needs_iteration","summary":"AWF validation evidence is missing.",'
+        f'"reason_code":"{CONFORMANCE_REQUIRES_AWF_VALIDATION}",'
+        '"gaps":[{"kind":"awf_validation_evidence","detail":"Run AWF validation."}]}'
+    )
+
+    result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
+        adapter=_PlanningAdapter("plan written", "implemented", report),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_diff", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=WorkspaceProfile.model_validate(
+            {
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "max_iterations": 0,
+                },
+            }
+        ),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert not isinstance(result, str)
+    assert result is not None
+    assert result.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    assert executor._committed_paths_since.await_count == 2  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit

@@ -54,6 +54,7 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
+    ConformanceGap,
     ConformanceIterationRecord,
     ConformanceStallEvidence,
     ConformanceStallKind,
@@ -916,10 +917,6 @@ async def _run_agent_task_with_optional_planning(
             )
             if recovered_near_miss:
                 after_plan = {*after_plan, plan_path}
-    if plan_path not in after_plan and can_accept_existing_plan:
-        plan_file_digest_after = _digest_file_if_present(worktree_path / plan_path)
-        if plan_file_digest_after is not None:
-            after_plan = {*after_plan, plan_path}
     if plan_path not in after_plan:
         return _build_planning_scope_failure(
             scope_phase="planning",
@@ -937,7 +934,7 @@ async def _run_agent_task_with_optional_planning(
                 offending_paths=extra,
                 summary=f"planning phase changed files outside `{plan_path}`",
             )
-    gaps: tuple[str, ...] = ()
+    gaps: tuple[ConformanceGap | str, ...] = ()
     last_report: PlanConformanceReport | None = None
     last_iteration = 0
     stall_policy = ConformanceStallPolicy(
@@ -1151,7 +1148,29 @@ async def _run_agent_task_with_optional_planning(
             )
             return None
 
-        if report is not None and conformance_requires_awf_validation(report):
+        implementation_artifact_paths = {plan_path, report_path}
+        implementation_compare = before_compare - implementation_artifact_paths
+        if report is not None and not implementation_compare:
+            if implementation_baseline_sha is not None:
+                try:
+                    implementation_compare = (
+                        await self._committed_paths_since(
+                            worktree_path, implementation_baseline_sha
+                        )
+                    ) - implementation_artifact_paths
+                except RuntimeError:
+                    _log.exception(
+                        "executor.planning_conformance_handoff_diff_failed",
+                        workspace_id=workspace.id,
+                        baseline_sha=implementation_baseline_sha,
+                    )
+                    implementation_compare = set()
+            else:
+                implementation_compare = set()
+        if report is not None and conformance_requires_awf_validation(
+            report,
+            implementation_compare,
+        ):
             _log.info(
                 "executor.planning_conformance_requires_awf_validation",
                 workspace_id=workspace.id,
