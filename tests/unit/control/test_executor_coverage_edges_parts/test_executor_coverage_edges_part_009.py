@@ -315,7 +315,7 @@ async def test_conformance_recovery_abort_marks_validating_workspace_failed(
 
     async def _abort_recovery(*_args: object, **kwargs: object) -> tuple[bool, object | None]:
         before_mark_failed = kwargs["before_mark_failed"]
-        await before_mark_failed()
+        await before_mark_failed(reason_code="GIT_AGENT_WRITABILITY_FAILED")
         return False, None
 
     monkeypatch.setattr(
@@ -354,11 +354,11 @@ async def test_conformance_recovery_abort_marks_validating_workspace_failed(
     assert result.stop
     finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
     assert finish_kwargs["status"] == OperationStatus.failed
-    assert finish_kwargs["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
+    assert finish_kwargs["reason_code"] == "GIT_AGENT_WRITABILITY_FAILED"
     mark_kwargs = executor._mark_failed.await_args.kwargs
     assert mark_kwargs["from_status"] is WorkspaceStatus.validating
     assert mark_kwargs["failure_reason"] is FailureReason.infrastructure_failure
-    assert mark_kwargs["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
+    assert mark_kwargs["reason_code"] == "GIT_AGENT_WRITABILITY_FAILED"
 
 
 @pytest.mark.unit
@@ -442,7 +442,7 @@ async def test_fix_pass_recovery_abort_marks_validating_workspace_failed(
 
     async def _abort_recovery(*_args: object, **kwargs: object) -> tuple[bool, object | None]:
         before_mark_failed = kwargs["before_mark_failed"]
-        await before_mark_failed()
+        await before_mark_failed(reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED")
         return False, None
 
     monkeypatch.setattr(
@@ -482,11 +482,11 @@ async def test_fix_pass_recovery_abort_marks_validating_workspace_failed(
     adapter.run.assert_not_awaited()
     finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
     assert finish_kwargs["status"] == OperationStatus.failed
-    assert finish_kwargs["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
+    assert finish_kwargs["reason_code"] == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
     mark_kwargs = executor._mark_failed.await_args.kwargs
     assert mark_kwargs["from_status"] is WorkspaceStatus.validating
     assert mark_kwargs["failure_reason"] is FailureReason.infrastructure_failure
-    assert mark_kwargs["reason_code"] == "AGENT_SERVICE_UNHEALTHY"
+    assert mark_kwargs["reason_code"] == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
 
 
 @pytest.mark.unit

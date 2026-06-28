@@ -312,6 +312,7 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
         workspace_id="ws_agent_service",
         ws=workspace,
         from_status=WorkspaceStatus.validating,
+        return_reason_code=True,
     )
     executor._recheck_status.assert_awaited_once_with(
         "ws_agent_service",
@@ -323,6 +324,7 @@ async def test_recovery_callbacks_recheck_supplied_validation_status_before_retr
     assert repair_calls[0]["failure_stage"] == "before agent retry"
     assert repair_calls[0]["before_mark_failed"] is not None
     assert repair_calls[0]["failure_from_status"] is WorkspaceStatus.validating
+    assert repair_calls[0]["return_reason_code"] is True
 
 
 @pytest.mark.unit
@@ -370,20 +372,63 @@ async def test_agent_service_retry_guard_failure_runs_terminal_callback(
 
 
 @pytest.mark.unit
+async def test_agent_service_retry_guard_failure_passes_reason_to_terminal_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[])
+    run_agent = AsyncMock(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT"), "validation-ok"])
+    callback_reason_codes: list[str | None] = []
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _before_agent_retry() -> str:
+        return "GIT_AGENT_WRITABILITY_FAILED"
+
+    async def _before_mark_failed(*, reason_code: str | None = None) -> None:
+        callback_reason_codes.append(reason_code)
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, result = await agent_service_recovery._run_agent_callable_with_service_recovery(
+        executor,
+        run_agent=run_agent,
+        workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=tmp_path / "compose.yml",
+        model="gpt-5.3-codex",
+        command_evidence=[],
+        workspace_id="ws_agent_service",
+        before_mark_failed=_before_mark_failed,
+        before_agent_retry=_before_agent_retry,
+        expected_status=WorkspaceStatus.validating,
+        failure_from_status=WorkspaceStatus.validating,
+    )
+
+    assert recovered is False
+    assert result is None
+    assert callback_reason_codes == ["GIT_AGENT_WRITABILITY_FAILED"]
+    assert run_agent.await_count == 1
+    executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_agent_service_restart_recheck_failure_runs_terminal_callback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     executor = _executor(side_effect=[])
     executor._recheck_status.return_value = False
-    callback_calls: list[str] = []
+    callback_reason_codes: list[str | None] = []
     run_agent = AsyncMock(side_effect=[_timeout_error("AGENT_IDLE_TIMEOUT"), "validation-ok"])
 
     async def _service_down(*_args: object, **_kwargs: object) -> bool:
         return False
 
-    async def _before_mark_failed() -> None:
-        callback_calls.append("finish-validation")
+    async def _before_mark_failed(*, reason_code: str | None = None) -> None:
+        callback_reason_codes.append(reason_code)
 
     monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
 
@@ -404,7 +449,7 @@ async def test_agent_service_restart_recheck_failure_runs_terminal_callback(
 
     assert recovered is False
     assert result is None
-    assert callback_calls == ["finish-validation"]
+    assert callback_reason_codes == ["EXECUTOR_STALE_STATUS"]
     executor._compose.ensure_project_up.assert_awaited_once()
     executor._recheck_status.assert_awaited_once_with(
         "ws_agent_service",
@@ -631,6 +676,48 @@ async def test_agent_service_cleanup_repair_failure_runs_terminal_callback(
     assert recovered is False
     assert result is None
     assert callback_calls == ["finish-validation"]
+    executor._compose.ensure_project_up.assert_not_awaited()
+    executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_agent_service_cleanup_repair_failure_passes_reason_to_terminal_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executor = _executor(side_effect=[_cleanup_error(), "planning-ok"])
+    callback_reason_codes: list[str | None] = []
+
+    async def _service_down(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _repair_after_cleanup_failure(_exc: ComposeExecCleanupError) -> str:
+        return "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+
+    async def _before_mark_failed(*, reason_code: str | None = None) -> None:
+        callback_reason_codes.append(reason_code)
+
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", _service_down)
+
+    recovered, result = await agent_service_recovery._run_agent_callable_with_service_recovery(
+        executor,
+        run_agent=AsyncMock(side_effect=[_cleanup_error(), "planning-ok"]),
+        workspace=SimpleNamespace(id="ws_agent_service", task_policy={}),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=tmp_path / "compose.yml",
+        model="gpt-5.3-codex",
+        command_evidence=[],
+        workspace_id="ws_agent_service",
+        before_mark_failed=_before_mark_failed,
+        after_agent_cleanup_failure_repair=_repair_after_cleanup_failure,
+        expected_status=WorkspaceStatus.validating,
+        failure_from_status=WorkspaceStatus.validating,
+    )
+
+    assert recovered is False
+    assert result is None
+    assert callback_reason_codes == ["MIRROR_HOOKS_PATH_REPAIR_FAILED"]
     executor._compose.ensure_project_up.assert_not_awaited()
     executor._mark_failed.assert_not_awaited()
 

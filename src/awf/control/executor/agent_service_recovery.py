@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from functools import partial
-from inspect import isawaitable
+from inspect import Parameter, isawaitable, signature
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.control.executor.git_ops import GIT_AGENT_WRITABILITY_FAILED_REASON_CODE
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import FailureReason, WorkspaceStatus
@@ -33,7 +34,8 @@ from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
-_BeforeMarkFailed = Callable[[], None | Awaitable[None]]
+_BeforeMarkFailed = Callable[..., None | Awaitable[None]]
+_RecoveryCallbackResult = bool | str
 
 
 def _build_agent_service_recovery_callbacks(
@@ -45,15 +47,18 @@ def _build_agent_service_recovery_callbacks(
     compose_file: Path,
     worktree_path: Path,
     execution_owner_id: str | None,
-    repair_mirror_hooks_path_or_mark_failed: Callable[..., Awaitable[bool]],
-    repair_hooks_after_agent_cleanup_failure: Callable[..., Awaitable[bool]],
+    repair_mirror_hooks_path_or_mark_failed: Callable[..., Awaitable[_RecoveryCallbackResult]],
+    repair_hooks_after_agent_cleanup_failure: Callable[..., Awaitable[_RecoveryCallbackResult]],
     recover_missing_head_after_cleanup_failure: Callable[..., Awaitable[bool]],
     deposit_planning_artifacts: Callable[[], None],
     expected_status: WorkspaceStatus = WorkspaceStatus.running,
     cleanup_failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
     cleanup_failure_stage: str = "agent_run_cleanup_failure",
     verify_post_agent_commit: bool = True,
-) -> tuple[Callable[[], Awaitable[bool]], Callable[[ComposeExecCleanupError], Awaitable[bool]]]:
+) -> tuple[
+    Callable[[], Awaitable[_RecoveryCallbackResult]],
+    Callable[[ComposeExecCleanupError], Awaitable[_RecoveryCallbackResult]],
+]:
     before_agent_retry = partial(
         _rerun_agent_pre_launch_guards,
         self,
@@ -93,11 +98,11 @@ async def _rerun_agent_pre_launch_guards(
     compose_file: Path,
     worktree_path: Path,
     execution_owner_id: str | None,
-    repair_mirror_hooks_path_or_mark_failed: Callable[..., Awaitable[bool]],
+    repair_mirror_hooks_path_or_mark_failed: Callable[..., Awaitable[_RecoveryCallbackResult]],
     deposit_planning_artifacts: Callable[[], None],
     expected_status: WorkspaceStatus,
     failure_from_status: WorkspaceStatus,
-) -> bool:
+) -> _RecoveryCallbackResult:
     if not await self._run_agent_git_writability_preflight(
         workspace_id=workspace_id,
         compose_project=compose_project,
@@ -105,24 +110,27 @@ async def _rerun_agent_pre_launch_guards(
         worktree_path=worktree_path,
         from_status=failure_from_status,
     ):
-        return False
-    if not await self._ensure_ollama_model_or_mark_failed(
+        return GIT_AGENT_WRITABILITY_FAILED_REASON_CODE
+    ollama_result = await self._ensure_ollama_model_or_mark_failed(
         workspace_id=workspace_id,
         ws=workspace,
         from_status=failure_from_status,
-    ):
-        return False
+        return_reason_code=True,
+    )
+    if ollama_result is not True:
+        return _callback_abort_reason_code(ollama_result) or "OLLAMA_MODEL_PROBE_FAILED"
     if not await self._recheck_status(
         workspace_id,
         expected=expected_status,
         action="agent_run",
         owner_id=execution_owner_id,
     ):
-        return False
+        return "EXECUTOR_STALE_STATUS"
     return await repair_mirror_hooks_path_or_mark_failed(
         failure_stage="before agent retry",
         before_mark_failed=deposit_planning_artifacts,
         failure_from_status=failure_from_status,
+        return_reason_code=True,
     )
 
 
@@ -139,10 +147,10 @@ async def _run_agent_task_with_service_recovery(
     command_evidence: list[str],
     workspace_id: str,
     execution_owner_id: str | None = None,
-    before_mark_failed: Callable[[], None] | None = None,
-    before_agent_retry: Callable[[], Awaitable[bool]] | None = None,
+    before_mark_failed: Callable[..., None | Awaitable[None]] | None = None,
+    before_agent_retry: Callable[[], Awaitable[_RecoveryCallbackResult]] | None = None,
     after_agent_cleanup_failure_repair: (
-        Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
+        Callable[[ComposeExecCleanupError], Awaitable[_RecoveryCallbackResult]] | None
     ) = None,
 ) -> tuple[bool, Any]:
     planning_retry_scope_baseline: dict[str, object] = {}
@@ -191,9 +199,9 @@ async def _run_agent_callable_with_service_recovery(
     workspace_id: str,
     execution_owner_id: str | None = None,
     before_mark_failed: _BeforeMarkFailed | None = None,
-    before_agent_retry: Callable[[], Awaitable[bool]] | None = None,
+    before_agent_retry: Callable[[], Awaitable[_RecoveryCallbackResult]] | None = None,
     after_agent_cleanup_failure_repair: (
-        Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
+        Callable[[ComposeExecCleanupError], Awaitable[_RecoveryCallbackResult]] | None
     ) = None,
     expected_status: WorkspaceStatus = WorkspaceStatus.running,
     failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
@@ -207,9 +215,14 @@ async def _run_agent_callable_with_service_recovery(
     while True:
         if run_before_retry:
             run_before_retry = False
-            if before_agent_retry is not None and not await before_agent_retry():
-                await _run_before_mark_failed(before_mark_failed)
-                return False, None
+            if before_agent_retry is not None:
+                retry_result = await before_agent_retry()
+                if retry_result is not True:
+                    await _run_before_mark_failed(
+                        before_mark_failed,
+                        reason_code=_callback_abort_reason_code(retry_result),
+                    )
+                    return False, None
         try:
             planning_result = await run_agent(restart_attempts > 0)
             restart_result = await _restart_after_conformance_timeout_failure(
@@ -285,8 +298,11 @@ async def _run_agent_callable_with_service_recovery(
             )
             if after_agent_cleanup_failure_repair is not None:
                 cleanup_repaired = await after_agent_cleanup_failure_repair(exc)
-                if not cleanup_repaired:
-                    await _run_before_mark_failed(before_mark_failed)
+                if cleanup_repaired is not True:
+                    await _run_before_mark_failed(
+                        before_mark_failed,
+                        reason_code=_callback_abort_reason_code(cleanup_repaired),
+                    )
                     return False, None
             restart_attempts, restarted = await _restart_agent_service_or_mark_unhealthy(
                 self,
@@ -314,17 +330,19 @@ async def _repair_after_recoverable_agent_cleanup_failure(
     workspace_id: str,
     owned_paths: list[str],
     execution_owner_id: str | None,
-    repair_hooks_after_agent_cleanup_failure: Callable[..., Awaitable[bool]],
+    repair_hooks_after_agent_cleanup_failure: Callable[..., Awaitable[_RecoveryCallbackResult]],
     recover_missing_head_after_cleanup_failure: Callable[..., Awaitable[bool]],
     deposit_planning_artifacts: Callable[[], None],
     failure_from_status: WorkspaceStatus = WorkspaceStatus.running,
     missing_head_recovery_stage: str = "agent_run_cleanup_failure",
     verify_post_agent_commit: bool = True,
-) -> bool:
-    if not await repair_hooks_after_agent_cleanup_failure(
+) -> _RecoveryCallbackResult:
+    repair_result = await repair_hooks_after_agent_cleanup_failure(
         failure_from_status=failure_from_status,
-    ):
-        return False
+        return_reason_code=True,
+    )
+    if repair_result is not True:
+        return _callback_abort_reason_code(repair_result) or False
     if await recover_missing_head_after_cleanup_failure(
         exc,
         stage=missing_head_recovery_stage,
@@ -350,7 +368,7 @@ async def _repair_after_recoverable_agent_cleanup_failure(
         message=cleanup_failure_message(exc),
         reason_code=EXEC_PROCESS_CLEANUP_FAILED,
     )
-    return False
+    return EXEC_PROCESS_CLEANUP_FAILED
 
 
 def _agent_service_restart_timeout_seconds(
@@ -537,7 +555,10 @@ async def _restart_agent_service_or_mark_unhealthy(
         action="agent_service_restart_recovery",
         owner_id=execution_owner_id,
     ):
-        await _run_before_mark_failed(before_mark_failed)
+        await _run_before_mark_failed(
+            before_mark_failed,
+            reason_code="EXECUTOR_STALE_STATUS",
+        )
         return restart_attempts, False
     return restart_attempts, True
 
@@ -582,12 +603,42 @@ async def _mark_agent_service_unhealthy(
     )
 
 
-async def _run_before_mark_failed(before_mark_failed: _BeforeMarkFailed | None) -> None:
+async def _run_before_mark_failed(
+    before_mark_failed: _BeforeMarkFailed | None,
+    *,
+    reason_code: str | None = None,
+) -> None:
     if before_mark_failed is None:
         return
-    result = before_mark_failed()
+    if reason_code is not None and _accepts_reason_code(before_mark_failed):
+        result = before_mark_failed(reason_code=reason_code)
+    else:
+        result = before_mark_failed()
     if isawaitable(result):
         await result
+
+
+def _callback_abort_reason_code(result: _RecoveryCallbackResult) -> str | None:
+    if not isinstance(result, str):
+        return None
+    stripped = result.strip()
+    return stripped or None
+
+
+def _accepts_reason_code(callback: _BeforeMarkFailed) -> bool:
+    try:
+        parameters = signature(callback).parameters.values()
+    except (TypeError, ValueError):  # pragma: no cover - uncommon callable objects
+        return False
+    for parameter in parameters:
+        if parameter.kind is Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "reason_code" and parameter.kind in {
+            Parameter.POSITIONAL_OR_KEYWORD,
+            Parameter.KEYWORD_ONLY,
+        }:
+            return True
+    return False
 
 
 def _mapping_str(mapping: Mapping[str, Any], key: str) -> str | None:

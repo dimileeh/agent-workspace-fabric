@@ -527,9 +527,9 @@ async def _run_post_agent_commit_repair(
     command_evidence: list[str],
     execution_owner_id: str | None = None,
     before_mark_failed: Callable[[], None | Awaitable[None]] | None = None,
-    before_agent_retry: Callable[[], Awaitable[bool]] | None = None,
+    before_agent_retry: Callable[[], Awaitable[bool | str]] | None = None,
     after_agent_cleanup_failure_repair: (
-        Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
+        Callable[[ComposeExecCleanupError], Awaitable[bool | str]] | None
     ) = None,
 ) -> bool:
     """Repair a failed post-agent pre-commit run and retry the commit once."""
@@ -957,9 +957,9 @@ async def _run_post_agent_semantic_precommit_repair(
     command_evidence: list[str],
     execution_owner_id: str | None = None,
     before_mark_failed: Callable[[], None | Awaitable[None]] | None = None,
-    before_agent_retry: Callable[[], Awaitable[bool]] | None = None,
+    before_agent_retry: Callable[[], Awaitable[bool | str]] | None = None,
     after_agent_cleanup_failure_repair: (
-        Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
+        Callable[[ComposeExecCleanupError], Awaitable[bool | str]] | None
     ) = None,
 ) -> bool:
     del commit_result

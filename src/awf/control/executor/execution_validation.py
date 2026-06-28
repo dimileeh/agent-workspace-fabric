@@ -167,9 +167,9 @@ async def run_validation_and_fix_cycle(
     git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
     execution_owner_id: str | None = None,
     resume_disable_fix_passes: bool = False,
-    before_agent_retry: Callable[[], Awaitable[bool]] | None = None,
+    before_agent_retry: Callable[[], Awaitable[bool | str]] | None = None,
     after_agent_cleanup_failure_repair: (
-        Callable[[ComposeExecCleanupError], Awaitable[bool]] | None
+        Callable[[ComposeExecCleanupError], Awaitable[bool | str]] | None
     ) = None,
 ) -> ExecutionValidationResult:
     """Run validate/fix attempts and emit the terminal validation state.
@@ -624,6 +624,7 @@ async def run_validation_and_fix_cycle(
 
                     async def _finish_conformance_recovery_failure(
                         *,
+                        reason_code: str = AGENT_SERVICE_UNHEALTHY,
                         _validation_run_id: str = validation_run_id,
                         _validation_coverage: dict[str, object] | None = validation_coverage,
                     ) -> None:
@@ -636,7 +637,7 @@ async def run_validation_and_fix_cycle(
                             status=OperationStatus.failed,
                             validation_run_id=_validation_run_id,
                             requested_tier=validation_tier,
-                            reason_code=AGENT_SERVICE_UNHEALTHY,
+                            reason_code=reason_code,
                             coverage=_validation_coverage,
                             error_message=message,
                         )
@@ -645,7 +646,7 @@ async def run_validation_and_fix_cycle(
                             from_status=WorkspaceStatus.validating,
                             failure_reason=FailureReason.infrastructure_failure,
                             message=message,
-                            reason_code=AGENT_SERVICE_UNHEALTHY,
+                            reason_code=reason_code,
                         )
 
                     (
@@ -1044,6 +1045,7 @@ async def run_validation_and_fix_cycle(
 
             async def _finish_fix_recovery_failure(
                 *,
+                reason_code: str = AGENT_SERVICE_UNHEALTHY,
                 _validation_run_id: str = validation_run_id,
                 _val_result: ValidationResult = val_result,
             ) -> None:
@@ -1053,7 +1055,7 @@ async def run_validation_and_fix_cycle(
                     status=OperationStatus.failed,
                     validation_run_id=_validation_run_id,
                     requested_tier=validation_tier,
-                    reason_code=AGENT_SERVICE_UNHEALTHY,
+                    reason_code=reason_code,
                     coverage=_validation_run_coverage_metadata(
                         _val_result,
                         baseline_coverage=baseline_coverage,
@@ -1065,7 +1067,7 @@ async def run_validation_and_fix_cycle(
                     from_status=WorkspaceStatus.validating,
                     failure_reason=FailureReason.infrastructure_failure,
                     message=message,
-                    reason_code=AGENT_SERVICE_UNHEALTHY,
+                    reason_code=reason_code,
                 )
 
             fix_recovered, fix_result = await _run_agent_callable_with_service_recovery(
