@@ -860,7 +860,7 @@ def _is_test_directory_command_target(
         return False
     if (
         re.search(
-            r"(?<![a-z0-9_])(?:has\s+not\s+run|not\s+(?:yet\s+)?run|"
+            r"(?<![a-z0-9_])(?:has\s+not\s+run|hasn't\s+run|not\s+(?:yet\s+)?run|"
             r"was\s+not\s+run|wasn't\s+run|never\s+run)(?![a-z0-9_])",
             command_segment,
         )
