@@ -589,10 +589,15 @@ def _leading_cd_package_scope(tokens: list[str], index: int) -> tuple[str, int] 
     package_dir = tokens[package_dir_index]
     if package_dir in _SHELL_COMPOUND_CONTROL_TOKENS or package_dir.startswith("-"):
         return None
-    install_index = package_dir_index + 1
-    if install_index >= len(tokens) or tokens[install_index] != "&&":
+    separator_index = package_dir_index + 1
+    if separator_index >= len(tokens) or tokens[separator_index] != "&&":
         return None
-    return package_dir, install_index + 1
+    install_index = separator_index + 1
+    while install_index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[install_index]):
+        install_index += 1
+    if install_index >= len(tokens):
+        return None
+    return package_dir, install_index
 
 
 def _node_package_manager_command(executable: str, location_tokens: list[str]) -> str:
