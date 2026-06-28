@@ -288,6 +288,7 @@ async def _run_ci_fix(
             stderr=exc.result.stderr,
         )
     except (
+        ProviderRecoveryRetryError,
         _MonitorAgentServiceRecoveryFailedError,
         _MonitorAgentServiceRecoverySupersededError,
     ):
