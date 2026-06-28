@@ -747,7 +747,15 @@ def _is_test_directory_command_target(
         text.rfind(":", 0, path_match_start),
     )
     command_segment = text[segment_start + 1 : path_match_start]
-    if segment_start == -1 and not _starts_with_validation_command_segment(command_segment):
+    if not _starts_with_validation_command_segment(command_segment):
+        return False
+    if (
+        re.search(
+            r"(?<![a-z0-9_])(?:has\s+not\s+run|not\s+run)(?![a-z0-9_])",
+            command_segment,
+        )
+        is not None
+    ):
         return False
     return (
         re.search(
