@@ -188,12 +188,14 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        result = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
         )
 
+        failures = result.failures
+        assert result.runs_in_progress is False
         assert len(failures) == 1
         failure = failures[0]
         assert failure.name == "coverage-gate"
@@ -204,8 +206,35 @@ class TestFetchFailingCheckLogs:
             "uv run --python 3.12 --extra dev pytest "
             "tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage -q",
         )
-        assert any("Missing reason catalog entries" in item for item in failure.error_summaries)
         assert any("ARTIFACT_BLOCKED" in item for item in failure.assertion_snippets)
+
+    @pytest.mark.unit
+    async def test_skips_failing_run_until_workflow_run_completed(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 42,
+                        "name": "go-tests",
+                        "conclusion": "FAILURE",
+                        "status": "in_progress",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert result.failures == ()
+        assert result.runs_in_progress is True
+        assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == []
 
     @pytest.mark.unit
     async def test_extracts_full_nested_pytest_node_path(self) -> None:
@@ -638,7 +667,7 @@ class TestFetchFailingCheckLogs:
             "uv run --python 3.12 --extra dev ruff check src/awf tests",
         )
         assert failure.suggested_repro_commands == ()
-        assert any("F401 imported but unused" in item for item in failure.error_summaries)
+        assert failure.error_summaries == ("Error: Process completed with exit code 1.",)
 
     @pytest.mark.unit
     async def test_redacts_secrets_before_log_and_evidence_are_stored(self) -> None:

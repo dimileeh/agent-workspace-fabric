@@ -253,6 +253,7 @@ class TestFetchFailingCheckLogsRollupFallback:
                         "databaseId": 123,
                         "name": "python-coverage-shards (7)",
                         "conclusion": "FAILURE",
+                        "status": "completed",
                     }
                 ]
             ),
@@ -276,6 +277,42 @@ class TestFetchFailingCheckLogsRollupFallback:
 
         assert len(failures) == 1
         assert len(_run_view_calls(fake)) == 1
+
+    @pytest.mark.unit
+    async def test_rollup_fallback_waits_when_matching_actions_run_not_completed(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 123,
+                        "name": "python-coverage-shards (7)",
+                        "conclusion": "FAILURE",
+                        "status": "queued",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (7)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert result.failures == ()
+        assert result.runs_in_progress is True
+        assert _run_view_calls(fake) == []
 
     @pytest.mark.unit
     async def test_rollup_fallback_ignores_non_actions_evidence(self) -> None:

@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -62,6 +61,7 @@ from awf.runtime.pr_monitor_actions import (
 from awf.runtime.pr_monitor_models import (
     DEFAULT_NON_CHECK_REVIEWER_LOGINS,
     CheckFailure,
+    CheckFailureLogResult,
     CheckState,
     CheckTiming,
     MergeableState,
@@ -86,6 +86,7 @@ __all__ = [
     # and monitor actions (now defined in ``pr_monitor_actions``).
     "DEFAULT_NON_CHECK_REVIEWER_LOGINS",
     "CheckFailure",
+    "CheckFailureLogResult",
     "CheckState",
     "CheckTiming",
     "MergeStateStatus",
@@ -620,28 +621,6 @@ _CI_TRANSIENT_INFRA_WAIT_KEY_PREFIX = "__awf_ci_infra_wait:"
 
 _CI_FAILED_JOB_RERUN_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT"})
 
-_CI_CODE_FAILURE_MARKERS = (
-    "failed test",
-    "pytest failed",
-    "assertionerror",
-    "assert failed",
-    "coverage failure",
-    "fail-under",
-    "typecheck",
-    "type check",
-    "would reformat:",
-    "found lint errors",
-    "found type errors",
-    "syntaxerror",
-    "traceback (most recent call last)",
-)
-
-_CI_CODE_FAILURE_PATTERNS = (
-    re.compile(r"(?m)^[^\n:]+:\d+:\d+:\s+[A-Z]\d{3}\b"),
-    re.compile(r"(?m)^[^\n:]+:\d+:\s+error:\s+.+\[[a-z0-9-]+\]"),
-    re.compile(r"\b(?:ruff|mypy|eslint)\b[^\n]*\b(?:failed|found|would reformat|errors?)\b"),
-)
-
 _CI_TRANSIENT_FAILURE_MARKERS = (
     "timed_out",
     "http status server error",
@@ -670,19 +649,6 @@ _CI_TRANSIENT_FAILURE_MARKERS = (
     "network is unreachable",
     "runner has received a shutdown signal",
     "lost communication with the server",
-)
-
-_CI_REQUIRED_ROLLUP_CHECK_NAMES = frozenset(
-    {
-        "ci-required",
-        "required-ci",
-        "required checks",
-        "required-checks",
-    }
-)
-_CI_REQUIRED_ROLLUP_FAILURE_MARKERS = (
-    "a required ci job did not pass",
-    "required ci job did not pass",
 )
 
 
@@ -863,69 +829,18 @@ def _ci_transient_infra_wait_seconds(
 
 
 def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
-    """True for retryable infra flakes with no structured/textual code evidence."""
+    """True for retryable infrastructure flakes."""
 
     log_text = failure.log_excerpt.lower()
-    if _has_structured_code_failure_evidence(failure):
-        return False
     if not log_text.strip():
         return bool(failure.run_id) and failure.conclusion.upper() == "TIMED_OUT"
-    if _looks_like_code_failure_text(log_text):
-        return False
     if any(marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS):
         return True
     return _log_shows_docker_registry_timeout(log_text)
 
 
-def _looks_like_required_ci_rollup_failure(failure: CheckFailure) -> bool:
-    name = failure.name.strip().lower()
-    if name in _CI_REQUIRED_ROLLUP_CHECK_NAMES:
-        return True
-    log_text = failure.log_excerpt.lower()
-    return any(marker in log_text for marker in _CI_REQUIRED_ROLLUP_FAILURE_MARKERS)
-
-
 def _ci_transient_rerun_failures(status: PRStatus) -> tuple[CheckFailure, ...]:
-    # A mixed run can fail a transient job *and* the ci-required rollup step,
-    # yielding one ``--log-failed`` excerpt that carries both a retryable
-    # 503/timeout marker and the rollup marker. Such a failure still owns real
-    # transient evidence plus a rerunnable run id, so keep it; only drop a *pure*
-    # rollup failure with no transient evidence of its own (rerunning the rollup
-    # job alone would not clear the underlying dependency failure).
-    return tuple(
-        failure
-        for failure in status.ci_failures
-        if _looks_like_transient_ci_failure(failure)
-        or not _looks_like_required_ci_rollup_failure(failure)
-    )
-
-
-def _has_structured_code_failure_evidence(failure: CheckFailure) -> bool:
-    if failure.test_node_ids or failure.assertion_snippets:
-        return True
-    return _looks_like_code_failure_text("\n".join(failure.error_summaries).lower())
-
-
-def _looks_like_code_failure_text(text: str) -> bool:
-    if any(marker in text for marker in _CI_CODE_FAILURE_MARKERS):
-        return True
-    return any(pattern.search(text) for pattern in _CI_CODE_FAILURE_PATTERNS)
-
-
-def _has_actionable_ci_failure_evidence(failure: CheckFailure) -> bool:
-    # A workflow run that fails a real job *and* the ci-required rollup step
-    # yields one combined ``--log-failed`` excerpt carrying both. Check for
-    # structured/code evidence first so a mixed run is not discarded as
-    # rollup-only; only treat it as a non-actionable rollup once no code
-    # evidence remains.
-    log_text = failure.log_excerpt.lower()
-    if _has_structured_code_failure_evidence(failure) or _looks_like_code_failure_text(log_text):
-        return True
-    if _looks_like_required_ci_rollup_failure(failure):
-        return False
-    if not log_text.strip():
-        return False
-    return not _looks_like_transient_ci_failure(failure)
+    return status.ci_failures
 
 
 _CI_MISSING_LOGS_HUMAN_MESSAGE = (
@@ -933,9 +848,6 @@ _CI_MISSING_LOGS_HUMAN_MESSAGE = (
 )
 _CI_TRANSIENT_HUMAN_MESSAGE = (
     "CI failure appears transient or infrastructure-related; AWF cannot safely rerun it again."
-)
-_CI_UNACTIONABLE_HUMAN_MESSAGE = (
-    "CI failed without actionable code-failure evidence; operator attention is required."
 )
 
 
@@ -947,13 +859,6 @@ def _ci_failure_action(
     rerun_failures = _ci_transient_rerun_failures(status)
     if _should_rerun_transient_ci(status, state, config):
         return RerunTransientCI(failures=rerun_failures)
-    # Actionable code evidence wins over an exhausted-transient NotifyHuman: a
-    # mixed run can carry a rollup-marked, code-bearing sibling that is filtered
-    # out of ``rerun_failures``, leaving only a transient flake there. Checking
-    # ``status.ci_failures`` (not ``rerun_failures``) first ensures the repair
-    # agent still sees the fixable pytest/mypy/ruff evidence.
-    if any(_has_actionable_ci_failure_evidence(f) for f in status.ci_failures):
-        return ReportCiFailure(failures=status.ci_failures)
     if rerun_failures and all(_looks_like_transient_ci_failure(f) for f in rerun_failures):
         if config.ci_transient_rerun_max_attempts <= 0:
             return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
@@ -980,7 +885,7 @@ def _ci_failure_action(
                 + 1
             ),
         )
-    return NotifyHuman(message=_CI_UNACTIONABLE_HUMAN_MESSAGE)
+    return ReportCiFailure(failures=status.ci_failures)
 
 
 def _supports_failed_job_rerun(failure: CheckFailure) -> bool:
@@ -998,13 +903,6 @@ def _should_rerun_transient_ci(
         return False
     rerun_failures = _ci_transient_rerun_failures(status)
     if not rerun_failures:
-        return False
-    # A mixed run can fail a real job *and* the ci-required rollup step, yielding a
-    # code-bearing rollup failure that ``_ci_transient_rerun_failures`` filters out
-    # and leaving only a transient sibling here. Never burn reruns while any failure
-    # in the full set carries actionable pytest/mypy/ruff evidence — surface it to
-    # the repair agent (``ReportCiFailure``) instead of waiting for the flake to clear.
-    if any(_has_actionable_ci_failure_evidence(failure) for failure in status.ci_failures):
         return False
     if any(not failure.run_id for failure in rerun_failures):
         return False
@@ -1223,6 +1121,8 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
 
     # 5. CI failures.
     if status.check_state == CheckState.FAILURE:
+        if status.ci_runs_in_progress:
+            return WaitForCI(reason="ci_run_in_progress")
         return _ci_failure_action(status, state, config)
 
     # 6. CI still running, or GitHub is still computing state → passive wait.

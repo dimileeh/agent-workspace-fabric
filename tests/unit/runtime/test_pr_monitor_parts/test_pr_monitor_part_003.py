@@ -120,7 +120,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_transient_failure_with_required_rollup_dispatches_rerun_for_underlying_job(
+    def test_transient_failure_with_required_rollup_reports_completed_failure_set(
         self,
     ) -> None:
         transient_failure = CheckFailure(
@@ -154,8 +154,8 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (transient_failure,)
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (transient_failure, rollup_failure)
 
     @pytest.mark.unit
     def test_mixed_run_with_rollup_marker_and_transient_evidence_dispatches_rerun(
@@ -191,7 +191,7 @@ class TestCiFailure:
         assert action.failures == (mixed_failure,)
 
     @pytest.mark.unit
-    def test_required_rollup_without_underlying_transient_job_notifies_human(
+    def test_required_rollup_without_underlying_transient_job_reports_failure(
         self,
     ) -> None:
         rollup_failure = CheckFailure(
@@ -211,9 +211,30 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, NotifyHuman)
-        assert action.message is not None
-        assert "without actionable code-failure evidence" in action.message
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (rollup_failure,)
+
+    @pytest.mark.unit
+    def test_arbitrary_completed_ci_failure_reports_failure(self) -> None:
+        failure = CheckFailure(
+            name="go-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "=== RUN   TestWidgetLifecycle\n"
+                "widget_test.go:42: expected active widget, got archived\n"
+                "--- FAIL: TestWidgetLifecycle (0.03s)"
+            ),
+            run_id="25897584272",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
 
     @pytest.mark.unit
     def test_mixed_run_with_rollup_marker_and_code_evidence_reports_failure(
@@ -770,9 +791,7 @@ class TestCiFailure:
         echo, daemon error, or registry/``/v2/`` context — is a real image/deploy
         bug, not flaky registry infra. ``failed to pull image`` wording is shared
         with containerd/k8s, so without corroborating Docker pull context it must
-        reach the repair agent rather than be silently rerun. (``--- FAIL`` Go
-        output is not caught by ``_looks_like_code_failure_text``, so this would
-        otherwise be misrouted to ``RerunTransientCI``.)"""
+        reach the repair agent rather than be silently rerun."""
         failure = CheckFailure(
             name="e2e-tests",
             conclusion="FAILURE",
@@ -1066,7 +1085,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_docker_pull_with_structured_test_evidence_reports_ci_failure(self) -> None:
+    def test_docker_pull_with_structured_test_evidence_dispatches_rerun(self) -> None:
         failure = CheckFailure(
             name="python-coverage-shards (2)",
             conclusion="FAILURE",
@@ -1086,7 +1105,7 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, ReportCiFailure)
+        assert isinstance(action, RerunTransientCI)
         assert action.failures == (failure,)
 
     @pytest.mark.unit
@@ -1126,7 +1145,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_timed_out_failure_without_logs_or_run_id_notifies_human(self) -> None:
+    def test_timed_out_failure_without_logs_or_run_id_reports_failure(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="TIMED_OUT",
@@ -1140,9 +1159,8 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, NotifyHuman)
-        assert action.message is not None
-        assert "without actionable code-failure evidence" in action.message
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
 
     @pytest.mark.unit
     @pytest.mark.parametrize("conclusion", ["CANCELLED", "ACTION_REQUIRED"])

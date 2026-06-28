@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from awf.common.redaction import redact_secrets
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_RUFF_DIAGNOSTIC_RE = re.compile(r"\b(?:src|tests)/[^\s:]+\.py:\d+:\d+:")
 _COMMAND_MARKERS = (
     "uv run ",
     "python -m pytest",
@@ -240,12 +239,9 @@ def _extract_error_summaries(lines: Iterable[str]) -> list[str]:
     summaries: list[str] = []
     for line in lines:
         if (
-            line.startswith("FAILED ")
-            or "AssertionError" in line
-            or line.startswith("Error:")
+            line.startswith("Error:")
             or "::error" in line
             or "Process completed with exit code" in line
-            or _RUFF_DIAGNOSTIC_RE.search(line)
             or line.lower().startswith(("error ", "error:", "fatal:"))
         ):
             summaries.append(line)

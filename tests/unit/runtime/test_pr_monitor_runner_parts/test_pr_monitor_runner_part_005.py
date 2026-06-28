@@ -32,6 +32,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     CheckFailure,
+    CheckFailureLogResult,
     CheckState,
     Merge,
     MergeableState,
@@ -473,7 +474,19 @@ class TestMiscMonitorHelpers:
         updated = _with_ci_failures(_status(), (failure,))
 
         assert updated.ci_failures == (failure,)
+        assert updated.ci_runs_in_progress is False
         assert updated.head_sha == "abc123"
+
+    @pytest.mark.unit
+    def test_ci_failure_replacement_records_in_progress_signal(self) -> None:
+        failure = CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom")
+        updated = _with_ci_failures(
+            _status(),
+            CheckFailureLogResult(failures=(failure,), runs_in_progress=True),
+        )
+
+        assert updated.ci_failures == (failure,)
+        assert updated.ci_runs_in_progress is True
 
     @pytest.mark.unit
     async def test_write_monitor_log_swallows_sink_failures(

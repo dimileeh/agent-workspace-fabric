@@ -23,6 +23,7 @@ from awf.runtime.pr_monitor import (
     RerunTransientCI,
     ReviewComment,
     ReviewThread,
+    WaitForCI,
     WaitForTransientCI,
     _ci_failure_identity,
     _ci_transient_infra_wait_count,
@@ -65,6 +66,7 @@ def _status(
     base_behind: int = 0,
     merge_state_status: MergeStateStatus = MergeStateStatus.CLEAN,
     ci_failures: tuple[CheckFailure, ...] = (),
+    ci_runs_in_progress: bool = False,
     closed: bool = False,
     merged: bool = False,
 ) -> PRStatus:
@@ -83,6 +85,7 @@ def _status(
         base_behind_count=base_behind,
         merge_state_status=merge_state_status,
         ci_failures=ci_failures,
+        ci_runs_in_progress=ci_runs_in_progress,
         closed=closed,
         merged=merged,
     )
@@ -162,7 +165,7 @@ class TestCiFailure:
         assert action.wait_seconds == 60
 
     @pytest.mark.unit
-    def test_transient_infra_wait_reads_legacy_rollup_signature(self) -> None:
+    def test_required_rollup_sibling_reports_completed_failure_set(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
@@ -179,15 +182,10 @@ class TestCiFailure:
             check_state=CheckState.FAILURE,
             ci_failures=(failure, rollup_failure),
         )
-        state = MonitorState()
-        state.threads_addressed_ids[
-            _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
-        ] = "2"
+        action = decide(status, MonitorState(), MonitorConfig(ci_transient_rerun_max_attempts=2))
 
-        action = decide(status, state, MonitorConfig(ci_transient_rerun_max_attempts=2))
-
-        assert isinstance(action, WaitForTransientCI)
-        assert action.failures == (failure,)
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure, rollup_failure)
 
     @pytest.mark.unit
     def test_transient_failure_with_disabled_rerun_budget_notifies_human(self) -> None:
@@ -283,7 +281,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_structured_test_evidence_prevents_transient_ci_rerun(self) -> None:
+    def test_structured_test_evidence_is_advisory_for_transient_ci_rerun(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
@@ -299,7 +297,7 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, ReportCiFailure)
+        assert isinstance(action, RerunTransientCI)
         assert action.failures == (failure,)
 
     @pytest.mark.unit
@@ -397,6 +395,17 @@ class TestCiFailure:
         assert isinstance(action, NotifyHuman)
         assert action.message is not None
         assert "could not retrieve actionable" in action.message
+
+    @pytest.mark.unit
+    def test_failure_with_run_still_in_progress_waits_for_ci(self) -> None:
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_runs_in_progress=True),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, WaitForCI)
+        assert action.reason == "ci_run_in_progress"
 
     @pytest.mark.unit
     def test_unresolved_comments_take_priority_over_ci_failure(self) -> None:

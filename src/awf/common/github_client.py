@@ -48,6 +48,7 @@ from awf.db.enums import ForgeKind
 from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
 from awf.runtime.pr_monitor import (
     CheckFailure,
+    CheckFailureLogResult,
     CheckTiming,
     PRStatus,
     ReviewComment,
@@ -900,7 +901,7 @@ class GitHubClient:
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
         rollup_checks: Sequence[CheckTiming] = (),
-    ) -> tuple[CheckFailure, ...]:
+    ) -> CheckFailureLogResult:
         """Fetch logs for failing/timed-out checks via ``gh run view``.
 
         The GraphQL PR query only surfaces an aggregate ``statusCheckRollup``
@@ -929,6 +930,12 @@ class GitHubClient:
         )
         failures: list[CheckFailure] = []
         seen_run_ids: set[str] = set()
+        runs_in_progress = False
+        status_by_run: dict[str, str] = {}
+        for run in runs_raw or []:
+            database_id = run.get("databaseId")
+            if database_id is not None:
+                status_by_run[str(database_id)] = str(run.get("status") or "").lower()
 
         async def _append_failure(
             *,
@@ -984,6 +991,9 @@ class GitHubClient:
             run_id = str(database_id) if database_id is not None else None
             if run_id is not None:
                 seen_run_ids.add(run_id)
+                if status_by_run.get(run_id) != "completed":
+                    runs_in_progress = True
+                    continue
             run_name = run.get("name") or (f"run/{run_id}" if run_id is not None else "run/unknown")
             await _append_failure(
                 run_id=run_id,
@@ -994,13 +1004,20 @@ class GitHubClient:
             run_id = _actions_run_id_from_details_url(check.details_url)
             if run_id is None or run_id in seen_run_ids:
                 continue
+            if status_by_run.get(run_id) not in (None, "completed"):
+                runs_in_progress = True
+                seen_run_ids.add(run_id)
+                continue
             seen_run_ids.add(run_id)
             await _append_failure(
                 run_id=run_id,
                 run_name=check.name,
                 conclusion=(check.conclusion or "FAILURE").upper(),
             )
-        return tuple(failures)
+        return CheckFailureLogResult(
+            failures=tuple(failures),
+            runs_in_progress=runs_in_progress,
+        )
 
     async def rerun_failed_workflow_jobs(self, *, repo: RepoRef, run_id: str) -> None:
         """Rerun only failed jobs for a workflow run.

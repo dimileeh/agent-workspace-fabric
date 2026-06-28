@@ -10,9 +10,11 @@ while the core file stays under the maintainability line budget.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import overload
 
 # ── Wire-shape dataclasses — what the runner assembles after polling GH ────
 
@@ -144,6 +146,41 @@ class CheckFailure:
 
 
 @dataclass(frozen=True)
+class CheckFailureLogResult:
+    """Failing-check log snapshot plus whether any failing run is still active."""
+
+    failures: tuple[CheckFailure, ...] = ()
+    runs_in_progress: bool = False
+
+    def __iter__(self) -> Iterator[CheckFailure]:
+        return iter(self.failures)
+
+    def __len__(self) -> int:
+        return len(self.failures)
+
+    @overload
+    def __getitem__(self, index: int) -> CheckFailure: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[CheckFailure, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> CheckFailure | tuple[CheckFailure, ...]:
+        return self.failures[index]
+
+    def __bool__(self) -> bool:
+        return bool(self.failures)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, tuple):
+            return self.failures == other
+        if isinstance(other, CheckFailureLogResult):
+            return (
+                self.failures == other.failures and self.runs_in_progress == other.runs_in_progress
+            )
+        return NotImplemented
+
+
+@dataclass(frozen=True)
 class CheckTiming:
     """Timing and link metadata for an individual GitHub check/status context."""
 
@@ -193,6 +230,7 @@ class PRStatus:
     shipped PR #335 / #336 as "ready to merge" when they were BEHIND)."""
 
     ci_failures: tuple[CheckFailure, ...] = ()
+    ci_runs_in_progress: bool = False
     checks: tuple[CheckTiming, ...] = ()
     no_checks_observed: bool = False
     """Forge authoritatively reported an EMPTY check/status set for this head.
