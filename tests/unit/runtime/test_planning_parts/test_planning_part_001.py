@@ -100,6 +100,12 @@ def test_conformance_gap_rejects_invalid_kind_under_optimized_python() -> None:
 
 
 @pytest.mark.unit
+def test_conformance_gap_rejects_invalid_kind_directly() -> None:
+    with pytest.raises(TypeError, match="kind must be a GapKind"):
+        ConformanceGap("not-a-kind", "detail")  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
 def test_parse_conformance_report_marks_invalid_json_as_needs_iteration() -> None:
     report = parse_conformance_report("not json")
 
@@ -429,6 +435,16 @@ def test_parse_conformance_report_tolerates_mixed_legacy_and_structured_gaps() -
 
 
 @pytest.mark.unit
+def test_gaps_from_payload_filters_empty_structured_details_and_accepts_gap_kind() -> None:
+    assert _gaps_from_payload(
+        [
+            {"kind": "implementation", "detail": "  "},
+            {"kind": GapKind.documentation, "detail": "update README"},
+        ]
+    ) == (ConformanceGap(kind=GapKind.documentation, detail="update README"),)
+
+
+@pytest.mark.unit
 def test_conformance_requires_awf_validation_accepts_structured_validation_gaps() -> None:
     report = PlanConformanceReport(
         status=PlanConformanceStatus.needs_iteration,
@@ -443,6 +459,18 @@ def test_conformance_requires_awf_validation_accepts_structured_validation_gaps(
     )
 
     assert conformance_requires_awf_validation(report, {Path("src/awf/runtime/planning.py")})
+
+
+@pytest.mark.unit
+def test_conformance_requires_awf_validation_rejects_empty_gaps() -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Validation evidence was requested without an actionable gap.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(),
+    )
+
+    assert not conformance_requires_awf_validation(report, {Path("src/awf/runtime/planning.py")})
 
 
 @pytest.mark.unit

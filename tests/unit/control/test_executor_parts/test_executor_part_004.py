@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
+from awf.adapters.base import AgentAdapter, AgentRunResult
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
@@ -30,6 +31,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
 )
@@ -313,6 +315,189 @@ async def _seed_running_worker_restart_recovery(
 
 
 class TestHappyPathPart003:
+    @pytest.mark.unit
+    async def test_planning_accepts_existing_plan_created_without_git_status_delta(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 0,
+                    "fail_on_unexplained_deviation": False,
+                },
+            },
+        )
+        worktree_path = _test_worktrees_root(factory) / ws_id
+        plan_path = Path("docs") / "awf-plans" / f"{ws_id}.md"
+
+        class _PlanWritingAdapter(AgentAdapter):
+            runtime = AgentRuntime.codex
+
+            @property
+            def name(self) -> AgentRuntime:
+                return AgentRuntime.codex
+
+            def get_provider(self, model: str | None) -> str:
+                return "openai"
+
+            def _cli_args(self, *, model: str | None) -> list[str]:
+                return []
+
+            async def run(self, *, prompt: str, **kwargs: Any) -> AgentRunResult:
+                if "## Planning phase" in prompt:
+                    full_plan_path = worktree_path / plan_path
+                    full_plan_path.parent.mkdir(parents=True, exist_ok=True)
+                    full_plan_path.write_text(
+                        "# Plan\n\n- implement the change\n", encoding="utf-8"
+                    )
+                    return AgentRunResult(returncode=0, stdout="plan written", stderr="")
+                if "## Conformance phase" in prompt:
+                    return AgentRunResult(
+                        returncode=0,
+                        stdout='{"status":"satisfied","summary":"done","gaps":[]}',
+                        stderr="",
+                    )
+                return AgentRunResult(returncode=0, stdout="implemented", stderr="")
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            assert workspace is not None
+
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 0,
+                    "fail_on_unexplained_deviation": False,
+                },
+            }
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # before planning changed paths
+        fake.queue_result(returncode=0, stdout="sha_pre\n")  # rev-parse HEAD baseline
+        # Adapter writes the plan file, but git status and committed diff do
+        # not surface it. The digest-change check must accept the on-disk plan
+        # and allow execution to proceed.
+        fake.queue_result(returncode=0, stdout="")  # changed paths after planning
+        fake.queue_result(returncode=0, stdout="")  # committed paths since planning baseline
+        fake.queue_result(returncode=0, stdout="sha_post\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout=f"?? {plan_path.as_posix()}\n")
+        fake.queue_result(returncode=0, stdout="sha_post\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=f"?? {plan_path.as_posix()}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
+        fake.queue_result(returncode=0, stdout="sha_post\n")  # rev-parse HEAD iter post
+
+        result = await executor._run_agent_task_with_optional_planning(
+            adapter=_PlanWritingAdapter(runner=fake),
+            workspace=workspace,
+            profile=profile,
+            compose_project=f"awf_{ws_id}",
+            compose_file=Path("docker-compose.yml"),
+            worktree_path=worktree_path,
+            model=None,
+            command_evidence=[],
+            accept_existing_plan=True,
+        )
+
+        assert result is None
+
+    @pytest.mark.unit
+    async def test_planning_validation_handoff_rejects_empty_diff_without_baseline(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 0,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+
+        plan_path = f"docs/awf-plans/{ws_id}.md"
+        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+        handoff_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Implementation appears complete; AWF validation evidence is missing.",
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": [
+                    {
+                        "kind": "awf_validation_evidence",
+                        "detail": "AWF-owned validation evidence is missing for pytest.",
+                    }
+                ],
+            }
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # before planning changed paths
+        fake.queue_result(returncode=0, stdout="sha_pre\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
+        fake.queue_result(returncode=0, stdout=f"?? {plan_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since planning baseline
+        fake.queue_result(returncode=1, stdout="")  # rev-parse HEAD pre-loop unavailable
+        fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
+        fake.queue_result(returncode=0, stdout=f"?? {plan_path}\n")  # before compare
+        fake.queue_result(returncode=0, stdout="sha_compare\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff request
+        fake.queue_result(returncode=0, stdout=f"?? {plan_path}\n?? {report_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
+        fake.queue_result(returncode=0, stdout="sha_compare\n")  # rev-parse HEAD iter post
+
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            assert workspace is not None
+            events = list(workspace.events)
+
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert not any(event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events)
+
+    @pytest.mark.unit
+    async def test_preserved_conformance_retry_scope_allows_clean_retry(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        tmp_path: Path,
+    ) -> None:
+        baseline = {
+            "conformance_before_compare": set(),
+            "conformance_before_compare_head": None,
+            "conformance_before_dirty_digests": {},
+        }
+        fake.queue_result(returncode=0, stdout="")  # changed paths after resumed conformance
+
+        from awf.control.executor import planning_ops as executor_planning_ops
+
+        result = await executor_planning_ops._check_preserved_conformance_retry_scope(
+            executor,
+            worktree_path=tmp_path,
+            report_path=Path("docs/awf-plans/ws.conformance.json"),
+            planning_retry_scope_baseline=baseline,
+        )
+
+        assert result is None
+
     @pytest.mark.unit
     async def test_planning_profile_records_conformance_stall_when_compare_idle_timeout_after_implementation_commits(
         self,
