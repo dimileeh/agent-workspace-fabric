@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from awf.runtime import planning as planning_mod
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_WORKTREE_ROOT,
@@ -14,6 +13,8 @@ from awf.runtime.planning import (
     MAX_CONFORMANCE_TEXT_CHARS,
     PLAN_CONFORMANCE_REPORTED,
     PLAN_CONFORMANCE_UNSATISFIED,
+    ConformanceGap,
+    GapKind,
     PlanConformanceReport,
     PlanConformanceStatus,
     _gaps_from_payload,
@@ -59,7 +60,7 @@ def test_parse_conformance_report_accepts_json_object() -> None:
 
     assert report.status == PlanConformanceStatus.needs_iteration
     assert report.summary == "not done"
-    assert report.gaps == ("wire API",)
+    assert report.gaps == (ConformanceGap(kind=GapKind.unknown, detail="wire API"),)
     assert report.reason_code == "PLAN_CONFORMANCE_API_GAP"
 
 
@@ -77,7 +78,12 @@ def test_parse_conformance_report_rejects_non_object_json() -> None:
 
     assert report.status == PlanConformanceStatus.needs_iteration
     assert report.summary == "Conformance report JSON was not an object."
-    assert report.gaps == ("Produce a JSON object with status, summary, and gaps.",)
+    assert report.gaps == (
+        ConformanceGap(
+            kind=GapKind.unknown,
+            detail="Produce a JSON object with status, summary, and gaps.",
+        ),
+    )
     assert report.reason_code == "PLAN_CONFORMANCE_REPORT_INVALID"
 
 
@@ -89,7 +95,7 @@ def test_satisfied_report_with_gaps_is_downgraded() -> None:
 
     assert report.status == PlanConformanceStatus.needs_iteration
     assert report.summary == "done Report included gaps, so AWF requires another iteration."
-    assert report.gaps == ("missing validation",)
+    assert report.gaps == (ConformanceGap(kind=GapKind.unknown, detail="missing validation"),)
 
 
 @pytest.mark.unit
@@ -109,7 +115,7 @@ def test_parse_conformance_report_defaults_and_aliases() -> None:
     assert satisfied.reason_code == "PLAN_CONFORMANCE_REPORTED"
     assert needs_iteration.status == PlanConformanceStatus.needs_iteration
     assert needs_iteration.summary == "Plan gaps remain."
-    assert needs_iteration.gaps == ("rerun mypy",)
+    assert needs_iteration.gaps == (ConformanceGap(kind=GapKind.unknown, detail="rerun mypy"),)
     assert blank_reason.reason_code == "PLAN_CONFORMANCE_REPORTED"
 
 
@@ -128,7 +134,7 @@ def test_parse_conformance_report_filters_blank_gap_items() -> None:
         '{"status":"needs_iteration","summary":"check","gaps":["  fix tests  "," ",""]}'
     )
 
-    assert report.gaps == ("fix tests",)
+    assert report.gaps == (ConformanceGap(kind=GapKind.unknown, detail="fix tests"),)
     assert _gaps_from_payload({"unexpected": "shape"}) == ()
 
 
@@ -334,7 +340,7 @@ def test_conformance_prompt_is_evidence_only_and_does_not_rerun_validation() -> 
 
 
 @pytest.mark.unit
-def test_conformance_prompt_documents_awf_validation_handoff_reason_code() -> None:
+def test_conformance_prompt_documents_structured_gap_kinds_and_reason_code() -> None:
     prompt = build_conformance_prompt(
         task_prompt="Add metrics",
         plan_path=Path("docs/awf-plans/ws_123.md"),
@@ -343,6 +349,13 @@ def test_conformance_prompt_documents_awf_validation_handoff_reason_code() -> No
     )
 
     assert '"reason_code"' in prompt
+    assert '"gaps":[{"kind":"awf_validation_evidence","detail":"..."}]' in prompt
+    for kind in GapKind:
+        assert kind.value in prompt
+    assert (
+        "the implementation is complete; the only thing missing/stale/insufficient "
+        "is AWF-owned validation RUN evidence"
+    ) in prompt
     assert CONFORMANCE_REQUIRES_AWF_VALIDATION in prompt
     assert (
         "only when every remaining gap is missing, stale, or insufficient AWF-owned validation evidence"
@@ -352,15 +365,47 @@ def test_conformance_prompt_documents_awf_validation_handoff_reason_code() -> No
 
 
 @pytest.mark.unit
-def test_conformance_requires_awf_validation_accepts_validation_evidence_only_gap() -> None:
+def test_parse_conformance_report_decodes_structured_gap_objects() -> None:
     report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Implementation appears complete; AWF validation evidence is missing.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        '"gaps":["AWF-owned validation evidence is missing for the required pytest gate."]}'
+        '{"status":"needs_iteration","summary":"not done",'
+        '"gaps":[{"kind":"implementation","detail":"wire API"}],'
+        '"reason_code":"PLAN_CONFORMANCE_API_GAP"}'
     )
 
-    assert conformance_requires_awf_validation(report)
+    assert report.gaps == (ConformanceGap(kind=GapKind.implementation, detail="wire API"),)
+
+
+@pytest.mark.unit
+def test_parse_conformance_report_tolerates_mixed_legacy_and_structured_gaps() -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration","summary":"mixed",'
+        '"gaps":[{"kind":"test_work","detail":"add regression test"},'
+        '"legacy prose gap",{"detail":"missing kind"},{"kind":"not_real","detail":"bad kind"}]}'
+    )
+
+    assert report.gaps == (
+        ConformanceGap(kind=GapKind.test_work, detail="add regression test"),
+        ConformanceGap(kind=GapKind.unknown, detail="legacy prose gap"),
+        ConformanceGap(kind=GapKind.unknown, detail="missing kind"),
+        ConformanceGap(kind=GapKind.unknown, detail="bad kind"),
+    )
+
+
+@pytest.mark.unit
+def test_conformance_requires_awf_validation_accepts_structured_validation_gaps() -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Implementation appears complete; AWF validation evidence is missing.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(
+            ConformanceGap(
+                kind=GapKind.awf_validation_evidence,
+                detail="AWF-owned validation evidence is missing for pytest.",
+            ),
+        ),
+    )
+
+    assert conformance_requires_awf_validation(report, {Path("src/awf/runtime/planning.py")})
 
 
 @pytest.mark.unit
@@ -369,22 +414,109 @@ def test_conformance_requires_awf_validation_accepts_hyphenated_reason_code() ->
         status=PlanConformanceStatus.needs_iteration,
         summary="Implementation appears complete; AWF validation evidence is missing.",
         reason_code="CONFORMANCE-REQUIRES-AWF-VALIDATION",
-        gaps=("AWF-owned validation evidence is missing for the required pytest gate.",),
+        gaps=(
+            ConformanceGap(
+                kind=GapKind.awf_validation_evidence,
+                detail="AWF-owned validation evidence is missing for pytest.",
+            ),
+        ),
     )
 
-    assert conformance_requires_awf_validation(report)
+    assert conformance_requires_awf_validation(report, {Path("src/awf/runtime/planning.py")})
 
 
 @pytest.mark.unit
-def test_conformance_requires_awf_validation_rejects_empty_gaps_even_with_reason_code() -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"No explicit gaps were provided.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        '"gaps":[]}'
+@pytest.mark.parametrize(
+    "kind",
+    (
+        GapKind.implementation,
+        GapKind.test_work,
+        GapKind.documentation,
+        GapKind.saved_plan_edit,
+        GapKind.migration,
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_non_validation_gap_kinds(
+    kind: GapKind,
+) -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Agent work remains.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(ConformanceGap(kind=kind, detail="agent-owned gap remains"),),
     )
 
-    assert not conformance_requires_awf_validation(report)
+    assert not conformance_requires_awf_validation(report, {Path("src/awf/runtime/planning.py")})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "before_compare",
+    (
+        set(),
+        frozenset(),
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_empty_diff_backstop(
+    before_compare: set[Path] | frozenset[Path],
+) -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Implementation appears complete; AWF validation evidence is missing.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(
+            ConformanceGap(
+                kind=GapKind.awf_validation_evidence,
+                detail="AWF-owned validation evidence is missing for pytest.",
+            ),
+        ),
+    )
+
+    assert not conformance_requires_awf_validation(report, before_compare)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "before_compare",
+    (
+        {Path("docs/usage.md")},
+        {Path(".awf/workspace.yml")},
+        {Path("tests/unit/runtime/test_planning.py")},
+    ),
+)
+def test_conformance_requires_awf_validation_is_category_blind_for_non_empty_diffs(
+    before_compare: set[Path],
+) -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Implementation appears complete; AWF validation evidence is missing.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(
+            ConformanceGap(
+                kind=GapKind.awf_validation_evidence,
+                detail="AWF-owned validation evidence is missing for pytest.",
+            ),
+        ),
+    )
+
+    assert conformance_requires_awf_validation(report, before_compare)
+
+
+@pytest.mark.unit
+def test_conformance_requires_awf_validation_rejects_unknown_legacy_gap() -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration","summary":"legacy",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        '"gaps":["AWF-owned validation evidence is missing for pytest."]}'
+    )
+
+    assert report.gaps == (
+        ConformanceGap(
+            kind=GapKind.unknown,
+            detail="AWF-owned validation evidence is missing for pytest.",
+        ),
+    )
+    assert not conformance_requires_awf_validation(report, {Path("src/awf/runtime/planning.py")})
 
 
 @pytest.mark.unit
@@ -392,367 +524,16 @@ def test_conformance_requires_awf_validation_rejects_satisfied_reports() -> None
     report = PlanConformanceReport(
         status=PlanConformanceStatus.satisfied,
         summary="Validation evidence is still missing, but status is final.",
-        gaps=("AWF validation evidence is missing for the required pytest gate.",),
+        gaps=(
+            ConformanceGap(
+                kind=GapKind.awf_validation_evidence,
+                detail="AWF validation evidence is missing for pytest.",
+            ),
+        ),
         reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
     )
 
-    assert not conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "AWF-owned coverage evidence is stale.",
-        "Required profile gate logs are missing from the workspace artifacts.",
-        "AWF functional test coverage logs are missing.",
-        "AWF unit test suite coverage evidence is missing.",
-        "AWF validation test suite evidence is missing.",
-        "AWF test runner coverage not found.",
-        "AWF validation tests evidence is missing.",
-        "Validation test logs are absent.",
-        "AWF test provenance is missing.",
-        "AWF coverage classification log is missing.",
-    ),
-)
-def test_conformance_requires_awf_validation_accepts_validation_subject_gaps_without_literal_validation(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Implementation appears complete; AWF validation evidence is missing.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "Migration validation evidence is missing.",
-        "Schema migration validation evidence is missing.",
-        "AWF validation evidence is missing for the Alembic/profile migration gate.",
-        "Schema migration profile gate logs are missing from the workspace artifacts.",
-        "Profile migration gate logs are missing from the workspace artifacts.",
-    ),
-)
-def test_conformance_requires_awf_validation_accepts_migration_gate_evidence_gaps(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Implementation appears complete; AWF migration gate evidence is missing.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "AWF validation run code coverage evidence is missing.",
-        "AWF-owned validation run code coverage has not been generated.",
-        "AWF-owned validation evidence is missing for the required reason_code.",
-    ),
-)
-def test_conformance_requires_awf_validation_accepts_code_coverage_evidence_gaps(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Implementation appears complete; AWF validation evidence is missing.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "AWF validation evidence is missing; see docs for profile gate configuration.",
-        "AWF validation evidence is missing; see the document for profile gate configuration.",
-        "AWF-owned validation evidence is missing, see documented profile gates.",
-    ),
-)
-def test_conformance_requires_awf_validation_accepts_documentation_context_gaps(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Implementation appears complete; AWF validation evidence is missing.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "Run pytest under AWF validation.",
-        "rerun pytest under AWF.",
-    ),
-)
-def test_conformance_requires_awf_validation_accepts_named_validation_command_handoff_gaps(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Implementation appears complete; AWF validation command is needed.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "Run pytest under AWF validation and wire the API endpoint required by the plan.",
-        "Rerun mypy under validation after you implement the endpoint.",
-    ),
-)
-def test_conformance_requires_awf_validation_rejects_mixed_named_command_handoff_gaps(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Validation command handoff and implementation work remain.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert not conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "No AWF-owned validation evidence is present for the required commands in "
-        "this conformance phase; please run during validation: uv run --python 3.12 "
-        "--extra dev pytest tests/integration/test_local_service_compose.py "
-        "tests/unit/service/test_config.py tests/unit/service/test_doctor.py -q; "
-        "uv run --python 3.12 --extra dev ruff check src/awf "
-        "tests/integration/test_local_service_compose.py "
-        "tests/unit/service/test_config.py tests/unit/service/test_doctor.py; "
-        "uv run --python 3.12 --extra dev mypy src/awf",
-        "Run and record the required validation commands for this plan: "
-        "`uv run --python 3.12 --extra dev pytest tests/unit/cli/test_cli.py -q`; "
-        "`uv run --python 3.12 --extra dev ruff check src/awf/cli/main.py "
-        "tests/unit/cli/test_cli.py`; "
-        "`uv run --python 3.12 --extra dev mypy src/awf`.",
-    ),
-)
-def test_conformance_requires_awf_validation_accepts_named_command_handoff_with_paths(
-    gap: str,
-) -> None:
-    report = PlanConformanceReport(
-        status=PlanConformanceStatus.needs_iteration,
-        summary="Implementation is complete; AWF validation evidence is missing.",
-        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
-        gaps=(gap,),
-    )
-
-    assert conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "Run pytest during AWF validation and add tests/unit/runtime/test_planning.py.",
-        "Run pytest during AWF validation and add assertions in tests/unit/runtime/test_planning.py.",
-        "Rerun pytest under validation after updating tests/unit/test_widget.py.",
-        "Run pytest in validation, then create test/unit/test_cli.py for the new case.",
-        "Run pytest during AWF validation and add src/tests/unit/test_widget.py.",
-        "Rerun pytest under validation after updating ./tests/unit/test_widget.py.",
-    ),
-)
-def test_conformance_requires_awf_validation_rejects_mixed_named_command_test_path_work_gaps(
-    gap: str,
-) -> None:
-    report = PlanConformanceReport(
-        status=PlanConformanceStatus.needs_iteration,
-        summary="Validation command handoff and test work remain.",
-        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
-        gaps=(gap,),
-    )
-
-    assert not conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "Add tests/unit/test_widget.py to cover the new case.",
-        "Update assertions in tests/unit/test_widget.py after the refactor.",
-    ),
-)
-def test_test_path_work_context_accepts_sentence_case_work_verbs(gap: str) -> None:
-    assert planning_mod._has_test_path_work_context(gap, gap.index("tests/"))
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "AWF test suite, coverage report is missing.",
-        "AWF test run: coverage evidence is absent.",
-    ),
-)
-def test_conformance_requires_awf_validation_accepts_punctuated_test_evidence_gaps(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Implementation appears complete; AWF validation evidence is missing.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-def test_conformance_requires_awf_validation_rejects_mixed_or_ordinary_gaps() -> None:
-    mixed = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Validation evidence is missing and the API is incomplete.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        '"gaps":["AWF-owned validation evidence is missing.",'
-        '"Wire the API endpoint required by the plan."]}'
-    )
-    ordinary = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Implementation gap remains.",'
-        '"gaps":["Wire the API endpoint required by the plan."]}'
-    )
-
-    assert not conformance_requires_awf_validation(mixed)
-    assert not conformance_requires_awf_validation(ordinary)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "Missing approval artifact for the handoff.",
-        "Schema evidence is missing for the generated artifact.",
-        "AWF validation evidence is missing for code review logs.",
-    ),
-)
-def test_conformance_requires_awf_validation_rejects_non_validation_artifact_gaps(
-    gap: str,
-) -> None:
-    report = PlanConformanceReport(
-        status=PlanConformanceStatus.needs_iteration,
-        summary="Implementation appears complete.",
-        gaps=(gap,),
-        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
-    )
-
-    assert not conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "Document the validation provenance behavior before the gap is satisfied.",
-        "Update docs for the validation profile gate before the gap is satisfied.",
-    ),
-)
-def test_conformance_requires_awf_validation_rejects_documentation_work_gaps(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Documentation work remains.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert not conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "AWF validation evidence is missing from the saved plan.",
-        "AWF validation evidence is missing from the README documentation.",
-    ),
-)
-def test_conformance_requires_awf_validation_rejects_plan_and_documentation_artifact_gaps(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Plan or documentation artifact work remains.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert not conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "Migration implementation is missing validation evidence.",
-        "Migration profile gate implementation is missing.",
-        "Migration validation logic is missing.",
-    ),
-)
-def test_conformance_requires_awf_validation_rejects_migration_implementation_gaps(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Migration implementation work remains.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert not conformance_requires_awf_validation(report)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "gap",
-    (
-        "Missing validation tests for the new parser.",
-        "Add validation tests for the new parser.",
-        "Write parser tests covering invalid input.",
-    ),
-)
-def test_conformance_requires_awf_validation_rejects_test_work_gaps(
-    gap: str,
-) -> None:
-    report = parse_conformance_report(
-        '{"status":"needs_iteration",'
-        '"summary":"Test work remains.",'
-        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
-        f'"gaps":["{gap}"]}}'
-    )
-
-    assert not conformance_requires_awf_validation(report)
+    assert not conformance_requires_awf_validation(report, {Path("src/awf/runtime/planning.py")})
 
 
 @pytest.mark.unit

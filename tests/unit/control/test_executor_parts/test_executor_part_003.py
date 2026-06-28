@@ -574,7 +574,12 @@ class TestHappyPathPart002:
                 "status": "needs_iteration",
                 "summary": "Only AWF validation evidence is missing.",
                 "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                "gaps": ["AWF-owned validation evidence is missing for pytest."],
+                "gaps": [
+                    {
+                        "kind": "awf_validation_evidence",
+                        "detail": "AWF-owned validation evidence is missing for pytest.",
+                    }
+                ],
             }
         )
         satisfied_report = json.dumps(
@@ -705,7 +710,12 @@ class TestHappyPathPart002:
                 "status": "needs_iteration",
                 "summary": "Only AWF validation evidence is missing.",
                 "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                "gaps": ["AWF-owned validation evidence is missing for pytest."],
+                "gaps": [
+                    {
+                        "kind": "awf_validation_evidence",
+                        "detail": "AWF-owned validation evidence is missing for pytest.",
+                    }
+                ],
             }
         )
         post_validation_gap_report = json.dumps(
@@ -853,7 +863,12 @@ class TestHappyPathPart002:
                 "status": "needs_iteration",
                 "summary": "Only AWF validation evidence is missing.",
                 "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                "gaps": ["AWF-owned validation evidence is missing for pytest."],
+                "gaps": [
+                    {
+                        "kind": "awf_validation_evidence",
+                        "detail": "AWF-owned validation evidence is missing for pytest.",
+                    }
+                ],
             }
         )
         post_validation_gap_report = json.dumps(

@@ -909,7 +909,12 @@ class TestHappyPathPart001:
                 "status": "needs_iteration",
                 "summary": "Implementation appears complete; AWF validation evidence is missing.",
                 "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
+                "gaps": [
+                    {
+                        "kind": "awf_validation_evidence",
+                        "detail": "AWF-owned validation evidence is missing for the pytest gate.",
+                    }
+                ],
             }
         )
         satisfied_report = json.dumps(
