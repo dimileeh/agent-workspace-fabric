@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import structlog
@@ -16,6 +16,7 @@ from awf.control.executor.monitor_handoff_audit import (
 )
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.db.session import session_scope
 from awf.profiles.models import (
     RUNTIME_BROWSER_UNAVAILABLE,
     ProfileLintFinding,
@@ -53,6 +54,36 @@ class _FindingsValidation:
 
 class TestRecordRuntimeBrowserFindings:
     @pytest.mark.unit
+    async def test_records_with_caller_owned_session_boundary(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        validation = _FindingsValidation((_browser_finding("chromium"),))
+
+        class _Executor:
+            _validation = validation
+
+        async with session_scope(factory) as session:
+            await _record_runtime_browser_findings(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+                session=session,
+            )
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            events = [
+                e for e in ws.events if e.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
+            ]
+            assert len(events) == 1
+            assert events[0].reason_code == RUNTIME_BROWSER_UNAVAILABLE
+
+    @pytest.mark.unit
     async def test_emits_one_warning_event_per_finding(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -64,13 +95,15 @@ class TestRecordRuntimeBrowserFindings:
             _session_factory = factory
             _validation = validation
 
-        await _record_runtime_browser_findings(
-            _Executor(),
-            workspace_id=ws_id,
-            compose_project="awf_x",
-            compose_file=Path("/tmp/compose.yml"),
-            profile=object(),
-        )
+        async with session_scope(factory) as session:
+            await _record_runtime_browser_findings(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+                session=session,
+            )
 
         assert validation.calls == [ws_id]
         async with factory() as s:
@@ -103,13 +136,15 @@ class TestRecordRuntimeBrowserFindings:
             _session_factory = factory
             _validation = _LegacyValidation()
 
-        await _record_runtime_browser_findings(
-            _Executor(),
-            workspace_id=ws_id,
-            compose_project="awf_x",
-            compose_file=Path("/tmp/compose.yml"),
-            profile=object(),
-        )
+        async with session_scope(factory) as session:
+            await _record_runtime_browser_findings(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+                session=session,
+            )
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
@@ -138,13 +173,15 @@ class TestRecordRuntimeBrowserFindings:
             _validation = _ExplodingValidation()
 
         with structlog.testing.capture_logs() as captured:
-            await _record_runtime_browser_findings(
-                _Executor(),
-                workspace_id=ws_id,
-                compose_project="awf_x",
-                compose_file=Path("/tmp/compose.yml"),
-                profile=object(),
-            )
+            async with session_scope(factory) as session:
+                await _record_runtime_browser_findings(
+                    _Executor(),
+                    workspace_id=ws_id,
+                    compose_project="awf_x",
+                    compose_file=Path("/tmp/compose.yml"),
+                    profile=object(),
+                    session=session,
+                )
 
         entry = next(e for e in captured if e["event"] == "executor.runtime_browser_probe_failed")
         assert entry["log_level"] == "warning"
@@ -177,13 +214,15 @@ class TestRecordRuntimeBrowserFindings:
             _record_runtime_browser_findings = _record_runtime_browser_findings
 
         with pytest.raises(RuntimeError, match="probe regression"):
-            await _record_runtime_browser_findings(
-                _Executor(),
-                workspace_id=ws_id,
-                compose_project="awf_x",
-                compose_file=Path("/tmp/compose.yml"),
-                profile=object(),
-            )
+            async with session_scope(factory) as session:
+                await _record_runtime_browser_findings(
+                    _Executor(),
+                    workspace_id=ws_id,
+                    compose_project="awf_x",
+                    compose_file=Path("/tmp/compose.yml"),
+                    profile=object(),
+                    session=session,
+                )
 
         with structlog.testing.capture_logs() as captured:
             await _record_runtime_browser_findings_safe(
@@ -215,13 +254,15 @@ class TestRecordRuntimeBrowserFindings:
             _session_factory = factory
             _validation = validation
 
-        await _record_runtime_browser_findings(
-            _Executor(),
-            workspace_id=ws_id,
-            compose_project="awf_x",
-            compose_file=Path("/tmp/compose.yml"),
-            profile=object(),
-        )
+        async with session_scope(factory) as session:
+            await _record_runtime_browser_findings(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+                session=session,
+            )
 
         assert validation.calls == [ws_id]
         async with factory() as s:
@@ -247,6 +288,7 @@ class TestRecordRuntimeBrowserFindings:
                 compose_project="awf_x",
                 compose_file=Path("/tmp/compose.yml"),
                 profile=object(),
+                session=cast(AsyncSession, object()),
             )
 
         entry = next(

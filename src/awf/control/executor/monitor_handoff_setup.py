@@ -20,6 +20,7 @@ from awf.control.executor.logging_ops import (
 )
 from awf.control.executor.mirror_hooks_repair import repair_mirror_hooks_path_or_mark_failed
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.session import session_scope
 from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
@@ -398,12 +399,14 @@ async def _run_monitor_handoff_profile_setup(
         ) and runtime_browser_probe_deferred_until_validate(profile)
         if callable(record_browser_findings) and not browser_probe_deferred:
             try:
-                await record_browser_findings(
-                    workspace_id=workspace_id,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    profile=profile,
-                )
+                async with session_scope(self._session_factory) as session:
+                    await record_browser_findings(
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        profile=profile,
+                        session=session,
+                    )
             except Exception as exc:
                 _log.warning(
                     "executor.monitor_handoff_runtime_browser_probe_record_failed",

@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import (
@@ -21,6 +23,7 @@ from awf.control.executor.logging_ops import (
 from awf.control.executor.metadata import _metadata_int
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.db.session import session_scope
 from awf.profiles.models import RUNTIME_BROWSER_UNAVAILABLE, RUNTIME_TOOLCHAIN_UNAVAILABLE
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_RETRY,
@@ -284,6 +287,7 @@ async def _record_runtime_browser_findings(
     compose_project: str,
     compose_file: Any,
     profile: Any,
+    session: AsyncSession,
 ) -> None:
     """Probe the container for declared Playwright browsers; record warnings."""
     probe = getattr(self._validation, "probe_runtime_browser_findings", None)
@@ -307,25 +311,24 @@ async def _record_runtime_browser_findings(
     if not findings:
         return
 
-    async with self._session_factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        if workspace is None:  # pragma: no cover - destroyed mid-flight
-            return
-        for finding in findings:
-            details = dict(finding.details)
-            await repo.add_event(
-                workspace,
-                event_type=RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE,
-                reason_code=RUNTIME_BROWSER_UNAVAILABLE,
-                payload={
-                    "browser": details.get("browser"),
-                    "available_browsers": details.get("available_browsers"),
-                    "path": finding.path,
-                    "message": finding.message,
-                },
-            )
-        await session.commit()
+    repo = WorkspaceRepository(session)
+    workspace = await repo.get(workspace_id)
+    if workspace is None:  # pragma: no cover - destroyed mid-flight
+        return
+    for finding in findings:
+        details = dict(finding.details)
+        await repo.add_event(
+            workspace,
+            event_type=RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE,
+            reason_code=RUNTIME_BROWSER_UNAVAILABLE,
+            payload={
+                "browser": details.get("browser"),
+                "available_browsers": details.get("available_browsers"),
+                "path": finding.path,
+                "message": finding.message,
+            },
+        )
+    await session.flush()
 
 
 async def _record_runtime_browser_findings_safe(
@@ -335,15 +338,27 @@ async def _record_runtime_browser_findings_safe(
     compose_project: str,
     compose_file: Any,
     profile: Any,
+    session: AsyncSession | None = None,
 ) -> None:
     """Double-guarded call-site wrapper for the runtime browser probe."""
     try:
-        await self._record_runtime_browser_findings(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-        )
+        if session is None:
+            async with session_scope(self._session_factory) as owned_session:
+                await self._record_runtime_browser_findings(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    profile=profile,
+                    session=owned_session,
+                )
+        else:
+            await self._record_runtime_browser_findings(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+                session=session,
+            )
     except Exception as exc:
         _log.warning(
             "executor.runtime_browser_probe_record_failed",
