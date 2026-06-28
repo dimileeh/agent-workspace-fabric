@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -65,10 +66,27 @@ def _resolve_git_commit() -> str:
     return _git_rev_parse_head() or UNKNOWN_GIT_COMMIT
 
 
+def _core_source_checkout_root() -> Path | None:
+    module_file = Path(__file__).resolve()
+    try:
+        package_dir = module_file.parents[1]
+        checkout_root = module_file.parents[3]
+    except IndexError:  # pragma: no cover - supported module paths are nested under awf/service.
+        return None
+    if package_dir != (checkout_root / "src" / "awf").resolve():
+        return None
+    if not (checkout_root / ".git").exists():
+        return None
+    return checkout_root
+
+
 def _git_rev_parse_head() -> str | None:
+    checkout_root = _core_source_checkout_root()
+    if checkout_root is None:
+        return None
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "-C", str(checkout_root), "rev-parse", "HEAD"],
             check=False,
             capture_output=True,
             text=True,
