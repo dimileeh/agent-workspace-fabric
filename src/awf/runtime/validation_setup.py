@@ -398,19 +398,34 @@ def _node_scoped_validation_package_manager(command: str) -> str | None:
     tokens = _shell_tokens(command, comments=True)
     if tokens is None:
         return None
+    index = _first_non_assignment_token_index(tokens)
+    package_manager = _node_scoped_package_manager_from_tokens(tokens, index, [])
+    if package_manager is not None:
+        return package_manager
+    scoped_command = _leading_cd_package_scope(tokens, index)
+    if scoped_command is None:
+        return None
+    package_dir, command_index = scoped_command
+    if command_index >= len(tokens):
+        return None
     return _node_scoped_package_manager_from_tokens(
         tokens,
-        _first_non_assignment_token_index(tokens),
+        command_index,
+        _node_package_manager_cd_location_tokens(tokens[command_index], package_dir),
     )
 
 
-def _node_scoped_package_manager_from_tokens(tokens: list[str], index: int) -> str | None:
+def _node_scoped_package_manager_from_tokens(
+    tokens: list[str],
+    index: int,
+    location_tokens: list[str],
+) -> str | None:
     if index >= len(tokens):
         return None
     executable = tokens[index]
     if executable not in _NODE_PACKAGE_MANAGERS:
         return None
-    location_tokens: list[str] = []
+    location_tokens = list(location_tokens)
     command_index = index + 1
     while command_index < len(tokens):
         token = tokens[command_index]
