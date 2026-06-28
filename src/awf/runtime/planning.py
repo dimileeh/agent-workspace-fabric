@@ -855,6 +855,16 @@ def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
         is not None
     ):
         return True
+    if (
+        re.search(
+            rf"^{test_path_pattern}(?:\s+|[,;:]\s+)"
+            r"(?:is|are|was|were|remains?)\s+missing(?![a-z0-9_])",
+            path_suffix,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    ):
+        return True
     return (
         re.search(
             rf"{work_verb_pattern}{modifier_pattern}\s+"
