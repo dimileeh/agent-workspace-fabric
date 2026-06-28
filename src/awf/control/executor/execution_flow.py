@@ -62,6 +62,7 @@ from awf.control.executor.mirror_hooks_repair import (
     repair_mirror_hooks_path_or_mark_failed,
 )
 from awf.control.executor.missing_head_recovery import recover_missing_head_after_cleanup_failure
+from awf.control.executor.pre_push_policy import run_pre_push_policy_checks
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
@@ -1404,49 +1405,15 @@ async def execute(
             validated_workspace_head_sha=successful_validation_workspace_head_sha,
         )
 
-    # The committed-output gates below diff ``base..HEAD`` in the worktree. If
-    # the worktree vanished during validation/repair the diff would fail and the
-    # empty-net-diff branch of the plan-only gate would mislabel the disappearance
-    # as a terminal PLAN_ONLY_OUTPUT agent failure. Surface the missing worktree
-    # as WORKTREE_MISSING (infrastructure) first so the reason code reflects the
-    # real cause, mirroring the worktree guard at the push step below.
-    if not await self._ensure_worktree_available(
+    if await run_pre_push_policy_checks(
+        self,
         workspace_id=workspace_id,
         worktree_path=worktree_path,
-        expected=WorkspaceStatus.validating,
-        action="pre_push_policy_check",
+        base_commit=base_commit,
+        owned_paths=list(ws.owned_paths),
+        execution_owner_id=execution_owner_id,
+        repair_mirror_hooks_path_or_mark_failed=_repair_mirror_hooks_path_or_mark_failed,
     ):
-        return
-    if not await _repair_mirror_hooks_path_or_mark_failed(
-        failure_stage="before post-validation policy checks",
-        failure_from_status=WorkspaceStatus.validating,
-    ):
-        return
-    try:
-        if await self._fail_if_plan_only_committed_output(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=base_commit,
-            expected_status=WorkspaceStatus.validating,
-        ):
-            return
-        if await self._fail_if_protected_quality_gate_committed_output(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=base_commit,
-            owned_paths=list(ws.owned_paths),
-            expected_status=WorkspaceStatus.validating,
-            execution_owner_id=execution_owner_id,
-        ):
-            return
-    except Exception as exc:
-        _log.exception("executor.pre_push_policy_check_failed", workspace_id=workspace_id)
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=WorkspaceStatus.validating,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=f"pre-push policy check failed: {exc!r}"[:2000],
-        )
         return
 
     if not await _repair_mirror_hooks_path_or_mark_failed(
