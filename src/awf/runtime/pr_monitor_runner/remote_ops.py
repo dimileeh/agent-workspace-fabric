@@ -938,6 +938,7 @@ async def _run_sync_base(
                 stderr=exc.result.stderr,
             )
         except (
+            ProviderRecoveryRetryError,
             _MonitorAgentServiceRecoveryFailedError,
             _MonitorAgentServiceRecoverySupersededError,
         ):
