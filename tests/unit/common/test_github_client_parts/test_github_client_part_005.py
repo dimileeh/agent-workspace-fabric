@@ -425,6 +425,90 @@ class TestFetchFailingCheckLogsRollupFallback:
         )
 
     @pytest.mark.unit
+    async def test_completed_empty_log_fetches_annotations_for_each_failed_shard(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 125,
+                        "name": "python-coverage-shards",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="")
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    [
+                        {
+                            "path": "tests/unit/test_alpha.py",
+                            "start_line": 11,
+                            "annotation_level": "failure",
+                            "message": "alpha shard failed",
+                        }
+                    ]
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    [
+                        {
+                            "path": "tests/unit/test_beta.py",
+                            "start_line": 22,
+                            "annotation_level": "failure",
+                            "message": "beta shard failed",
+                        }
+                    ]
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures, runs_in_progress = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (1)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/125/job/789",
+                    app_slug="github-actions",
+                ),
+                CheckTiming(
+                    name="python-coverage-shards (2)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/125/job/790",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert runs_in_progress is False
+        assert len(failures) == 1
+        assert "tests/unit/test_alpha.py:11:1: alpha shard failed" in failures[0].log_excerpt
+        assert "tests/unit/test_beta.py:22:1: beta shard failed" in failures[0].log_excerpt
+        assert [
+            call.args[2]
+            for call in fake.calls
+            if call.args[:2] == ["gh", "api"] and call.args[2].endswith("/annotations")
+        ] == [
+            "repos/o/r/check-runs/789/annotations",
+            "repos/o/r/check-runs/790/annotations",
+        ]
+
+    @pytest.mark.unit
     async def test_rollup_fallback_ignores_non_actions_evidence(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")

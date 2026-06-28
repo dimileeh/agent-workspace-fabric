@@ -935,60 +935,59 @@ class GitHubClient:
             for run in runs_raw or []
             if run.get("databaseId") is not None
         }
-        check_run_id_by_run = {
-            run_id: check_run_id
-            for check in _rollup_action_run_failures(rollup_checks)
-            for run_id, check_run_id in (
-                (
-                    _actions_run_id_from_details_url(check.details_url),
-                    _actions_check_run_id_from_details_url(check.details_url),
-                ),
-            )
-            if run_id is not None and check_run_id is not None
-        }
+        check_run_ids_by_run: dict[str, list[str]] = {}
+        for check in _rollup_action_run_failures(rollup_checks):
+            run_id = _actions_run_id_from_details_url(check.details_url)
+            check_run_id = _actions_check_run_id_from_details_url(check.details_url)
+            if run_id is None or check_run_id is None:
+                continue
+            check_run_ids = check_run_ids_by_run.setdefault(run_id, [])
+            if check_run_id not in check_run_ids:
+                check_run_ids.append(check_run_id)
 
-        async def _annotation_log_text(check_run_id: str | None) -> str:
-            if check_run_id is None:
+        async def _annotation_log_text(check_run_ids: Sequence[str]) -> str:
+            if not check_run_ids:
                 return ""
-            result = await self._run_gh(
-                [
-                    "gh",
-                    "api",
-                    f"repos/{repo.slug()}/check-runs/{check_run_id}/annotations",
-                    "--paginate",
-                    "--slurp",
-                ],
-                operation="check_run_annotations",
-                strict=False,
-            )
-            if not result.ok or not result.stdout.strip():
-                return ""
-            try:
-                payload = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                return ""
-            if not isinstance(payload, list):
-                return ""
-            annotations: list[dict[str, Any]] = []
-            for page_or_item in payload:
-                if isinstance(page_or_item, dict):
-                    annotations.append(page_or_item)
-                elif isinstance(page_or_item, list):
-                    annotations.extend(item for item in page_or_item if isinstance(item, dict))
             lines: list[str] = []
-            for item in annotations:
-                message = _clean_optional_str(item.get("message"))
-                raw_details = _clean_optional_str(item.get("raw_details"))
-                path = _clean_optional_str(item.get("path"))
-                start_line = item.get("start_line")
-                start_column = item.get("start_column")
-                if path and isinstance(start_line, int) and message:
-                    column = start_column if isinstance(start_column, int) else 1
-                    lines.append(f"{path}:{start_line}:{column}: {message}")
-                elif message:
-                    lines.append(message)
-                if raw_details:
-                    lines.extend(raw_details.splitlines())
+            for check_run_id in check_run_ids:
+                result = await self._run_gh(
+                    [
+                        "gh",
+                        "api",
+                        f"repos/{repo.slug()}/check-runs/{check_run_id}/annotations",
+                        "--paginate",
+                        "--slurp",
+                    ],
+                    operation="check_run_annotations",
+                    strict=False,
+                )
+                if not result.ok or not result.stdout.strip():
+                    continue
+                try:
+                    payload = json.loads(result.stdout)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, list):
+                    continue
+                annotations: list[dict[str, Any]] = []
+                for page_or_item in payload:
+                    if isinstance(page_or_item, dict):
+                        annotations.append(page_or_item)
+                    elif isinstance(page_or_item, list):
+                        annotations.extend(item for item in page_or_item if isinstance(item, dict))
+                for item in annotations:
+                    message = _clean_optional_str(item.get("message"))
+                    raw_details = _clean_optional_str(item.get("raw_details"))
+                    path = _clean_optional_str(item.get("path"))
+                    start_line = item.get("start_line")
+                    start_column = item.get("start_column")
+                    if path and isinstance(start_line, int) and message:
+                        column = start_column if isinstance(start_column, int) else 1
+                        lines.append(f"{path}:{start_line}:{column}: {message}")
+                    elif message:
+                        lines.append(message)
+                    if raw_details:
+                        lines.extend(raw_details.splitlines())
             return "\n".join(lines)
 
         async def _append_failure(
@@ -996,7 +995,7 @@ class GitHubClient:
             run_id: str | None,
             run_name: str,
             conclusion: str,
-            check_run_id: str | None = None,
+            check_run_ids: Sequence[str] = (),
         ) -> None:
             log = (
                 await self._run_gh(
@@ -1017,7 +1016,7 @@ class GitHubClient:
             )
             raw_log_text = log.stdout if log is not None else ""
             if not raw_log_text.strip():
-                raw_log_text = await _annotation_log_text(check_run_id)
+                raw_log_text = await _annotation_log_text(check_run_ids)
             log_text = redact_ci_log(raw_log_text)
             evidence = extract_ci_failure_evidence(
                 raw_log_text,
@@ -1056,7 +1055,7 @@ class GitHubClient:
                 run_id=run_id,
                 run_name=run_name,
                 conclusion=conclusion_upper,
-                check_run_id=check_run_id_by_run.get(run_id or ""),
+                check_run_ids=check_run_ids_by_run.get(run_id or "", ()),
             )
         for check in _rollup_action_run_failures(rollup_checks):
             run_id = _actions_run_id_from_details_url(check.details_url)
@@ -1070,7 +1069,7 @@ class GitHubClient:
                 run_id=run_id,
                 run_name=check.name,
                 conclusion=(check.conclusion or "FAILURE").upper(),
-                check_run_id=_actions_check_run_id_from_details_url(check.details_url),
+                check_run_ids=check_run_ids_by_run.get(run_id, ()),
             )
         return (tuple(failures), runs_in_progress)
 
