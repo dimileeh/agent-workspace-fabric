@@ -411,6 +411,38 @@ async def test_recovery_callbacks_fence_stale_owner_before_retry_preflights(
 
 
 @pytest.mark.unit
+async def test_cleanup_repair_preserves_hook_failure_reason_without_marking_failed() -> None:
+    executor = SimpleNamespace(_mark_failed=AsyncMock())
+    repair_hooks_after_agent_cleanup_failure = AsyncMock(
+        return_value="MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    )
+    recover_missing_head_after_cleanup_failure = AsyncMock(return_value=True)
+    deposit_planning_artifacts = AsyncMock()
+
+    result = await agent_service_recovery._repair_after_recoverable_agent_cleanup_failure(
+        executor,
+        _cleanup_error(),
+        workspace_id="ws_agent_service",
+        owned_paths=["src/awf"],
+        execution_owner_id="worker-1",
+        repair_hooks_after_agent_cleanup_failure=repair_hooks_after_agent_cleanup_failure,
+        recover_missing_head_after_cleanup_failure=recover_missing_head_after_cleanup_failure,
+        deposit_planning_artifacts=deposit_planning_artifacts,
+        failure_from_status=WorkspaceStatus.validating,
+    )
+
+    assert result == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    repair_hooks_after_agent_cleanup_failure.assert_awaited_once_with(
+        failure_stage="after agent cleanup failure",
+        failure_from_status=WorkspaceStatus.validating,
+        return_reason_code=True,
+    )
+    recover_missing_head_after_cleanup_failure.assert_not_awaited()
+    deposit_planning_artifacts.assert_not_called()
+    executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_agent_service_retry_guard_failure_runs_terminal_callback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
