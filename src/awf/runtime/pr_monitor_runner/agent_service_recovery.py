@@ -93,7 +93,13 @@ async def _run_monitor_agent_with_service_recovery(
             if recovered is None:
                 raise
             restart_attempts = recovered
-            await _rerun_monitor_agent_pre_launch_guards(self, workspace_id=workspace_id)
+            await _rerun_monitor_agent_pre_launch_guards(
+                self,
+                workspace_id=workspace_id,
+                source_reason_code=exc.reason_code,
+                service_healthy=False,
+                restart_attempts=restart_attempts,
+            )
             continue
         except ComposeExecCleanupError as exc:
             recovered = await _recover_monitor_agent_service_after_cleanup_error(
@@ -109,7 +115,13 @@ async def _run_monitor_agent_with_service_recovery(
             if recovered is None:
                 raise
             restart_attempts = recovered
-            await _rerun_monitor_agent_pre_launch_guards(self, workspace_id=workspace_id)
+            await _rerun_monitor_agent_pre_launch_guards(
+                self,
+                workspace_id=workspace_id,
+                source_reason_code=exc.reason_code,
+                service_healthy=False,
+                restart_attempts=restart_attempts,
+            )
             continue
         append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
         return cast(AgentRunResult, result)
@@ -119,9 +131,19 @@ async def _rerun_monitor_agent_pre_launch_guards(
     self: Any,
     *,
     workspace_id: str,
+    source_reason_code: str = AGENT_SERVICE_UNHEALTHY,
+    service_healthy: bool | None = None,
+    restart_attempts: int = 0,
 ) -> None:
     if await self._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
+    await _raise_if_monitor_agent_service_recovery_was_superseded(
+        self,
+        workspace_id=workspace_id,
+        source_reason_code=source_reason_code,
+        service_healthy=service_healthy,
+        restart_attempts=restart_attempts,
+    )
     worktree_path = self._worktrees_root / workspace_id
     if not await repair_agent_runtime_ownership(
         logger=_log,

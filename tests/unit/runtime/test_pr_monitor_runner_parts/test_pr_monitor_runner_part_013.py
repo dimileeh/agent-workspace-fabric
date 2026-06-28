@@ -344,6 +344,84 @@ async def test_monitor_agent_service_recovery_reruns_pre_launch_guards_before_re
 
 
 @pytest.mark.unit
+async def test_monitor_agent_service_recovery_fences_pre_retry_repairs_after_restart(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-old"
+        await session.commit()
+
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="monitor idle timeout while agent service was down",
+            ),
+            reason_code=AGENT_IDLE_TIMEOUT,
+            details={"provider": "google", "model": "gemini-2.5-pro"},
+        )
+    )
+    adapter.queue(stdout="AWF-VERDICT: FIXED: should not run")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = "worker-old"
+
+    async def _provider_recovery_suppresses_cli(_workspace_id: str) -> bool:
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.monitor_claimed_by = "worker-new"
+            await session.commit()
+        return False
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        pytest.fail("superseded monitor must not repair agent-runtime ownership")
+
+    runner._provider_recovery_suppresses_cli = _provider_recovery_suppresses_cli  # type: ignore[method-assign]
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+    ownership_repair = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_agent_runtime_ownership",
+        side_effect=_repair_agent_runtime_ownership,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError) as raised:
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=_write_compose_file(tmp_path),
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=[],
+        )
+
+    assert adapter.calls == ["fix the comment"]
+    ensure_project_up.assert_awaited_once()
+    ownership_repair.assert_not_awaited()
+    assert raised.value.details["superseded_reason"] == "monitor_claim_changed"
+    assert raised.value.details["restart_attempts"] == 1
+
+
+@pytest.mark.unit
 async def test_monitor_agent_service_recovery_pre_retry_guard_respects_provider_suppression(
     tmp_path: Path,
 ) -> None:
@@ -374,6 +452,10 @@ async def test_monitor_agent_service_recovery_pre_retry_guard_fails_closed_on_ow
     mocker.patch(
         "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_agent_runtime_ownership",
         return_value=False,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._raise_if_monitor_agent_service_recovery_was_superseded",
+        return_value=None,
     )
 
     with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError):
@@ -413,6 +495,10 @@ async def test_monitor_agent_service_recovery_pre_retry_guard_fails_closed_on_mi
     mocker.patch(
         "awf.runtime.pr_monitor_runner.agent_service_recovery.repair_mirror_hooks_path",
         side_effect=repair_error,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._raise_if_monitor_agent_service_recovery_was_superseded",
+        return_value=None,
     )
 
     with pytest.raises(_MonitorMirrorHooksPathRepairFailedError):
