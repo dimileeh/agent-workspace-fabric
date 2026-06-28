@@ -809,6 +809,8 @@ def test_saved_plan_scoped_check_handoff_rejects_saved_plan_edits(gap: str) -> N
         "Rerun pytest under validation after updating ./tests/unit/test_widget.py.",
         "Run pytest during AWF validation and add validation tests.",
         "Run pytest during AWF validation and the feature needs tests.",
+        "No AWF-owned validation evidence is present; please run during validation: "
+        "pytest tests/unit/test_cli.py. The feature needs tests.",
         "AWF validation evidence is missing; git diff --check has not run and "
         "tests/unit/test_cli.py needs assertions.",
     ),

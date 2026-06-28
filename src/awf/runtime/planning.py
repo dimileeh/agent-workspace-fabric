@@ -828,6 +828,7 @@ def _is_test_directory_command_target(
         text.rfind(";", 0, path_match_start),
         text.rfind("\n", 0, path_match_start),
         text.rfind(":", 0, path_match_start),
+        _last_sentence_boundary(text, path_match_start),
     )
     command_segment = text[segment_start + 1 : path_match_start]
     if not _starts_with_validation_command_segment(command_segment):
@@ -849,6 +850,13 @@ def _is_test_directory_command_target(
         )
         is not None
     )
+
+
+def _last_sentence_boundary(text: str, end: int) -> int:
+    boundary = -1
+    for match in re.finditer(r"(?<=[a-z0-9_)\]/`])[.!?]\s+", text[:end]):
+        boundary = match.start()
+    return boundary
 
 
 def _starts_with_validation_command_segment(segment: str) -> bool:
