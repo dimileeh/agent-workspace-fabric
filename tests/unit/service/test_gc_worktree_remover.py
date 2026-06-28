@@ -691,6 +691,40 @@ async def test_remove_orphan_worktree_uses_repo_url_from_linked_mirror(
 
 
 @pytest.mark.unit
+async def test_remove_orphan_worktree_uses_companion_path_name_as_worktree_id(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    parent_workspace_id = "ws_parent"
+    companion_id = f"{parent_workspace_id}__companion__backend"
+    repo_url = _make_mirror_with_worktree(tmp_path, work_dir, companion_id)
+    worktree_path = work_dir / "git" / "worktrees" / companion_id
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=parent_workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": companion_id,
+            "status": "succeeded",
+            "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+        }
+    ]
+    mock_gm.remove_worktree.assert_awaited_once_with(
+        workspace_id=companion_id,
+        repo_url=repo_url,
+    )
+
+
+@pytest.mark.unit
 async def test_remove_orphan_worktree_uses_mirror_registry_when_gitfile_is_missing(
     tmp_path: Path,
 ) -> None:

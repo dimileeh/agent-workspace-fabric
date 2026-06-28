@@ -205,13 +205,14 @@ async def remove_orphan_worktree(
     """
     from awf.node.git_manager import GitManager
 
+    worktree_id = path.name or workspace_id
     if not path.exists():
         return WorkspaceGCWorktreeRemoveResult(
             status="skipped",
             reason_code=PATH_ALREADY_REMOVED,
             target_results=(
                 WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=workspace_id,
+                    worktree_id=worktree_id,
                     status="skipped",
                     reason_code=PATH_ALREADY_REMOVED,
                 ),
@@ -224,7 +225,7 @@ async def remove_orphan_worktree(
             reason_code="WORKTREE_NOT_GIT_MANAGED",
             target_results=(
                 WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=workspace_id,
+                    worktree_id=worktree_id,
                     status="skipped",
                     reason_code="WORKTREE_NOT_GIT_MANAGED",
                 ),
@@ -238,7 +239,7 @@ async def remove_orphan_worktree(
             error=f"could not resolve mirror for Git-managed orphan worktree {path}",
             target_results=(
                 WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=workspace_id,
+                    worktree_id=worktree_id,
                     status="failed",
                     reason_code="ORPHAN_WORKTREE_GIT_CONTEXT_UNRESOLVED",
                     error=f"could not resolve mirror for Git-managed orphan worktree {path}",
@@ -254,7 +255,7 @@ async def remove_orphan_worktree(
             error=f"could not resolve repo URL from orphan worktree mirror {mirror_path}",
             target_results=(
                 WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=workspace_id,
+                    worktree_id=worktree_id,
                     status="failed",
                     reason_code="ORPHAN_WORKTREE_REPO_URL_UNRESOLVED",
                     error=f"could not resolve repo URL from orphan worktree mirror {mirror_path}",
@@ -264,7 +265,7 @@ async def remove_orphan_worktree(
 
     try:
         await GitManager(work_dir / "git").remove_worktree(
-            workspace_id=workspace_id, repo_url=repo_url
+            workspace_id=worktree_id, repo_url=repo_url
         )
     except Exception as exc:
         error = str(exc)
@@ -274,7 +275,7 @@ async def remove_orphan_worktree(
             error=error,
             target_results=(
                 WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=workspace_id,
+                    worktree_id=worktree_id,
                     status="failed",
                     reason_code="GIT_WORKTREE_REMOVE_FAILED",
                     error=error,
@@ -286,7 +287,7 @@ async def remove_orphan_worktree(
         reason_code="WORKTREE_REMOVE_SUCCEEDED",
         target_results=(
             WorkspaceGCWorktreeRemoveTargetResult(
-                worktree_id=workspace_id,
+                worktree_id=worktree_id,
                 status="succeeded",
                 reason_code="WORKTREE_REMOVE_SUCCEEDED",
             ),
