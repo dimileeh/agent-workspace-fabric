@@ -315,14 +315,17 @@ class TestHappyPath:
         ]
 
     @pytest.mark.unit
-    def test_profile_phase_command_plan_adds_browser_install_after_pre_agent_when_batched(
+    def test_profile_phase_command_plan_adds_browser_install_after_setup_dependency_when_batched(
         self,
     ) -> None:
         profile = WorkspaceProfile.model_validate(
             {
                 "name": "browser-setup-test",
                 "runtime": {"browsers": ["chromium"]},
-                "phases": {"setup": ["npm install"], "pre_agent": ["node scripts/pre.js"]},
+                "phases": {
+                    "setup": ["npm install", "node scripts/setup-playwright.js"],
+                    "pre_agent": ["node scripts/pre.js"],
+                },
                 "database": {"generated_setup": ["python scripts/db_generated_setup.py"]},
             }
         )
@@ -331,11 +334,12 @@ class TestHappyPath:
 
         assert [(command.phase, command.command.command) for command in commands] == [
             ("setup", "npm install"),
+            ("setup", "npx playwright install chromium"),
+            ("setup", "node scripts/setup-playwright.js"),
             ("db_generated_setup", "python scripts/db_generated_setup.py"),
             ("pre_agent", "node scripts/pre.js"),
-            ("setup", "npx playwright install chromium"),
         ]
-        assert commands[3].command.required is False
+        assert commands[1].command.required is False
 
     @pytest.mark.unit
     def test_profile_phase_command_plan_uses_pre_agent_dependency_install_for_browser_install(
@@ -499,8 +503,8 @@ class TestHappyPath:
     ) -> None:
         fake, val = runner
         fake.queue_result(returncode=0, stdout="dependencies installed")
-        fake.queue_result(returncode=0, stdout="pre-agent ok")
         fake.queue_result(returncode=1, stderr="browser download failed")
+        fake.queue_result(returncode=0, stdout="pre-agent ok")
         profile = WorkspaceProfile.model_validate(
             {
                 "name": "browser-setup-test",
@@ -520,7 +524,7 @@ class TestHappyPath:
         assert result.all_passed
         assert result.first_failure is None
         assert len(fake.calls) == 3
-        browser_install = result.commands[2]
+        browser_install = result.commands[1]
         assert browser_install.command == "npx playwright install chromium"
         assert browser_install.returncode == 1
         assert browser_install.required is False

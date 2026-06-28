@@ -205,6 +205,22 @@ def profile_phase_command_plan(
     requested_phases = set(phase_names)
     deferred_browser_install: ProfileExecutionCommand | None = None
     defer_browser_install_until_validate_install = False
+    browser_install_package_manager: str | None = None
+
+    def append_command_with_deferred_browser_install(
+        command: ProfileExecutionCommand,
+    ) -> None:
+        nonlocal deferred_browser_install
+        commands.append(command)
+        command_package_manager = _node_dependency_install_package_manager(command.command.command)
+        if (
+            deferred_browser_install is not None
+            and not defer_browser_install_until_validate_install
+            and command_package_manager == browser_install_package_manager
+        ):
+            commands.append(deferred_browser_install)
+            deferred_browser_install = None
+
     for phase in sorted(
         phase_names,
         key=lambda phase: _PROFILE_PHASE_EXECUTION_ORDER.get(
@@ -213,32 +229,37 @@ def profile_phase_command_plan(
         ),
     ):
         if phase == "setup":
-            commands.extend(_phase_commands(profile, "setup"))
-            commands.extend(
-                ProfileExecutionCommand(
-                    phase=DB_GENERATED_SETUP_PHASE,
-                    command=command,
-                    database_hook=True,
-                    hook_kind="generated_setup",
-                )
-                for command in profile.database.generated_setup
-            )
             browser_install = playwright_browser_install_command(profile)
             if browser_install is not None:
-                browser_install_command = ProfileExecutionCommand(
+                browser_install_package_manager = _infer_node_package_manager(profile)
+                deferred_browser_install = ProfileExecutionCommand(
                     phase="setup",
                     command=browser_install,
                 )
-                if _should_defer_browser_install_until_validate_install(
-                    profile,
-                    requested_phases,
-                ):
-                    deferred_browser_install = browser_install_command
-                    defer_browser_install_until_validate_install = True
-                elif "pre_agent" in requested_phases:
-                    deferred_browser_install = browser_install_command
-                else:
-                    commands.append(browser_install_command)
+                defer_browser_install_until_validate_install = (
+                    _should_defer_browser_install_until_validate_install(
+                        profile,
+                        requested_phases,
+                    )
+                )
+            for setup_command in _phase_commands(profile, "setup"):
+                append_command_with_deferred_browser_install(setup_command)
+            for command in profile.database.generated_setup:
+                append_command_with_deferred_browser_install(
+                    ProfileExecutionCommand(
+                        phase=DB_GENERATED_SETUP_PHASE,
+                        command=command,
+                        database_hook=True,
+                        hook_kind="generated_setup",
+                    )
+                )
+            if (
+                deferred_browser_install is not None
+                and not defer_browser_install_until_validate_install
+                and "pre_agent" not in requested_phases
+            ):
+                commands.append(deferred_browser_install)
+                deferred_browser_install = None
             continue
         if phase == "validate":
             commands.extend(
@@ -262,14 +283,17 @@ def profile_phase_command_plan(
                     deferred_browser_install = None
                     defer_browser_install_until_validate_install = False
             continue
+        if phase == "pre_agent":
+            for pre_agent_command in _phase_commands(profile, phase):
+                append_command_with_deferred_browser_install(pre_agent_command)
+            if (
+                deferred_browser_install is not None
+                and not defer_browser_install_until_validate_install
+            ):
+                commands.append(deferred_browser_install)
+                deferred_browser_install = None
+            continue
         commands.extend(_phase_commands(profile, phase))
-        if (
-            phase == "pre_agent"
-            and deferred_browser_install is not None
-            and not defer_browser_install_until_validate_install
-        ):
-            commands.append(deferred_browser_install)
-            deferred_browser_install = None
     return commands
 
 
