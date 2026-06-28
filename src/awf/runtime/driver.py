@@ -54,6 +54,7 @@ class WorkspaceStartRequest:
 class WorkspaceStopRequest:
     workspace_id: str
     repo_url: str
+    companion_worktrees: tuple[tuple[str, str], ...] = ()
     compose_project_name: str | None = None
     compose_file_path: Path | None = None
     worktree_host_path: Path | None = None
@@ -154,6 +155,7 @@ class LocalRuntimeDriver:
         return await self.cleaner.cleanup(
             workspace_id=request.workspace_id,
             repo_url=request.repo_url,
+            companion_worktrees=request.companion_worktrees,
             compose_project_name=request.compose_project_name,
             compose_file_path=request.compose_file_path,
             worktree_host_path=request.worktree_host_path,

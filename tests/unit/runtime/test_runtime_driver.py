@@ -43,6 +43,10 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
     status_result = object()
     compose_file = tmp_path / "compose.yml"
     worktree = tmp_path / "repo"
+    companion_worktrees = (
+        ("ws_1-adopted-api", "https://github.com/o/api.git"),
+        ("ws_1-fork-web", "https://github.com/o/web.git"),
+    )
 
     class _Provisioner:
         async def provision(self, workspace_id: str) -> object:
@@ -133,6 +137,7 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
                 compose_project_name="awf_ws_1",
                 compose_file_path=compose_file,
                 worktree_host_path=worktree,
+                companion_worktrees=companion_worktrees,
                 remove_volumes=False,
                 remove_worktree=False,
             )
@@ -178,6 +183,7 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
                 "compose_project_name": "awf_ws_1",
                 "compose_file_path": compose_file,
                 "worktree_host_path": worktree,
+                "companion_worktrees": companion_worktrees,
                 "remove_volumes": False,
                 "remove_worktree": False,
             },
