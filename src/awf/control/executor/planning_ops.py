@@ -810,7 +810,13 @@ async def _run_agent_task_with_optional_planning(
     before_plan = await self._changed_paths(worktree_path)
     plan_file_digest_before = _digest_file_if_present(worktree_path / plan_path)
     plan_candidates_before = _plan_artifact_candidate_digests(worktree_path, plan_path)
-    skip_planning_for_existing_plan = accept_existing_plan and plan_file_digest_before is not None
+    can_accept_existing_plan = accept_existing_plan and (
+        planning_retry_scope_baseline is None
+        or "post_planning_dirty_paths" in planning_retry_scope_baseline
+    )
+    skip_planning_for_existing_plan = (
+        can_accept_existing_plan and plan_file_digest_before is not None
+    )
     baseline_sha: str | None = None
     rev_r = await self._runner.run(
         [
@@ -896,7 +902,7 @@ async def _run_agent_task_with_optional_planning(
             )
             if recovered_near_miss:
                 after_plan = {*after_plan, plan_path}
-    if plan_path not in after_plan and accept_existing_plan:
+    if plan_path not in after_plan and can_accept_existing_plan:
         plan_file_digest_after = _digest_file_if_present(worktree_path / plan_path)
         if plan_file_digest_after is not None:
             after_plan = {*after_plan, plan_path}

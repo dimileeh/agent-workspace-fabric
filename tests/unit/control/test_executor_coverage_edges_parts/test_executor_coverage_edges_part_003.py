@@ -411,6 +411,47 @@ async def test_planning_recovery_retry_accepts_existing_required_plan(
 
 
 @pytest.mark.unit
+async def test_planning_recovery_retry_rejects_stale_plan_without_post_planning_marker(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = worktree / "docs" / "awf-plans" / "ws_retry_stale.md"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# Stale Plan\n\nDo not trust this artifact.\n", encoding="utf-8")
+
+    runner = FakeCommandRunner()
+    _queue_planning_success_with_conformance_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "planning prompt did not refresh plan",
+        "implementation would have run",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_retry_stale", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-stale-plan"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+        planning_retry_scope_baseline={"dirty_paths": set(), "head_sha": "base_sha"},
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.message.startswith(
+        "planning phase did not create or modify required plan file "
+        "`docs/awf-plans/ws_retry_stale.md`"
+    )
+    assert len(adapter.prompts) == 1
+    assert adapter.prompts[0].startswith("## Planning phase")
+
+
+@pytest.mark.unit
 async def test_planning_recovery_retry_skips_plan_scope_for_implementation_delta(
     tmp_path: Path,
 ) -> None:
