@@ -204,6 +204,7 @@ def profile_phase_command_plan(
     commands: list[ProfileExecutionCommand] = []
     requested_phases = set(phase_names)
     deferred_browser_install: ProfileExecutionCommand | None = None
+    defer_browser_install_until_validate_install = False
     for phase in sorted(
         phase_names,
         key=lambda phase: _PROFILE_PHASE_EXECUTION_ORDER.get(
@@ -228,7 +229,13 @@ def profile_phase_command_plan(
                     phase="setup",
                     command=browser_install,
                 )
-                if "pre_agent" in requested_phases:
+                if _should_defer_browser_install_until_validate_install(
+                    profile,
+                    requested_phases,
+                ):
+                    deferred_browser_install = browser_install_command
+                    defer_browser_install_until_validate_install = True
+                elif "pre_agent" in requested_phases:
                     deferred_browser_install = browser_install_command
                 else:
                     commands.append(browser_install_command)
@@ -243,10 +250,24 @@ def profile_phase_command_plan(
                 )
                 for command in profile.database.pre_validation_refresh
             )
-            commands.extend(_phase_commands(profile, "validate"))
+            for validate_command in _phase_commands(profile, "validate"):
+                commands.append(validate_command)
+                if (
+                    defer_browser_install_until_validate_install
+                    and deferred_browser_install is not None
+                    and _node_dependency_install_package_manager(validate_command.command.command)
+                    is not None
+                ):
+                    commands.append(deferred_browser_install)
+                    deferred_browser_install = None
+                    defer_browser_install_until_validate_install = False
             continue
         commands.extend(_phase_commands(profile, phase))
-        if phase == "pre_agent" and deferred_browser_install is not None:
+        if (
+            phase == "pre_agent"
+            and deferred_browser_install is not None
+            and not defer_browser_install_until_validate_install
+        ):
             commands.append(deferred_browser_install)
             deferred_browser_install = None
     return commands
@@ -323,6 +344,13 @@ def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
         if executable in _NODE_PACKAGE_MANAGERS and fallback_package_manager is None:
             fallback_package_manager = executable
     for command in profile.phases.validate_commands:
+        package_manager = _node_dependency_install_package_manager(command.command)
+        if package_manager is not None:
+            if _node_package_manager_has_scope(package_manager):
+                return package_manager
+            if dependency_install_package_manager is None:
+                dependency_install_package_manager = package_manager
+    for command in profile.phases.validate_commands:
         package_manager = _node_scoped_validation_package_manager(command.command)
         if package_manager is not None:
             return package_manager
@@ -334,6 +362,36 @@ def _node_package_manager_has_scope(package_manager: str) -> bool:
         return len(shlex.split(package_manager)) > 1
     except ValueError:
         return False
+
+
+def _should_defer_browser_install_until_validate_install(
+    profile: WorkspaceProfile,
+    requested_phases: set[str],
+) -> bool:
+    if "validate" not in requested_phases:
+        return False
+    if _requested_pre_validate_node_dependency_install_exists(profile, requested_phases):
+        return False
+    return any(
+        _node_dependency_install_package_manager(command.command) is not None
+        for command in profile.phases.validate_commands
+    )
+
+
+def _requested_pre_validate_node_dependency_install_exists(
+    profile: WorkspaceProfile,
+    requested_phases: set[str],
+) -> bool:
+    commands: list[ProfileCommand] = []
+    if "setup" in requested_phases:
+        commands.extend(profile.phases.setup)
+        commands.extend(profile.database.generated_setup)
+    if "pre_agent" in requested_phases:
+        commands.extend(profile.phases.pre_agent)
+    return any(
+        _node_dependency_install_package_manager(command.command) is not None
+        for command in commands
+    )
 
 
 def _node_scoped_validation_package_manager(command: str) -> str | None:
