@@ -267,6 +267,10 @@ class ControlWorker(WorkerDelegatesMixin):
             execution_slots = self._available_execution_slots()
             if execution_slots > 0:
                 active_execution_ids = set(self._execution_tasks)
+                await self._record_monitor_recovery_deferred_active_execution_claims(
+                    limit=execution_slots,
+                    exclude_ids=active_execution_ids,
+                )
                 monitoring_ids = await self._list_monitoring_pr(
                     limit=execution_slots,
                     exclude_ids=active_execution_ids,

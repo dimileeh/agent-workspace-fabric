@@ -54,6 +54,7 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
+    ConformanceGap,
     ConformanceIterationRecord,
     ConformanceStallEvidence,
     ConformanceStallKind,
@@ -761,6 +762,8 @@ async def _run_agent_task_with_optional_planning(
     worktree_path: Path,
     model: str | None,
     command_evidence: list[str] | None = None,
+    accept_existing_plan: bool = False,
+    planning_retry_scope_baseline: dict[str, object] | None = None,
 ) -> str | _PlanningRunFailure | _PlanningValidationHandoff | None:
     planning = profile.planning
     coordination_warnings = coordination_warnings_from_task_policy(
@@ -797,6 +800,20 @@ async def _run_agent_task_with_optional_planning(
     except ValueError as exc:
         return f"planning profile is invalid: {exc}"
 
+    if (
+        planning.fail_on_unexplained_deviation
+        and accept_existing_plan
+        and planning_retry_scope_baseline is not None
+    ):
+        preserved_conformance_failure = await _check_preserved_conformance_retry_scope(
+            self,
+            worktree_path=worktree_path,
+            report_path=report_path,
+            planning_retry_scope_baseline=planning_retry_scope_baseline,
+        )
+        if preserved_conformance_failure is not None:
+            return preserved_conformance_failure
+
     # Hand the agent worktree-root-anchored artifact paths so the plan/report
     # land at the repo root even if the agent cd's into a task subdir mid-run
     # (#620). All internal logic below — digests, scope checks, the validation
@@ -808,6 +825,13 @@ async def _run_agent_task_with_optional_planning(
     before_plan = await self._changed_paths(worktree_path)
     plan_file_digest_before = _digest_file_if_present(worktree_path / plan_path)
     plan_candidates_before = _plan_artifact_candidate_digests(worktree_path, plan_path)
+    can_accept_existing_plan = accept_existing_plan and (
+        planning_retry_scope_baseline is None
+        or "post_planning_dirty_paths" in planning_retry_scope_baseline
+    )
+    skip_planning_for_existing_plan = (
+        can_accept_existing_plan and plan_file_digest_before is not None
+    )
     baseline_sha: str | None = None
     rev_r = await self._runner.run(
         [
@@ -821,24 +845,42 @@ async def _run_agent_task_with_optional_planning(
     )
     if rev_r.ok and rev_r.stdout.strip():
         baseline_sha = rev_r.stdout.strip()
-    await self._update_subphase(workspace.id, "planning")
-    plan_result = await adapter.run(
-        compose_project=compose_project,
-        compose_file=compose_file,
-        prompt=build_planning_prompt(
-            task_prompt=workspace.task_prompt,
-            plan_path=agent_plan_path,
-            coordination_warnings=coordination_warnings,
-            workspace_runtime_context=workspace_runtime_context,
-        ),
-        model=model,
-        workspace_id=workspace.id,
-    )
-    append_command_evidence(
-        command_evidence,
-        stdout=plan_result.stdout,
-        stderr=plan_result.stderr,
-    )
+    if planning_retry_scope_baseline is not None:
+        if "dirty_paths" not in planning_retry_scope_baseline:
+            planning_retry_scope_baseline["dirty_paths"] = set(before_plan)
+            planning_retry_scope_baseline["head_sha"] = baseline_sha
+        elif accept_existing_plan and not (
+            # Once a prior attempt passed planning scope, skip-planning retries
+            # start from the recovered worktree so implementation deltas are not
+            # misclassified as planning-only scope violations.
+            skip_planning_for_existing_plan
+            and "post_planning_dirty_paths" in planning_retry_scope_baseline
+        ):
+            preserved_dirty_paths = planning_retry_scope_baseline.get("dirty_paths")
+            if isinstance(preserved_dirty_paths, set):
+                before_plan = {path for path in preserved_dirty_paths if isinstance(path, Path)}
+            preserved_head_sha = planning_retry_scope_baseline.get("head_sha")
+            if isinstance(preserved_head_sha, str) and preserved_head_sha:
+                baseline_sha = preserved_head_sha
+    if not skip_planning_for_existing_plan:
+        await self._update_subphase(workspace.id, "planning")
+        plan_result = await adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=build_planning_prompt(
+                task_prompt=workspace.task_prompt,
+                plan_path=agent_plan_path,
+                coordination_warnings=coordination_warnings,
+                workspace_runtime_context=workspace_runtime_context,
+            ),
+            model=model,
+            workspace_id=workspace.id,
+        )
+        append_command_evidence(
+            command_evidence,
+            stdout=plan_result.stdout,
+            stderr=plan_result.stderr,
+        )
     dirty_paths = await self._changed_paths(worktree_path)
     committed_paths = (
         await self._committed_paths_since(worktree_path, baseline_sha)
@@ -846,6 +888,8 @@ async def _run_agent_task_with_optional_planning(
         else set()
     )
     after_plan = dirty_paths | committed_paths
+    if skip_planning_for_existing_plan:
+        after_plan = {*after_plan, plan_path}
     plan_candidates_after = _plan_artifact_candidate_digests(worktree_path, plan_path)
     near_miss_plan_artifacts: list[dict[str, object]] = []
     if plan_path not in after_plan:
@@ -890,8 +934,7 @@ async def _run_agent_task_with_optional_planning(
                 offending_paths=extra,
                 summary=f"planning phase changed files outside `{plan_path}`",
             )
-
-    gaps: tuple[str, ...] = ()
+    gaps: tuple[ConformanceGap | str, ...] = ()
     last_report: PlanConformanceReport | None = None
     last_iteration = 0
     stall_policy = ConformanceStallPolicy(
@@ -916,6 +959,9 @@ async def _run_agent_task_with_optional_planning(
     #    empty digests, which would falsely trip
     #    ``classify_conformance_stall``'s repeated_output detector.
     implementation_baseline_sha = await self._git_rev_parse_head(worktree_path)
+    if planning_retry_scope_baseline is not None:
+        planning_retry_scope_baseline["post_planning_dirty_paths"] = set(after_plan)
+        planning_retry_scope_baseline["post_planning_head_sha"] = implementation_baseline_sha
     iteration_start_digest = self._digest_dirty_content(
         worktree_path, dirty_paths, head_sha=implementation_baseline_sha
     )
@@ -943,6 +989,19 @@ async def _run_agent_task_with_optional_planning(
             stderr=execute_result.stderr,
         )
         before_compare = await self._changed_paths(worktree_path)
+        before_compare_head: str | None = None
+        before_dirty_digests: dict[Path, str] = {}
+        if planning.fail_on_unexplained_deviation and planning_retry_scope_baseline is not None:
+            before_compare_head = await self._git_rev_parse_head(worktree_path)
+            before_dirty_digests = {
+                path: self._digest_dirty_content(worktree_path, {path})
+                for path in before_compare - {report_path}
+            }
+            planning_retry_scope_baseline["conformance_before_compare"] = set(before_compare)
+            planning_retry_scope_baseline["conformance_before_compare_head"] = before_compare_head
+            planning_retry_scope_baseline["conformance_before_dirty_digests"] = dict(
+                before_dirty_digests
+            )
         # Snapshot any pre-existing report digest so the timeout branch
         # can distinguish a report this compare call produced from a
         # stale leftover (e.g., a satisfied JSON written by a prior
@@ -992,7 +1051,21 @@ async def _run_agent_task_with_optional_planning(
         # and slip past the success short-circuit below.
         after_compare = await self._changed_paths(worktree_path)
         if planning.fail_on_unexplained_deviation:
-            extra = sorted(after_compare - before_compare - {report_path})
+            committed_compare = (
+                await self._committed_paths_since(worktree_path, before_compare_head)
+                if before_compare_head is not None
+                else set()
+            )
+            edited_pre_dirty_extra = {
+                path
+                for path, digest in before_dirty_digests.items()
+                if self._digest_dirty_content(worktree_path, {path}) != digest
+            }
+            extra = sorted(
+                (after_compare - before_compare - {report_path})
+                | (committed_compare - {report_path})
+                | edited_pre_dirty_extra
+            )
             if extra:
                 return _build_planning_scope_failure(
                     scope_phase="conformance",
@@ -1075,7 +1148,29 @@ async def _run_agent_task_with_optional_planning(
             )
             return None
 
-        if report is not None and conformance_requires_awf_validation(report):
+        implementation_artifact_paths = {plan_path, report_path}
+        implementation_compare = before_compare - implementation_artifact_paths
+        if report is not None and not implementation_compare:
+            if implementation_baseline_sha is not None:
+                try:
+                    implementation_compare = (
+                        await self._committed_paths_since(
+                            worktree_path, implementation_baseline_sha
+                        )
+                    ) - implementation_artifact_paths
+                except RuntimeError:
+                    _log.exception(
+                        "executor.planning_conformance_handoff_diff_failed",
+                        workspace_id=workspace.id,
+                        baseline_sha=implementation_baseline_sha,
+                    )
+                    implementation_compare = set()
+            else:
+                implementation_compare = set()
+        if report is not None and conformance_requires_awf_validation(
+            report,
+            implementation_compare,
+        ):
             _log.info(
                 "executor.planning_conformance_requires_awf_validation",
                 workspace_id=workspace.id,
@@ -1118,6 +1213,9 @@ async def _run_agent_task_with_optional_planning(
                     plan_path=plan_path,
                     report_path=report_path,
                     recovery_action=planning.conformance_stall.recovery_action,
+                    source_reason_code=(
+                        compare_error.reason_code if compare_error is not None else None
+                    ),
                 ),
             )
 
@@ -1175,6 +1273,7 @@ async def _build_conformance_stall_failure(
     plan_path: Path,
     report_path: Path,
     recovery_action: str | None = None,
+    source_reason_code: str | None = None,
 ) -> _PlanningRunFailure:
     head_sha = await self._git_rev_parse_head(worktree_path)
     commit_count = 0
@@ -1199,6 +1298,8 @@ async def _build_conformance_stall_failure(
         changed_paths=changed_paths,
         recovery_action=recovery_action,
     )
+    if source_reason_code in {"AGENT_IDLE_TIMEOUT", "AGENT_TIMEOUT"}:
+        stall_evidence_payload["source_reason_code"] = source_reason_code
     details: dict[str, Any] = {"conformance_stall": stall_evidence_payload}
     if last_report is not None:
         details["conformance"] = build_conformance_failure_evidence(
@@ -1243,6 +1344,58 @@ async def _build_conformance_stall_failure(
         message=message,
         reason_code=AGENT_STALLED_IN_CONFORMANCE,
         details=details,
+    )
+
+
+async def _check_preserved_conformance_retry_scope(
+    self: Any,
+    *,
+    worktree_path: Path,
+    report_path: Path,
+    planning_retry_scope_baseline: dict[str, object],
+) -> _PlanningRunFailure | None:
+    preserved_dirty_paths = planning_retry_scope_baseline.pop("conformance_before_compare", None)
+    preserved_head_sha = planning_retry_scope_baseline.pop("conformance_before_compare_head", None)
+    preserved_dirty_digests = planning_retry_scope_baseline.pop(
+        "conformance_before_dirty_digests", None
+    )
+    if not isinstance(preserved_dirty_paths, set):
+        return None
+
+    before_compare = {path for path in preserved_dirty_paths if isinstance(path, Path)}
+    before_compare_head = preserved_head_sha if isinstance(preserved_head_sha, str) else None
+    before_dirty_digests = (
+        {
+            path: digest
+            for path, digest in preserved_dirty_digests.items()
+            if isinstance(path, Path) and isinstance(digest, str)
+        }
+        if isinstance(preserved_dirty_digests, Mapping)
+        else {}
+    )
+    after_compare = await self._changed_paths(worktree_path)
+    committed_compare = (
+        await self._committed_paths_since(worktree_path, before_compare_head)
+        if before_compare_head
+        else set()
+    )
+    edited_pre_dirty_extra = {
+        path
+        for path, digest in before_dirty_digests.items()
+        if self._digest_dirty_content(worktree_path, {path}) != digest
+    }
+    extra = sorted(
+        (after_compare - before_compare - {report_path})
+        | (committed_compare - {report_path})
+        | edited_pre_dirty_extra
+    )
+    if not extra:
+        return None
+    return _build_planning_scope_failure(
+        scope_phase="conformance",
+        required_paths=(report_path,),
+        offending_paths=extra,
+        summary=(f"conformance phase changed files outside `{report_path}`"),
     )
 
 

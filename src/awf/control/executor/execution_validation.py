@@ -7,7 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from awf.adapters.base import AgentAdapter, AgentRunError
+from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
+from awf.adapters.provider_failures import AGENT_SERVICE_UNHEALTHY
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import (
@@ -21,6 +22,10 @@ from awf.common.git_identity import (
 )
 from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
 from awf.control.executor import planning_artifacts as _planning_artifacts
+from awf.control.executor.agent_service_recovery import (
+    AGENT_SERVICE_RECOVERY_ABORTED,
+    _run_agent_callable_with_service_recovery,
+)
 from awf.control.executor.constants import (
     PLAN_CONFORMANCE_UNSATISFIED,
     POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
@@ -60,6 +65,7 @@ from awf.control.executor.validation_cleanup_guards import (
 from awf.control.executor.validation_cleanup_guards import (
     handle_validation_cleanup_guard as _handle_validation_cleanup_guard,
 )
+from awf.control.executor.validation_side_effects import _side_effect_failure_result
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
     find_protected_quality_gate_changes,
@@ -74,7 +80,6 @@ from awf.control.validation_fix_cycle import (
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.runtime.validation import (
-    ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
     profile_phase_command_plan,
@@ -82,65 +87,11 @@ from awf.runtime.validation import (
 from awf.runtime.validation_worktree import (
     VALIDATION_INFRASTRUCTURE_ERROR,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
-    VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
     VALIDATION_WORKTREE_STATUS_FAILED,
-    ValidationWorktreeCleanup,
     check_validation_worktree_clean,
     cleanup_validation_worktree_side_effects,
     validation_worktree_preexisting_dirty_message,
 )
-
-
-def _safe_validation_artifact_name(value: str) -> str:
-    """Return a filesystem-safe artifact name for validation evidence."""
-    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
-    return safe or "validation"
-
-
-def _cleaned_side_effect_paths(cleanup_result: ValidationWorktreeCleanup) -> tuple[str, ...]:
-    """Return stable path evidence for cleaned validation side effects."""
-    return cleanup_result.side_effect_paths
-
-
-def _side_effect_failure_result(
-    *,
-    val_result: ValidationResult,
-    cleanup_result: ValidationWorktreeCleanup,
-    workspace_id: str,
-    validation_run_id: str,
-    artifacts_root: Path,
-) -> ValidationResult:
-    """Add a synthetic validation failure for cleaned successful side effects."""
-    side_effect_paths = _cleaned_side_effect_paths(cleanup_result)
-    paths_text = ", ".join(side_effect_paths) if side_effect_paths else "<unknown>"
-    artifacts_dir = artifacts_root / workspace_id / "validation_worktree"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    safe_validation_run_id = _safe_validation_artifact_name(validation_run_id)
-    stdout_path = artifacts_dir / f"{safe_validation_run_id}.side_effects.stdout"
-    stderr_path = artifacts_dir / f"{safe_validation_run_id}.side_effects.stderr"
-    stdout_path.write_text(
-        (
-            "AWF validation commands passed only before validation worktree cleanup "
-            "restored or deleted side effects. The restored commit state was not "
-            f"validated. Cleaned paths: {paths_text}."
-        ),
-        encoding="utf-8",
-    )
-    stderr_path.write_text("", encoding="utf-8")
-    command = ValidationCommandResult(
-        command="validation worktree side-effect guard",
-        returncode=1,
-        duration_seconds=0.0,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        reason_code=VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
-        policy_failed=True,
-        metadata={
-            "cleaned_paths": list(side_effect_paths),
-            "restore_ref": cleanup_result.restore_ref,
-        },
-    )
-    return replace(val_result, commands=[*val_result.commands, command])
 
 
 async def run_validation_and_fix_cycle(
@@ -163,6 +114,10 @@ async def run_validation_and_fix_cycle(
     git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
     execution_owner_id: str | None = None,
     resume_disable_fix_passes: bool = False,
+    before_agent_retry: Callable[[], Awaitable[bool | str]] | None = None,
+    after_agent_cleanup_failure_repair: (
+        Callable[[ComposeExecCleanupError], Awaitable[bool | str]] | None
+    ) = None,
 ) -> ExecutionValidationResult:
     """Run validate/fix attempts and emit the terminal validation state.
 
@@ -594,18 +549,92 @@ async def run_validation_and_fix_cycle(
                             max_fix_passes=post_validation_conformance_fix_pass_budget,
                             will_retry=False,
                         )
-                    conformance_failure = await self._run_post_validation_conformance_check(
-                        adapter=adapter,
+                    conformance_scope_baseline = (
+                        await self._capture_post_validation_conformance_scope_baseline(
+                            worktree_path,
+                            conformance_handoff.report_path,
+                        )
+                    )
+
+                    async def _run_conformance_agent(
+                        _accept_existing_plan: bool,
+                        *,
+                        _handoff: _PlanningValidationHandoff = conformance_handoff,
+                        _validation_run_id: str = validation_run_id,
+                        _conformance_scope_baseline: Any = conformance_scope_baseline,
+                    ) -> Any:
+                        return await self._run_post_validation_conformance_check(
+                            adapter=adapter,
+                            workspace=ws,
+                            profile=profile,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            worktree_path=worktree_path,
+                            model=run_model,
+                            handoff=_handoff,
+                            validation_run_id=_validation_run_id,
+                            base_commit=base_commit,
+                            conformance_scope_baseline=_conformance_scope_baseline,
+                        )
+
+                    async def _finish_conformance_recovery_failure(
+                        *,
+                        reason_code: str = AGENT_SERVICE_RECOVERY_ABORTED,
+                        details: Mapping[str, Any] | None = None,
+                        _validation_run_id: str = validation_run_id,
+                        _validation_coverage: dict[str, object] | None = validation_coverage,
+                    ) -> None:
+                        message = (
+                            "agent compose service recovery failed during "
+                            "post-validation conformance"
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=_validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=reason_code,
+                            coverage=_validation_coverage,
+                            error_message=message,
+                        )
+                        await _mark_failed_preserving_planning_artifacts(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=reason_code,
+                            details=details,
+                        )
+
+                    (
+                        conformance_recovered,
+                        conformance_failure,
+                    ) = await _run_agent_callable_with_service_recovery(
+                        self,
+                        run_agent=_run_conformance_agent,
                         workspace=ws,
                         profile=profile,
                         compose_project=compose_project,
                         compose_file=compose_file,
-                        worktree_path=worktree_path,
                         model=run_model,
-                        handoff=conformance_handoff,
-                        validation_run_id=validation_run_id,
-                        base_commit=base_commit,
+                        command_evidence=[],
+                        workspace_id=workspace_id,
+                        execution_owner_id=execution_owner_id,
+                        before_mark_failed=_finish_conformance_recovery_failure,
+                        before_mark_failed_marks_workspace=True,
+                        before_agent_retry=before_agent_retry,
+                        after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+                        expected_status=WorkspaceStatus.validating,
+                        failure_from_status=WorkspaceStatus.validating,
                     )
+                    if not conformance_recovered:
+                        return ExecutionValidationResult(
+                            stop=True,
+                            successful_validation_run_id=successful_validation_run_id,
+                            successful_validation_workspace_head_sha=(
+                                successful_validation_workspace_head_sha
+                            ),
+                        )
                 except ComposeExecCleanupError as exc:
                     message = cleanup_failure_message(exc)
                     _log.error(
@@ -958,13 +987,73 @@ async def run_validation_and_fix_cycle(
             )
         fix_command_evidence: list[str] = []
         try:
-            fix_result = await adapter.run(
+
+            async def _run_fix_agent(
+                _accept_existing_plan: bool,
+                *,
+                _fix_prompt: str = fix_prompt,
+            ) -> AgentRunResult:
+                return await adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=_fix_prompt,
+                    model=run_model,
+                    workspace_id=workspace_id,
+                )
+
+            async def _finish_fix_recovery_failure(
+                *,
+                reason_code: str = AGENT_SERVICE_UNHEALTHY,
+                details: Mapping[str, Any] | None = None,
+                _validation_run_id: str = validation_run_id,
+                _val_result: ValidationResult = val_result,
+            ) -> None:
+                message = "agent compose service recovery failed during validation fix pass"
+                await self._finish_pending_validate_operations(
+                    workspace_id=workspace_id,
+                    status=OperationStatus.failed,
+                    validation_run_id=_validation_run_id,
+                    requested_tier=validation_tier,
+                    reason_code=reason_code,
+                    coverage=_validation_run_coverage_metadata(
+                        _val_result,
+                        baseline_coverage=baseline_coverage,
+                    ),
+                    error_message=message,
+                )
+                await _mark_failed_preserving_planning_artifacts(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=message,
+                    reason_code=reason_code,
+                    details=details,
+                )
+
+            fix_recovered, fix_result = await _run_agent_callable_with_service_recovery(
+                self,
+                run_agent=_run_fix_agent,
+                workspace=ws,
+                profile=profile,
                 compose_project=compose_project,
                 compose_file=compose_file,
-                prompt=fix_prompt,
                 model=run_model,
+                command_evidence=fix_command_evidence,
                 workspace_id=workspace_id,
+                execution_owner_id=execution_owner_id,
+                before_mark_failed=_finish_fix_recovery_failure,
+                before_mark_failed_marks_workspace=True,
+                before_agent_retry=before_agent_retry,
+                after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+                expected_status=WorkspaceStatus.validating,
+                failure_from_status=WorkspaceStatus.validating,
             )
+            if not fix_recovered:
+                return ExecutionValidationResult(
+                    stop=True,
+                    successful_validation_run_id=successful_validation_run_id,
+                    successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                )
             append_command_evidence(
                 fix_command_evidence,
                 stdout=fix_result.stdout,

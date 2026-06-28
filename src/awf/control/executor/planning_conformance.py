@@ -13,6 +13,7 @@ import shlex as shlex
 import time as time
 import traceback as traceback
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,37 @@ from awf.service.artifacts import (
 
 def _git_literal_pathspec(path: Path) -> str:
     return f":(literal){path.as_posix()}"
+
+
+@dataclass(frozen=True)
+class _PostValidationConformanceScopeBaseline:
+    before_compare: set[Path]
+    before_compare_head: str | None
+    before_dirty_digests: dict[Path, str]
+
+
+async def _capture_post_validation_conformance_scope_baseline(
+    self: Any,
+    worktree_path: Path,
+    report_path: Path,
+) -> _PostValidationConformanceScopeBaseline:
+    # Snapshot before the adapter run and before any AWF-synthesized
+    # satisfied report write below; this scope check only polices changes
+    # made during the report-only conformance command.
+    before_compare = await self._changed_paths(worktree_path)
+    before_compare_head = await self._git_rev_parse_head(worktree_path)
+    allowed_paths = {report_path}
+    # Path-set subtraction misses edits to already-dirty paths, so keep a
+    # content snapshot for every pre-dirty non-report path.
+    before_dirty_digests = {
+        path: self._digest_dirty_content(worktree_path, {path})
+        for path in before_compare - allowed_paths
+    }
+    return _PostValidationConformanceScopeBaseline(
+        before_compare=before_compare,
+        before_compare_head=before_compare_head,
+        before_dirty_digests=before_dirty_digests,
+    )
 
 
 async def _prepare_conformance_salvage_for_execution(
@@ -216,26 +248,26 @@ async def _run_post_validation_conformance_check(
     handoff: _PlanningValidationHandoff,
     validation_run_id: str,
     base_commit: str,
+    conformance_scope_baseline: _PostValidationConformanceScopeBaseline | None = None,
 ) -> _PlanningRunFailure | None:
     # Post-validation conformance is strictly report-only, regardless of
     # ordinary planning unexplained-deviation policy.
     del profile
     evidence = await self._validation_run_evidence_for_conformance(validation_run_id)
-    # Snapshot before the adapter run and before any AWF-synthesized
-    # satisfied report write below; this scope check only polices changes
-    # made during the report-only conformance command.
-    before_compare = await self._changed_paths(worktree_path)
-    before_compare_head = await self._git_rev_parse_head(worktree_path)
+    if conformance_scope_baseline is None:
+        conformance_scope_baseline = await self._capture_post_validation_conformance_scope_baseline(
+            worktree_path,
+            handoff.report_path,
+        )
+    before_compare = set(conformance_scope_baseline.before_compare)
+    before_compare_head = conformance_scope_baseline.before_compare_head
     allowed_paths = {handoff.report_path}
-    # Path-set subtraction misses edits to already-dirty paths, so keep a
-    # content snapshot for every pre-dirty non-report path.
-    before_dirty_digests = {
-        path: self._digest_dirty_content(worktree_path, {path})
-        for path in before_compare - allowed_paths
-    }
-    # A stale handoff report may still be present at this path; prefer
-    # stdout unless the conformance rerun actually refreshed the file.
+    before_dirty_digests = dict(conformance_scope_baseline.before_dirty_digests)
     report_path = worktree_path / handoff.report_path
+    # The path-scope baseline is intentionally preserved across service-recovery
+    # retries, but report freshness is per attempt. A failed cleanup attempt can
+    # leave a report behind; treating the original pre-retry digest as current
+    # would let that leftover file override the retry's stdout.
     before_report_text = _read_text_if_present(report_path)
     before_report_digest = _digest_text(before_report_text) if before_report_text else None
     # Hand the agent worktree-root-anchored artifact paths so the report lands

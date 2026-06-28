@@ -64,6 +64,8 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
@@ -525,17 +527,14 @@ async def _run_pre_push_validation_fix_pass(
     if mirror_repair_failure_reason is not None:
         return False, mirror_repair_failure_reason
     try:
-        fix_result = await self._deps.adapter.run(
+        await self._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
             prompt=build_fix_prompt(context),
-            workspace_id=workspace_id,
             log_source="monitor-pre-push-validation-fix",
-        )
-        append_command_evidence(
-            command_evidence,
-            stdout=fix_result.stdout,
-            stderr=fix_result.stderr,
+            command_evidence=command_evidence,
+            operation_start_head=fix_start_head,
         )
     except AgentRunError as exc:
         append_command_evidence(
@@ -549,6 +548,15 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             reason_code=exc.reason_code,
         )
+    except (
+        ProviderRecoveryRetryError,
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorAgentServiceRecoveryFailedError,
+        _MonitorAgentServiceRecoverySupersededError,
+        _MonitorHeadObjectMissingError,
+        _MonitorMirrorHooksPathRepairFailedError,
+    ):
+        raise
     except ComposeExecCleanupError as exc:
         _log.warning(
             "monitor.pre_push_validation_fix_cleanup_failed",

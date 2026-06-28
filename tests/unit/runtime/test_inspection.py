@@ -8,7 +8,7 @@ import sys
 import pytest
 
 from awf.runtime import inspection
-from awf.runtime.inspection import RuntimeInspector, _ProcessResult
+from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot, _ProcessResult
 
 
 @pytest.mark.unit
@@ -144,6 +144,40 @@ async def test_runtime_inspector_builds_running_service_snapshot(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "inspect_data",
+    [
+        {},
+        {"Config": {"Labels": {}}, "State": {"Status": "running"}},
+    ],
+)
+async def test_probe_agent_service_health_is_indeterminate_when_running_labels_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    inspect_data: dict[str, object],
+) -> None:
+    ps_row = {
+        "ID": "abc123",
+        "Image": "awf-agent-runtime:latest",
+        "Names": "awf_ws_agent_1",
+        "State": "running",
+        "Status": "Up 2 minutes",
+    }
+
+    async def _fake_run(args: list[str]) -> _ProcessResult:
+        assert args[:2] == ["docker", "ps"]
+        return _ProcessResult(returncode=0, stdout=json.dumps(ps_row) + "\n", stderr="")
+
+    async def _fake_inspect(container_id: str) -> dict[str, object]:
+        assert container_id == "abc123"
+        return inspect_data
+
+    monkeypatch.setattr(inspection, "_run", _fake_run)
+    monkeypatch.setattr(inspection, "_inspect_container", _fake_inspect)
+
+    assert await inspection.probe_agent_service_health(RuntimeInspector(), "awf_ws_running") is None
+
+
+@pytest.mark.unit
 async def test_runtime_inspector_uses_row_fallbacks_for_stopped_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -238,3 +272,85 @@ def test_runtime_helper_fallbacks() -> None:
     assert inspection._state_from({}, {}) == "unknown"
     assert inspection._ports_from({"Ports": ""}) == []
     assert inspection._ports_from({"Ports": None}) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "service",
+    [
+        RuntimeService(name="agent", container_id="abc", image="agent", state="running"),
+        RuntimeService(
+            name="agent",
+            container_id="abc",
+            image="agent",
+            state="running",
+            health="healthy",
+        ),
+    ],
+)
+def test_agent_service_health_from_snapshot_running(service: RuntimeService) -> None:
+    snapshot = RuntimeSnapshot(stack_state="running", services=[service])
+
+    assert inspection.agent_service_health_from_snapshot(snapshot) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "service",
+    [
+        RuntimeService(name="agent", container_id="abc", image="agent", state="exited"),
+        RuntimeService(name="agent", container_id="abc", image="agent", state="dead"),
+        RuntimeService(
+            name="agent",
+            container_id="abc",
+            image="agent",
+            state="running",
+            health="starting",
+        ),
+        RuntimeService(
+            name="agent",
+            container_id="abc",
+            image="agent",
+            state="running",
+            health="unhealthy",
+        ),
+    ],
+)
+def test_agent_service_health_from_snapshot_down(service: RuntimeService) -> None:
+    snapshot = RuntimeSnapshot(stack_state="running", services=[service])
+
+    assert inspection.agent_service_health_from_snapshot(snapshot) is False
+
+
+@pytest.mark.unit
+def test_agent_service_health_from_snapshot_missing_agent_is_down() -> None:
+    snapshot = RuntimeSnapshot(
+        stack_state="running",
+        services=[
+            RuntimeService(
+                name="postgres",
+                container_id="pg",
+                image="postgres",
+                state="running",
+            )
+        ],
+    )
+
+    assert inspection.agent_service_health_from_snapshot(snapshot) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stack_state", ["unknown", "unavailable"])
+def test_agent_service_health_from_snapshot_indeterminate_stack(stack_state: str) -> None:
+    snapshot = RuntimeSnapshot(stack_state=stack_state, reason="docker unavailable")
+
+    assert inspection.agent_service_health_from_snapshot(snapshot) is None
+
+
+@pytest.mark.unit
+async def test_probe_agent_service_health_returns_none_on_probe_exception() -> None:
+    class _BrokenInspector:
+        async def inspect(self, _compose_project_name: str) -> RuntimeSnapshot:
+            raise RuntimeError("docker exploded")
+
+    assert await inspection.probe_agent_service_health(_BrokenInspector(), "awf_ws") is None

@@ -84,6 +84,9 @@ class ExecutorDelegatesMixin:
     _run_post_validation_conformance_check = (
         _planning_conformance._run_post_validation_conformance_check
     )
+    _capture_post_validation_conformance_scope_baseline = (
+        _planning_conformance._capture_post_validation_conformance_scope_baseline
+    )
     _write_satisfied_post_validation_conformance_report = staticmethod(
         _planning_conformance._write_satisfied_post_validation_conformance_report
     )

@@ -1275,6 +1275,7 @@ async def test_validation_success_path_does_not_redeposit_after_conformance_unli
         _mark_failed=AsyncMock(),
         _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
         _update_subphase=AsyncMock(),
+        _capture_post_validation_conformance_scope_baseline=AsyncMock(return_value=None),
         _validation=_Validation(),
         _run_post_validation_conformance_check=AsyncMock(return_value=None),
     )

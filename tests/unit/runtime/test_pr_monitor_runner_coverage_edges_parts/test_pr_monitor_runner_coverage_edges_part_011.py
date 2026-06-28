@@ -16,6 +16,7 @@ from awf.db.enums import AgentRuntime
 from awf.db.repositories import PolicyFindingRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import CheckFailure
+from awf.runtime.pr_monitor_runner import ci_ops as pr_ci_ops
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
 from tests.postgres import postgres_test_engine
@@ -144,6 +145,61 @@ async def test_ci_fix_refuses_pre_existing_dirty_worktree_before_agent(
     assert [call.args for call in cmd.calls] == [
         _git_worktree_command(worktree, "status", "--porcelain", "--untracked-files=all")
     ]
+
+
+@pytest.mark.unit
+async def test_ci_fix_provider_retry_from_service_recovery_does_not_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider retry raised by service recovery must bypass the CI commit sink."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    commit_calls = 0
+
+    async def _repair_agent_runtime_ownership(**_kwargs: object) -> bool:
+        return True
+
+    async def _raise_provider_retry(**_kwargs: object) -> None:
+        raise ProviderRecoveryRetryError()
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        nonlocal commit_calls
+        commit_calls += 1
+        return False
+
+    monkeypatch.setattr(
+        pr_ci_ops, "repair_agent_runtime_ownership", _repair_agent_runtime_ownership
+    )
+    monkeypatch.setattr(pr_ci_ops, "mirror_path_for_worktree", lambda _worktree_path: None)
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", _raise_provider_retry)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    assert commit_calls == 0
 
 
 @pytest.mark.unit

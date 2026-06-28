@@ -33,10 +33,6 @@ from awf.db.models import (
     Workspace,
     WorkspaceEvent,
 )
-from awf.db.repositories._scheduler import (
-    _schedulable_workspace_ids_stmt,
-    _scheduler_scoring_time,
-)
 from awf.db.repositories.base import (
     DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
     HostPortConflict,
@@ -52,6 +48,7 @@ from awf.db.repositories.quality_repo import (
     MergeCandidateRepository,
     ResourceReservationRepository,
 )
+from awf.db.repositories.system_repo import WorkerHeartbeatRepository
 from awf.db.repositories.task_repo import (
     TaskAttemptRepository,
     TaskRepository,
@@ -89,6 +86,13 @@ from awf.db.repositories.workspace_repo_idempotency import (
 from awf.db.repositories.workspace_repo_resumable import (
     list_resumable_blocked_ids,
     list_resumable_recovering_ids,
+)
+from awf.db.repositories.workspace_repo_scheduler import (
+    list_monitoring_pr_deferred_active_execution_claim_workspaces,
+    list_schedulable_candidates,
+    list_schedulable_ids,
+    list_schedulable_workspaces,
+    sort_schedulable_workspaces,
 )
 
 
@@ -708,28 +712,20 @@ class WorkspaceRepository:
         node_id: str | None = None,
         after: Any | None = None,
         scoring_at: datetime | None = None,
+        execution_claim_owner_id: str | None = None,
     ) -> builtins.list[str]:
         """Return schedulable workspace IDs in scheduler priority order."""
-        if limit <= 0:
-            return []
-
-        scoring_time = _scheduler_scoring_time(after=after, scoring_at=scoring_at)
-        candidates = await self._list_schedulable_candidates(
+        return await list_schedulable_ids(
+            self._session,
+            self._dialect_name,
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
             node_id=node_id,
             after=after,
-            scoring_at=scoring_time,
+            scoring_at=scoring_at,
+            execution_claim_owner_id=execution_claim_owner_id,
         )
-        return [
-            workspace.id
-            for workspace in self._sort_schedulable_workspaces(
-                candidates,
-                limit,
-                scoring_at=scoring_time,
-            )
-        ]
 
     async def list_schedulable_workspaces(
         self,
@@ -740,25 +736,41 @@ class WorkspaceRepository:
         node_id: str | None = None,
         after: Any | None = None,
         scoring_at: datetime | None = None,
+        execution_claim_owner_id: str | None = None,
     ) -> builtins.list[Workspace]:
         """Return schedulable workspaces in scheduler priority order."""
-        if limit <= 0:
-            return []
-
-        scoring_time = _scheduler_scoring_time(after=after, scoring_at=scoring_at)
-        candidates = await self._list_schedulable_candidates(
+        return await list_schedulable_workspaces(
+            self._session,
+            self._dialect_name,
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
             node_id=node_id,
             after=after,
-            scoring_at=scoring_time,
+            scoring_at=scoring_at,
+            execution_claim_owner_id=execution_claim_owner_id,
         )
 
-        return self._sort_schedulable_workspaces(
-            candidates,
-            limit,
-            scoring_at=scoring_time,
+    async def list_monitoring_pr_deferred_active_execution_claim_workspaces(
+        self,
+        *,
+        limit: int,
+        claim_cutoff: datetime,
+        owner_id: str,
+        exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
+        scoring_at: datetime | None = None,
+    ) -> builtins.list[Workspace]:
+        """Return monitor rows blocked by another worker's active execution claim."""
+        return await list_monitoring_pr_deferred_active_execution_claim_workspaces(
+            self._session,
+            self._dialect_name,
+            limit=limit,
+            exclude_ids=exclude_ids,
+            node_id=node_id,
+            scoring_at=scoring_at,
+            claim_cutoff=claim_cutoff,
+            owner_id=owner_id,
         )
 
     async def _list_schedulable_candidates(
@@ -770,20 +782,19 @@ class WorkspaceRepository:
         node_id: str | None = None,
         after: Any | None = None,
         scoring_at: datetime,
+        execution_claim_owner_id: str | None = None,
     ) -> builtins.list[Workspace]:
-        stmt = _schedulable_workspace_ids_stmt(
+        return await list_schedulable_candidates(
+            self._session,
+            self._dialect_name,
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
             node_id=node_id,
             after=after,
             scoring_at=scoring_at,
-            dialect_name=self._dialect_name,
-            skip_locked=self._dialect_name == "postgresql",
-            claim_cutoff=datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None,
+            execution_claim_owner_id=execution_claim_owner_id,
         )
-        result = await self._session.execute(stmt)
-        return list(result.scalars().all())
 
     @staticmethod
     def _sort_schedulable_workspaces(
@@ -792,31 +803,7 @@ class WorkspaceRepository:
         *,
         scoring_at: datetime,
     ) -> builtins.list[Workspace]:
-        from awf.service.scheduler import (
-            scheduler_score_from_workspace,
-        )
-
-        # Handle paginated order key fallback
-        def _get_sort_key(item: tuple[Any, Workspace]) -> tuple[Any, ...]:
-            score, ws = item
-            # Order tuple representation matching DB schema ordering:
-            # (class_priority, effective_score, queued_at, workspace_id)
-            return (
-                -score.class_priority,
-                -score.effective_score,
-                ws.created_at or datetime.min,
-                ws.id,
-            )
-
-        scored = sorted(
-            (
-                (scheduler_score_from_workspace(workspace, now=scoring_at), workspace)
-                for workspace in candidates
-            ),
-            key=_get_sort_key,
-        )
-        ordered = [workspace for _score, workspace in scored]
-        return ordered if limit is None else ordered[:limit]
+        return sort_schedulable_workspaces(candidates, limit, scoring_at=scoring_at)
 
     async def transition(
         self,
@@ -1081,6 +1068,13 @@ class WorkspaceRepository:
         clear_stale_execution_claim_cutoff: datetime | None = None,
     ) -> bool:
         """Claim a monitor-recovery workspace unless another lease is active."""
+        fresh_execution_claim_owner_ids = (
+            await WorkerHeartbeatRepository(self._session).list_fresh_worker_ids(
+                now=clear_stale_execution_claim_cutoff
+            )
+            if clear_stale_execution_claim_cutoff is not None
+            else None
+        )
         return await claim_monitoring_pr(
             self._session,
             workspace_id,
@@ -1088,6 +1082,7 @@ class WorkspaceRepository:
             lease_expires_at=lease_expires_at,
             now=now,
             clear_stale_execution_claim_cutoff=clear_stale_execution_claim_cutoff,
+            fresh_execution_claim_owner_ids=fresh_execution_claim_owner_ids,
         )
 
     async def claim_worker_restart_recovery_execution(

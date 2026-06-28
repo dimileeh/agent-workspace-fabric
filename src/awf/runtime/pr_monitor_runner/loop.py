@@ -5,6 +5,7 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,10 +18,7 @@ from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import (
     RepoRef,
 )
-from awf.db.enums import (
-    OperationStatus,
-    OperationType,
-)
+from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import WorkspaceEventCreate
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
@@ -37,8 +35,10 @@ from awf.runtime.pr_monitor import (
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
+    WaitForTransientCI,
     _ci_transient_rerun_count,
     _ci_transient_rerun_state_key,
+    _record_ci_transient_infra_wait,
 )
 from awf.runtime.pr_monitor_runner import (
     merge_loop as _merge_loop,
@@ -62,6 +62,10 @@ from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.loop_helpers import (
     _post_workflow_scope_notification_best_effort,
 )
+from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
+    _finish_agent_service_recovery_failed_operation,
+    _finish_agent_service_recovery_superseded_operation,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
 )
@@ -70,6 +74,8 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
 )
 
 
@@ -140,46 +146,13 @@ async def _execute(
         },
     )
 
-    # Clear the awaiting-human attention flag the moment the monitor resumes with
-    # a resuming action: ``decide()`` returns exactly one action per poll, so
-    # WaitForCI / AddressComments / SyncBase / terminal completes+aborts each mean
-    # the external blocker is gone. ``NotifyHuman`` is excluded because it IS the
-    # human-block action. ``Merge`` is excluded too: ``handle_merge_action`` owns
-    # the attention flag for that arm because a deterministic merge rejection
-    # (branch protection / restrictions) falls back to notifying a human *without*
-    # recording a sticky blocker, so ``decide()`` keeps returning ``Merge`` every
-    # poll. Clearing here first would null the persisted episode start before the
-    # merge loop re-sets it, defeating the repo-side COALESCE and resetting
-    # ``awaiting_human_since`` to ``now`` each cycle — the operator's "awaiting
-    # human for N" timer would never age (#659). ``handle_merge_action`` (for
-    # ``Merge``) and the manual-ready ``NotifyHuman`` handoff below instead clear
-    # any stale flag themselves right before each of their non-human gate waits
-    # (merge queue, reviewer settle, initial review grace) so a *resolved*
-    # ``NotifyHuman`` episode does not keep surfacing "awaiting human" while the
-    # monitor merely waits on a non-human gate; their deterministic-rejection arms
-    # re-set attention directly, and the pre-merge settle is deliberately left
-    # untouched so a branch-protection rejection that re-sets attention every poll
-    # does not flicker the signal. The ``IS NOT NULL`` guard makes
-    # the repo update a no-op when the flag is already clear, so this per-poll clear
-    # never churns the row — but the guarded ``UPDATE`` still round-trips once per
-    # poll. We keep it unconditional rather than inferring "already clear" from
-    # in-process state: ``awaiting_human_since`` is persisted, so a monitor restart
-    # between the ``NotifyHuman`` set and this clear would otherwise strand a stale
-    # attention signal. The round-trip is negligible beside the operation/state/
-    # audit writes each poll already performs.
+    # Clear awaiting-human attention as soon as the monitor resumes with a
+    # non-human action. ``Merge`` owns its own attention handling because branch
+    # protection can deterministically re-enter that arm every poll (#659).
     #
-    # ``AddressComments`` is the one resuming action that can itself be a human
-    # wait: a comment-repair push rejected for a missing ``workflow`` token scope
-    # requeues ``AddressComments`` and keeps the row in ``monitoring_pr`` (it does
-    # NOT terminally fail like the sync-base / CI-repair workflow-scope arms),
-    # waiting on an operator to grant the scope. That arm persists
-    # ``awaiting_workflow_scope`` so this poll knows the previous one ended on that
-    # wait; honor it by skipping the clear (the attention set by the prior poll
-    # survives — ``set_workspace_attention`` COALESCEs the episode start, so it
-    # stays stable across the requeued polls). Reset the marker first so the moment
-    # a poll is no longer workflow-scope-blocked (push succeeds, or ``decide``
-    # returns a different action) we fall back to the normal resume clear next
-    # cycle — at most one extra poll of "awaiting human" after the block resolves.
+    # Comment repair may requeue ``AddressComments`` while waiting for an
+    # operator-granted workflow token scope. The persisted marker skips this clear
+    # for that one blocked poll, then resets so the next non-blocked poll clears.
     awaiting_workflow_scope = state.awaiting_workflow_scope
     state.clear_awaiting_workflow_scope()
     # The merge-block attention marker only makes sense while ``decide()`` stays on
@@ -310,6 +283,22 @@ async def _execute(
                 monitor_log=monitor_log,
             )
             _clear_transient_base_fetch_retry_state(state, context="sync_base")
+        except _MonitorAgentServiceRecoverySupersededError as exc:
+            await _finish_agent_service_recovery_superseded_operation(
+                self,
+                operation,
+                exc=exc,
+                error_message=str(exc),
+            )
+            raise
+        except _MonitorAgentServiceRecoveryFailedError as exc:
+            await _finish_agent_service_recovery_failed_operation(
+                self,
+                operation,
+                exc=exc,
+                error_message=str(exc),
+            )
+            raise
         except ProviderRecoveryRetryError:
             await self._finish_monitor_operation(
                 operation,
@@ -463,6 +452,7 @@ async def _execute(
                     workspace_id,
                     message=push_result.error_message or push_result.reason_code,
                     reason_code=push_result.reason_code,
+                    details=push_result.failure_evidence(),
                 )
                 return True
             self._record_sync_base_progress(
@@ -757,6 +747,75 @@ async def _execute(
         state.iter_count += 1
         return False
 
+    if isinstance(action, WaitForTransientCI):
+        failures_payload = [_ci_failure_payload(failure) for failure in action.failures]
+        run_ids = tuple(
+            dict.fromkeys(failure.run_id for failure in action.failures if failure.run_id)
+        )
+        rerun_signature = _ci_transient_rerun_state_key(status.head_sha, action.failures)
+        recorded_wait_count, first_seen_at = _record_ci_transient_infra_wait(
+            state,
+            head_sha=status.head_sha,
+            failures=action.failures,
+        )
+        elapsed_seconds = max(time.time() - first_seen_at, 0.0)
+        rerun_attempts = _ci_transient_rerun_count(
+            state,
+            head_sha=status.head_sha,
+            failures=action.failures,
+            legacy_failures=status.ci_failures,
+        )
+        infra_wait_payload: dict[str, object] = {
+            "wait_count": recorded_wait_count,
+            "wait_seconds": action.wait_seconds,
+            "elapsed_seconds": elapsed_seconds,
+            "rerun_attempts": rerun_attempts,
+            "failures": failures_payload,
+            "run_ids": list(run_ids),
+            "head_sha": status.head_sha,
+        }
+        await self._persist_state(workspace_id, state)
+        await self._write_monitor_log(
+            monitor_log,
+            {
+                "event": "monitor.ci_transient_infra_waiting",
+                "workspace_id": workspace_id,
+                "pr_number": pr_number,
+                "reason_code": _CI_TRANSIENT_RERUN_REASON,
+                **infra_wait_payload,
+            },
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="workspace.monitor_ci_transient_infra_waiting",
+                    reason_code=_CI_TRANSIENT_RERUN_REASON,
+                    payload=infra_wait_payload,
+                )
+            ],
+        )
+        await self._sleep_with_monitor_state_operation(
+            workspace_id=workspace_id,
+            action="ci_transient_infra_wait",
+            requested_action="wait_for_transient_ci",
+            reason=(
+                "CI failure still matches transient infrastructure signatures "
+                "after deterministic reruns; waiting before human escalation."
+            ),
+            reason_code=_CI_TRANSIENT_RERUN_REASON,
+            pr_number=pr_number,
+            status=status,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            wait_seconds=action.wait_seconds,
+            monitor_log=monitor_log,
+            extra_payload=infra_wait_payload,
+            extra_identity=(rerun_signature, recorded_wait_count, *run_ids, "infra_wait"),
+        )
+        state.iter_count += 1
+        return False
+
     if isinstance(action, ReportCiFailure):
         operation = await self._begin_monitor_operation(
             workspace_id=workspace_id,
@@ -792,6 +851,24 @@ async def _execute(
                 operation_type=OperationType.ci_repair.value,
                 monitor_log=monitor_log,
             )
+        except _MonitorAgentServiceRecoverySupersededError as exc:
+            await _finish_agent_service_recovery_superseded_operation(
+                self,
+                operation,
+                exc=exc,
+                error_message=str(exc),
+                extra_result={"failure_count": len(action.failures)},
+            )
+            raise
+        except _MonitorAgentServiceRecoveryFailedError as exc:
+            await _finish_agent_service_recovery_failed_operation(
+                self,
+                operation,
+                exc=exc,
+                error_message=str(exc),
+                extra_result={"failure_count": len(action.failures)},
+            )
+            raise
         except ProviderRecoveryRetryError:
             await self._finish_monitor_operation(
                 operation,
@@ -911,6 +988,7 @@ async def _execute(
                     workspace_id,
                     message=push_result.error_message or push_result.reason_code,
                     reason_code=push_result.reason_code,
+                    details=push_result.failure_evidence(),
                 )
                 return True
             state.iter_count += 1
@@ -984,6 +1062,30 @@ async def _execute(
                 operation_id=operation.operation_id if operation is not None else None,
                 operation_type=OperationType.comment_repair.value,
             )
+        except _MonitorAgentServiceRecoverySupersededError as exc:
+            await _finish_agent_service_recovery_superseded_operation(
+                self,
+                operation,
+                exc=exc,
+                error_message=str(exc),
+                extra_result={
+                    "thread_count": len(action.threads),
+                    "review_comment_count": len(action.review_comments),
+                },
+            )
+            raise
+        except _MonitorAgentServiceRecoveryFailedError as exc:
+            await _finish_agent_service_recovery_failed_operation(
+                self,
+                operation,
+                exc=exc,
+                error_message=str(exc),
+                extra_result={
+                    "thread_count": len(action.threads),
+                    "review_comment_count": len(action.review_comments),
+                },
+            )
+            raise
         except ProviderRecoveryRetryError:
             await self._finish_monitor_operation(
                 operation,
@@ -1099,6 +1201,7 @@ async def _execute(
                     workspace_id,
                     message=push_result.error_message or push_result.reason_code,
                     reason_code=push_result.reason_code,
+                    details=push_result.failure_evidence(),
                 )
                 return True
             state.iter_count += 1
@@ -1153,6 +1256,22 @@ async def _execute(
                 _operation_id=operation.operation_id if operation is not None else None,
                 _operation_type=OperationType.comment_repair.value,
             )
+        except _MonitorAgentServiceRecoverySupersededError as exc:
+            await _finish_agent_service_recovery_superseded_operation(
+                self,
+                operation,
+                exc=exc,
+                error_message=str(exc),
+            )
+            raise
+        except _MonitorAgentServiceRecoveryFailedError as exc:
+            await _finish_agent_service_recovery_failed_operation(
+                self,
+                operation,
+                exc=exc,
+                error_message=str(exc),
+            )
+            raise
         except ProviderRecoveryRetryError:
             await self._finish_monitor_operation(
                 operation,
@@ -1239,6 +1358,7 @@ async def _execute(
                     workspace_id,
                     message=push_result.error_message or push_result.reason_code,
                     reason_code=push_result.reason_code,
+                    details=push_result.failure_evidence(),
                 )
                 return True
             state.iter_count += 1

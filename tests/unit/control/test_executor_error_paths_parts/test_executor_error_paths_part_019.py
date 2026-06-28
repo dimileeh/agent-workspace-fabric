@@ -94,8 +94,11 @@ class _NoopResumeCompose:
         workspace_id: str,
         wait: bool = True,
         compose_up_timeout_seconds: int = 300,
+        force_recreate: bool = False,
+        services: tuple[str, ...] = (),
     ) -> None:
         del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
+        del force_recreate, services
 
 
 async def _seed_ready(
@@ -351,6 +354,8 @@ class TestPrMonitorResume:
                 workspace_id: str,
                 wait: bool = True,
                 compose_up_timeout_seconds: int = 300,
+                force_recreate: bool = False,
+                services: tuple[str, ...] = (),
             ) -> None:
                 call_order.append("compose")
                 assert project_name == "persisted_project"
@@ -358,6 +363,8 @@ class TestPrMonitorResume:
                 assert workspace_id == ws_id
                 assert wait is True
                 assert compose_up_timeout_seconds == 300
+                assert force_recreate is True
+                assert services == ()
 
         class _Monitor:
             async def run(
@@ -500,8 +507,11 @@ class TestPrMonitorResume:
                 workspace_id: str,
                 wait: bool = True,
                 compose_up_timeout_seconds: int = 300,
+                force_recreate: bool = False,
+                services: tuple[str, ...] = (),
             ) -> None:
                 del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
+                del force_recreate, services
                 raise AssertionError("compose must not restart after recovery skips")
 
         ws_id = await _seed_monitoring_pr(

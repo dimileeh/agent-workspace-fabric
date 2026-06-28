@@ -17,6 +17,7 @@ from awf.runtime.planning import (
     ConformanceStallEvidence,
     ConformanceStallKind,
     ConformanceStallPolicy,
+    GapKind,
     _evidence_strings,
     build_conformance_stall_failure_evidence,
     build_conformance_stall_recovery_prompt,
@@ -336,9 +337,13 @@ def test_build_conformance_stall_recovery_prompt_steers_agent_to_only_redo_compa
         in prompt
     )
     assert (
-        '{"status":"satisfied|needs_iteration","summary":"...","gaps":["..."],'
+        '{"status":"satisfied|needs_iteration","summary":"...",'
+        '"gaps":[{"kind":"awf_validation_evidence","detail":"..."}],'
         '"reason_code":"optional reason code"}'
     ) in prompt
+    assert "Each `gaps` item must be an object with a `kind`" in prompt
+    for kind in GapKind:
+        assert kind.value in prompt
     assert "### Original task" in prompt
     assert "Implement the billing retry flow." in prompt
 

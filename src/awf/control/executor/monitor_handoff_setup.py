@@ -272,7 +272,7 @@ async def _run_monitor_handoff_profile_setup(
         return bool(recovered)
 
     async def _repair_mirror_hooks_path_or_mark_failed(*, failure_stage: str) -> bool:
-        return await repair_mirror_hooks_path_or_mark_failed(
+        repaired = await repair_mirror_hooks_path_or_mark_failed(
             executor=self,
             workspace_id=workspace_id,
             mirror_path=mirror_path,
@@ -280,6 +280,7 @@ async def _run_monitor_handoff_profile_setup(
             recovery_active=False,
             failure_stage=failure_stage,
         )
+        return repaired is True
 
     try:
         validation = getattr(self, "_validation", None)

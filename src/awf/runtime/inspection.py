@@ -18,6 +18,7 @@ class RuntimeService:
     health: str | None = None
     ports: list[str] = field(default_factory=list)
     started_at: str | None = None
+    service_label_available: bool = True
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ class RuntimeInspector:
                     started_at=state_data.get("StartedAt")
                     if isinstance(state_data, dict)
                     else None,
+                    service_label_available=_service_label_available(inspect_data),
                 )
             )
         if not services:
@@ -83,6 +85,41 @@ class RuntimeInspector:
         if any(s.state == "running" for s in services):
             return RuntimeSnapshot(stack_state="running", services=services)
         return RuntimeSnapshot(stack_state="stopped", services=services)
+
+
+def agent_service_health_from_snapshot(
+    snapshot: RuntimeSnapshot,
+    *,
+    service_name: str = "agent",
+) -> bool | None:
+    """Return tri-state health for the compose agent service."""
+
+    if snapshot.stack_state in {"unknown", "unavailable"}:
+        return None
+    service = next((item for item in snapshot.services if item.name == service_name), None)
+    if service is None:
+        if snapshot.stack_state == "running" and any(
+            not item.service_label_available for item in snapshot.services
+        ):
+            return None
+        return False
+    health = (service.health or "").strip().lower()
+    if health in {"starting", "unhealthy"}:
+        return False
+    return service.state.strip().lower() == "running"
+
+
+async def probe_agent_service_health(
+    inspector: RuntimeInspector,
+    compose_project_name: str | None,
+) -> bool | None:
+    """Inspect a compose stack and return tri-state health for its agent service."""
+
+    try:
+        snapshot = await inspector.inspect(compose_project_name)
+    except Exception:
+        return None
+    return agent_service_health_from_snapshot(snapshot)
 
 
 @dataclass(frozen=True)
@@ -128,6 +165,18 @@ async def _inspect_container(container_id: str) -> dict[str, object]:
 
 
 def _service_name(row: dict[str, object], inspect_data: dict[str, object]) -> str:
+    service = _compose_service_label(inspect_data)
+    if service is not None:
+        return service
+    names = row.get("Names")
+    return str(names or row.get("ID") or "unknown")
+
+
+def _service_label_available(inspect_data: dict[str, object]) -> bool:
+    return _compose_service_label(inspect_data) is not None
+
+
+def _compose_service_label(inspect_data: dict[str, object]) -> str | None:
     labels: object = {}
     config = inspect_data.get("Config") if inspect_data else None
     if isinstance(config, dict):
@@ -136,8 +185,7 @@ def _service_name(row: dict[str, object], inspect_data: dict[str, object]) -> st
         service = labels.get("com.docker.compose.service")
         if isinstance(service, str) and service:
             return service
-    names = row.get("Names")
-    return str(names or row.get("ID") or "unknown")
+    return None
 
 
 def _command_from(

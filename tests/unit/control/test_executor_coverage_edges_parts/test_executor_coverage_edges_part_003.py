@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from awf.common.commands import FakeCommandRunner
+from awf.adapters.base import AgentRunError
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -373,6 +374,308 @@ async def test_planning_required_fails_when_plan_file_is_not_changed(tmp_path: P
     assert scope["salvage_policy"] == "explicit_salvage_required"
     assert "Retry planning from a clean workspace" in scope["recommended_action"]
     assert len(adapter.prompts) == 1
+
+
+@pytest.mark.unit
+async def test_planning_recovery_retry_accepts_existing_required_plan(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = worktree / "docs" / "awf-plans" / "ws_retry_plan.md"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# Plan\n\nResume implementation.\n", encoding="utf-8")
+
+    runner = FakeCommandRunner()
+    _queue_planning_success_with_conformance_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "implementation resumed",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_retry_plan", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-existing-plan"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 2
+    assert adapter.prompts[0].startswith("## Execution phase")
+    assert adapter.prompts[1].startswith("## Conformance phase")
+
+
+@pytest.mark.unit
+async def test_planning_recovery_retry_rejects_stale_plan_without_post_planning_marker(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = worktree / "docs" / "awf-plans" / "ws_retry_stale.md"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# Stale Plan\n\nDo not trust this artifact.\n", encoding="utf-8")
+
+    runner = FakeCommandRunner()
+    _queue_planning_success_with_conformance_commands(runner)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "planning prompt did not refresh plan",
+        "implementation would have run",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_retry_stale", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-stale-plan"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+        planning_retry_scope_baseline={"dirty_paths": set(), "head_sha": "base_sha"},
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.message.startswith(
+        "planning phase did not create or modify required plan file "
+        "`docs/awf-plans/ws_retry_stale.md`"
+    )
+    assert len(adapter.prompts) == 1
+    assert adapter.prompts[0].startswith("## Planning phase")
+
+
+@pytest.mark.unit
+async def test_planning_recovery_retry_skips_plan_scope_for_implementation_delta(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = worktree / "docs" / "awf-plans" / "ws_retry_impl.md"
+
+    class _InterruptedAfterPlanningAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                plan_path.parent.mkdir(parents=True, exist_ok=True)
+                plan_path.write_text("# Plan\n\nImplement after recovery.\n", encoding="utf-8")
+            if len(self.prompts) == 2:
+                raise AgentRunError(
+                    agent=AgentRuntime.codex,
+                    result=CommandResult(
+                        returncode=124,
+                        stdout="",
+                        stderr='service "agent" is not running',
+                    ),
+                    reason_code="AGENT_IDLE_TIMEOUT",
+                )
+            return result
+
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # initial before_plan
+    runner.queue_result(returncode=0, stdout="base_sha\n")  # initial baseline HEAD
+    runner.queue_result(returncode=0, stdout="")  # initial dirty_paths after planning
+    runner.queue_result(returncode=0, stdout="")  # initial committed_paths_since
+    runner.queue_result(returncode=0, stdout="post_plan_sha\n")  # implementation baseline
+    executor = _executor_with_runner(runner, tmp_path)
+    planning_retry_scope_baseline: dict[str, object] = {}
+
+    with pytest.raises(AgentRunError):
+        await executor._run_agent_task_with_optional_planning(
+            adapter=_InterruptedAfterPlanningAdapter("plan", "implementation"),  # type: ignore[arg-type]
+            workspace=SimpleNamespace(id="ws_retry_impl", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+            profile=_required_awf_plan_profile("planning-retry-implementation-delta"),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=worktree,
+            model=None,
+            planning_retry_scope_baseline=planning_retry_scope_baseline,
+        )
+
+    assert planning_retry_scope_baseline["post_planning_dirty_paths"] == {
+        Path("docs/awf-plans/ws_retry_impl.md")
+    }
+
+    runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # retry before_plan
+    runner.queue_result(returncode=0, stdout="impl_sha\n")  # retry baseline HEAD
+    runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # retry dirty_paths
+    runner.queue_result(returncode=0, stdout="")  # retry committed_paths_since
+    runner.queue_result(returncode=0, stdout="impl_sha\n")  # implementation baseline
+    runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # before_compare
+    runner.queue_result(returncode=0, stdout="impl_sha\n")  # conformance baseline HEAD
+    runner.queue_result(returncode=0, stdout=" M src/app.py\n")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # conformance committed_paths_since
+    runner.queue_result(returncode=0, stdout="impl_sha\n")  # post-compare HEAD
+    retry_adapter = _PlanningAdapter(
+        "implementation resumed",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=retry_adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_retry_impl", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-implementation-delta"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+        planning_retry_scope_baseline=planning_retry_scope_baseline,
+    )
+
+    assert message is None
+    assert len(retry_adapter.prompts) == 2
+    assert retry_adapter.prompts[0].startswith("## Execution phase")
+
+
+@pytest.mark.unit
+async def test_planning_recovery_retry_rejects_preserved_conformance_source_delta(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_retry_conformance.md")
+    report_path = Path("docs/awf-plans/ws_retry_conformance.json")
+    (worktree / plan_path).parent.mkdir(parents=True, exist_ok=True)
+    (worktree / plan_path).write_text("# Plan\n\nResume implementation.\n", encoding="utf-8")
+    (worktree / "src").mkdir(parents=True, exist_ok=True)
+    (worktree / "src" / "side_effect.py").write_text("leaked = True\n", encoding="utf-8")
+
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=0,
+        stdout=(f"?? {plan_path.as_posix()}\n?? {report_path.as_posix()}\n?? src/side_effect.py\n"),
+    )  # preserved conformance retry scope check
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter("implementation would have run")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_retry_conformance", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-conformance-source-delta"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+        planning_retry_scope_baseline={
+            "post_planning_dirty_paths": {plan_path},
+            "post_planning_head_sha": "post_plan_sha",
+            "conformance_before_compare": {plan_path},
+            "conformance_before_compare_head": "before_compare_sha",
+            "conformance_before_dirty_digests": {},
+        },
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["scope_phase"] == "conformance"
+    assert scope["offending_paths"] == ["src/side_effect.py"]
+    assert adapter.prompts == []
+
+
+@pytest.mark.unit
+async def test_planning_recovery_retry_rejects_preserved_conformance_commit_and_predirty_edit(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_retry_conformance_commit.md")
+    report_path = Path("docs/awf-plans/ws_retry_conformance_commit.json")
+    predirty_path = Path("src/already_dirty.py")
+    (worktree / plan_path).parent.mkdir(parents=True, exist_ok=True)
+    (worktree / plan_path).write_text("# Plan\n\nResume implementation.\n", encoding="utf-8")
+    (worktree / predirty_path).parent.mkdir(parents=True, exist_ok=True)
+    (worktree / predirty_path).write_text("edited_by_conformance = True\n", encoding="utf-8")
+
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=0,
+        stdout=(
+            f"?? {plan_path.as_posix()}\n"
+            f"?? {report_path.as_posix()}\n"
+            f" M {predirty_path.as_posix()}\n"
+        ),
+    )  # preserved conformance retry scope check
+    runner.queue_result(returncode=0, stdout="src/committed.py\n")  # committed_paths_since
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter("implementation would have run")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(
+            id="ws_retry_conformance_commit", task_prompt="do it", task_tag=None
+        ),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-conformance-commit"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+        planning_retry_scope_baseline={
+            "post_planning_dirty_paths": {plan_path, predirty_path},
+            "post_planning_head_sha": "post_plan_sha",
+            "conformance_before_compare": {plan_path, predirty_path},
+            "conformance_before_compare_head": "before_compare_sha",
+            "conformance_before_dirty_digests": {predirty_path: "original-digest"},
+        },
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["offending_paths"] == ["src/already_dirty.py", "src/committed.py"]
+    assert adapter.prompts == []
+
+
+@pytest.mark.unit
+async def test_planning_recovery_retry_rejects_committed_source_delta_from_initial_baseline(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = worktree / "docs" / "awf-plans" / "ws_retry_dirty.md"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# Plan\n\nResume implementation.\n", encoding="utf-8")
+
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # current retry before_plan
+    runner.queue_result(returncode=0, stdout="retry_sha\n")  # current retry HEAD
+    runner.queue_result(returncode=0, stdout="")  # current retry dirty_paths
+    runner.queue_result(returncode=0, stdout="src/illegal.py\n")  # diff from original baseline
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter("plan already exists")
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_retry_dirty", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=_required_awf_plan_profile("planning-retry-dirty-initial-baseline"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        accept_existing_plan=True,
+        planning_retry_scope_baseline={"dirty_paths": set(), "head_sha": "base_sha"},
+    )
+
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["offending_paths"] == ["src/illegal.py"]
+    diff_calls = [
+        call for call in runner.calls if "diff" in call.args and "--name-only" in call.args
+    ]
+    assert diff_calls
+    assert "base_sha..HEAD" in diff_calls[-1].args
 
 
 @pytest.mark.unit
@@ -1185,184 +1488,3 @@ async def test_auto_retry_planning_scope_failure_records_skip_and_retry_errors(
     assert events[-1][1] == "PLANNING_SCOPE_AUTO_RETRY_HOST_PORT_CONFLICT"
     assert events[-1][2]["detail"]["host_port"] == 9090
     assert events[-1][2]["retry_after"] == "terminal_runtime_released"
-
-
-@pytest.mark.unit
-def test_plan_artifact_candidate_digests_skips_non_internal_plan_dir(
-    tmp_path: Path,
-) -> None:
-    """A plan path outside the internal plan dir digests no candidates.
-
-    Only ``docs/awf-plans`` artifacts participate in near-miss recovery; a plan
-    path rooted elsewhere must short-circuit before any filesystem scan so an
-    unrelated sibling tree is never treated as a recovery source.
-    """
-    candidates = executor_planning_ops._plan_artifact_candidate_digests(  # noqa: SLF001
-        tmp_path,
-        Path("some/other/place/ws_main.md"),
-    )
-
-    assert candidates == {}
-
-
-@pytest.mark.unit
-def test_plan_artifact_candidate_digests_skips_symlink_and_directory_entries(
-    tmp_path: Path,
-) -> None:
-    """Only real, non-symlink files are digested as recovery candidates.
-
-    A ``ws_*.md`` glob match that is a symlink (``is_symlink``) or a directory
-    (``not is_file``) must be skipped: following such an entry during the later
-    ``source.replace(target)`` move would mutate storage outside the plain plan
-    artifact the scope checks observe. The lone real file is the only candidate.
-    """
-    worktree = tmp_path / "worktree"
-    plan_dir = worktree / "docs" / "awf-plans"
-    plan_dir.mkdir(parents=True)
-    real = plan_dir / "ws_real.md"
-    real.write_text("# real\n", encoding="utf-8")
-    (plan_dir / "ws_dir.md").mkdir()  # matches the glob but is not a file
-    (plan_dir / "ws_link.md").symlink_to(real)  # matches the glob but is a symlink
-
-    candidates = executor_planning_ops._plan_artifact_candidate_digests(  # noqa: SLF001
-        worktree,
-        Path("docs/awf-plans/ws_main.md"),
-    )
-
-    expected_digest = hashlib.sha256(b"# real\n").hexdigest()
-    assert candidates == {Path("docs/awf-plans/ws_real.md"): expected_digest}
-
-
-@pytest.mark.unit
-def test_plan_artifact_candidate_digests_skips_undigestable_candidate(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A candidate that cannot be digested (vanished/unreadable) is excluded.
-
-    ``_digest_file_if_present`` returns ``None`` when a file disappears or fails
-    to read between the glob and the digest. Such a candidate must be dropped
-    rather than recorded with a missing digest, so the near-miss snapshot stays
-    faithful to what is actually on disk.
-    """
-    worktree = tmp_path / "worktree"
-    plan_dir = worktree / "docs" / "awf-plans"
-    plan_dir.mkdir(parents=True)
-    (plan_dir / "ws_real.md").write_text("# real\n", encoding="utf-8")
-    monkeypatch.setattr(
-        executor_planning_ops,
-        "_digest_file_if_present",
-        lambda _path: None,
-    )
-
-    candidates = executor_planning_ops._plan_artifact_candidate_digests(  # noqa: SLF001
-        worktree,
-        Path("docs/awf-plans/ws_main.md"),
-    )
-
-    assert candidates == {}
-
-
-@pytest.mark.unit
-def test_recover_plan_artifact_near_miss_ignores_non_default_plan_path() -> None:
-    """Recovery only applies to the default ``ws_<id>.md`` plan path.
-
-    A profile that overrides ``plan_path`` away from the default takes ownership
-    of its own artifact naming, so the typo-recovery heuristic must not fire and
-    must yield no evidence.
-    """
-    recovered, evidence = executor_planning_ops._recover_plan_artifact_near_miss(  # noqa: SLF001
-        worktree_path=Path("/nonexistent/worktree"),
-        workspace_id="ws_custom",
-        required_plan_path=Path("docs/awf-plans/custom-name.md"),
-        required_plan_digest_after=None,
-        dirty_paths_before_planning=[],
-        changed_paths_during_planning=[],
-        candidates_before={},
-        candidates_after={Path("docs/awf-plans/ws_typoed.md"): "digest"},
-        conformance_report_present=False,
-    )
-
-    assert recovered is False
-    assert evidence == []
-
-
-@pytest.mark.unit
-def test_recover_plan_artifact_near_miss_refuses_when_target_present_on_disk(
-    tmp_path: Path,
-) -> None:
-    """A required plan that already exists on disk blocks the elevated move.
-
-    Even after every other guard passes, a final ``target.exists()`` check
-    refuses to clobber a plan file that materialized at the required path,
-    surfacing ``required_plan_path_exists`` instead.
-    """
-    required_plan_path = Path("docs/awf-plans/ws_t.md")
-    candidate_path = Path("docs/awf-plans/ws_u.md")  # Hamming distance 1
-    target = tmp_path / required_plan_path
-    target.parent.mkdir(parents=True)
-    target.write_text("# already here\n", encoding="utf-8")
-
-    recovered, evidence = executor_planning_ops._recover_plan_artifact_near_miss(  # noqa: SLF001
-        worktree_path=tmp_path,
-        workspace_id="ws_t",
-        required_plan_path=required_plan_path,
-        required_plan_digest_after=None,
-        dirty_paths_before_planning=[],
-        changed_paths_during_planning=[],
-        candidates_before={},
-        candidates_after={candidate_path: "digest"},
-        conformance_report_present=False,
-    )
-
-    assert recovered is False
-    assert evidence == [
-        {
-            "path": "docs/awf-plans/ws_u.md",
-            "required_path": "docs/awf-plans/ws_t.md",
-            "reason": "required_plan_path_exists",
-            "filename_hamming_distance": 1,
-        }
-    ]
-    # The pre-existing plan must be left untouched.
-    assert target.read_text(encoding="utf-8") == "# already here\n"
-
-
-@pytest.mark.unit
-def test_recover_plan_artifact_near_miss_reports_failed_move(
-    tmp_path: Path,
-) -> None:
-    """A move that fails (candidate vanished) yields ``recovery_move_failed``.
-
-    When the typo candidate disappears between the snapshot and the rename, the
-    ``source.replace(target)`` raises ``OSError``; recovery must report the
-    failure with the error string rather than crashing or claiming success.
-    """
-    required_plan_path = Path("docs/awf-plans/ws_t.md")
-    candidate_path = Path("docs/awf-plans/ws_u.md")  # Hamming distance 1
-    # The plan dir exists but the candidate source file does not, so the rename
-    # raises ``FileNotFoundError`` (a subclass of ``OSError``).
-    (tmp_path / required_plan_path.parent).mkdir(parents=True)
-
-    recovered, evidence = executor_planning_ops._recover_plan_artifact_near_miss(  # noqa: SLF001
-        worktree_path=tmp_path,
-        workspace_id="ws_t",
-        required_plan_path=required_plan_path,
-        required_plan_digest_after=None,
-        dirty_paths_before_planning=[],
-        changed_paths_during_planning=[],
-        candidates_before={},
-        candidates_after={candidate_path: "digest"},
-        conformance_report_present=False,
-    )
-
-    assert recovered is False
-    assert len(evidence) == 1
-    item = evidence[0]
-    assert item["path"] == "docs/awf-plans/ws_u.md"
-    assert item["required_path"] == "docs/awf-plans/ws_t.md"
-    assert item["reason"] == "recovery_move_failed"
-    assert item["filename_hamming_distance"] == 1
-    assert isinstance(item["error"], str) and item["error"]
-    # No partial artifact must be left at the required path.
-    assert not (tmp_path / required_plan_path).exists()

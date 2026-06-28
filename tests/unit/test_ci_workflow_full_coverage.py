@@ -19,6 +19,7 @@ DB_URL = "postgresql+asyncpg://awf:awf_ci@localhost:5432/awf"
 DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 GITHUB_HOSTED_RUNNER = "ubuntu-latest"
+POSTGRES_CI_IMAGE = "public.ecr.aws/docker/library/postgres:16"
 SETUP_UV_VERSION = "0.5.31"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -182,7 +183,7 @@ def test_ci_has_parallel_python_coverage_shards() -> None:
     assert isinstance(services, dict)
     postgres = services.get("postgres")
     assert isinstance(postgres, dict)
-    assert postgres.get("image") == "postgres:16"
+    assert postgres.get("image") == POSTGRES_CI_IMAGE
     assert postgres.get("env") == {
         "POSTGRES_USER": "awf",
         "POSTGRES_PASSWORD": "awf_ci",

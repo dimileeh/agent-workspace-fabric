@@ -25,8 +25,12 @@ from awf.common.command_evidence import (
     append_command_evidence,
 )
 from awf.common.commands import CommandResult
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.git_identity import (
     git_safe_directory_config_args,
+)
+from awf.control.executor.agent_service_recovery import (
+    _run_agent_callable_with_service_recovery,
 )
 from awf.control.executor.constants import (
     _AWF_RUFF_FORMAT_CHECK_HOOK_ID,
@@ -519,8 +523,15 @@ async def _run_post_agent_commit_repair(
     model: str | None,
     allow_agent_repair: bool,
     ws: Workspace,
+    profile: WorkspaceProfile,
     command_evidence: list[str],
-) -> None:
+    execution_owner_id: str | None = None,
+    before_mark_failed: Callable[[], None | Awaitable[None]] | None = None,
+    before_agent_retry: Callable[[], Awaitable[bool | str]] | None = None,
+    after_agent_cleanup_failure_repair: (
+        Callable[[ComposeExecCleanupError], Awaitable[bool | str]] | None
+    ) = None,
+) -> bool:
     """Repair a failed post-agent pre-commit run and retry the commit once."""
     if classification.repair_strategy == "deterministic":
         await self._run_post_agent_deterministic_precommit_repair(
@@ -532,7 +543,7 @@ async def _run_post_agent_commit_repair(
             run_commit=run_commit,
             git_in_worktree=git_in_worktree,
         )
-        return
+        return True
 
     if classification.autofix_repair_files:
         repaired = await self._run_post_agent_autofixable_precommit_repair(
@@ -545,26 +556,33 @@ async def _run_post_agent_commit_repair(
             git_in_worktree=git_in_worktree,
         )
         if repaired:
-            return
+            return True
 
     if classification.repair_strategy == "agent" and allow_agent_repair:
-        await self._run_post_agent_semantic_precommit_repair(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=base_commit,
-            commit_result=commit_result,
-            classification=classification,
-            staged_paths=staged_paths,
-            run_commit=run_commit,
-            git_in_worktree=git_in_worktree,
-            adapter=adapter,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            model=model,
-            ws=ws,
-            command_evidence=command_evidence,
+        return cast(
+            bool,
+            await self._run_post_agent_semantic_precommit_repair(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_commit=base_commit,
+                commit_result=commit_result,
+                classification=classification,
+                staged_paths=staged_paths,
+                run_commit=run_commit,
+                git_in_worktree=git_in_worktree,
+                adapter=adapter,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                model=model,
+                ws=ws,
+                profile=profile,
+                command_evidence=command_evidence,
+                execution_owner_id=execution_owner_id,
+                before_mark_failed=before_mark_failed,
+                before_agent_retry=before_agent_retry,
+                after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
+            ),
         )
-        return
 
     reported_repair_strategy = (
         "agent_skipped"
@@ -935,8 +953,15 @@ async def _run_post_agent_semantic_precommit_repair(
     compose_file: Path,
     model: str | None,
     ws: Workspace,
+    profile: WorkspaceProfile,
     command_evidence: list[str],
-) -> None:
+    execution_owner_id: str | None = None,
+    before_mark_failed: Callable[[], None | Awaitable[None]] | None = None,
+    before_agent_retry: Callable[[], Awaitable[bool | str]] | None = None,
+    after_agent_cleanup_failure_repair: (
+        Callable[[ComposeExecCleanupError], Awaitable[bool | str]] | None
+    ) = None,
+) -> bool:
     del commit_result
     prompt = _build_post_agent_precommit_repair_prompt(
         classification=classification,
@@ -944,14 +969,34 @@ async def _run_post_agent_semantic_precommit_repair(
     )
     repair_error: AgentRunError | None = None
     try:
-        repair_result = await adapter.run(
+
+        async def _run_repair_agent(_accept_existing_plan: bool) -> Any:
+            return await adapter.run(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=prompt,
+                model=model,
+                workspace_id=workspace_id,
+                log_source="post_agent_precommit_repair",
+            )
+
+        recovered, repair_result = await _run_agent_callable_with_service_recovery(
+            self,
+            run_agent=_run_repair_agent,
+            workspace=ws,
+            profile=profile,
             compose_project=compose_project,
             compose_file=compose_file,
-            prompt=prompt,
             model=model,
+            command_evidence=command_evidence,
             workspace_id=workspace_id,
-            log_source="post_agent_precommit_repair",
+            execution_owner_id=execution_owner_id,
+            before_mark_failed=before_mark_failed,
+            before_agent_retry=before_agent_retry,
+            after_agent_cleanup_failure_repair=after_agent_cleanup_failure_repair,
         )
+        if not recovered:
+            return False
         append_command_evidence(
             command_evidence,
             stdout=repair_result.stdout,
@@ -1148,7 +1193,7 @@ async def _run_post_agent_semantic_precommit_repair(
             ),
             reason_code=classification.reason_code,
         )
-        return
+        return True
 
     retry_classification = _classify_post_agent_commit_failure(retry_result)
     if retry_classification.repair_strategy == "deterministic" and repair_error is None:
@@ -1172,7 +1217,7 @@ async def _run_post_agent_semantic_precommit_repair(
             run_commit=run_commit,
             git_in_worktree=git_in_worktree,
         )
-        return
+        return True
 
     await self._record_post_agent_commit_format_repair(
         workspace_id=workspace_id,

@@ -21,6 +21,7 @@ async def claim_monitoring_pr(
     lease_expires_at: datetime,
     now: datetime | None = None,
     clear_stale_execution_claim_cutoff: datetime | None = None,
+    fresh_execution_claim_owner_ids: set[str] | None = None,
 ) -> bool:
     """Claim a monitor-recovery workspace unless another lease is active."""
     cutoff = now or datetime.now(UTC)
@@ -29,19 +30,42 @@ async def claim_monitoring_pr(
         "monitor_claim_expires_at": lease_expires_at,
         "updated_at": Workspace.updated_at,
     }
+    claim_conditions: list[Any] = [
+        Workspace.id == workspace_id,
+        Workspace.status == WorkspaceStatus.monitoring_pr.value,
+        or_(
+            Workspace.monitor_claim_expires_at.is_(None),
+            Workspace.monitor_claim_expires_at <= cutoff,
+            Workspace.monitor_claimed_by == owner_id,
+        ),
+    ]
     if clear_stale_execution_claim_cutoff is not None:
         stale_execution_claim = or_(
             Workspace.execution_claimed_by.is_(None),
             Workspace.execution_claim_expires_at.is_(None),
             Workspace.execution_claim_expires_at <= clear_stale_execution_claim_cutoff,
         )
+        clearable_execution_claim = stale_execution_claim
+        if fresh_execution_claim_owner_ids is not None:
+            clearable_execution_claim = or_(
+                stale_execution_claim,
+                and_(
+                    Workspace.execution_claimed_by.is_not(None),
+                    Workspace.execution_claimed_by != owner_id,
+                    Workspace.execution_claimed_by.not_in(sorted(fresh_execution_claim_owner_ids)),
+                ),
+            )
+        execution_claim_available = or_(
+            clearable_execution_claim,
+            Workspace.execution_claimed_by == owner_id,
+        )
         values.update(
             execution_claimed_by=case(
-                (stale_execution_claim, None),
+                (clearable_execution_claim, None),
                 else_=Workspace.execution_claimed_by,
             ),
             execution_claim_expires_at=case(
-                (stale_execution_claim, None),
+                (clearable_execution_claim, None),
                 else_=Workspace.execution_claim_expires_at,
             ),
             # D3: bump the fencing token when clearing a stale execution
@@ -49,21 +73,14 @@ async def claim_monitoring_pr(
             # fenced on its next CAS write. Untouched when the claim is
             # preserved (unexpired) so a live worker is never fenced.
             execution_claim_epoch=case(
-                (stale_execution_claim, Workspace.execution_claim_epoch + 1),
+                (clearable_execution_claim, Workspace.execution_claim_epoch + 1),
                 else_=Workspace.execution_claim_epoch,
             ),
         )
+        claim_conditions.append(execution_claim_available)
     result = await session.execute(
         update(Workspace)
-        .where(
-            Workspace.id == workspace_id,
-            Workspace.status == WorkspaceStatus.monitoring_pr.value,
-            or_(
-                Workspace.monitor_claim_expires_at.is_(None),
-                Workspace.monitor_claim_expires_at <= cutoff,
-                Workspace.monitor_claimed_by == owner_id,
-            ),
-        )
+        .where(*claim_conditions)
         .values(**values)
         .returning(Workspace.id)
         .execution_options(synchronize_session=False)

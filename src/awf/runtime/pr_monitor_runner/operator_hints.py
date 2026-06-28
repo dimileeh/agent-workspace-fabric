@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -63,6 +65,12 @@ _OPERATOR_HINT_BARE_FEEDBACK_ID_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_PROTECTED_HISTORY_DIRECTIVE_REBLOCK_PREFIX = "__awf_protected_history_directive_reblocked__:"
+
+
+def _protected_history_directive_reblock_key(preserved_head_sha: str, directive: str) -> str:
+    digest = hashlib.sha256(directive.strip().encode("utf-8")).hexdigest()[:16]
+    return f"{_PROTECTED_HISTORY_DIRECTIVE_REBLOCK_PREFIX}{preserved_head_sha}:{digest}"
 
 
 async def _run_operator_hint_cycle(
@@ -202,6 +210,36 @@ async def _run_operator_hint_cycle(
                 acted_feedback_text=hint.directive,
             )
             return _GitPushResult(pushed=False, failed=False, returncode=0)
+        # Repeat-directive short-circuit: a prior cycle re-blocked this exact
+        # ``(preserved commit, directive)`` for leaving the ungranted protected commit
+        # in local history (revert-on-top), so re-running the identical directive would
+        # only repeat the leak — park needs_human without burning CLI tokens. But the
+        # stored marker alone is NOT proof the leak still exists: a valid reset/rebase
+        # (or an unfinalized drop whose marker clear was lost to a crash) can remove the
+        # preserved commit from the unpushed range while the marker lingers. Re-confirm
+        # against the same safety boundary the leak guard below uses —
+        # ``_preserved_commit_in_unpushed_range`` returns False once the commit was
+        # dropped or is already on the remote — so a now-resolved directive falls through
+        # to normal processing instead of being wedged at needs_human
+        # (PRRT_kwDOSJAM6s6Ms-zG).
+        repeat_key = _protected_history_directive_reblock_key(preserved_head_sha, hint.directive)
+        if state.threads_addressed_ids.get(
+            repeat_key
+        ) and await self._preserved_commit_in_unpushed_range(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+            preserved_head_sha=preserved_head_sha,
+        ):
+            reason = (
+                "The previous operator directive still left the ungranted protected "
+                f"commit {preserved_head_sha} in local history. Provide a new directive "
+                "that drops the commit with reset/rebase/cherry-pick, not a revert-on-top "
+                "commit, or approve-and-keep the protected path."
+            )
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
     acted_feedback_text = hint.directive
     if hint.directive or not active_grant_specs:
         if not hint.directive:
@@ -427,7 +465,11 @@ async def _run_operator_hint_cycle(
     # protected path of the current block, otherwise this wedges a valid push at
     # needs_human where no further grant can be added (PRRT_kwDOSJAM6s6KG1hs). A
     # grant that covers only some of those paths (or none) still leaves an ungranted
-    # protected change, so the guard keeps firing.
+    # protected change, so the guard keeps firing. A clean current net diff is NOT
+    # enough to skip this check: a revert-on-top can remove the protected path from
+    # the tree diff while the preserved protected commit remains an unpushed ancestor
+    # of HEAD. ``_preserved_commit_in_unpushed_range`` is the safety boundary: it
+    # returns false only when the preserved commit was dropped or is already remote.
     if (
         protected_scope_block is None
         and hint.directive
@@ -447,9 +489,32 @@ async def _run_operator_hint_cycle(
         reason = (
             "operator directive resolved the protected block by reverting on top of "
             f"the preserved commit {preserved_head_sha} instead of dropping it; pushing "
-            "would publish the ungranted protected change. Reset the worktree to remove "
-            "the preserved commit, or approve-and-keep the protected path, then resume."
+            "would publish the ungranted protected change. Drop the preserved commit "
+            "with reset/rebase/cherry-pick; do not add another revert-on-top commit. "
+            "Alternatively, approve-and-keep the protected path, then resume."
         )
+        # Key the repeat guard to the head the re-block will RECORD as the next
+        # ``__awf_protected_block_preserved_head__`` marker, NOT the old preserved
+        # SHA. ``_pause_monitor_for_protected_scope_block`` (reached via
+        # ``_reblock_preserved_protected_leak`` below) re-reads the worktree HEAD —
+        # here the revert-on-top commit — and overwrites the marker with it (falling
+        # back to leaving the old marker when HEAD is unresolvable). The next resume
+        # reads THAT rewritten marker to recompute its repeat key, so keying this mark
+        # to the old preserved SHA always misses, re-running the identical directive
+        # one more time instead of parking for human attention. Mirror the re-block's
+        # own marker logic exactly (PRRT_kwDOSJAM6s6MtBzN).
+        reblock_marker_sha = await self._rev_parse_head(worktree_path) or preserved_head_sha
+        reblock_repeat_key = _protected_history_directive_reblock_key(
+            reblock_marker_sha, hint.directive
+        )
+        # In-memory mark (flushed by the loop's later ``_persist_state``) AND durable
+        # persistence in the re-block commit itself (via ``extra_state_markers`` below).
+        # The re-block rewrites the preserved-head marker durably to this same HEAD, so
+        # the repeat key must be just as durable; otherwise a crash before
+        # ``_persist_state`` keeps the rewritten marker but loses the repeat key, and the
+        # next identical directive recomputes the same key, misses, and re-runs the agent
+        # instead of parking for human attention (PRRT_kwDOSJAM6s6MtULR).
+        state.mark_addressed(reblock_repeat_key, "reblocked")
         # RE-BLOCK into ``blocked`` so the approve-and-keep grant this message
         # advertises is actually reachable. ``guide_workspace`` only accepts
         # ``--grant`` inputs for a ``blocked`` workspace (non-blocked + grants ->
@@ -476,6 +541,7 @@ async def _run_operator_hint_cycle(
             operation_start_head=operation_start_head,
             block_resume_phase=block_resume_phase,
             reason=reason,
+            extra_state_markers={reblock_repeat_key: "reblocked"},
         )
     # Idempotent push (divergence recovery, WS-2 §5): if the preserved commit is
     # already on the remote PR branch (a monitor/worker restart re-ran the resume
@@ -719,6 +785,7 @@ async def _reblock_preserved_protected_leak(
     operation_start_head: str | None,
     block_resume_phase: str,
     reason: str,
+    extra_state_markers: Mapping[str, str] | None = None,
 ) -> _GitPushResult:
     """Re-block a still-undeliverable preserved protected commit into ``blocked``.
 
@@ -765,6 +832,7 @@ async def _reblock_preserved_protected_leak(
                 operation_id=operation_id,
                 operation_type=operation_type,
                 source_head_sha=operation_start_head,
+                extra_state_markers=extra_state_markers,
             ),
         )
         if reblock_result.paused_into_blocked:

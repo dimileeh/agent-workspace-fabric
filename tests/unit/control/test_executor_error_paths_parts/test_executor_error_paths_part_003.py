@@ -134,8 +134,11 @@ class _NoopResumeCompose:
         workspace_id: str,
         wait: bool = True,
         compose_up_timeout_seconds: int = 300,
+        force_recreate: bool = False,
+        services: tuple[str, ...] = (),
     ) -> None:
         del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
+        del force_recreate, services
 
 
 class _RecordingValidation:

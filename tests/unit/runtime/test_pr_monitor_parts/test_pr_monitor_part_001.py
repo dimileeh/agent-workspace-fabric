@@ -141,7 +141,18 @@ def _status(
         ),
         (
             "failing ci",
-            _status(check_state=CheckState.FAILURE),
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(
+                    CheckFailure(
+                        name="python-full-coverage",
+                        conclusion="FAILURE",
+                        log_excerpt=("tests/unit/test_x.py::test_y FAILED\nE   assert 1 == 2"),
+                        test_node_ids=("tests/unit/test_x.py::test_y",),
+                        assertion_snippets=("assert 1 == 2",),
+                    ),
+                ),
+            ),
             MonitorState(),
             ReportCiFailure,
             None,

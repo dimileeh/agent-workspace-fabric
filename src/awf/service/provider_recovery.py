@@ -14,6 +14,7 @@ from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.provider_failures import (
     AGENT_AUTH_FAILED,
     AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+    AGENT_SERVICE_UNHEALTHY,
     classify_provider_failure,
     infer_provider,
 )
@@ -153,6 +154,9 @@ def provider_recovery_metadata_from_failure(
         if metadata is None:
             return None
 
+    if _is_infra_failure_metadata(metadata):
+        return None
+
     policy = parse_provider_recovery_policy(task_policy)
     state = parse_provider_recovery_state(task_policy)
     auth_failure = _is_auth_failure_metadata(metadata)
@@ -261,6 +265,13 @@ def _is_auth_failure_metadata(metadata: Mapping[str, Any]) -> bool:
     return (
         _metadata_str(metadata, "failure_type") == "auth"
         or _metadata_str(metadata, "reason_code") == AGENT_AUTH_FAILED
+    )
+
+
+def _is_infra_failure_metadata(metadata: Mapping[str, Any]) -> bool:
+    return (
+        _metadata_str(metadata, "failure_scope") == "infra"
+        or _metadata_str(metadata, "reason_code") == AGENT_SERVICE_UNHEALTHY
     )
 
 

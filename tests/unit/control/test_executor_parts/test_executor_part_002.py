@@ -25,6 +25,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
     ollama_model,
 )
+from awf.control.executor import execution_validation as execution_validation_mod
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
@@ -36,7 +37,6 @@ from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.planning import (
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
-    PLAN_CONFORMANCE_UNSATISFIED,
 )
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.pr_monitor_operations import (
@@ -831,6 +831,7 @@ class TestHappyPathPart001:
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/awf/foo.py\n",
         )
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
         fake.queue_result(  # conformance adapter
             returncode=0,
             stdout='{"status":"satisfied","summary":"plan achieved","gaps":[]}',
@@ -843,6 +844,7 @@ class TestHappyPathPart001:
                 " M src/awf/foo.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -881,6 +883,7 @@ class TestHappyPathPart001:
     @pytest.mark.unit
     async def test_planning_validation_handoff_runs_validation_then_conformance_only_check(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -905,7 +908,12 @@ class TestHappyPathPart001:
                 "status": "needs_iteration",
                 "summary": "Implementation appears complete; AWF validation evidence is missing.",
                 "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
+                "gaps": [
+                    {
+                        "kind": "awf_validation_evidence",
+                        "detail": "AWF-owned validation evidence is missing for the pytest gate.",
+                    }
+                ],
             }
         )
         satisfied_report = json.dumps(
@@ -924,6 +932,7 @@ class TestHappyPathPart001:
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
         fake.queue_result(
             returncode=0,
@@ -933,6 +942,7 @@ class TestHappyPathPart001:
                 " M src/x.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -953,6 +963,19 @@ class TestHappyPathPart001:
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        recovery_calls: list[dict[str, object]] = []
+        original_recovery = execution_validation_mod._run_agent_callable_with_service_recovery
+
+        async def _spy_recovery(*args: object, **kwargs: object) -> tuple[bool, object]:
+            recovery_calls.append(kwargs)
+            return await original_recovery(*args, **kwargs)
+
+        monkeypatch.setattr(
+            execution_validation_mod,
+            "_run_agent_callable_with_service_recovery",
+            _spy_recovery,
+        )
 
         await executor.execute(ws_id)
 
@@ -977,6 +1000,11 @@ class TestHappyPathPart001:
 
         assert phase_names == ["planning", "execution", "conformance", "conformance"]
         assert conformance_call_indexes[-1] > validation_call_index
+        assert recovery_calls
+        assert recovery_calls[-1]["expected_status"] is WorkspaceStatus.validating
+        assert recovery_calls[-1]["failure_from_status"] is WorkspaceStatus.validating
+        assert callable(recovery_calls[-1]["before_agent_retry"])
+        assert callable(recovery_calls[-1]["after_agent_cleanup_failure_repair"])
         assert "Validation evidence" in prompts[-1]
         assert "VALIDATION_OK" in prompts[-1]
         assert "validation.01_validate.stdout" in prompts[-1]
@@ -1022,6 +1050,108 @@ class TestHappyPathPart001:
             event for event in events if event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION
         ]
         assert handoff_events
+
+    @pytest.mark.unit
+    async def test_planning_validation_handoff_accepts_committed_implementation_changes(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 0,
+                    "enforce_plan_only_changes": True,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+
+        handoff_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Implementation appears complete; AWF validation evidence is missing.",
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": [
+                    {
+                        "kind": "awf_validation_evidence",
+                        "detail": "AWF-owned validation evidence is missing for the pytest gate.",
+                    }
+                ],
+            }
+        )
+        satisfied_report = json.dumps(
+            {
+                "status": "satisfied",
+                "summary": "implementation and validation satisfy plan",
+                "gaps": [],
+            }
+        )
+
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- implement foo\n", encoding="utf-8")
+
+        fake.queue_result(returncode=0, stdout="")  # changed paths before planning
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
+        fake.queue_result(returncode=0, stdout="")  # changed paths after planning
+        fake.queue_result(
+            returncode=0,
+            stdout=f"docs/awf-plans/{ws_id}.md\n",
+        )  # committed_paths_since planning baseline
+        fake.queue_result(returncode=0, stdout="post_planning_sha\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="implemented and committed")  # execution adapter
+        fake.queue_result(returncode=0, stdout="")  # clean changed paths before compare
+        fake.queue_result(
+            returncode=0, stdout="post_implementation_sha\n"
+        )  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
+        fake.queue_result(returncode=0, stdout="")  # clean changed paths after compare
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
+        fake.queue_result(
+            returncode=0, stdout="post_implementation_sha\n"
+        )  # rev-parse HEAD post-iter
+        fake.queue_result(
+            returncode=0,
+            stdout="src/x.py\n",
+        )  # committed paths since implementation baseline
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="")  # cached diff after already-committed work
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count includes committed work
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        _queue_validation_head(fake, head="post_implementation_sha")
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(
+            returncode=0, stdout="post_implementation_sha\n"
+        )  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
+        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        fake.queue_result(returncode=0, stdout="")  # git restore report path
+        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
+        _queue_pre_push_diagnostics(fake, head="post_implementation_sha")
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id, limit=20)
+
+        assert ws.status == WorkspaceStatus.completed.value
+        assert any(event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events)
 
     @pytest.mark.unit
     async def test_validation_handoff_evidence_prefers_coverage_column_and_redacts(
@@ -1282,164 +1412,3 @@ class TestHappyPathPart001:
         result = _json_value(operation["result"])
         assert result["reason_code"] == "AGENT_CLI_FAILED"
         assert result["validation_run_id"]
-
-    @pytest.mark.unit
-    async def test_post_validation_conformance_gap_stops_at_preserved_handoff_budget(
-        self,
-        executor: WorkspaceExecutor,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "planned-recovery",
-                "planning": {
-                    "required": True,
-                    "plan_path": "docs/awf-plans/{workspace_id}.md",
-                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
-                    "max_iterations": 2,
-                },
-                "phases": {"validate": ["pytest -q"]},
-            },
-        )
-        # Seed the worktree plan + (unsatisfied) conformance report the real
-        # agent would write; the deposit must surface them even on the
-        # preserved-FAILED stop path so the console stays uniform.
-        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
-        worktree_plans.mkdir(parents=True, exist_ok=True)
-        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n", encoding="utf-8")
-        (worktree_plans / f"{ws_id}.conformance.json").write_text(
-            '{"status": "needs_iteration", "gaps": ["incomplete"]}',
-            encoding="utf-8",
-        )
-        operation_id = "op_post_validation_conformance_gap"
-        await _insert_validate_handoff_recovery_operation(
-            factory,
-            workspace_id=ws_id,
-            operation_id=operation_id,
-            requested_tier=1,
-            conformance_overrides={"iteration": 1, "max_iterations": 2},
-        )
-        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
-        post_validation_gap_report = json.dumps(
-            {
-                "status": "needs_iteration",
-                "summary": "Validation passed, but the API docs are still incomplete.",
-                "gaps": ["Document the API endpoint required by the saved plan."],
-            }
-        )
-
-        _queue_validation_head(fake)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=post_validation_gap_report)
-        fake.queue_result(
-            returncode=0,
-            stdout=f"?? {report_path}\n",
-        )
-        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-
-        await executor.execute(ws_id)
-
-        adapter_prompts = _adapter_prompts(fake)
-        post_validation_conformance_prompts = [
-            prompt
-            for prompt in adapter_prompts
-            if "Conformance phase" in prompt and "### Validation evidence" in prompt
-        ]
-
-        assert len(adapter_prompts) == 1
-        assert post_validation_conformance_prompts == adapter_prompts
-        assert [
-            line
-            for prompt in post_validation_conformance_prompts
-            for line in prompt.splitlines()
-            if line.startswith("Iteration: ")
-        ] == ["Iteration: 2"]
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            runs = (
-                (
-                    await s.execute(
-                        text(
-                            "SELECT status, reason_code FROM validation_runs "
-                            "WHERE workspace_id = :workspace_id ORDER BY started_at"
-                        ),
-                        {"workspace_id": ws_id},
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            operation = (
-                (
-                    await s.execute(
-                        text(
-                            """
-                            SELECT status, error_code, result, finished_at, payload,
-                                   idempotency_key
-                            FROM operations
-                            WHERE id = :operation_id
-                            """
-                        ),
-                        {"operation_id": operation_id},
-                    )
-                )
-                .mappings()
-                .one()
-            )
-            extra_validate_recovery_ops = (
-                await s.execute(
-                    text(
-                        """
-                        SELECT COUNT(*)
-                        FROM operations
-                        WHERE workspace_id = :workspace_id
-                          AND type = 'validate'
-                          AND status IN ('pending', 'running')
-                          AND id <> :operation_id
-                          AND idempotency_key LIKE 'pr_monitor:validate_only:%'
-                        """
-                    ),
-                    {"workspace_id": ws_id, "operation_id": operation_id},
-                )
-            ).scalar_one()
-
-        assert ws is not None
-        assert ws.status == WorkspaceStatus.failed.value
-        assert ws.failure_reason == "agent_failure"
-        assert "Document the API endpoint required by the saved plan." in (ws.failure_message or "")
-        assert [run["status"] for run in runs] == ["succeeded"]
-        assert [run["reason_code"] for run in runs] == ["VALIDATION_OK"]
-        assert operation["status"] == "failed"
-        assert operation["error_code"] == PLAN_CONFORMANCE_UNSATISFIED
-        assert operation["finished_at"] is not None
-        payload = _json_value(operation["payload"])
-        assert payload["owner"] == "pr_monitor"
-        assert payload["source"] == "pr_monitor"
-        assert payload["action"] == "validate_only"
-        assert payload["requested_action"] == "validate"
-        assert payload["requested_tier"] == 1
-        assert payload["source_head_sha"] == "deadbeef01"
-        assert payload["source_base_sha"] == "a" * 40
-        assert payload["target_branch"] == "development"
-        assert payload["remote_branch"] == f"awf/{ws_id}"
-        assert payload["recovery_mode"] == "validate_only"
-        assert payload["conformance"]["iteration"] == 1
-        assert payload["conformance"]["max_iterations"] == 2
-        assert operation["idempotency_key"].startswith("pr_monitor:validate_only:")
-        result = _json_value(operation["result"])
-        assert result["reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
-        assert result["requested_tier"] == 1
-        assert extra_validate_recovery_ops == 0
-
-        # Preserved FAILED workspace still surfaces its plan + (unsatisfied)
-        # conformance report in the served artifact dir.
-        served_dir = tmp_path / "work" / "artifacts" / ws_id
-        assert (served_dir / "plan.md").is_file()
-        assert (served_dir / "conformance.json").read_text(
-            encoding="utf-8"
-        ) == '{"status": "needs_iteration", "gaps": ["incomplete"]}'

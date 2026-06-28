@@ -37,6 +37,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
+from awf.control.executor import execution_validation as execution_validation_mod
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     ValidationRunRepository,
@@ -1071,6 +1072,7 @@ class TestFixCycleRecoversAfterOneFailure:
     @pytest.mark.unit
     async def test_fix_pass_invokes_adapter_a_second_time(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
@@ -1078,6 +1080,18 @@ class TestFixCycleRecoversAfterOneFailure:
         """A failed validation should trigger a second validation-fix adapter run."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
+        recovery_calls: list[dict[str, object]] = []
+        original_recovery = execution_validation_mod._run_agent_callable_with_service_recovery
+
+        async def _spy_recovery(*args: object, **kwargs: object) -> tuple[bool, object]:
+            recovery_calls.append(kwargs)
+            return await original_recovery(*args, **kwargs)
+
+        monkeypatch.setattr(
+            execution_validation_mod,
+            "_run_agent_callable_with_service_recovery",
+            _spy_recovery,
+        )
         _queue_initial_pass(fake)
         fake.queue_result(returncode=1, stderr="fail")
         _queue_fix_pass(fake)
@@ -1090,6 +1104,11 @@ class TestFixCycleRecoversAfterOneFailure:
         # invocations. Two of them = initial agent + fix-pass agent.
         adapter_calls = [c for c in fake.calls if "codex" in c.args and "exec" in c.args]
         assert len(adapter_calls) == 2
+        assert recovery_calls
+        assert recovery_calls[-1]["expected_status"] is WorkspaceStatus.validating
+        assert recovery_calls[-1]["failure_from_status"] is WorkspaceStatus.validating
+        assert callable(recovery_calls[-1]["before_agent_retry"])
+        assert callable(recovery_calls[-1]["after_agent_cleanup_failure_repair"])
 
     @pytest.mark.unit
     async def test_fix_prompt_embeds_failure_context(

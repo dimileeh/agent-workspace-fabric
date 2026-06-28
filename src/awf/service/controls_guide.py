@@ -277,6 +277,17 @@ async def guide_workspace(
         for key, val in remaining.items():
             if val is not None:
                 claims_reset[key] = val
+    # Operator guide is explicit operator re-engagement: the persisted
+    # HUMAN_WAIT attention episode (set by the monitor's ``NotifyHuman``) has
+    # been superseded by this operator directive. Clear the out-of-band
+    # ``awaiting_human_since`` / ``awaiting_human_reason`` columns now,
+    # mirroring remonitor and the in-process monitor resume clear, so the row
+    # does not stay stuck with ``attention_required=true`` after the operator
+    # has supplied guidance. ``clear_workspace_attention`` is guarded by
+    # ``awaiting_human_since IS NOT NULL`` so it is a DB-level no-op (no row
+    # churn, no spurious ``updated_at`` bump) when there is no episode — a
+    # ``monitoring_pr`` workspace with no prior escalation is untouched.
+    await repo.clear_workspace_attention(workspace.id)
     if state_reset is None:
         await repo.advance_workspace_version(workspace)
     event_payload: dict[str, object | None] = {
