@@ -639,6 +639,8 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
             for marker in (
                 "validation run evidence",
                 "validation run provenance",
+                "validation run artifact",
+                "validation run artifacts",
                 "validation run log",
                 "validation run logs",
             )
