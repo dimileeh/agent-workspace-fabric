@@ -616,8 +616,11 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "not available",
         "not found",
         "not run",
+        "not yet run",
         "has not run",
         "hasn't run",
+        "was not run",
+        "wasn't run",
         "never run",
         "run validation",
         "validation run",
@@ -674,7 +677,15 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
             named_validation_run_evidence_gap
             or any(
                 has_marker(marker)
-                for marker in ("not run", "has not run", "hasn't run", "never run")
+                for marker in (
+                    "not run",
+                    "not yet run",
+                    "has not run",
+                    "hasn't run",
+                    "was not run",
+                    "wasn't run",
+                    "never run",
+                )
             )
         )
     )
@@ -774,7 +785,8 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         r"(?<![a-z0-9_])(?:docs|documentation|document|doc|guide|readme)"
         r"(?![a-z0-9_])[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
         r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
-        r"not found|not run|has not run|hasn't run|never run)\b",
+        r"not found|not run|not yet run|has not run|hasn't run|was not run|wasn't run|"
+        r"never run)\b",
     )
     if any(re.search(pattern, text) for pattern in deterministic_gap_patterns):
         return False
@@ -784,7 +796,8 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
         r"[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
         r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
-        r"not found|not run|has not run|hasn't run|never run)\b",
+        r"not found|not run|not yet run|has not run|hasn't run|was not run|wasn't run|"
+        r"never run)\b",
     )
     if not saved_plan_scoped_check_handoff and any(
         re.search(pattern, text) for pattern in saved_plan_artifact_patterns
@@ -847,7 +860,8 @@ def _is_test_directory_command_target(
         return False
     if (
         re.search(
-            r"(?<![a-z0-9_])(?:has\s+not\s+run|not\s+run|never\s+run)(?![a-z0-9_])",
+            r"(?<![a-z0-9_])(?:has\s+not\s+run|not\s+(?:yet\s+)?run|"
+            r"was\s+not\s+run|wasn't\s+run|never\s+run)(?![a-z0-9_])",
             command_segment,
         )
         is not None
