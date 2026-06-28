@@ -1152,13 +1152,16 @@ async def _run_agent_task_with_optional_planning(
             )
             return None
 
-        implementation_compare = before_compare
+        implementation_artifact_paths = {plan_path, report_path}
+        implementation_compare = before_compare - implementation_artifact_paths
         if report is not None and not implementation_compare:
             if implementation_baseline_sha is not None:
                 try:
-                    implementation_compare = await self._committed_paths_since(
-                        worktree_path, implementation_baseline_sha
-                    )
+                    implementation_compare = (
+                        await self._committed_paths_since(
+                            worktree_path, implementation_baseline_sha
+                        )
+                    ) - implementation_artifact_paths
                 except RuntimeError:
                     _log.exception(
                         "executor.planning_conformance_handoff_diff_failed",

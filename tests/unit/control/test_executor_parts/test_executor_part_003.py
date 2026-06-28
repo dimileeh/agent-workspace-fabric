@@ -677,6 +677,71 @@ class TestHappyPathPart002:
         assert [run["reason_code"] for run in runs] == ["COMMAND_FAILED", "VALIDATION_OK"]
 
     @pytest.mark.unit
+    async def test_planning_validation_handoff_ignores_plan_artifact_only_dirty_diff(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/{workspace_id}.md",
+                    "conformance_report_path": "docs/{workspace_id}.conformance.json",
+                    "max_iterations": 0,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        plan_path = f"docs/{ws_id}.md"
+        report_path = f"docs/{ws_id}.conformance.json"
+        handoff_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Only AWF validation evidence is missing.",
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": [
+                    {
+                        "kind": "awf_validation_evidence",
+                        "detail": "AWF-owned validation evidence is missing for pytest.",
+                    }
+                ],
+            }
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning
+        fake.queue_result(returncode=0, stdout=f"?? {plan_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="no implementation changes")  # execute
+        fake.queue_result(returncode=0, stdout=f"?? {plan_path}\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=handoff_report)
+        fake.queue_result(returncode=0, stdout=f"?? {plan_path}\n?? {report_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since conformance HEAD
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-iter
+        fake.queue_result(returncode=0, stdout="")  # committed paths since implementation baseline
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id, limit=100)
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "agent_failure"
+        assert "plan conformance was not satisfied after 0 iteration(s)" in (
+            ws.failure_message or ""
+        )
+        assert not any(event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events)
+
+    @pytest.mark.unit
     async def test_planning_validation_handoff_keeps_remaining_conformance_fix_iteration(
         self,
         fake: FakeCommandRunner,
