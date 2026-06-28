@@ -175,6 +175,8 @@ class CheckFailureLogResult:
             return (
                 self.failures == other.failures and self.runs_in_progress == other.runs_in_progress
             )
+        if isinstance(other, tuple) and not other:
+            return not self.failures
         return NotImplemented
 
 
