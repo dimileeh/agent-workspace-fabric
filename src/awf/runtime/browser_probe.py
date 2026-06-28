@@ -19,6 +19,8 @@ from awf.runtime.validation_setup import (
     node_package_manager_package_dir,
 )
 
+_BROWSER_PROBE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset({"--cwd", "--dir", "--prefix", "-C"})
+
 
 @dataclass(frozen=True)
 class ProbeExecResult:
@@ -77,6 +79,7 @@ def _browser_probe_node_runtime(package_manager: str) -> str:
         package_manager_tokens = shlex.split(package_manager)
     except ValueError:
         return "node"
+    package_manager_tokens = _browser_probe_without_directory_scope(package_manager_tokens)
     executable = package_manager_tokens[0] if package_manager_tokens else "npm"
     if executable == "yarn":
         return shlex.join([*package_manager_tokens, "node"])
@@ -85,6 +88,27 @@ def _browser_probe_node_runtime(package_manager: str) -> str:
     if executable == "npm" and len(package_manager_tokens) > 1:
         return shlex.join([*package_manager_tokens, "exec", "--", "node"])
     return "node"
+
+
+def _browser_probe_without_directory_scope(tokens: list[str]) -> list[str]:
+    stripped: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _BROWSER_PROBE_PM_LOCATION_OPTION_VALUE_FLAGS:
+            index += 2
+            continue
+        if token.startswith("-C") and len(token) > 2:
+            index += 1
+            continue
+        if token.startswith("--") and "=" in token:
+            option_name, _, _option_value = token.partition("=")
+            if option_name in _BROWSER_PROBE_PM_LOCATION_OPTION_VALUE_FLAGS:
+                index += 1
+                continue
+        stripped.append(token)
+        index += 1
+    return stripped
 
 
 _BROWSER_PROBE_SCRIPT = _browser_probe_script("node")
