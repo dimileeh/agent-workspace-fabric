@@ -434,6 +434,35 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "pnpm --filter web exec playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace"
 
+    @pytest.mark.parametrize(
+        ("validate_command", "expected"),
+        [
+            (
+                "npm run test:e2e --workspace web",
+                "npm --workspace web exec -- playwright install chromium",
+            ),
+            (
+                "npm test -w web",
+                "npm -w web exec -- playwright install chromium",
+            ),
+        ],
+    )
+    def test_root_npm_setup_uses_late_validate_workspace_scope_for_browser_install(
+        self,
+        validate_command: str,
+        expected: str,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["npm ci"],
+            validate=[validate_command],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == expected
+        assert browser_probe_workdir(profile) == "/workspace"
+
 
 @pytest.mark.unit
 class TestLeadingExecutable:

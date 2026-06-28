@@ -109,6 +109,8 @@ _SETUP_DEPENDENCY_NETWORK_DEFAULT_BACKOFF_SECONDS = (1.0, 3.0)
 _UV_DEV_VALIDATION_TOOLS = frozenset({"mypy", "pre-commit", "pytest", "ruff"})
 _NODE_PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun"})
 _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS = frozenset({"ci", "i", "install"})
+_NPM_SCRIPT_VALIDATION_SUBCOMMANDS = frozenset({"run", "run-script"})
+_NPM_DIRECT_SCRIPT_VALIDATION_SUBCOMMANDS = frozenset({"test", "t"})
 _COREPACK_PREAMBLE_SUBCOMMANDS = frozenset({"enable", "install", "prepare", "use"})
 _NODE_PM_OPTION_VALUE_FLAGS = frozenset(
     {
@@ -380,9 +382,59 @@ def _node_scoped_package_manager_from_tokens(tokens: list[str], index: int) -> s
                 command_index,
                 location_tokens,
             )
+        if executable == "npm":
+            package_manager = _node_npm_validation_workspace_package_manager(
+                tokens,
+                command_index,
+                location_tokens,
+            )
+            if package_manager is not None:
+                return package_manager
         break
     if location_tokens:
         return _node_package_manager_command(executable, location_tokens)
+    return None
+
+
+def _node_npm_validation_workspace_package_manager(
+    tokens: list[str],
+    subcommand_index: int,
+    location_tokens: list[str],
+) -> str | None:
+    subcommand = tokens[subcommand_index]
+    if subcommand in _NPM_SCRIPT_VALIDATION_SUBCOMMANDS:
+        saw_script = False
+    elif subcommand in _NPM_DIRECT_SCRIPT_VALIDATION_SUBCOMMANDS:
+        saw_script = True
+    else:
+        return None
+    inferred_location_tokens = list(location_tokens)
+    option_index = subcommand_index + 1
+    while option_index < len(tokens):
+        token = tokens[option_index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS or token == "--":
+            break
+        if token in _NODE_PM_OPTION_VALUE_FLAGS:
+            if option_index + 1 >= len(tokens):
+                return None
+            if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
+                inferred_location_tokens.extend((token, tokens[option_index + 1]))
+            option_index += 2
+            continue
+        if token.startswith("--") and "=" in token:
+            option_name, _, _ = token.partition("=")
+            if option_name in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
+                inferred_location_tokens.append(token)
+            option_index += 1
+            continue
+        if token.startswith("-"):
+            option_index += 1
+            continue
+        if not saw_script:
+            saw_script = True
+        option_index += 1
+    if saw_script and inferred_location_tokens:
+        return _node_package_manager_command("npm", inferred_location_tokens)
     return None
 
 
