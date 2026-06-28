@@ -543,6 +543,7 @@ async def run_validation_and_fix_cycle(
             coverage_evidence_reason_code=coverage_evidence.reason_code,
             coverage_evidence_source_run_id=coverage_evidence.source_run_id,
         )
+        await _record_deferred_runtime_browser_findings()
         if val_result.all_passed:
             conformance_failure: _PlanningRunFailure | None = None
             if planning_validation_handoff is not None:
@@ -849,7 +850,6 @@ async def run_validation_and_fix_cycle(
                     )
                     if post_conformance_head_sha:
                         successful_validation_workspace_head_sha = post_conformance_head_sha
-                await _record_deferred_runtime_browser_findings()
                 await self._finish_pending_validate_operations(
                     workspace_id=workspace_id,
                     status=OperationStatus.succeeded,
@@ -898,7 +898,6 @@ async def run_validation_and_fix_cycle(
             # If a post-validation conformance fix already consumed a
             # prior successful run, this terminal path intentionally
             # reports coverage from the fresh failing validation result.
-            await _record_deferred_runtime_browser_findings()
             await self._finish_pending_validate_operations(
                 workspace_id=workspace_id,
                 status=OperationStatus.failed,
