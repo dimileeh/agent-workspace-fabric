@@ -11,10 +11,16 @@ from awf.profiles.models import RUNTIME_BROWSER_UNAVAILABLE, WorkspaceProfile
 from awf.runtime.validation_runner import ValidationRunner
 
 
-def _profile_with_browsers(browsers: list[str]) -> WorkspaceProfile:
-    return WorkspaceProfile.model_validate(
-        {"name": "browser-profile", "runtime": {"browsers": browsers}}
-    )
+def _profile_with_browsers(
+    browsers: list[str], *, setup: list[str] | None = None
+) -> WorkspaceProfile:
+    payload: dict[str, object] = {
+        "name": "browser-profile",
+        "runtime": {"browsers": browsers},
+    }
+    if setup is not None:
+        payload["phases"] = {"setup": setup}
+    return WorkspaceProfile.model_validate(payload)
 
 
 def _runner(fake: FakeCommandRunner, tmp_path: Path) -> ValidationRunner:
@@ -43,6 +49,25 @@ class TestProbeRuntimeBrowserFindings:
         assert "awf_ws1" in argv
         assert "agent" in argv
         assert argv[-1] == "chromium"
+
+    async def test_probe_uses_scoped_npm_package_workdir(self, tmp_path: Path) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="OK chromium\n")
+        runner = _runner(fake, tmp_path)
+
+        findings = await runner.probe_runtime_browser_findings(
+            workspace_id="ws-1",
+            compose_project="awf_ws1",
+            compose_file=tmp_path / "compose.yml",
+            profile=_profile_with_browsers(
+                ["chromium"],
+                setup=["npm --prefix apps/web ci"],
+            ),
+        )
+
+        assert findings == ()
+        argv = fake.calls[0].args
+        assert argv[argv.index("-w") + 1] == "/workspace/apps/web"
 
     async def test_probe_skips_without_browsers(self, tmp_path: Path) -> None:
         fake = FakeCommandRunner()

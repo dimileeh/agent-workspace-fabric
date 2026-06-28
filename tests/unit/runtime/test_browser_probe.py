@@ -16,6 +16,7 @@ from awf.profiles.models import (
 from awf.runtime.browser_probe import (
     _BROWSER_PROBE_SCRIPT,
     ProbeExecResult,
+    browser_probe_workdir,
     probe_runtime_browsers,
 )
 
@@ -23,6 +24,16 @@ from awf.runtime.browser_probe import (
 def _profile_with_browsers(browsers: list[str]) -> WorkspaceProfile:
     return WorkspaceProfile.model_validate(
         {"name": "browser-profile", "runtime": {"browsers": browsers}}
+    )
+
+
+def _profile_with_setup_and_browsers(commands: list[str]) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "browser-profile",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": commands},
+        }
     )
 
 
@@ -115,6 +126,16 @@ class TestProbeRuntimeBrowsers:
         findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
 
         assert findings == ()
+
+    def test_browser_probe_workdir_uses_scoped_npm_package_directory(self) -> None:
+        profile = _profile_with_setup_and_browsers(["npm --prefix apps/web ci"])
+
+        assert browser_probe_workdir(profile) == "/workspace/apps/web"
+
+    def test_browser_probe_workdir_keeps_workspace_root_for_unscoped_install(self) -> None:
+        profile = _profile_with_setup_and_browsers(["npm ci"])
+
+        assert browser_probe_workdir(profile) == "/workspace"
 
     def test_embedded_probe_reports_declared_browsers_missing_without_playwright(
         self, tmp_path

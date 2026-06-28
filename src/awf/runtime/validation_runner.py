@@ -50,6 +50,7 @@ from awf.runtime.browser_probe import (
     ProbeExecResult as BrowserProbeExecResult,
 )
 from awf.runtime.browser_probe import (
+    browser_probe_workdir,
     probe_runtime_browsers,
 )
 from awf.runtime.logs import LogStore
@@ -448,6 +449,7 @@ class ValidationRunner:
                 cli_args=cli_args,
                 source="browser_probe",
                 label="browser_probe",
+                workdir=browser_probe_workdir(profile),
             )
             try:
                 result = await asyncio.wait_for(

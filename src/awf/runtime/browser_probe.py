@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.profiles.models import (
     ProfileLintFinding,
     WorkspaceProfile,
     runtime_browser_findings,
 )
+from awf.runtime.validation_setup import node_package_manager_package_dir
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,16 @@ NODE
 true
 """.strip()
 _BROWSER_STATUS_RE = re.compile(r"^(?P<status>OK|MISSING) (?P<browser>\S+)$", re.MULTILINE)
+
+
+def browser_probe_workdir(profile: WorkspaceProfile) -> str:
+    """Return the in-container directory where Playwright should resolve from."""
+    package_dir = node_package_manager_package_dir(profile)
+    if package_dir is None:
+        return DEFAULT_AGENT_WORKDIR
+    if package_dir.startswith("/"):
+        return package_dir
+    return posixpath.normpath(posixpath.join(DEFAULT_AGENT_WORKDIR, package_dir))
 
 
 async def probe_runtime_browsers(

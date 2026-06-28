@@ -264,6 +264,11 @@ def playwright_browser_install_command(profile: WorkspaceProfile) -> ProfileComm
     )
 
 
+def node_package_manager_package_dir(profile: WorkspaceProfile) -> str | None:
+    """Return the inferred Node package directory from setup, when scoped."""
+    return _node_package_manager_package_dir(_infer_node_package_manager(profile))
+
+
 def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
     fallback_package_manager: str | None = None
     for command in profile.phases.setup:
@@ -322,6 +327,28 @@ def _node_package_manager_command(executable: str, location_tokens: list[str]) -
     if not location_tokens:
         return executable
     return shlex.join([executable, *location_tokens])
+
+
+def _node_package_manager_package_dir(package_manager: str) -> str | None:
+    try:
+        tokens = shlex.split(package_manager)
+    except ValueError:
+        return None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _NODE_PM_LOCATION_OPTION_VALUE_FLAGS:
+            if index + 1 >= len(tokens):
+                return None
+            return tokens[index + 1]
+        if token.startswith("-C") and len(token) > 2:
+            return token[2:]
+        if token.startswith("--") and "=" in token:
+            option_name, _, option_value = token.partition("=")
+            if option_name in _NODE_PM_LOCATION_OPTION_VALUE_FLAGS:
+                return option_value or None
+        index += 1
+    return None
 
 
 def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecutionCommand]:
