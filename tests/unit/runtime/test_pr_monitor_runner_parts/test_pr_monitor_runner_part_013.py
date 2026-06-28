@@ -57,6 +57,12 @@ def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") ->
     )
 
 
+def _write_compose_file(tmp_path: Path) -> Path:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    return compose_file
+
+
 @pytest.mark.unit
 async def test_run_returns_after_terminal_agent_service_recovery_sentinel(
     factory: async_sessionmaker[AsyncSession],
@@ -160,8 +166,7 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
         return_value=None,
     )
     command_evidence: list[str] = []
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_file = _write_compose_file(tmp_path)
 
     result = await runner._run_monitor_agent_with_service_recovery(
         workspace_id=workspace_id,
@@ -268,7 +273,7 @@ async def test_monitor_agent_service_recovery_reruns_pre_launch_guards_before_re
     result = await runner._run_monitor_agent_with_service_recovery(
         workspace_id=workspace_id,
         compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
+        compose_file=_write_compose_file(tmp_path),
         prompt="fix the comment",
         log_source="recovery",
         command_evidence=[],
@@ -424,7 +429,7 @@ async def test_monitor_agent_idle_timeout_uses_workspace_compose_timeout_for_res
         "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
         return_value=None,
     )
-    compose_file = tmp_path / "compose.yml"
+    compose_file = _write_compose_file(tmp_path)
 
     result = await runner._run_monitor_agent_with_service_recovery(
         workspace_id=workspace_id,
@@ -836,12 +841,13 @@ async def test_monitor_agent_service_recovery_stops_when_workspace_leaves_monito
         "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
         side_effect=_cancel_workspace_after_restart,
     )
+    compose_file = _write_compose_file(tmp_path)
 
     with pytest.raises(_MonitorAgentServiceRecoverySupersededError):
         await runner._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
+            compose_file=compose_file,
             prompt="fix the comment",
             log_source="recovery",
             command_evidence=[],
@@ -902,12 +908,13 @@ async def test_monitor_agent_service_recovery_stops_when_monitor_claim_is_supers
         "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
         side_effect=_supersede_monitor_claim_after_restart,
     )
+    compose_file = _write_compose_file(tmp_path)
 
     with pytest.raises(_MonitorAgentServiceRecoverySupersededError):
         await runner._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
+            compose_file=compose_file,
             prompt="fix the comment",
             log_source="recovery",
             command_evidence=[],
@@ -1006,12 +1013,13 @@ async def test_monitor_agent_service_restart_failure_terminates_without_provider
             stderr="compose unavailable",
         ),
     )
+    compose_file = _write_compose_file(tmp_path)
 
     with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
         await runner._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
+            compose_file=compose_file,
             prompt="fix the comment",
             log_source="recovery",
             command_evidence=[],
@@ -1073,12 +1081,13 @@ async def test_monitor_agent_service_restart_unexpected_error_propagates(
         "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
         side_effect=RuntimeError("unexpected bug"),
     )
+    compose_file = _write_compose_file(tmp_path)
 
     with pytest.raises(RuntimeError, match="unexpected bug"):
         await runner._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
+            compose_file=compose_file,
             prompt="fix the comment",
             log_source="recovery",
             command_evidence=[],
@@ -1127,12 +1136,13 @@ async def test_monitor_agent_service_recovery_exhaustion_terminates_workspace(
         "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
         return_value=None,
     )
+    compose_file = _write_compose_file(tmp_path)
 
     with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
         await runner._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
+            compose_file=compose_file,
             prompt="fix the comment",
             log_source="recovery",
             command_evidence=[],
