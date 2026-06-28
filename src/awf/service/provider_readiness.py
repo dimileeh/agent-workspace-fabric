@@ -40,6 +40,7 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
 _GITHUB_TIMEOUT_SECONDS = 5.0
 _HTTP_TIMEOUT_SECONDS = 2.0
 _PROVIDER_PROBE_TIMEOUT_SECONDS = 5.0
+_RUNTIME_CLI_PROBE_TIMEOUT_SECONDS = 30.0
 # Wall/read bound for a streamed ``POST /api/pull``. Multi-GB models take
 # minutes, so the bound is generous; a stalled stream still cannot hang forever
 # because the bound is passed through to the injected HTTP stream seam.
