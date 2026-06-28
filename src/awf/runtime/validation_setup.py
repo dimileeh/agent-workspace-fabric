@@ -271,17 +271,29 @@ def profile_phase_command_plan(
                 )
                 for command in profile.database.pre_validation_refresh
             )
+            pending_validate_commands: list[ProfileExecutionCommand] = []
             for validate_command in _phase_commands(profile, "validate"):
-                commands.append(validate_command)
                 if (
                     defer_browser_install_until_validate_install
                     and deferred_browser_install is not None
                     and _node_dependency_install_package_manager(validate_command.command.command)
                     is not None
                 ):
+                    commands.append(validate_command)
                     commands.append(deferred_browser_install)
                     deferred_browser_install = None
                     defer_browser_install_until_validate_install = False
+                    commands.extend(pending_validate_commands)
+                    pending_validate_commands = []
+                    continue
+                if (
+                    defer_browser_install_until_validate_install
+                    and deferred_browser_install is not None
+                ):
+                    pending_validate_commands.append(validate_command)
+                    continue
+                commands.append(validate_command)
+            commands.extend(pending_validate_commands)
             continue
         if phase == "pre_agent":
             for pre_agent_command in _phase_commands(profile, phase):

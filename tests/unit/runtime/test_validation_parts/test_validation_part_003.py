@@ -394,6 +394,36 @@ class TestHappyPath:
         assert commands[2].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_runs_validate_install_before_browser_tests(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-validate-install-reordered-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["node scripts/generate-config.js"],
+                    "validate": [
+                        "pnpm test:e2e",
+                        "pnpm install --frozen-lockfile",
+                        "pnpm test:unit",
+                    ],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup", "validate"))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "node scripts/generate-config.js"),
+            ("validate", "pnpm install --frozen-lockfile"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm test:e2e"),
+            ("validate", "pnpm test:unit"),
+        ]
+        assert commands[2].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_adds_one_browser_install_for_multiple_browsers(
         self,
     ) -> None:
