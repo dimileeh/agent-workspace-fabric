@@ -38,9 +38,6 @@ from awf.runtime.validation_command_probe import (
     _leading_executables as _leading_executables,
 )
 from awf.runtime.validation_command_probe import (
-    _shell_tokens as _shell_tokens,
-)
-from awf.runtime.validation_command_probe import (
     validate_command_probe_targets as validate_command_probe_targets,
 )
 from awf.runtime.validation_coverage import (
@@ -88,6 +85,19 @@ HEALTHCHECK_TIMEOUT = "HEALTHCHECK_TIMEOUT"
 HEALTHCHECK_COMMAND_FAILED = "HEALTHCHECK_COMMAND_FAILED"
 HEALTHCHECK_HTTP_STATUS_MISMATCH = "HEALTHCHECK_HTTP_STATUS_MISMATCH"
 HEALTHCHECK_INVALID_CONFIGURATION = "HEALTHCHECK_INVALID_CONFIGURATION"
+
+
+def _shell_tokens(command: str, *, comments: bool = False) -> list[str] | None:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        if not comments:
+            lexer.commenters = ""
+        return list(lexer)
+    except ValueError:
+        return None
+
+
 PYTEST_TEST_FAILURE = "PYTEST_TEST_FAILURE"
 PROFILE_PREFLIGHT_PHASE = "profile_preflight"
 PROFILE_VALIDATION_TOOL_UNAVAILABLE = "PROFILE_VALIDATION_TOOL_UNAVAILABLE"
@@ -889,7 +899,7 @@ def _leading_cd_package_scope(tokens: list[str], index: int) -> tuple[str, int] 
     if package_dir in _SHELL_COMPOUND_CONTROL_TOKENS or package_dir.startswith("-"):
         return None
     separator_index = package_dir_index + 1
-    if separator_index >= len(tokens) or tokens[separator_index] != "&&":
+    if separator_index >= len(tokens) or tokens[separator_index] not in {"&&", ";"}:
         return None
     install_index = separator_index + 1
     while install_index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[install_index]):
