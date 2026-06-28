@@ -114,6 +114,14 @@ class TestPlaywrightBrowserInstallCommand:
                 "npm install --prefix=apps/web",
                 "npm --prefix=apps/web exec -- playwright install chromium",
             ),
+            (
+                "npm --workspace apps/web ci",
+                "npm --workspace apps/web exec -- playwright install chromium",
+            ),
+            (
+                "npm -w apps/web ci",
+                "npm -w apps/web exec -- playwright install chromium",
+            ),
         ],
     )
     def test_preserves_npm_package_directory_from_setup_install(
@@ -128,6 +136,10 @@ class TestPlaywrightBrowserInstallCommand:
         assert command is not None
         assert command.command == expected
         assert command.required is False
+        assert (
+            browser_probe_workdir(_profile_with_setup_and_browsers([setup_command]))
+            == "/workspace/apps/web"
+        )
 
     def test_unscoped_npm_install_keeps_npx_playwright_command(self) -> None:
         command = playwright_browser_install_command(_profile_with_setup_and_browsers(["npm ci"]))
