@@ -119,6 +119,7 @@ _NODE_PM_OPTION_VALUE_FLAGS = frozenset(
         "-C",
     }
 )
+_NODE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset({"--cwd", "--prefix", "-C"})
 _UV_OPTION_VALUE_FLAGS = frozenset(
     {
         "--config-setting",
@@ -230,12 +231,25 @@ def profile_phase_command_plan(
 def playwright_command(package_manager: str, *args: str) -> str:
     """Build a package-manager-aware Playwright command."""
     escaped_args = shlex.join(args)
-    if package_manager == "pnpm":
+    try:
+        package_manager_tokens = shlex.split(package_manager)
+    except ValueError:
+        package_manager_tokens = [package_manager]
+    executable = package_manager_tokens[0] if package_manager_tokens else "npm"
+    if executable == "pnpm":
+        if len(package_manager_tokens) > 1:
+            return shlex.join([*package_manager_tokens, "exec", "playwright", *args])
         return f"pnpm exec playwright {escaped_args}"
-    if package_manager == "yarn":
+    if executable == "yarn":
+        if len(package_manager_tokens) > 1:
+            return shlex.join([*package_manager_tokens, "playwright", *args])
         return f"yarn playwright {escaped_args}"
-    if package_manager == "bun":
+    if executable == "bun":
+        if len(package_manager_tokens) > 1:
+            return shlex.join([*package_manager_tokens, "x", "playwright", *args])
         return f"bunx playwright {escaped_args}"
+    if executable == "npm" and len(package_manager_tokens) > 1:
+        return shlex.join([*package_manager_tokens, "exec", "--", "playwright", *args])
     return f"npx playwright {escaped_args}"
 
 
@@ -272,20 +286,42 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     executable = tokens[index]
     if executable not in _NODE_PACKAGE_MANAGERS:
         return None
+    location_tokens: list[str] = []
     subcommand_index = index + 1
     while subcommand_index < len(tokens):
         token = tokens[subcommand_index]
         if token in _NODE_PM_OPTION_VALUE_FLAGS:
+            if token in _NODE_PM_LOCATION_OPTION_VALUE_FLAGS and subcommand_index + 1 < len(tokens):
+                location_tokens.extend((token, tokens[subcommand_index + 1]))
             subcommand_index += 2
             continue
+        if token.startswith("-C") and len(token) > 2:
+            location_tokens.append(token)
+            subcommand_index += 1
+            continue
         if token.startswith("--") and "=" in token:
+            option_name, _, _ = token.partition("=")
+            if option_name in _NODE_PM_LOCATION_OPTION_VALUE_FLAGS:
+                location_tokens.append(token)
             subcommand_index += 1
             continue
         if token.startswith("-"):
             subcommand_index += 1
             continue
-        return executable if token in _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS else None
-    return executable if executable == "yarn" else None
+        return (
+            _node_package_manager_command(executable, location_tokens)
+            if token in _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS
+            else None
+        )
+    if executable == "yarn":
+        return _node_package_manager_command(executable, location_tokens)
+    return None
+
+
+def _node_package_manager_command(executable: str, location_tokens: list[str]) -> str:
+    if not location_tokens:
+        return executable
+    return shlex.join([executable, *location_tokens])
 
 
 def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecutionCommand]:

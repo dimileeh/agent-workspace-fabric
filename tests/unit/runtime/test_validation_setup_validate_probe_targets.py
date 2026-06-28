@@ -17,11 +17,22 @@ from awf.runtime.validation import (
     _leading_executables,
     validate_command_probe_targets,
 )
+from awf.runtime.validation_setup import playwright_browser_install_command
 
 
 def _profile_with_validate(commands: list[str]) -> WorkspaceProfile:
     return WorkspaceProfile.model_validate(
         {"name": "validate-profile", "phases": {"validate": commands}}
+    )
+
+
+def _profile_with_setup_and_browsers(commands: list[str]) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "browser-profile",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": commands},
+        }
     )
 
 
@@ -79,6 +90,41 @@ def _profile_with_coverage_gate(
             },
         }
     )
+
+
+@pytest.mark.unit
+class TestPlaywrightBrowserInstallCommand:
+    @pytest.mark.parametrize(
+        ("setup_command", "expected"),
+        [
+            (
+                "npm --prefix apps/web ci",
+                "npm --prefix apps/web exec -- playwright install chromium",
+            ),
+            (
+                "npm --cwd apps/web install",
+                "npm --cwd apps/web exec -- playwright install chromium",
+            ),
+        ],
+    )
+    def test_preserves_npm_package_directory_from_setup_install(
+        self,
+        setup_command: str,
+        expected: str,
+    ) -> None:
+        command = playwright_browser_install_command(
+            _profile_with_setup_and_browsers([setup_command])
+        )
+
+        assert command is not None
+        assert command.command == expected
+        assert command.required is False
+
+    def test_unscoped_npm_install_keeps_npx_playwright_command(self) -> None:
+        command = playwright_browser_install_command(_profile_with_setup_and_browsers(["npm ci"]))
+
+        assert command is not None
+        assert command.command == "npx playwright install chromium"
 
 
 @pytest.mark.unit
