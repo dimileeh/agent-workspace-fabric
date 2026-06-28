@@ -956,6 +956,7 @@ class GitHubClient:
                     "api",
                     f"repos/{repo.slug()}/check-runs/{check_run_id}/annotations",
                     "--paginate",
+                    "--slurp",
                 ],
                 operation="check_run_annotations",
                 strict=False,
@@ -968,10 +969,14 @@ class GitHubClient:
                 return ""
             if not isinstance(payload, list):
                 return ""
+            annotations: list[dict[str, Any]] = []
+            for page_or_item in payload:
+                if isinstance(page_or_item, dict):
+                    annotations.append(page_or_item)
+                elif isinstance(page_or_item, list):
+                    annotations.extend(item for item in page_or_item if isinstance(item, dict))
             lines: list[str] = []
-            for item in payload:
-                if not isinstance(item, dict):
-                    continue
+            for item in annotations:
                 message = _clean_optional_str(item.get("message"))
                 raw_details = _clean_optional_str(item.get("raw_details"))
                 path = _clean_optional_str(item.get("path"))

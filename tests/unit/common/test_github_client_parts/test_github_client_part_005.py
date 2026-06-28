@@ -347,7 +347,9 @@ class TestFetchFailingCheckLogsRollupFallback:
         assert _run_view_calls(fake) == []
 
     @pytest.mark.unit
-    async def test_completed_empty_log_uses_check_run_annotations_fallback(self) -> None:
+    async def test_completed_empty_log_uses_paginated_check_run_annotations_fallback(
+        self,
+    ) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -367,13 +369,24 @@ class TestFetchFailingCheckLogsRollupFallback:
             returncode=0,
             stdout=json.dumps(
                 [
-                    {
-                        "path": "src/awf/runtime/foo.py",
-                        "start_line": 10,
-                        "annotation_level": "failure",
-                        "message": "F401 imported but unused",
-                        "raw_details": "Error: Process completed with exit code 1.",
-                    }
+                    [
+                        {
+                            "path": "src/awf/runtime/foo.py",
+                            "start_line": 10,
+                            "annotation_level": "failure",
+                            "message": "F401 imported but unused",
+                            "raw_details": "Error: Process completed with exit code 1.",
+                        }
+                    ],
+                    [
+                        {
+                            "path": "src/awf/runtime/bar.py",
+                            "start_line": 22,
+                            "start_column": 7,
+                            "annotation_level": "failure",
+                            "message": "E501 line too long",
+                        }
+                    ],
                 ]
             ),
         )
@@ -396,6 +409,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         assert runs_in_progress is False
         assert len(failures) == 1
         assert "src/awf/runtime/foo.py:10:1: F401 imported but unused" in failures[0].log_excerpt
+        assert "src/awf/runtime/bar.py:22:7: E501 line too long" in failures[0].log_excerpt
         assert "Process completed with exit code 1" in failures[0].log_excerpt
         assert any("F401 imported" in item for item in failures[0].error_summaries)
         assert any(
@@ -405,6 +419,7 @@ class TestFetchFailingCheckLogsRollupFallback:
                 "api",
                 "repos/o/r/check-runs/789/annotations",
                 "--paginate",
+                "--slurp",
             ]
             for call in fake.calls
         )
