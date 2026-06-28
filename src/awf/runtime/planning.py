@@ -745,7 +745,12 @@ def _is_test_directory_command_target(
     text: str, path_match_start: int, path_match_end: int
 ) -> bool:
     if (
-        re.match(r"(?:\s*(?:[`),.;:]|$)|\s+-{1,2}[a-z0-9][a-z0-9-]*)", text[path_match_end:])
+        re.match(
+            r"(?:\s*(?:[`),.;:]|$)|\s+-{1,2}[a-z0-9][a-z0-9-]*|"
+            r"\s+(?:(?:\.{1,2}[/\\])|[a-z0-9_.-]+[/\\]|"
+            r"[a-z0-9_.-]+\.[a-z0-9_.-]+)[^\s`),;:]*)",
+            text[path_match_end:],
+        )
         is None
     ):
         return False
