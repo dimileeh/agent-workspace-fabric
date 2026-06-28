@@ -571,6 +571,28 @@ def test_conformance_requires_awf_validation_accepts_named_command_handoff_with_
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "Run lint during AWF validation: lint tests.",
+        "Run build during AWF validation: build tests.",
+        "Run coverage during AWF validation: coverage tests.",
+    ),
+)
+def test_conformance_requires_awf_validation_accepts_named_validation_tools_targeting_tests(
+    gap: str,
+) -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Implementation is complete; AWF validation evidence is missing.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(gap,),
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
 def test_conformance_requires_awf_validation_accepts_saved_plan_scoped_check_handoff() -> None:
     gap = (
         "Missing focused-check evidence from the saved plan for scoped validation "

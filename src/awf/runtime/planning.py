@@ -744,7 +744,8 @@ def _is_test_directory_command_target(
         return False
     return (
         re.search(
-            r"(?<![a-z0-9_])(?:pytest|ruff\s+check|mypy|npm|git\s+diff\s+--check)"
+            r"(?<![a-z0-9_])(?:pytest|ruff\s+check|mypy|coverage|npm|lint|build|"
+            r"git\s+diff\s+--check)"
             r"(?![a-z0-9_])",
             command_segment,
         )
@@ -756,7 +757,7 @@ def _starts_with_validation_command_segment(segment: str) -> bool:
     return (
         re.match(
             r"\s*(?:uv\s+run|python(?:3(?:\.\d+)?)?(?:\s+-m)?|"
-            r"/usr/bin/env|env|pytest|ruff\s+check|mypy|npm|"
+            r"/usr/bin/env|env|pytest|ruff\s+check|mypy|coverage|npm|lint|build|"
             r"git\s+diff\s+--check)(?![a-z0-9_])",
             segment,
         )
