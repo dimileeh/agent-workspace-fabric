@@ -1094,7 +1094,7 @@ async def _repair_mirror_hooks_path_once(mirror_path: Path) -> tuple[bool, bool]
                 ),
                 config_scope_args=("--local",),
                 config_path=mirror_path / "config",
-                operation_prefix="mirror",
+                operation_prefix="linked_worktree",
             )
             or repaired
         )

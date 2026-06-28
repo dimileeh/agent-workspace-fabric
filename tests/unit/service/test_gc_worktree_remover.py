@@ -18,6 +18,7 @@ from awf.service.gc import (
     _default_worktree_remover,
     plan_terminal_workspace_gc,
 )
+from awf.service.gc_worktrees import remove_orphan_worktree
 
 
 @pytest.fixture
@@ -30,6 +31,41 @@ async def session_factory(
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _git(args: list[str], cwd: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _make_mirror_with_worktree(tmp_path: Path, work_dir: Path, workspace_id: str) -> str:
+    import subprocess
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(["init", "-q", "-b", "main"], origin)
+    _git(["config", "user.name", "AWF Test"], origin)
+    _git(["config", "user.email", "awf@test.local"], origin)
+    (origin / "README.md").write_text("initial\n", encoding="utf-8")
+    _git(["add", "."], origin)
+    _git(["commit", "-q", "-m", "init"], origin)
+    repo_url = str(origin)
+    mirror = work_dir / "git" / "mirrors" / "repo.git"
+    mirror.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--bare", repo_url, str(mirror)],
+        check=True,
+        capture_output=True,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    worktree.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "--git-dir", str(mirror), "worktree", "add", str(worktree), "main"],
+        check=True,
+        capture_output=True,
+    )
+    return repo_url
 
 
 async def _workspace(
@@ -626,3 +662,50 @@ async def test_default_worktree_remover_handles_git_error(
         assert result.status == "failed"
         assert result.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
         assert "mirror missing" in result.error
+
+
+@pytest.mark.unit
+async def test_remove_orphan_worktree_uses_repo_url_from_linked_mirror(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    repo_url = _make_mirror_with_worktree(tmp_path, work_dir, workspace_id)
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    mock_gm.remove_worktree.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        repo_url=repo_url,
+    )
+
+
+@pytest.mark.unit
+async def test_remove_orphan_worktree_fails_loudly_when_mirror_context_unresolved(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktree_path = work_dir / "git" / "worktrees" / "ws_rowless"
+    _write(worktree_path / ".git", "[core]\n\trepositoryformatversion = 0\n")
+
+    result = await remove_orphan_worktree(
+        workspace_id="ws_rowless",
+        path=worktree_path,
+        work_dir=work_dir,
+    )
+
+    assert result.status == "failed"
+    assert result.reason_code == "ORPHAN_WORKTREE_GIT_CONTEXT_UNRESOLVED"
+    assert result.error is not None
+    assert "could not resolve mirror" in result.error
+    assert worktree_path.exists()

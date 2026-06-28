@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from awf.db.models import Workspace
+from awf.service.gc_classify import PATH_ALREADY_REMOVED
 from awf.service.gc_companions import companion_worktree_remove_targets
 
 if TYPE_CHECKING:
@@ -184,6 +185,125 @@ async def default_worktree_remover(
         reason_code="WORKTREE_REMOVE_SUCCEEDED",
         target_results=tuple(target_results),
     )
+
+
+async def remove_orphan_worktree(
+    *,
+    workspace_id: str,
+    path: Path,
+    work_dir: Path,
+) -> WorkspaceGCWorktreeRemoveResult:
+    """Remove a row-less classified orphan worktree through Git metadata.
+
+    Classified orphan reaping may not have a ``Workspace`` row, so it cannot use
+    ``default_worktree_remover`` to fetch ``repo_url`` from the DB. Resolve the
+    linked bare mirror from the worktree's ``.git`` file, read the mirror's
+    origin URL, then call ``GitManager.remove_worktree`` so removal serializes
+    on the same mirror lock as hook repair.
+    """
+    from awf.node.git_manager import GitManager, mirror_path_for_worktree
+
+    if not path.exists():
+        return WorkspaceGCWorktreeRemoveResult(
+            status="skipped",
+            reason_code=PATH_ALREADY_REMOVED,
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="skipped",
+                    reason_code=PATH_ALREADY_REMOVED,
+                ),
+            ),
+        )
+    if is_existing_non_git_worktree(path):
+        return WorkspaceGCWorktreeRemoveResult(
+            status="skipped",
+            reason_code="WORKTREE_NOT_GIT_MANAGED",
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="skipped",
+                    reason_code="WORKTREE_NOT_GIT_MANAGED",
+                ),
+            ),
+        )
+
+    mirror_path = mirror_path_for_worktree(path)
+    if mirror_path is None:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="ORPHAN_WORKTREE_GIT_CONTEXT_UNRESOLVED",
+            error=f"could not resolve mirror for Git-managed orphan worktree {path}",
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="failed",
+                    reason_code="ORPHAN_WORKTREE_GIT_CONTEXT_UNRESOLVED",
+                    error=f"could not resolve mirror for Git-managed orphan worktree {path}",
+                ),
+            ),
+        )
+
+    repo_url = await _repo_url_from_mirror(mirror_path)
+    if repo_url is None:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="ORPHAN_WORKTREE_REPO_URL_UNRESOLVED",
+            error=f"could not resolve repo URL from orphan worktree mirror {mirror_path}",
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="failed",
+                    reason_code="ORPHAN_WORKTREE_REPO_URL_UNRESOLVED",
+                    error=f"could not resolve repo URL from orphan worktree mirror {mirror_path}",
+                ),
+            ),
+        )
+
+    try:
+        await GitManager(work_dir / "git").remove_worktree(
+            workspace_id=workspace_id, repo_url=repo_url
+        )
+    except Exception as exc:
+        error = str(exc)
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            error=error,
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="failed",
+                    reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                    error=error,
+                ),
+            ),
+        )
+    return WorkspaceGCWorktreeRemoveResult(
+        status="succeeded",
+        reason_code="WORKTREE_REMOVE_SUCCEEDED",
+        target_results=(
+            WorkspaceGCWorktreeRemoveTargetResult(
+                worktree_id=workspace_id,
+                status="succeeded",
+                reason_code="WORKTREE_REMOVE_SUCCEEDED",
+            ),
+        ),
+    )
+
+
+async def _repo_url_from_mirror(mirror_path: Path) -> str | None:
+    from awf.node.git_manager import _run_git_config
+
+    returncode, stdout, _stderr = await _run_git_config(
+        git_args=("--git-dir", str(mirror_path)),
+        config_scope_args=("--local",),
+        args=("--get", "remote.origin.url"),
+    )
+    if returncode != 0:
+        return None
+    repo_url = stdout.strip()
+    return repo_url or None
 
 
 def is_existing_non_git_worktree(path: Path) -> bool:

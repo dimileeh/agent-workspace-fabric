@@ -12,6 +12,10 @@ from typing import Any
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
+from awf.service.gc_worktrees import (
+    WorkspaceGCWorktreeRemoveResult,
+    WorkspaceGCWorktreeRemoveTargetResult,
+)
 from awf.service.orphan_resources import (
     ORPHAN_REAP_DISABLED,
     ORPHAN_REAP_OK,
@@ -123,6 +127,137 @@ def _orphan_summary_with_compose_and_worktree(tmp_path: Path, *, auto_cleanup_or
         auto_cleanup_orphans=auto_cleanup_orphans,
         reaper_available=auto_cleanup_orphans,
     )
+
+
+@pytest.mark.unit
+def test_reaper_uses_git_aware_remover_for_git_managed_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: ../mirrors/repo.git/worktrees/ws_dead\n")
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+    calls: list[tuple[str, Path]] = []
+
+    async def _git_aware_remover(
+        *, workspace_id: str, path: Path, work_dir: Path
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        calls.append((workspace_id, path))
+        assert work_dir == tmp_path.resolve()
+        return WorkspaceGCWorktreeRemoveResult(
+            status="succeeded",
+            reason_code="WORKTREE_REMOVE_SUCCEEDED",
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="succeeded",
+                    reason_code="WORKTREE_REMOVE_SUCCEEDED",
+                ),
+            ),
+        )
+
+    def _direct_delete_forbidden(
+        kind: str, path: Path, *, work_dir: Path
+    ) -> tuple[bool, str | None, str | None]:
+        raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
+
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
+    )
+
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            min_age_hours=0,
+            worktree_remover=_git_aware_remover,
+        )
+    )
+
+    assert result.status == "ok"
+    assert calls == [("ws_dead", worktree)]
+    assert [outcome.to_dict() for outcome in result.reaped] == [
+        {
+            "kind": "worktree",
+            "workspace_id": "ws_dead",
+            "status": "reaped",
+            "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+        }
+    ]
+
+
+@pytest.mark.unit
+def test_reaper_reports_git_aware_worktree_remover_failure_without_direct_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: ../mirrors/repo.git/worktrees/ws_dead\n")
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+
+    async def _git_aware_remover(
+        *, workspace_id: str, path: Path, work_dir: Path
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        del path, work_dir
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            error="mirror lock removal failed",
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="failed",
+                    reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                    error="mirror lock removal failed",
+                ),
+            ),
+        )
+
+    def _direct_delete_forbidden(
+        kind: str, path: Path, *, work_dir: Path
+    ) -> tuple[bool, str | None, str | None]:
+        raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
+
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
+    )
+
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            min_age_hours=0,
+            worktree_remover=_git_aware_remover,
+        )
+    )
+
+    assert result.status == "partial"
+    assert result.reason_code == "ORPHAN_REAP_PARTIAL"
+    assert result.reaped == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].reason_code == "GIT_WORKTREE_REMOVE_FAILED"
+    assert result.errors[0].error == "mirror lock removal failed"
+    assert worktree.exists()
 
 
 @pytest.mark.unit

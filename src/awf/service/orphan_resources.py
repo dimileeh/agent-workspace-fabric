@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -29,6 +29,11 @@ from awf.service.gc_classify import (
     PATH_DELETED,
 )
 from awf.service.gc_reconcile import ComposeTeardownOutcome, build_and_delete_gc_path
+from awf.service.gc_worktrees import (
+    WorkspaceGCWorktreeRemoveResult,
+    is_existing_non_git_worktree,
+    remove_orphan_worktree,
+)
 from awf.service.orphan_reaping import (
     OrphanReapOutcome as OrphanReapOutcome,
 )
@@ -92,6 +97,16 @@ class OrphanResourceComposeTeardown(Protocol):
         *,
         fallback_volume_names: tuple[str, ...] = (),
     ) -> ComposeTeardownOutcome: ...
+
+
+class OrphanResourceWorktreeRemover(Protocol):
+    def __call__(  # pragma: no cover - Protocol method declaration only.
+        self,
+        *,
+        workspace_id: str,
+        path: Path,
+        work_dir: Path,
+    ) -> Awaitable[WorkspaceGCWorktreeRemoveResult]: ...
 
 
 ResourceKind = Literal["container", "network", "volume", "worktree"]
@@ -782,6 +797,7 @@ async def reap_classified_orphans(
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
     row_less_only: bool = False,
     limit: int | None = None,
+    worktree_remover: OrphanResourceWorktreeRemover | None = None,
 ) -> OrphanReapResult:
     """Reap ``terminal`` / aged ``missing`` classified orphans when ``enabled``.
 
@@ -789,8 +805,9 @@ async def reap_classified_orphans(
     historical ``dry_run_only`` behavior. With ``enabled=True`` it tears down
     each orphaned compose stack (containers/networks/volumes) via
     WS-B1's :meth:`ComposeManager.teardown_project` and removes orphaned worktree
-    directories via WS-B1's :func:`build_and_delete_gc_path` (which keeps the
-    recursive byte-estimate scan off the event loop). Records classified
+    directories via Git-aware removal when they carry linked Git metadata, or
+    via WS-B1's :func:`build_and_delete_gc_path` for plain non-Git directories
+    (which keeps the recursive byte-estimate scan off the event loop). Records classified
     ``expected`` / ``unknown`` are left untouched, and a permission refusal
     surfaces loudly (``PATH_DELETE_PERMISSION_DENIED``) as a ``partial`` run --
     never a silent success. When classification is unreliable (DB/scanner
@@ -878,6 +895,9 @@ async def reap_classified_orphans(
         orphan_records = _limit_records_to_oldest_workspaces(
             orphan_records, limit=limit, resolved_work_dir=resolved_work_dir
         )
+    resolved_worktree_remover = (
+        remove_orphan_worktree if worktree_remover is None else worktree_remover
+    )
     # One teardown per (project, workspace) so multiple docker resources from the
     # same stack do not trigger redundant downs.
     compose_projects: dict[tuple[str, str], None] = {}
@@ -944,11 +964,39 @@ async def reap_classified_orphans(
         path_text = record.resource.path
         if not path_text:  # pragma: no cover - worktree records always carry a path.
             continue
+        worktree_path = Path(path_text)
+        if worktree_path.exists() and not is_existing_non_git_worktree(worktree_path):
+            removal = await resolved_worktree_remover(
+                workspace_id=record.workspace_id,
+                path=worktree_path,
+                work_dir=resolved_work_dir,
+            )
+            if removal.ok:
+                outcome = OrphanReapOutcome(
+                    kind="worktree",
+                    workspace_id=record.workspace_id,
+                    status="reaped" if removal.status == "succeeded" else "already_removed",
+                    reason_code=removal.reason_code,
+                )
+                reaped.append(outcome)
+                _log.info("orphan_resources.reaped_worktree", **outcome.to_dict())
+            else:
+                outcome = OrphanReapOutcome(
+                    kind="worktree",
+                    workspace_id=record.workspace_id,
+                    status="failed",
+                    reason_code=removal.reason_code,
+                    error=removal.error,
+                )
+                errors.append(outcome)
+                _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+            continue
+
         # Build the GC path (a recursive ``rglob`` byte estimate over a full
         # worktree checkout) and delete it inside one ``to_thread`` so the scan
         # never blocks the worker event loop -- matching WS-B1's reconciler.
         deleted, error, reason_code = await asyncio.to_thread(
-            build_and_delete_gc_path, "worktree", Path(path_text), work_dir=resolved_work_dir
+            build_and_delete_gc_path, "worktree", worktree_path, work_dir=resolved_work_dir
         )
         if deleted:
             outcome = OrphanReapOutcome(

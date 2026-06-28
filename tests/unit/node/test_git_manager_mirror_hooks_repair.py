@@ -117,6 +117,39 @@ class TestRepairMirrorHooksPath:
         assert started is True
 
     @pytest.mark.unit
+    async def test_remove_worktree_waits_for_same_mirror_lock_as_repair(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo_url = "git@github.com:example/repo.git"
+        manager = git_module.GitManager(tmp_path / "git")
+        mirror = manager._mirror_path(repo_url)  # noqa: SLF001
+        worktree = manager.get_worktree_path("ws_dead")
+        mirror.mkdir(parents=True)
+        worktree.mkdir(parents=True)
+        entered: list[str] = []
+
+        async def _run(args: list[str], *, operation: str) -> git_module.GitResult:
+            del args
+            entered.append(operation)
+            return git_module.GitResult(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(manager, "_run", _run)
+        lock = git_module.GitManager._lock_for_mirror(mirror)  # noqa: SLF001
+        await lock.acquire()
+        task = asyncio.create_task(
+            manager.remove_worktree(workspace_id="ws_dead", repo_url=repo_url)
+        )
+        try:
+            await asyncio.sleep(0)
+            assert entered == []
+            assert task.done() is False
+        finally:
+            lock.release()
+
+        await task
+        assert entered == ["worktree.remove", "worktree.prune"]
+
+    @pytest.mark.unit
     async def test_prunes_and_retries_when_linked_worktree_metadata_disappears(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -660,7 +693,7 @@ class TestRepairMirrorHooksPath:
                 (*safe_args, "-C", str(worktree)),
                 ("--local",),
                 mirror / "config",
-                "mirror",
+                "linked_worktree",
             ),
             (
                 (*safe_args, "-C", str(worktree)),
