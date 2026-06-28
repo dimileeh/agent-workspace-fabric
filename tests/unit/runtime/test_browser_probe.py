@@ -156,3 +156,42 @@ class TestProbeRuntimeBrowsers:
 
         assert result.returncode == 0
         assert result.stdout.splitlines() == ["MISSING chromium", "MISSING firefox"]
+
+    def test_embedded_probe_uses_playwright_test_package_when_playwright_missing(
+        self, tmp_path
+    ) -> None:
+        if shutil.which("node") is None:
+            pytest.skip("node is required to exercise the embedded probe script")
+        browser_bin = tmp_path / "chromium"
+        browser_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        package_dir = tmp_path / "node_modules" / "@playwright" / "test"
+        package_dir.mkdir(parents=True)
+        package_dir.joinpath("index.js").write_text(
+            f"""
+exports.chromium = {{
+  executablePath() {{
+    return {str(browser_bin)!r};
+  }},
+}};
+exports.firefox = {{
+  executablePath() {{
+    return {str(tmp_path / "missing-firefox")!r};
+  }},
+}};
+""",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env.pop("NODE_PATH", None)
+
+        result = subprocess.run(
+            ["sh", "-lc", _BROWSER_PROBE_SCRIPT, "browser_probe", "chromium", "firefox"],
+            cwd=tmp_path,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.splitlines() == ["OK chromium", "MISSING firefox"]

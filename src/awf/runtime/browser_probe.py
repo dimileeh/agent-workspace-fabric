@@ -30,10 +30,17 @@ ExecInContainer = Callable[[list[str]], Awaitable[ProbeExecResult]]
 _BROWSER_PROBE_SCRIPT = r"""
 node - "$@" <<'NODE' || true
 const fs = require("fs");
-let playwright;
-try {
-  playwright = require("playwright");
-} catch (_error) {
+function loadPlaywright() {
+  for (const moduleName of ["playwright", "@playwright/test"]) {
+    try {
+      return require(moduleName);
+    } catch (_error) {
+    }
+  }
+  return null;
+}
+const playwright = loadPlaywright();
+if (!playwright) {
   for (const name of process.argv.slice(2)) {
     console.log(`MISSING ${name}`);
   }
