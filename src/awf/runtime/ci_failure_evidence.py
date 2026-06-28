@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from awf.common.redaction import redact_secrets
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_RUFF_DIAGNOSTIC_RE = re.compile(r"\b(?:src|tests)/[^\s:]+\.py:\d+:\d+:")
+_PYTHON_DIAGNOSTIC_RE = re.compile(
+    r"\b(?:src|tests)/[^\s:]+\.py:\d+(?::\d+)?:\s*(?:error|warning):"
+)
 _COMMAND_MARKERS = (
     "uv run ",
     "python -m pytest",
@@ -256,19 +258,28 @@ def _extract_error_summaries(lines: Iterable[str]) -> list[str]:
     marker_summaries: list[str] = []
     generic_summaries: list[str] = []
     for line in lines:
-        if _line_has_code_failure_marker(line):
+        message = _github_log_message_segment(line)
+        if _line_has_code_failure_marker(message):
             marker_summaries.append(line)
         elif (
-            line.startswith("FAILED ")
-            or "AssertionError" in line
-            or line.startswith("Error:")
-            or "::error" in line
-            or "Process completed with exit code" in line
-            or _RUFF_DIAGNOSTIC_RE.search(line)
-            or line.lower().startswith(("error ", "error:", "fatal:"))
+            message.startswith("FAILED ")
+            or "AssertionError" in message
+            or message.startswith("Error:")
+            or "::error" in message
+            or "Process completed with exit code" in message
+            or _PYTHON_DIAGNOSTIC_RE.search(message)
+            or message.lower().startswith(("error ", "error:", "fatal:"))
         ):
             generic_summaries.append(line)
     return [*marker_summaries, *generic_summaries]
+
+
+def _github_log_message_segment(line: str) -> str:
+    """Return the message after GitHub's job and step log prefixes."""
+    parts = line.split("\t", 2)
+    if len(parts) == 3 and parts[0].strip() and parts[1].strip():
+        return parts[2].strip()
+    return line
 
 
 def _line_has_code_failure_marker(line: str) -> bool:

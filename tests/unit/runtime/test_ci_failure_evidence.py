@@ -161,6 +161,25 @@ def test_ci_failure_evidence_prioritizes_marker_summaries_within_cap() -> None:
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_ignores_github_step_prefix_for_marker_matching() -> None:
+    diagnostic = (
+        "python\tType check (mypy)\t"
+        "src/awf/runtime/ci_failure_evidence.py:260: error: Incompatible types"
+    )
+    boilerplate = [
+        f"python\tType check (mypy)\t2026-06-28T20:28:{second:02d}Z setup line"
+        for second in range(10)
+    ]
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join([*boilerplate, diagnostic]),
+        check_name="Type check (mypy)",
+    )
+
+    assert evidence.error_summaries == (diagnostic.replace("\t", " "),)
+
+
+@pytest.mark.unit
 def test_ci_failure_evidence_preserves_prefixed_github_error_annotations() -> None:
     """Timestamped check-name prefixes do not hide coverage annotations."""
     prefixed_annotation = (
