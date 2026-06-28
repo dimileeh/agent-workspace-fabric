@@ -46,6 +46,7 @@ from awf.api.routes import (
 from awf.common.config import Settings, get_settings, validate_production_settings
 from awf.db.session import make_engine, make_session_factory
 from awf.service.callbacks import shutdown_callback_target_validation_executor
+from awf.service.core_discovery import CORE_DISCOVERY_STATE_ATTR, build_core_discovery_payload
 
 
 def configure_database(
@@ -109,6 +110,7 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
         lifespan=_lifespan if use_lifespan else None,
     )
     health.reset_egress_audit_summary_counts_task(app.state)
+    setattr(app.state, CORE_DISCOVERY_STATE_ATTR, build_core_discovery_payload())
     app.add_exception_handler(
         WebSocketAuthorizationDenialError,
         websocket_authorization_denial_handler,

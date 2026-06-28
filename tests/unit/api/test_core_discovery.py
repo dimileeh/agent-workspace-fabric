@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from awf import __version__
 from awf.api.app import create_app
 from awf.common.config import get_settings
+from awf.service import core_discovery as core_discovery_service
 
 DISCOVERY_PATH = "/.well-known/awf-core.json"
 
@@ -65,6 +66,35 @@ async def test_core_discovery_uses_safe_unknown_git_commit_fallback(
 
     assert response.status_code == 200
     assert response.json()["git_commit"] == "unknown"
+
+
+async def test_core_discovery_caches_git_commit_before_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AWF_GIT_COMMIT", raising=False)
+    calls = 0
+
+    def _initial_git_commit() -> str:
+        nonlocal calls
+        calls += 1
+        return "cached-head"
+
+    def _request_path_git_commit() -> str:
+        raise AssertionError("discovery request path must not resolve git commit")
+
+    monkeypatch.setattr(core_discovery_service, "_git_rev_parse_head", _initial_git_commit)
+    app = create_app(use_lifespan=False)
+    monkeypatch.setattr(core_discovery_service, "_git_rev_parse_head", _request_path_git_commit)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.get(DISCOVERY_PATH)
+        second = await client.get(DISCOVERY_PATH)
+
+    assert first.status_code == 200
+    assert first.json()["git_commit"] == "cached-head"
+    assert second.status_code == 200
+    assert second.json()["git_commit"] == "cached-head"
+    assert calls == 1
 
 
 async def test_core_discovery_does_not_weaken_protected_routes(

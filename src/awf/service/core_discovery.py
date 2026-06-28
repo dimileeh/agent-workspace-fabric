@@ -13,6 +13,7 @@ from awf.runtime.driver import WORKSPACE_EXECUTION_V1
 
 PACKAGE_NAME = "agent-workspace-fabric"
 UNKNOWN_GIT_COMMIT = "unknown"
+CORE_DISCOVERY_STATE_ATTR = "core_discovery_payload"
 
 
 class CoreDiscoveryResponse(BaseModel):
@@ -46,6 +47,15 @@ def build_core_discovery_payload() -> CoreDiscoveryPayload:
     """Build the stable public Core discovery payload without reading secrets."""
 
     return CoreDiscoveryPayload(git_commit=_resolve_git_commit())
+
+
+def core_discovery_payload_from_state(app_state: object) -> CoreDiscoveryPayload:
+    """Return the cached discovery payload without resolving git during requests."""
+
+    payload = getattr(app_state, CORE_DISCOVERY_STATE_ATTR, None)
+    if isinstance(payload, CoreDiscoveryPayload):
+        return payload
+    return CoreDiscoveryPayload()
 
 
 def _resolve_git_commit() -> str:
