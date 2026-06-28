@@ -364,7 +364,7 @@ class TestPrMonitorResume:
                 assert wait is True
                 assert compose_up_timeout_seconds == 300
                 assert force_recreate is True
-                assert services == ()
+                assert services == ("agent",)
 
         class _Monitor:
             async def run(
