@@ -548,6 +548,8 @@ async def _restart_agent_service_or_mark_unhealthy(
             workspace_id=workspace_id,
             wait=True,
             compose_up_timeout_seconds=compose_up_timeout_seconds,
+            force_recreate=True,
+            services=("agent",),
         )
     except ComposeOperationError as restart_exc:
         if not await self._recheck_status(

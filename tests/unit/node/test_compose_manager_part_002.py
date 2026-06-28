@@ -769,6 +769,44 @@ class TestRenderTeardown:
         assert "--wait" not in calls[0]
 
     @pytest.mark.unit
+    async def test_ensure_project_up_can_force_recreate_services(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovery callers can force a recreate of a specific service."""
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager.ensure_project_up(
+            project_name="awf_ws_resume",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id="ws_resume",
+            force_recreate=True,
+            services=("agent",),
+        )
+
+        assert calls
+        assert calls[0] == (
+            "docker",
+            "compose",
+            "up",
+            "-d",
+            "--remove-orphans",
+            "--force-recreate",
+            "--wait",
+            "--wait-timeout",
+            "300",
+            "agent",
+        )
+
+    @pytest.mark.unit
     async def test_compose_command_times_out_and_kills_hung_process(
         self,
         manager: ComposeManager,
