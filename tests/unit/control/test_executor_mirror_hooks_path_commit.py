@@ -601,7 +601,7 @@ async def test_execute_repairs_agent_cleanup_failure_before_service_recovery_ret
     deposit_calls: list[dict[str, Any]] = []
     repair_calls: list[Path] = []
     callback_repair_counts: list[tuple[int, int]] = []
-    callback_result: list[bool] = []
+    callback_result: list[bool | str] = []
     verify_head = AsyncMock(return_value=False)
     recover_head = AsyncMock(return_value=missing_head_recovered)
     verify_recovered = AsyncMock(return_value=True)
@@ -728,7 +728,7 @@ async def test_execute_repairs_agent_cleanup_failure_before_service_recovery_ret
 
     assert all(path == mirror_path for path in repair_calls)
     assert callback_repair_counts == [(len(repair_calls) - 1, len(repair_calls))]
-    assert callback_result == [missing_head_recovered]
+    assert callback_result == [True if missing_head_recovered else "EXEC_PROCESS_CLEANUP_FAILED"]
     verify_head.assert_awaited_once_with(worktree_path)
     recover_head.assert_awaited_once()
     assert recover_head.await_args.kwargs == {

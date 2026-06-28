@@ -254,6 +254,8 @@ async def _run_agent_callable_with_service_recovery(
         except AgentRunError as exc:
             if exc.reason_code not in _AGENT_SERVICE_TIMEOUT_REASON_CODES:
                 raise
+            if not compose_file.is_file():
+                raise
             service_healthy = await probe_agent_service_health(
                 RuntimeInspector(),
                 compose_project,
@@ -349,6 +351,7 @@ async def _repair_after_recoverable_agent_cleanup_failure(
     verify_post_agent_commit: bool = True,
 ) -> _RecoveryCallbackResult:
     repair_result = await repair_hooks_after_agent_cleanup_failure(
+        failure_stage="after agent cleanup failure",
         failure_from_status=failure_from_status,
         return_reason_code=True,
     )
@@ -414,6 +417,8 @@ async def _restart_after_conformance_timeout_failure(
 ) -> tuple[int, bool] | None:
     source_reason_code = _conformance_stall_timeout_source_reason_code(planning_result)
     if source_reason_code is None:
+        return None
+    if not compose_file.is_file():
         return None
     service_healthy = await probe_agent_service_health(
         RuntimeInspector(),

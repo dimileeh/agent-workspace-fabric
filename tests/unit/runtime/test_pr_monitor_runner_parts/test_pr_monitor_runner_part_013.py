@@ -161,6 +161,7 @@ async def test_monitor_agent_idle_timeout_restarts_service_and_retries(
     )
     command_evidence: list[str] = []
     compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
 
     result = await runner._run_monitor_agent_with_service_recovery(
         workspace_id=workspace_id,

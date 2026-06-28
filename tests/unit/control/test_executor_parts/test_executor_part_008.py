@@ -189,7 +189,12 @@ async def _active_grant(
         return row.scalars().one()
 
 
-def _queue_blocked_resume_to_push(fake: FakeCommandRunner, *, ws_id: str) -> None:
+def _queue_blocked_resume_to_push(
+    fake: FakeCommandRunner,
+    *,
+    ws_id: str,
+    conformance_handoff: bool = False,
+) -> None:
     # Approve-and-keep resume skips the agent; the post-agent commit, the
     # validation, the pre-push policy gates, and the push all still run, so
     # the queue mirrors the happy path MINUS the leading ``adapter.run``.
@@ -201,6 +206,9 @@ def _queue_blocked_resume_to_push(fake: FakeCommandRunner, *, ws_id: str) -> Non
     fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
     _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+    if conformance_handoff:
+        fake.queue_result(returncode=0, stdout="")  # conformance baseline status
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance baseline HEAD
     _queue_pre_push_diagnostics(fake)
     fake.queue_result(returncode=0)  # git push
     fake.queue_result(
@@ -458,7 +466,7 @@ async def test_blocked_resume_grant_runs_conformance_check_from_persisted_handof
         factory,
         block_planning_conformance_handoff=_PENDING_CONFORMANCE_HANDOFF,
     )
-    _queue_blocked_resume_to_push(fake, ws_id=ws_id)
+    _queue_blocked_resume_to_push(fake, ws_id=ws_id, conformance_handoff=True)
 
     seen_handoffs: list[Any] = []
 

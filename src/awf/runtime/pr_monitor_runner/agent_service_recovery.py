@@ -165,6 +165,8 @@ async def _recover_monitor_agent_service_after_error(
 ) -> int | None:
     if exc.reason_code not in _AGENT_SERVICE_TIMEOUT_REASON_CODES:
         return None
+    if not compose_file.is_file():
+        return None
     service_healthy = await probe_agent_service_health(RuntimeInspector(), compose_project)
     classification = classify_provider_failure(
         reason_code=exc.reason_code,

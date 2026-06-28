@@ -498,7 +498,9 @@ async def execute(
                     skip_measure=resume_from_blocked,
                 )
             except ComposeExecCleanupError as exc:
-                if not await _repair_mirror_hooks_path_after_cleanup_failure():
+                if not await _repair_mirror_hooks_path_after_cleanup_failure(
+                    failure_stage="after agent cleanup failure"
+                ):
                     return
                 if not await _recover_missing_head_after_cleanup_failure(
                     exc, stage="baseline_coverage_cleanup_failure"
