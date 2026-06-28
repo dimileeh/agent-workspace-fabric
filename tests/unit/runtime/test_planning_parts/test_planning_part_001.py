@@ -916,9 +916,11 @@ def test_conformance_requires_awf_validation_rejects_mixed_named_command_test_pa
     (
         "Run git diff --check under AWF validation and fix whitespace errors.",
         "Run git diff --check during validation and fix trailing whitespace.",
+        "Run git diff --check under AWF validation and resolve conflict markers.",
+        "Run git diff --check during validation and remove conflict markers.",
     ),
 )
-def test_conformance_requires_awf_validation_rejects_git_diff_handoff_with_whitespace_work(
+def test_conformance_requires_awf_validation_rejects_git_diff_handoff_with_file_work(
     gap: str,
 ) -> None:
     report = PlanConformanceReport(

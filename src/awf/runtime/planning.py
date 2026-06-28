@@ -772,6 +772,8 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         r"(?:saved\s+)?plan(?![a-z0-9_])",
         r"(?<![a-z0-9_])(?:fix|correct|resolve|remove|trim)\b"
         r"[^.;:]*\b(?:trailing\s+)?whitespace\b",
+        r"(?<![a-z0-9_])(?:fix|correct|resolve|remove)\b"
+        r"[^.;:]*\bconflict[-\s]+markers?\b",
         r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
         r"(?:\s+(?:also|still|now|currently|already|yet))*"
         r"\s+(?:gap|gaps|task|tasks|todo|todos|update|updates|change|changes|"
