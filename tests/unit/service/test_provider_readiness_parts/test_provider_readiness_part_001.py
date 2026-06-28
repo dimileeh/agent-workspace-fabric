@@ -1450,6 +1450,48 @@ def test_agent_runtime_cli_probe_reports_success_and_missing_cli(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_runtime_cli_probe_uses_docker_start_timeout_without_slowing_auth_probe(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    observed: dict[str, float] = {}
+
+    def _runtime_probe(_args: list[str], **kwargs: object) -> Any:
+        observed["runtime_timeout"] = float(kwargs["timeout"])
+        return _completed(stdout="/usr/bin/codex\n")
+
+    runtime = provider_readiness._probe_agent_runtime_cli(
+        settings,
+        executable="codex",
+        provider="codex",
+        environ={},
+        run_subprocess=_runtime_probe,
+        secrets=frozenset(),
+    )
+
+    def _auth_probe(_args: list[str], **kwargs: object) -> Any:
+        observed["auth_timeout"] = float(kwargs["timeout"])
+        return _completed(stdout="ok")
+
+    auth = provider_readiness._probe_cli_auth_status(
+        provider_label="Probe",
+        args=["probe", "auth", "status"],
+        failure_reason="PROBE_AUTH_FAILED",
+        timeout_reason="PROBE_AUTH_TIMEOUT",
+        missing_reason="PROBE_CLI_NOT_FOUND",
+        error_reason="PROBE_AUTH_ERROR",
+        environ={},
+        run_subprocess=_auth_probe,
+        secrets=frozenset(),
+    )
+
+    assert runtime["status"] == "ok"
+    assert auth["status"] == "ok"
+    assert observed["runtime_timeout"] >= 30.0
+    assert observed["auth_timeout"] == provider_readiness._PROVIDER_PROBE_TIMEOUT_SECONDS
+
+
+@pytest.mark.unit
 def test_cli_auth_probe_reports_success_and_unusable_auth() -> None:
     success = provider_readiness._probe_cli_auth_status(
         provider_label="Probe",
