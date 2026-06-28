@@ -23,6 +23,7 @@ from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.session import make_engine, session_scope
+from awf.node.git_manager import GitOperationError
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.gc_classify import (
     PATH_ALREADY_REMOVED,
@@ -965,9 +966,23 @@ async def reap_classified_orphans(
         if not path_text:  # pragma: no cover - worktree records always carry a path.
             continue
         worktree_path = Path(path_text)
-        if worktree_path.exists() and not is_existing_non_git_worktree(
-            worktree_path, work_dir=resolved_work_dir
-        ):
+        try:
+            use_git_aware_remover = worktree_path.exists() and not is_existing_non_git_worktree(
+                worktree_path, work_dir=resolved_work_dir
+            )
+        except GitOperationError as exc:
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="failed",
+                reason_code=exc.reason_code,
+                error=str(exc),
+            )
+            errors.append(outcome)
+            _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+            continue
+
+        if use_git_aware_remover:
             removal = await resolved_worktree_remover(
                 workspace_id=worktree_path.name,
                 path=worktree_path,

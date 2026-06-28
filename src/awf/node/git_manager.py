@@ -988,10 +988,7 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
         linked_git_dir = mirror_path / "worktrees" / worktree_name
         if not linked_git_dir.is_dir():
             continue
-        try:
-            registered_worktree = _linked_worktree_path_from_git_dir(linked_git_dir)
-        except GitOperationError:
-            continue
+        registered_worktree = _linked_worktree_path_from_git_dir(linked_git_dir)
         if registered_worktree == resolved_worktree:
             return mirror_path.resolve()
     return None
