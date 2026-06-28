@@ -855,11 +855,12 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     log_text = failure.log_excerpt.lower()
     if not log_text.strip():
         return bool(failure.run_id) and failure.conclusion.upper() == "TIMED_OUT"
-    if not _log_shows_code_failure(log_text) and any(
+    shows_code_failure = _log_shows_code_failure(log_text)
+    if not shows_code_failure and any(
         marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS
     ):
         return True
-    return _log_shows_docker_registry_timeout(log_text)
+    return not shows_code_failure and _log_shows_docker_registry_timeout(log_text)
 
 
 def _ci_candidate_failures(status: PRStatus) -> tuple[CheckFailure, ...]:

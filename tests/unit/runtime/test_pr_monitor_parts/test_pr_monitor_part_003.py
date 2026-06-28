@@ -263,6 +263,34 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_docker_pull_registry_timeout_with_code_failure_reports_failure(self) -> None:
+        """Combined logs with code failures and Docker timeouts must be repaired."""
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "tests/integration/test_fetch.py::test_download_prompt FAILED\n"
+                "E   AssertionError: expected 'ready'\n"
+                "=== short test summary info ===\n"
+                "FAILED tests/integration/test_fetch.py::test_download_prompt\n"
+                "/usr/bin/docker pull postgres:16\n"
+                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
+                "context deadline exceeded (Client.Timeout exceeded while awaiting headers)\n"
+                "Docker pull failed with exit code 1"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_mixed_run_with_rollup_marker_and_code_evidence_reports_failure(
         self,
     ) -> None:
