@@ -913,6 +913,15 @@ def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
         "scenario",
         "scenarios",
     )
+    path_work_states = (
+        "added",
+        "created",
+        "edited",
+        "modified",
+        "revised",
+        "updated",
+        "written",
+    )
     location_prepositions = ("for", "in", "inside", "into", "to", "under", "within")
     work_verb_pattern = rf"(?<![a-z0-9_])(?:{'|'.join(work_verbs)})"
     modifier_pattern = rf"(?:\s+(?:{'|'.join(modifiers)}))*"
@@ -938,6 +947,17 @@ def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
             rf"^{test_path_pattern}(?:\s+|[,;:]\s+)"
             rf"(?:{post_path_work_lead_pattern}){modifier_pattern}\s+"
             rf"(?:{'|'.join(work_objects)})(?![a-z0-9_])",
+            path_suffix,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    ):
+        return True
+    if (
+        re.search(
+            rf"^{test_path_pattern}(?:\s+|[,;:]\s+)"
+            rf"(?:(?:needs?|requires?)\s+to\s+be|(?:must|should)\s+be)\s+"
+            rf"(?:{'|'.join(path_work_states)})(?![a-z0-9_])",
             path_suffix,
             flags=re.IGNORECASE,
         )
