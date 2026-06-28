@@ -247,7 +247,9 @@ async def remove_orphan_worktree(
             ),
         )
 
-    repo_url = await _repo_url_from_mirror(mirror_path)
+    from awf.node.git_manager import read_mirror_origin_url
+
+    repo_url = await read_mirror_origin_url(mirror_path)
     if repo_url is None:
         return WorkspaceGCWorktreeRemoveResult(
             status="failed",
@@ -293,20 +295,6 @@ async def remove_orphan_worktree(
             ),
         ),
     )
-
-
-async def _repo_url_from_mirror(mirror_path: Path) -> str | None:
-    from awf.node.git_manager import _run_git_config
-
-    returncode, stdout, _stderr = await _run_git_config(
-        git_args=("--git-dir", str(mirror_path)),
-        config_scope_args=("--local",),
-        args=("--get", "remote.origin.url"),
-    )
-    if returncode != 0:
-        return None
-    repo_url = stdout.strip()
-    return repo_url or None
 
 
 def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path | None:

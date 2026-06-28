@@ -994,6 +994,19 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
     return None
 
 
+async def read_mirror_origin_url(mirror_path: Path) -> str | None:
+    """Return a bare mirror's configured origin URL, when present."""
+    returncode, stdout, _stderr = await _run_git_config(
+        git_args=("--git-dir", str(mirror_path)),
+        config_scope_args=("--local",),
+        args=("--get", "remote.origin.url"),
+    )
+    if returncode != 0:
+        return None
+    repo_url = stdout.strip()
+    return repo_url or None
+
+
 def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
     """Return the Git metadata directory linked from a worktree's ``.git`` file."""
     git_file = worktree_path / ".git"

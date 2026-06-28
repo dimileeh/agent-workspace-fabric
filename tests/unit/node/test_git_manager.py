@@ -770,6 +770,38 @@ def test_mirror_path_for_worktree_handles_commondir_and_unreadable_commondir(
 
 
 @pytest.mark.unit
+async def test_read_mirror_origin_url_returns_configured_origin(tmp_path: Path) -> None:
+    repo_url = "git@github.com:example/repo.git"
+    mirror = tmp_path / "repo.git"
+    subprocess.run(["git", "init", "--bare", str(mirror)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "--git-dir", str(mirror), "config", "remote.origin.url", repo_url],
+        check=True,
+        capture_output=True,
+    )
+
+    assert await git_manager.read_mirror_origin_url(mirror) == repo_url
+
+
+@pytest.mark.unit
+async def test_read_mirror_origin_url_returns_none_when_unset_or_empty(
+    tmp_path: Path,
+) -> None:
+    mirror = tmp_path / "repo.git"
+    subprocess.run(["git", "init", "--bare", str(mirror)], check=True, capture_output=True)
+
+    assert await git_manager.read_mirror_origin_url(mirror) is None
+
+    subprocess.run(
+        ["git", "--git-dir", str(mirror), "config", "remote.origin.url", ""],
+        check=True,
+        capture_output=True,
+    )
+
+    assert await git_manager.read_mirror_origin_url(mirror) is None
+
+
+@pytest.mark.unit
 def test_linked_worktree_path_from_git_dir_rejects_invalid_back_reference(
     tmp_path: Path,
 ) -> None:
