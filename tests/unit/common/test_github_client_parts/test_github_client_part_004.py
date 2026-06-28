@@ -237,7 +237,7 @@ class TestFetchFailingCheckLogs:
         assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == []
 
     @pytest.mark.unit
-    async def test_marks_in_progress_sibling_run_before_conclusion_filter(self) -> None:
+    async def test_completed_failure_with_in_progress_sibling_reports_failure(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -267,7 +267,7 @@ class TestFetchFailingCheckLogs:
             head_sha="abc",
         )
 
-        assert result.runs_in_progress is True
+        assert result.runs_in_progress is False
         assert [failure.name for failure in result.failures] == ["go-tests"]
         assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == [
             ["gh", "run", "view", "42", "--repo", "o/r", "--log-failed"]

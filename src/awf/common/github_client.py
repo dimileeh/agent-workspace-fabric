@@ -937,8 +937,6 @@ class GitHubClient:
             if database_id is not None:
                 status = str(run.get("status") or "").lower()
                 status_by_run[str(database_id)] = status
-                if status not in ("", "completed"):
-                    runs_in_progress = True
 
         async def _append_failure(
             *,
