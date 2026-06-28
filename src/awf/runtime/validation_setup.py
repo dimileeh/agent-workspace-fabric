@@ -245,7 +245,8 @@ def playwright_browser_install_command(profile: WorkspaceProfile) -> ProfileComm
         return None
     package_manager = _infer_node_package_manager(profile)
     return ProfileCommand(
-        command=playwright_command(package_manager, "install", *profile.runtime.browsers)
+        command=playwright_command(package_manager, "install", *profile.runtime.browsers),
+        required=False,
     )
 
 

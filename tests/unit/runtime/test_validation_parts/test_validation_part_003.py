@@ -333,6 +333,7 @@ class TestHappyPath:
             ("db_generated_setup", "python scripts/db_generated_setup.py"),
             ("pre_agent", "node scripts/pre.js"),
         ]
+        assert commands[1].command.required is False
 
     @pytest.mark.unit
     def test_profile_phase_command_plan_adds_one_browser_install_for_multiple_browsers(
@@ -416,6 +417,38 @@ class TestHappyPath:
         commands = profile_phase_command_plan(profile, ("setup",))
 
         assert commands[-1].command.command == "pnpm exec playwright install chromium"
+
+    @pytest.mark.unit
+    async def test_generated_browser_install_failure_is_non_blocking(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="dependencies installed")
+        fake.queue_result(returncode=1, stderr="browser download failed")
+        fake.queue_result(returncode=0, stdout="pre-agent ok")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-setup-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {"setup": ["npm install"], "pre_agent": ["node scripts/pre.js"]},
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_browser_install",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("setup", "pre_agent"),
+        )
+
+        assert result.all_passed
+        assert result.first_failure is None
+        assert len(fake.calls) == 3
+        browser_install = result.commands[1]
+        assert browser_install.command == "npx playwright install chromium"
+        assert browser_install.returncode == 1
+        assert browser_install.required is False
 
     @pytest.mark.unit
     async def test_runs_each_test_command_in_order(
