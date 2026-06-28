@@ -404,6 +404,23 @@ class TestPlaywrightBrowserInstallCommand:
         assert _node_dependency_install_package_manager("npm --userconfig=.npmrc ci") == "npm"
 
     @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("yarn --immutable", "yarn"),
+            ("yarn --cwd apps/web --immutable", "yarn --cwd apps/web"),
+            ("yarn --cwd=apps/web --immutable", "yarn --cwd=apps/web"),
+            ("yarn --version", None),
+            ("yarn --immutable --help", None),
+        ],
+    )
+    def test_dependency_install_parser_distinguishes_yarn_option_only_installs(
+        self,
+        command: str,
+        expected: str | None,
+    ) -> None:
+        assert _node_dependency_install_package_manager(command) == expected
+
+    @pytest.mark.parametrize(
         ("setup_command", "expected"),
         [
             (
@@ -513,6 +530,23 @@ class TestPlaywrightBrowserInstallCommand:
             ("validate", "pnpm install"),
             ("setup", "pnpm exec playwright install chromium"),
             ("validate", "pnpm test"),
+        ]
+
+    def test_yarn_version_setup_probe_defers_browser_install_until_validate_install(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["yarn --version"],
+            validate=["yarn install", "yarn test"],
+        )
+
+        commands = profile_phase_command_plan(profile, ["setup", "validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "yarn --version"),
+            ("validate", "yarn install"),
+            ("setup", "yarn playwright install chromium"),
+            ("validate", "yarn test"),
         ]
 
 

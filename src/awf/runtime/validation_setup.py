@@ -692,6 +692,8 @@ def _node_dependency_install_package_manager_from_tokens(
         return None
     inferred_location_tokens = list(location_tokens)
     dependency_install_seen = False
+    yarn_option_only_install_seen = False
+    yarn_location_only_arguments = True
     subcommand_index = index + 1
     while subcommand_index < len(tokens):
         token = tokens[subcommand_index]
@@ -702,6 +704,8 @@ def _node_dependency_install_package_manager_from_tokens(
                 tokens
             ):
                 inferred_location_tokens.extend((token, tokens[subcommand_index + 1]))
+            elif executable == "yarn":
+                yarn_location_only_arguments = False
             subcommand_index += 2
             continue
         if token.startswith("-C") and len(token) > 2:
@@ -710,11 +714,26 @@ def _node_dependency_install_package_manager_from_tokens(
             continue
         if token.startswith("--") and "=" in token:
             option_name, _, _ = token.partition("=")
+            if executable == "yarn":
+                if option_name in _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS:
+                    return None
+                if option_name in _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS["yarn"]:
+                    yarn_option_only_install_seen = True
+                elif option_name not in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
+                    yarn_location_only_arguments = False
             if option_name in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
                 inferred_location_tokens.append(token)
             subcommand_index += 1
             continue
         if token.startswith("-"):
+            if executable == "yarn":
+                option_name = token.split("=", 1)[0]
+                if option_name in _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS:
+                    return None
+                if option_name in _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS["yarn"]:
+                    yarn_option_only_install_seen = True
+                else:
+                    yarn_location_only_arguments = False
             subcommand_index += 1
             continue
         if executable == "yarn" and token == "workspace":
@@ -738,7 +757,7 @@ def _node_dependency_install_package_manager_from_tokens(
         subcommand_index += 1
     if dependency_install_seen:
         return _node_package_manager_command(executable, inferred_location_tokens)
-    if executable == "yarn":
+    if executable == "yarn" and (yarn_option_only_install_seen or yarn_location_only_arguments):
         return _node_package_manager_command(executable, inferred_location_tokens)
     return None
 
