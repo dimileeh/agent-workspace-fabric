@@ -17,6 +17,7 @@ _NODE_PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun"})
 _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS = frozenset({"ci", "i", "install"})
 _NPM_SCRIPT_VALIDATION_SUBCOMMANDS = frozenset({"run", "run-script"})
 _NPM_DIRECT_SCRIPT_VALIDATION_SUBCOMMANDS = frozenset({"test", "t"})
+_NPM_EXEC_VALIDATION_SUBCOMMANDS = frozenset({"exec", "x"})
 _BROWSER_VALIDATION_SCRIPT_NAMES = frozenset(
     {"browser", "e2e", "playwright", "test:browser", "test:e2e"}
 )
@@ -597,14 +598,21 @@ def _node_npm_validation_workspace_package_manager(
         saw_script = False
     elif subcommand in _NPM_DIRECT_SCRIPT_VALIDATION_SUBCOMMANDS:
         saw_script = True
+    elif subcommand in _NPM_EXEC_VALIDATION_SUBCOMMANDS:
+        saw_script = False
     else:
         return None
     inferred_location_tokens = list(location_tokens)
     option_index = subcommand_index + 1
     while option_index < len(tokens):
         token = tokens[option_index]
-        if token in _SHELL_COMPOUND_CONTROL_TOKENS or token == "--":
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
             break
+        if token == "--":
+            if subcommand not in _NPM_EXEC_VALIDATION_SUBCOMMANDS:
+                break
+            option_index += 1
+            continue
         if _node_pm_option_takes_value("npm", token):
             if option_index + 1 >= len(tokens):
                 return None
@@ -624,6 +632,8 @@ def _node_npm_validation_workspace_package_manager(
         if not saw_script:
             saw_script = True
         option_index += 1
+        if subcommand in _NPM_EXEC_VALIDATION_SUBCOMMANDS:
+            break
     if saw_script and inferred_location_tokens:
         return _node_package_manager_command("npm", inferred_location_tokens)
     return None

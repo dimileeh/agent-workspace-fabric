@@ -583,6 +583,14 @@ class TestPlaywrightBrowserInstallCommand:
                 "npm test -w web",
                 "npm -w web exec -- playwright install chromium",
             ),
+            (
+                "npm exec --workspace web -- playwright test",
+                "npm --workspace web exec -- playwright install chromium",
+            ),
+            (
+                "npm x -w web -- playwright test",
+                "npm -w web exec -- playwright install chromium",
+            ),
         ],
     )
     def test_root_npm_setup_uses_late_validate_workspace_scope_for_browser_install(
