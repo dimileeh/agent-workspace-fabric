@@ -418,9 +418,12 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
             stderr=f"could not resolve linked git context for worktree {path}: {exc}",
             reason_code="WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
         ) from exc
-    registered_mirror_path = mirror_path_for_registered_worktree(path, mirrors_root)
     if linked_mirror_path is None:
-        return registered_mirror_path
+        return mirror_path_for_registered_worktree(path, mirrors_root)
+    try:
+        registered_mirror_path = mirror_path_for_registered_worktree(path, mirrors_root)
+    except GitOperationError:
+        return linked_mirror_path
     if registered_mirror_path is None:
         return linked_mirror_path
     if linked_mirror_path == registered_mirror_path:
