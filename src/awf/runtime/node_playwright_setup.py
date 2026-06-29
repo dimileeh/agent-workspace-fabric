@@ -21,7 +21,13 @@ _NPM_EXEC_VALIDATION_SUBCOMMANDS = frozenset({"exec", "x"})
 _BROWSER_VALIDATION_SCRIPT_NAMES = frozenset(
     {"browser", "e2e", "playwright", "test:browser", "test:e2e"}
 )
-_BROWSER_VALIDATION_SCRIPT_PREFIXES = ("browser:", "e2e:", "playwright:", "test:browser:")
+_BROWSER_VALIDATION_SCRIPT_PREFIXES = (
+    "browser:",
+    "e2e:",
+    "playwright:",
+    "test:browser:",
+    "test:e2e:",
+)
 _COREPACK_PREAMBLE_SUBCOMMANDS = frozenset({"enable", "install", "prepare", "use"})
 _NODE_PM_OPTION_VALUE_FLAGS = frozenset(
     {
