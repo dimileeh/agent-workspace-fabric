@@ -532,6 +532,23 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "pnpm --filter web exec playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace"
 
+    def test_late_yarn_workspace_run_browser_script_overrides_earlier_scoped_lint(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["yarn install --immutable"],
+            validate=[
+                "yarn workspace api run lint",
+                "yarn workspace web run test:e2e",
+            ],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "yarn workspace web playwright install chromium"
+        assert browser_probe_workdir(profile) == "/workspace"
+
     def test_late_browser_validate_scope_overrides_earlier_scoped_setup_install(
         self,
     ) -> None:

@@ -485,10 +485,16 @@ def _node_package_manager_subcommand_invokes_browser_script(
         workspace_name = tokens[workspace_name_index]
         if workspace_name in _SHELL_COMPOUND_CONTROL_TOKENS or workspace_name.startswith("-"):
             return False
-        script_index = _script_name_index(tokens, workspace_name_index + 1, executable)
-        return script_index is not None and _is_browser_validation_script_name(
-            tokens[script_index],
-        )
+        command_index = _script_name_index(tokens, workspace_name_index + 1, executable)
+        if command_index is None:
+            return False
+        command_name = tokens[command_index]
+        if command_name == "run":
+            script_index = _script_name_index(tokens, command_index + 1, executable)
+            return script_index is not None and _is_browser_validation_script_name(
+                tokens[script_index],
+            )
+        return _is_browser_validation_script_name(command_name)
     if subcommand in _NPM_SCRIPT_VALIDATION_SUBCOMMANDS or subcommand == "run":
         script_index = _script_name_index(tokens, subcommand_index + 1, executable)
         return script_index is not None and _is_browser_validation_script_name(
