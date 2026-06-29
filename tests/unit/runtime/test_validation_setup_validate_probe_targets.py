@@ -672,6 +672,23 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    def test_validate_browser_install_ignores_separators_inside_shell_comment(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["pnpm install --frozen-lockfile # keep; note\npnpm test:e2e"],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "pnpm install --frozen-lockfile # keep; note"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm test:e2e"),
+        ]
+        assert commands[1].command.required is False
+
     def test_validate_browser_install_split_replays_exported_state_for_trailing_command(
         self,
     ) -> None:

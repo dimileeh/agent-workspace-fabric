@@ -618,10 +618,17 @@ def _unquoted_install_chain_separator_spans(command: str) -> list[tuple[int, str
     separator_indices: list[tuple[int, str]] = []
     in_single_quote = False
     in_double_quote = False
+    in_comment = False
     escaped = False
     index = 0
     while index < len(command):
         char = command[index]
+        if in_comment:
+            if char == "\n":
+                in_comment = False
+                separator_indices.append((index, "\n"))
+            index += 1
+            continue
         if escaped:
             escaped = False
             index += 1
@@ -644,6 +651,8 @@ def _unquoted_install_chain_separator_spans(command: str) -> list[tuple[int, str
             in_single_quote = True
         elif char == '"':
             in_double_quote = True
+        elif _starts_shell_comment(command, index):
+            in_comment = True
         elif command[index : index + 2] == "&&":
             separator_indices.append((index, "&&"))
             index += 2
@@ -654,6 +663,15 @@ def _unquoted_install_chain_separator_spans(command: str) -> list[tuple[int, str
             separator_indices.append((index, "\n"))
         index += 1
     return separator_indices
+
+
+def _starts_shell_comment(command: str, index: int) -> bool:
+    if command[index] != "#":
+        return False
+    if index == 0:
+        return True
+    previous = command[index - 1]
+    return previous.isspace() or previous in {";", "&", "|"}
 
 
 def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecutionCommand]:
