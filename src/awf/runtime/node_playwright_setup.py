@@ -28,12 +28,16 @@ def playwright_command(package_manager: str, *args: str) -> str:
     except ValueError:
         package_manager_tokens = [package_manager]
     executable = package_manager_tokens[0] if package_manager_tokens else "npm"
-    if executable == "pnpm":
-        return f"pnpm exec playwright {escaped_args}"
-    if executable == "yarn":
-        return f"yarn playwright {escaped_args}"
-    if executable == "bun":
+    executable_base = executable.rsplit("/", 1)[-1]
+    package_manager_invocation = shlex.join([executable_base, *package_manager_tokens[1:]])
+    if executable_base == "pnpm":
+        return f"{package_manager_invocation} exec playwright {escaped_args}"
+    if executable_base == "yarn":
+        return f"{package_manager_invocation} playwright {escaped_args}"
+    if executable_base == "bun":
         return f"bunx playwright {escaped_args}"
+    if executable_base == "npm" and len(package_manager_tokens) > 1:
+        return f"{package_manager_invocation} exec playwright {escaped_args}"
     return f"npx playwright {escaped_args}"
 
 
@@ -55,8 +59,18 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> str | None:
             base = token.rsplit("/", 1)[-1]
             if base in _NODE_PACKAGE_MANAGERS:
                 rest = tokens[index + 1 :]
-                if not rest or any(sub in _NODE_INSTALL_SUBCOMMANDS for sub in rest):
+                if not rest:
                     return base
+                install_index = next(
+                    (
+                        offset
+                        for offset, subcommand in enumerate(rest)
+                        if subcommand in _NODE_INSTALL_SUBCOMMANDS
+                    ),
+                    None,
+                )
+                if install_index is not None:
+                    return shlex.join([base, *rest[:install_index]])
     return None
 
 

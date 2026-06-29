@@ -108,6 +108,28 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("setup_command", "expected"),
+    [
+        ("pnpm -C web install", "pnpm -C web exec playwright install chromium"),
+        (
+            "pnpm --filter web install",
+            "pnpm --filter web exec playwright install chromium",
+        ),
+    ],
+)
+def test_browser_install_preserves_pnpm_install_scope(setup_command: str, expected: str) -> None:
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"setup": [setup_command]}}
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == expected
+
+
+@pytest.mark.unit
 def test_browser_install_does_not_infer_node_manager_from_future_pre_agent() -> None:
     profile = _profile(
         {
