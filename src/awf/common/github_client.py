@@ -1039,7 +1039,7 @@ class GitHubClient:
             if not _rollup_check_is_github_actions(check) or run_id in seen_run_ids:
                 continue
             run_status = status_by_run.get(run_id)
-            if run_status != "completed" and (run_status is not None or bool(runs_raw)):
+            if run_status is not None and run_status != "completed":
                 runs_in_progress = True
                 seen_run_ids.add(run_id)
                 continue

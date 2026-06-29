@@ -315,7 +315,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         assert _run_view_calls(fake) == []
 
     @pytest.mark.unit
-    async def test_rollup_fallback_waits_when_actions_run_status_is_unknown(self) -> None:
+    async def test_rollup_fallback_fetches_logs_when_actions_run_absent_from_list(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -330,6 +330,7 @@ class TestFetchFailingCheckLogsRollupFallback:
                 ]
             ),
         )
+        fake.queue_result(returncode=0, stdout="pytest failed in tests/unit/test_widget.py")
         client = GitHubClient(fake)
 
         result = await client.fetch_failing_check_logs(
@@ -346,9 +347,14 @@ class TestFetchFailingCheckLogsRollupFallback:
             ),
         )
 
-        assert result.failures == ()
-        assert result.runs_in_progress is True
-        assert _run_view_calls(fake) == []
+        assert len(result.failures) == 1
+        assert result.failures[0].name == "python-coverage-shards (7)"
+        assert result.failures[0].run_id == "123"
+        assert "pytest failed" in result.failures[0].log_excerpt
+        assert result.runs_in_progress is False
+        assert _run_view_calls(fake) == [
+            ["gh", "run", "view", "123", "--repo", "o/r", "--log-failed"]
+        ]
 
     @pytest.mark.unit
     async def test_rollup_fallback_synthesizes_external_failures(self) -> None:
