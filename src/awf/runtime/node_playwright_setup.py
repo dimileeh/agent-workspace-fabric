@@ -946,13 +946,14 @@ def _should_defer_browser_install_until_validate_install(
         workspace_root=workspace_root,
     ):
         return False
-    if _post_agent_node_dependency_install_exists(profile):
-        return True
-    if _post_agent_python_playwright_dependency_install_exists(
-        profile,
-        workspace_root=workspace_root,
-    ):
-        return True
+    if "post_agent" in requested_phases or "validate" not in requested_phases:
+        if _post_agent_node_dependency_install_exists(profile):
+            return True
+        if _post_agent_python_playwright_dependency_install_exists(
+            profile,
+            workspace_root=workspace_root,
+        ):
+            return True
     if _requested_pre_validate_playwright_usage_exists(profile, requested_phases):
         return _requested_pre_validate_python_playwright_usage_exists(
             profile,
