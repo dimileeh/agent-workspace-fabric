@@ -307,19 +307,23 @@ def profile_phase_command_plan(
                 and not _pre_validate_node_dependency_install_exists(profile)
             ):
                 browser_install = playwright_browser_install_command(profile)
-                if (
-                    browser_install is not None
-                    and _should_defer_browser_install_until_validate_install(
-                        profile,
-                        requested_phases,
+                if browser_install is not None:
+                    defer_browser_install_until_validate_install = (
+                        _should_defer_browser_install_until_validate_install(
+                            profile,
+                            requested_phases,
+                        )
                     )
-                ):
-                    browser_install_package_manager = _infer_node_package_manager(profile)
-                    deferred_browser_install = ProfileExecutionCommand(
+                    browser_install_command = ProfileExecutionCommand(
                         phase="setup",
                         command=browser_install,
                     )
-                    defer_browser_install_until_validate_install = True
+                    if defer_browser_install_until_validate_install:
+                        browser_install_package_manager = _infer_node_package_manager(profile)
+                        deferred_browser_install = browser_install_command
+                    else:
+                        commands.append(browser_install_command)
+                        browser_install_added = True
             commands.extend(
                 ProfileExecutionCommand(
                     phase=DB_REFRESH_PHASE,

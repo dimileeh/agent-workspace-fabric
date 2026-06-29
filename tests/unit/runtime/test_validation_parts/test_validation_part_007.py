@@ -236,6 +236,30 @@ class TestBrowserPhaseCommandPlan:
         assert commands[1].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_validate_only_adds_browser_install_without_dependency_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-validate-without-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "validate": [
+                        "pnpm test:e2e",
+                    ],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("validate",))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm test:e2e"),
+        ]
+        assert commands[0].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_defers_browser_install_across_production_batches(
         self,
     ) -> None:
