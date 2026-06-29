@@ -16,6 +16,7 @@ from awf.service.gc import WorkspaceGCCandidate, WorkspaceGCPath, _default_workt
 from awf.service.gc_worktrees import (
     _managed_mirror_path,
     _mirror_registry_points_to_worktree,
+    git_context_mirror_path_for_worktree,
     is_existing_non_git_worktree,
     remove_orphan_worktree,
 )
@@ -253,6 +254,7 @@ async def test_remove_orphan_worktree_ignores_malformed_duplicate_registry_for_l
     linked_git_dir.mkdir(parents=True)
     duplicate_git_dir.mkdir(parents=True)
     _write(worktree_path / ".git", f"gitdir: {linked_git_dir}\n")
+    (linked_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
     (duplicate_git_dir / "gitdir").write_text("", encoding="utf-8")
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
@@ -270,6 +272,29 @@ async def test_remove_orphan_worktree_ignores_malformed_duplicate_registry_for_l
         workspace_id=workspace_id,
         mirror_path=linked_mirror.resolve(),
     )
+
+
+@pytest.mark.unit
+def test_git_context_mirror_path_fails_closed_when_registry_fails_before_linked_validation(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    linked_mirror = work_dir / "git" / "mirrors" / "z-linked.git"
+    malformed_mirror = work_dir / "git" / "mirrors" / "a-malformed.git"
+    linked_git_dir = linked_mirror / "worktrees" / workspace_id
+    malformed_git_dir = malformed_mirror / "worktrees" / workspace_id
+    linked_git_dir.mkdir(parents=True)
+    malformed_git_dir.mkdir(parents=True)
+    _write(worktree_path / ".git", f"gitdir: {linked_git_dir}\n")
+    (malformed_git_dir / "gitdir").write_text("", encoding="utf-8")
+
+    with pytest.raises(GitOperationError) as raised:
+        git_context_mirror_path_for_worktree(worktree_path, work_dir=work_dir)
+
+    assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    assert "empty linked-worktree gitdir back-reference" in raised.value.stderr
 
 
 @pytest.mark.unit

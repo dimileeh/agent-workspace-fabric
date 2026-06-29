@@ -472,7 +472,9 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
     try:
         registered_mirror_path = mirror_path_for_registered_worktree(path, mirrors_root)
     except GitOperationError:
-        return linked_mirror_path
+        if _mirror_registry_points_to_worktree(linked_mirror_path, path):
+            return linked_mirror_path
+        raise
     if registered_mirror_path is None:
         return linked_mirror_path
     if linked_mirror_path == registered_mirror_path:
