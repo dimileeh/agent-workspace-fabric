@@ -978,6 +978,20 @@ def mirror_path_for_worktree(worktree_path: Path) -> Path | None:
     return linked_git_dir.parent.parent.resolve()
 
 
+def _path_within_root(path: Path, root: Path) -> Path | None:
+    try:
+        resolved_path = path.resolve()
+        resolved_root = root.resolve()
+    except RuntimeError:
+        resolved_path = path.absolute()
+        resolved_root = root.absolute()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return resolved_path
+
+
 def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) -> Path | None:
     """Return the bare mirror path from mirror-side linked-worktree metadata.
 
@@ -988,7 +1002,12 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
     if not mirrors_dir.exists():
         return None
     try:
-        mirror_paths = sorted(path for path in mirrors_dir.iterdir() if path.is_dir())
+        mirror_paths = sorted(
+            resolved_path
+            for path in mirrors_dir.iterdir()
+            if path.is_dir()
+            if (resolved_path := _path_within_root(path, mirrors_dir)) is not None
+        )
     except OSError as exc:
         raise GitOperationError(
             operation="mirror_registry_scan",
@@ -1023,7 +1042,7 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
             if best_match is None or registered_mtime_ns >= best_match[0]:
                 best_match = (registered_mtime_ns, mirror_path)
     if best_match is not None:
-        return best_match[1].resolve()
+        return best_match[1]
     if first_probe_error is not None:
         raise first_probe_error
     return None

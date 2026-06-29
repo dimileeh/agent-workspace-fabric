@@ -794,6 +794,31 @@ def test_mirror_path_for_registered_worktree_prefers_newest_duplicate_match(
 
 
 @pytest.mark.unit
+def test_mirror_path_for_registered_worktree_ignores_external_symlinked_mirror(
+    tmp_path: Path,
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    managed_mirror = mirrors_dir / "a-managed.git"
+    external_mirror = tmp_path / "external.git"
+    managed_linked_git_dir = managed_mirror / "worktrees" / "ws"
+    external_linked_git_dir = external_mirror / "worktrees" / "ws"
+    managed_linked_git_dir.mkdir(parents=True)
+    external_linked_git_dir.mkdir(parents=True)
+    for linked_git_dir in (managed_linked_git_dir, external_linked_git_dir):
+        (linked_git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    os.utime(managed_linked_git_dir, ns=(1, 1))
+    os.utime(external_linked_git_dir, ns=(2, 2))
+    (mirrors_dir / "z-external.git").symlink_to(external_mirror, target_is_directory=True)
+
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+        == managed_mirror.resolve()
+    )
+
+
+@pytest.mark.unit
 def test_mirror_path_for_registered_worktree_ignores_earlier_unreadable_match(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
