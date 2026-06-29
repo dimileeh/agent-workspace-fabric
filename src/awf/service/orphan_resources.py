@@ -52,6 +52,9 @@ from awf.service.orphan_resource_types import (
     RESOURCE_KINDS as RESOURCE_KINDS,
 )
 from awf.service.orphan_resource_types import (
+    Classification as Classification,
+)
+from awf.service.orphan_resource_types import (
     ClassifiedResource as ClassifiedResource,
 )
 from awf.service.orphan_resource_types import (

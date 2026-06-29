@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from awf.service import orphan_resources
+from awf.service.orphan_resource_types import Classification as ExtractedClassification
 from awf.service.orphan_resources import (
     DetectedResource,
     ResourceScan,
@@ -58,6 +59,13 @@ def _ok_view(
         retained_ids=frozenset(retained or set()),
         available=True,
     )
+
+
+@pytest.mark.unit
+def test_orphan_resources_reexports_classification_type() -> None:
+    from awf.service.orphan_resources import Classification
+
+    assert Classification is ExtractedClassification
 
 
 @pytest.mark.unit
