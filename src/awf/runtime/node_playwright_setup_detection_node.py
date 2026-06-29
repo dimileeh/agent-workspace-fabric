@@ -27,6 +27,7 @@ from awf.runtime.node_playwright_setup import (
     _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS,
     _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS,
     _SHELL_COMPOUND_CONTROL_TOKENS,
+    _YARN_WORKSPACES_FOCUS_ALL_FLAGS,
     _command_segment_invokes_node_playwright,
     _playwright_browser_install_node_package_manager,
     _shell_tokens,
@@ -327,6 +328,12 @@ def _node_dependency_install_satisfies_browser_install(
         browser_tokens = shlex.split(browser_install_package_manager)
     except ValueError:
         return False
+    if (
+        command_tokens == ["yarn"]
+        and len(browser_tokens) >= 3
+        and browser_tokens[:2] == ["yarn", "workspace"]
+    ):
+        return True
     return (
         len(command_tokens) == 1
         and len(browser_tokens) == 1
@@ -958,12 +965,17 @@ def _node_yarn_workspaces_focus_package_manager(
     focus_index = workspaces_index + 1
     if focus_index >= len(tokens) or tokens[focus_index] != "focus":
         return None
+    focus_all_seen = False
     workspace_name: str | None = None
     index = focus_index + 1
     while index < len(tokens):
         token = tokens[index]
         if token in _SHELL_COMPOUND_CONTROL_TOKENS:
             break
+        if token in _YARN_WORKSPACES_FOCUS_ALL_FLAGS:
+            focus_all_seen = True
+            index += 1
+            continue
         if token.startswith("-"):
             index += 1
             continue
@@ -972,6 +984,8 @@ def _node_yarn_workspaces_focus_package_manager(
         workspace_name = token
         index += 1
     if workspace_name is None:
+        if focus_all_seen:
+            return _node_package_manager_command("yarn", location_tokens)
         return None
     return _node_package_manager_command(
         "yarn",

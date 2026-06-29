@@ -195,6 +195,26 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.required is False
         assert browser_probe_workdir(profile) == "/workspace"
 
+    @pytest.mark.parametrize(
+        "setup_command",
+        ["yarn workspaces focus --all", "yarn workspaces focus -A"],
+    )
+    def test_recognizes_yarn_focus_all_as_project_install(self, setup_command: str) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[f"{setup_command} && yarn workspace web playwright test"],
+        )
+
+        assert browser_probe_workdir(profile) == "/workspace"
+
+        commands = profile_phase_command_plan(profile, ["setup", "validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", setup_command),
+            ("setup", "yarn workspace web playwright install chromium"),
+            ("validate", "yarn workspace web playwright test"),
+        ]
+
     def test_unscoped_npm_install_keeps_npx_playwright_command(self) -> None:
         command = playwright_browser_install_command(_profile_with_setup_and_browsers(["npm ci"]))
 

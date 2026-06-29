@@ -53,6 +53,7 @@ _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS: dict[str, frozenset[str]] = {
 }
 _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS = frozenset({"--help", "--version", "-h", "-v"})
 _SETUP_DEPENDENCY_GLOBAL_INSTALL_FLAGS = frozenset({"--global", "-g"})
+_YARN_WORKSPACES_FOCUS_ALL_FLAGS = frozenset({"--all", "-A"})
 _SHELL_COMPOUND_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "|&", "&"})
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?\Z")
