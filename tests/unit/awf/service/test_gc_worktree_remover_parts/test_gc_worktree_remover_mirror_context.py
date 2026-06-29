@@ -501,6 +501,21 @@ def test_existing_directory_without_git_context_is_non_git_worktree(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_existing_directory_without_git_context_ignores_malformed_registry(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_salvage"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    malformed_git_dir = work_dir / "git" / "mirrors" / "malformed.git" / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    malformed_git_dir.mkdir(parents=True)
+    (malformed_git_dir / "gitdir").write_text("", encoding="utf-8")
+
+    assert is_existing_non_git_worktree(worktree_path, work_dir=work_dir) is True
+
+
+@pytest.mark.unit
 async def test_remove_orphan_worktree_skips_stale_managed_linked_mirror(
     tmp_path: Path,
 ) -> None:
