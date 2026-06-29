@@ -330,6 +330,10 @@ class TestPlaywrightBrowserInstallCommand:
                 "uv pip install --python python3.12 playwright",
                 "python3.12 -m playwright install chromium",
             ),
+            (
+                "uv pip install --python .venv playwright",
+                ".venv/bin/python -m playwright install chromium",
+            ),
         ],
     )
     def test_python_playwright_profile_preserves_uv_pip_target_environment(

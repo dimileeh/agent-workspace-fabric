@@ -69,6 +69,7 @@ _PIP_REQUIREMENT_FILE_EQUALS_PREFIX = "--requirement="
 _CONTAINER_WORKSPACE_ROOT = Path("/workspace")
 _UV_PIP_PYTHON_FLAGS = frozenset({"-p", "--python"})
 _UV_PIP_PYTHON_EQUALS_PREFIXES = ("-p=", "--python=")
+_UV_PIP_VENV_DIRECTORY_NAMES = frozenset({".venv", "venv"})
 _UV_SYNC_EXTRA_FLAGS = frozenset({"--extra"})
 _UV_SYNC_EXTRA_EQUALS_PREFIX = "--extra="
 _UV_SYNC_GROUP_FLAGS = frozenset({"--group"})
@@ -620,7 +621,13 @@ def _uv_pip_python_target_executable(tokens: list[str], index: int) -> str | Non
 def _python_executable_for_uv_pip_target(target: str) -> str:
     if re.fullmatch(r"\d+(?:\.\d+)*", target):
         return f"python{target}"
+    if _is_uv_pip_venv_directory_target(target):
+        return str(Path(target) / "bin" / "python")
     return target
+
+
+def _is_uv_pip_venv_directory_target(target: str) -> bool:
+    return Path(target).name in _UV_PIP_VENV_DIRECTORY_NAMES
 
 
 def _uv_sync_segment_installs_playwright(
