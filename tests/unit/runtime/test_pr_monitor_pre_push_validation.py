@@ -37,6 +37,7 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
     ValidationWorktreeCheck,
+    ValidationWorktreeCleanup,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -159,6 +160,7 @@ async def test_pre_push_validation_records_target_head_before_push(
 async def test_pre_push_validation_records_deferred_browser_findings_after_validate(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Deferred browser installs should still be probed in monitor pre-push validation."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -183,6 +185,20 @@ async def test_pre_push_validation_records_deferred_browser_findings_after_valid
     local_head = "e" * 40
     cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
     cmd.queue_result(returncode=0, stdout="", stderr="")
+    order: list[str] = []
+
+    async def _cleanup(
+        _self: Any,
+        *,
+        worktree_path: Path,
+        restore_ref: str,
+    ) -> ValidationWorktreeCleanup:
+        order.append("cleanup")
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=restore_ref,
+        )
 
     class _BrowserValidation(_FakeValidation):
         def __init__(self) -> None:
@@ -194,6 +210,7 @@ async def test_pre_push_validation_records_deferred_browser_findings_after_valid
         ) -> tuple[ProfileLintFinding, ...]:
             assert self.calls, "browser probe must run after pre-push validation"
             assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+            order.append("browser_probe")
             self.probe_calls.append(dict(kwargs))
             return (
                 ProfileLintFinding(
@@ -214,6 +231,7 @@ async def test_pre_push_validation_records_deferred_browser_findings_after_valid
         worktrees_root=tmp_path / "worktrees",
     )
     runner._deps.validation = validation  # type: ignore[assignment]
+    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", _cleanup)
 
     result = await runner._validated_git_push_result(
         workspace_id=workspace_id,
@@ -232,6 +250,7 @@ async def test_pre_push_validation_records_deferred_browser_findings_after_valid
             "profile": profile,
         }
     ]
+    assert order == ["browser_probe", "cleanup"]
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
         assert ws is not None

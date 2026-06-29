@@ -242,16 +242,22 @@ async def test_validation_records_deferred_browser_findings_after_validate_insta
         "check_validation_worktree_clean",
         AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
     )
+    order: list[str] = []
+
+    async def _cleanup_validation_worktree_side_effects(
+        **_kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        order.append("cleanup")
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref="c" * 40,
+        )
+
     monkeypatch.setattr(
         executor_execution_validation,
         "cleanup_validation_worktree_side_effects",
-        AsyncMock(
-            return_value=ValidationWorktreeCleanup(
-                cleaned=True,
-                check=ValidationWorktreeCheck(clean=True),
-                restore_ref="c" * 40,
-            )
-        ),
+        _cleanup_validation_worktree_side_effects,
     )
 
     class _Validation:
@@ -261,6 +267,7 @@ async def test_validation_records_deferred_browser_findings_after_validate_insta
     browser_calls: list[dict[str, object]] = []
 
     async def _record_runtime_browser_findings_safe(**kwargs: object) -> None:
+        order.append("browser_probe")
         browser_calls.append(kwargs)
 
     executor = SimpleNamespace(
@@ -309,6 +316,7 @@ async def test_validation_records_deferred_browser_findings_after_validate_insta
             "profile": profile,
         }
     ]
+    assert order == ["browser_probe", "cleanup"]
 
 
 @pytest.mark.unit

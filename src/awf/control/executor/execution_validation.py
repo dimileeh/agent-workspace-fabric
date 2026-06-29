@@ -469,12 +469,12 @@ async def run_validation_and_fix_cycle(
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
             )
+        await _record_deferred_runtime_browser_findings()
         cleanup_result = await cleanup_validation_worktree_side_effects(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
             restore_ref=validation_workspace_head_sha,
         )
-        await _record_deferred_runtime_browser_findings()
         if not cleanup_result.ok:
             callback_ignored = await self._finish_validation_callback_if_terminal(
                 workspace_id=workspace_id,

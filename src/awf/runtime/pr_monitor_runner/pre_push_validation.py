@@ -1226,17 +1226,17 @@ async def _run_pre_push_validation(
             message=message,
         )
 
-    cleanup_result = await _pre_push_validation_cleanup(
-        self,
-        worktree_path=worktree_path,
-        restore_ref=workspace_head_sha,
-    )
     await _record_deferred_runtime_browser_findings_safe(
         self,
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=compose_file,
         profile=profile,
+    )
+    cleanup_result = await _pre_push_validation_cleanup(
+        self,
+        worktree_path=worktree_path,
+        restore_ref=workspace_head_sha,
     )
     if not cleanup_result.ok:
         await _finish_pre_push_validation_run(
