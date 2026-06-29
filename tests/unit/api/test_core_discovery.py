@@ -106,6 +106,53 @@ def test_git_rev_parse_head_returns_none_outside_core_source_checkout(
     assert core_discovery_service._git_rev_parse_head() is None
 
 
+def test_core_discovery_payload_from_state_uses_default_when_cache_missing() -> None:
+    payload = core_discovery_service.core_discovery_payload_from_state(SimpleNamespace())
+
+    assert payload.git_commit == "unknown"
+    assert payload.capabilities == ("workspace.execution.v1",)
+
+
+def test_git_rev_parse_head_returns_none_when_source_checkout_has_no_git_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    module_file = checkout / "src" / "awf" / "service" / "core_discovery.py"
+    module_file.parent.mkdir(parents=True)
+    module_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(core_discovery_service, "__file__", str(module_file))
+
+    def _run(args: list[str], **kwargs: object) -> SimpleNamespace:
+        raise AssertionError("git must not run when the checkout has no .git directory")
+
+    monkeypatch.setattr(core_discovery_service.subprocess, "run", _run)
+
+    assert core_discovery_service._git_rev_parse_head() is None
+
+
+def test_git_rev_parse_head_returns_none_when_git_command_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _run(args: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=128, stdout="")
+
+    monkeypatch.setattr(core_discovery_service.subprocess, "run", _run)
+
+    assert core_discovery_service._git_rev_parse_head() is None
+
+
+def test_git_rev_parse_head_returns_none_when_git_exec_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _run(args: list[str], **kwargs: object) -> SimpleNamespace:
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr(core_discovery_service.subprocess, "run", _run)
+
+    assert core_discovery_service._git_rev_parse_head() is None
+
+
 async def test_core_discovery_caches_git_commit_before_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
