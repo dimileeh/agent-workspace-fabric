@@ -300,6 +300,24 @@ def _command_installs_python_playwright(
             index += 1
         if index >= len(tokens):
             return False
+        scoped_command = _leading_cd_package_scope(tokens, index)
+        if scoped_command is not None:
+            package_dir, command_index = scoped_command
+            if _command_segment_installs_python_playwright(
+                tokens,
+                command_index,
+                workspace_root=workspace_root,
+                requirement_base_dir=_requirement_base_dir_for_scope(
+                    package_dir,
+                    workspace_root=workspace_root,
+                ),
+            ):
+                return True
+            next_command_index = _sequential_command_next_index(tokens, command_index)
+            if next_command_index is None:
+                return False
+            index = next_command_index
+            continue
         if _command_segment_installs_python_playwright(
             tokens,
             index,
@@ -318,22 +336,37 @@ def _command_segment_installs_python_playwright(
     index: int,
     *,
     workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
 ) -> bool:
     executable = tokens[index]
     if executable in _PIP_EXECUTABLES:
-        return _pip_segment_installs_playwright(tokens, index + 1, workspace_root=workspace_root)
+        return _pip_segment_installs_playwright(
+            tokens,
+            index + 1,
+            workspace_root=workspace_root,
+            requirement_base_dir=requirement_base_dir,
+        )
     if executable in _PYTHON_EXECUTABLES and tokens[index + 1 : index + 3] == ["-m", "pip"]:
-        return _pip_segment_installs_playwright(tokens, index + 3, workspace_root=workspace_root)
+        return _pip_segment_installs_playwright(
+            tokens,
+            index + 3,
+            workspace_root=workspace_root,
+            requirement_base_dir=requirement_base_dir,
+        )
     if executable == "uv" and index + 1 < len(tokens):
         if tokens[index + 1] == "pip":
             return _pip_segment_installs_playwright(
-                tokens, index + 2, workspace_root=workspace_root
+                tokens,
+                index + 2,
+                workspace_root=workspace_root,
+                requirement_base_dir=requirement_base_dir,
             )
         if tokens[index + 1] == "add":
             return _python_requirements_include_playwright(
                 tokens,
                 index + 2,
                 workspace_root=workspace_root,
+                requirement_base_dir=requirement_base_dir,
             )
     return False
 
@@ -359,9 +392,18 @@ def _command_python_playwright_executable(
                 tokens,
                 command_index,
                 workspace_root=workspace_root,
+                requirement_base_dir=_requirement_base_dir_for_scope(
+                    package_dir,
+                    workspace_root=workspace_root,
+                ),
             )
             if executable is not None:
                 return f"{shlex.join(['cd', package_dir])} && {executable}"
+            next_command_index = _sequential_command_next_index(tokens, command_index)
+            if next_command_index is None:
+                return None
+            index = next_command_index
+            continue
         executable = _command_segment_python_playwright_executable(
             tokens,
             index,
@@ -395,6 +437,7 @@ def _command_segment_python_playwright_executable(
     index: int,
     *,
     workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
 ) -> str | None:
     executable = tokens[index]
     if executable in _PYTHON_EXECUTABLES and tokens[index + 1 : index + 3] == [
@@ -406,6 +449,7 @@ def _command_segment_python_playwright_executable(
         tokens,
         index,
         workspace_root=workspace_root,
+        requirement_base_dir=requirement_base_dir,
     ):
         if executable in {"python3", "pip3"}:
             return "python3"
@@ -420,6 +464,7 @@ def _pip_segment_installs_playwright(
     index: int,
     *,
     workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
 ) -> bool:
     while index < len(tokens):
         token = tokens[index]
@@ -430,6 +475,7 @@ def _pip_segment_installs_playwright(
                 tokens,
                 index + 1,
                 workspace_root=workspace_root,
+                requirement_base_dir=requirement_base_dir,
             )
         index += 1
     return False
@@ -440,6 +486,7 @@ def _python_requirements_include_playwright(
     index: int,
     *,
     workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
 ) -> bool:
     seen_requirement_files: set[Path] = set()
     while index < len(tokens):
@@ -451,6 +498,7 @@ def _python_requirements_include_playwright(
             requirement_file,
             seen_requirement_files,
             workspace_root=workspace_root,
+            requirement_base_dir=requirement_base_dir,
         ):
             return True
         if _PYTHON_PLAYWRIGHT_REQUIREMENT_RE.fullmatch(token):
@@ -477,8 +525,13 @@ def _python_requirement_file_includes_playwright(
     seen_requirement_files: set[Path],
     *,
     workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
 ) -> bool:
-    path = _safe_local_requirement_file_path(requirement_file, workspace_root=workspace_root)
+    path = _safe_local_requirement_file_path(
+        requirement_file,
+        workspace_root=workspace_root,
+        requirement_base_dir=requirement_base_dir,
+    )
     if path is None or path in seen_requirement_files:
         return False
     seen_requirement_files.add(path)
@@ -501,13 +554,19 @@ def _safe_local_requirement_file_path(
     requirement_file: str,
     *,
     workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
 ) -> Path | None:
     if not requirement_file or requirement_file.startswith("-"):
         return None
     resolved_workspace_root = (workspace_root or Path.cwd()).resolve()
+    resolved_requirement_base_dir = (
+        requirement_base_dir.resolve()
+        if requirement_base_dir is not None
+        else resolved_workspace_root
+    )
     path = Path(requirement_file)
     if not path.is_absolute():
-        path = resolved_workspace_root / path
+        path = resolved_requirement_base_dir / path
     try:
         resolved = path.resolve(strict=True)
         resolved.relative_to(resolved_workspace_root)
@@ -547,6 +606,17 @@ def _python_requirement_line_includes_playwright(
         seen_requirement_files,
         workspace_root=workspace_root,
     )
+
+
+def _requirement_base_dir_for_scope(
+    package_dir: str,
+    *,
+    workspace_root: Path | None = None,
+) -> Path:
+    path = Path(package_dir)
+    if path.is_absolute():
+        return path
+    return (workspace_root or Path.cwd()) / path
 
 
 def _command_invokes_python_playwright(command: str) -> bool:

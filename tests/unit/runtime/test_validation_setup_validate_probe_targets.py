@@ -922,6 +922,24 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    def test_scoped_validate_python_requirement_install_uses_cd_directory(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        app_root = workspace_root / "apps" / "web"
+        app_root.mkdir(parents=True)
+        (app_root / "requirements.txt").write_text("playwright\n", encoding="utf-8")
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["cd apps/web && python -m pip install -r requirements.txt"],
+        )
+
+        command = playwright_browser_install_command(profile, workspace_root=workspace_root)
+
+        assert command is not None
+        assert command.command == "cd apps/web && python -m playwright install chromium"
+
     def test_validate_python_browser_install_splits_direct_install_and_test_chain(self) -> None:
         profile = _profile_with_setup_validate_and_browsers(
             setup=[],
