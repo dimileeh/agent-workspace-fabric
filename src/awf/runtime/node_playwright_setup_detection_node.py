@@ -45,6 +45,8 @@ from awf.runtime.node_playwright_setup_shell import (
 )
 from awf.runtime.validation_command_probe import _first_non_assignment_token_index
 
+_NPM_PRESERVED_VALUELESS_INSTALL_FLAGS = frozenset({"--workspaces"})
+
 
 def _node_package_manager_has_scope(package_manager: str) -> bool:
     try:
@@ -332,6 +334,12 @@ def _node_dependency_install_satisfies_browser_install(
         command_tokens == ["yarn"]
         and len(browser_tokens) >= 3
         and browser_tokens[:2] == ["yarn", "workspace"]
+    ):
+        return True
+    if (
+        command_tokens == ["npm", "--workspaces"]
+        and len(browser_tokens) >= 3
+        and browser_tokens[:2] == ["npm", "--workspace"]
     ):
         return True
     return (
@@ -888,6 +896,10 @@ def _node_dependency_install_package_manager_from_tokens(
             option_name = token.split("=", 1)[0]
             if option_name in _SETUP_DEPENDENCY_GLOBAL_INSTALL_FLAGS:
                 return None
+            if executable == "npm" and token in _NPM_PRESERVED_VALUELESS_INSTALL_FLAGS:
+                inferred_location_tokens.append(token)
+                subcommand_index += 1
+                continue
             if executable == "yarn":
                 if option_name in _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS:
                     return None

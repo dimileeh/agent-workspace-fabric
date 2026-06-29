@@ -940,6 +940,25 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    def test_validate_browser_install_preserves_npm_workspaces_install_scope(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[
+                "npm install --workspaces && npm --workspace web exec playwright test",
+            ],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "npm install --workspaces"),
+            ("setup", "npm --workspace web exec -- playwright install chromium"),
+            ("validate", "npm --workspace web exec playwright test"),
+        ]
+        assert commands[1].command.required is False
+
     @pytest.mark.parametrize("phase", ["setup", "validate"])
     def test_browser_install_splits_assignment_only_install_preamble(
         self,
