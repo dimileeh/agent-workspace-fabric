@@ -1531,7 +1531,11 @@ def _leading_cd_package_scope(tokens: list[str], index: int) -> tuple[str, int] 
     if package_dir_index >= len(tokens):
         return None
     package_dir = tokens[package_dir_index]
-    if package_dir in _SHELL_COMPOUND_CONTROL_TOKENS or package_dir.startswith("-"):
+    if (
+        package_dir in _SHELL_COMPOUND_CONTROL_TOKENS
+        or package_dir.startswith("-")
+        or _cd_package_scope_uses_shell_expansion(package_dir)
+    ):
         return None
     separator_index = package_dir_index + 1
     if separator_index >= len(tokens) or tokens[separator_index] not in {"&&", ";"}:
@@ -1541,6 +1545,10 @@ def _leading_cd_package_scope(tokens: list[str], index: int) -> tuple[str, int] 
     if install_index >= len(tokens):
         return None
     return package_dir, install_index
+
+
+def _cd_package_scope_uses_shell_expansion(package_dir: str) -> bool:
+    return "$" in package_dir or "`" in package_dir
 
 
 def _node_package_manager_command(executable: str, location_tokens: list[str]) -> str:

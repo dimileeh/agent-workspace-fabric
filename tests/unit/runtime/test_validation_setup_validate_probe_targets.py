@@ -494,6 +494,15 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "pnpm -C apps/web exec playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace/apps/web"
 
+    def test_rejects_shell_expanded_cd_scope_for_pnpm_install(self) -> None:
+        profile = _profile_with_setup_and_browsers(['cd "$APP_DIR" && pnpm install'])
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "pnpm exec playwright install chromium"
+        assert browser_probe_workdir(profile) == "/workspace"
+
     def test_preserves_package_directory_from_leading_cd_with_double_dash(self) -> None:
         profile = _profile_with_setup_and_browsers(["cd -- apps/web && npm ci"])
 
