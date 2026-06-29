@@ -63,6 +63,8 @@ _PYTHON_PLAYWRIGHT_REQUIREMENT_RE = re.compile(
 )
 _PIP_REQUIREMENT_FILE_FLAGS = frozenset({"-r", "--requirement"})
 _PIP_REQUIREMENT_FILE_EQUALS_PREFIX = "--requirement="
+_UV_PIP_PYTHON_FLAGS = frozenset({"-p", "--python"})
+_UV_PIP_PYTHON_EQUALS_PREFIXES = ("-p=", "--python=")
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
 
 
@@ -469,9 +471,41 @@ def _command_segment_python_playwright_executable(
         requirement_base_dir=requirement_base_dir,
     ):
         if executable == "uv":
-            return "uv run"
+            return _uv_python_playwright_install_executable(tokens, index)
         return _python_executable_for_install_executable(executable) or "python"
     return None
+
+
+def _uv_python_playwright_install_executable(tokens: list[str], index: int) -> str | None:
+    if index + 1 >= len(tokens):
+        return None
+    if tokens[index + 1] == "add":
+        return "uv run"
+    if tokens[index + 1] != "pip":
+        return None
+    return _uv_pip_python_target_executable(tokens, index + 2) or "python"
+
+
+def _uv_pip_python_target_executable(tokens: list[str], index: int) -> str | None:
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return None
+        if token in _UV_PIP_PYTHON_FLAGS:
+            if index + 1 >= len(tokens) or tokens[index + 1] in _SHELL_COMPOUND_CONTROL_TOKENS:
+                return None
+            return _python_executable_for_uv_pip_target(tokens[index + 1])
+        for prefix in _UV_PIP_PYTHON_EQUALS_PREFIXES:
+            if token.startswith(prefix):
+                return _python_executable_for_uv_pip_target(token.removeprefix(prefix))
+        index += 1
+    return None
+
+
+def _python_executable_for_uv_pip_target(target: str) -> str:
+    if re.fullmatch(r"\d+(?:\.\d+)*", target):
+        return f"python{target}"
+    return target
 
 
 def _pip_segment_installs_playwright(
