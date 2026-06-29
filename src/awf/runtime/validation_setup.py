@@ -560,9 +560,18 @@ def _split_dependency_install_chain(
             workspace_root=workspace_root,
         ):
             return None
-        browser_install_scope_prefix = None
+        inline_browser_install_scope_prefix = _dependency_install_inline_browser_scope_prefix(
+            install_command,
+            browser_install_package_manager,
+            workspace_root=workspace_root,
+        )
+        browser_install_scope_prefix = inline_browser_install_scope_prefix
         if scope_prefixes is not None:
             trailing_scope_prefix, browser_install_scope_prefix = scope_prefixes
+            browser_install_scope_prefix = _combine_shell_scope_prefixes(
+                browser_install_scope_prefix,
+                inline_browser_install_scope_prefix,
+            )
             trailing_command = f"{trailing_scope_prefix} && {trailing_command}"
         return (
             replace(
@@ -659,6 +668,45 @@ def _dependency_install_chain_has_unpreserved_shell_state_scope(
         ):
             return _command_has_unpreserved_shell_state_scope(scope_prefix)
     return False
+
+
+def _dependency_install_inline_browser_scope_prefix(
+    install_command: str,
+    browser_install_package_manager: str | None,
+    *,
+    workspace_root: Path | None = None,
+) -> str | None:
+    for command_text, command_tokens in _sequential_shell_command_text_ranges(install_command):
+        command_index = _first_non_assignment_token_index(command_tokens)
+        if command_index == 0 or command_index >= len(command_tokens):
+            continue
+        if not _command_satisfies_deferred_browser_install(
+            command_text,
+            _node_dependency_install_package_manager(command_text),
+            browser_install_package_manager,
+            workspace_root=workspace_root,
+        ):
+            continue
+        leading_assignments = command_tokens[:command_index]
+        if not all(
+            _replay_safe_assignment_only_state(assignment) for assignment in leading_assignments
+        ):
+            return None
+        assignment_parts = command_text.split(maxsplit=command_index)
+        if len(assignment_parts) <= command_index:
+            return None
+        assignment_text = " ".join(assignment_parts[:command_index])
+        if _shell_tokens(assignment_text) != leading_assignments:
+            return None
+        return f"export {assignment_text}"
+    return None
+
+
+def _combine_shell_scope_prefixes(*scope_prefixes: str | None) -> str | None:
+    scoped = [scope_prefix for scope_prefix in scope_prefixes if scope_prefix]
+    if not scoped:
+        return None
+    return "; ".join(scoped)
 
 
 def _command_has_unpreserved_shell_state_scope(command: str) -> bool:

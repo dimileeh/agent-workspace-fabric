@@ -1064,6 +1064,57 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    def test_browser_install_replays_inline_install_assignments_for_browser_install(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[
+                "PATH=/opt/node/bin:$PATH PLAYWRIGHT_BROWSERS_PATH=.pw "
+                "pnpm install && PATH=/opt/node/bin:$PATH "
+                "PLAYWRIGHT_BROWSERS_PATH=.pw pnpm exec playwright test"
+            ],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            (
+                "validate",
+                "PATH=/opt/node/bin:$PATH PLAYWRIGHT_BROWSERS_PATH=.pw pnpm install",
+            ),
+            (
+                "setup",
+                "export PATH=/opt/node/bin:$PATH PLAYWRIGHT_BROWSERS_PATH=.pw "
+                "&& pnpm exec playwright install chromium",
+            ),
+            (
+                "validate",
+                "PATH=/opt/node/bin:$PATH PLAYWRIGHT_BROWSERS_PATH=.pw pnpm exec playwright test",
+            ),
+        ]
+        assert commands[1].command.required is False
+
+    def test_browser_install_does_not_replay_unsafe_inline_install_assignment(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[
+                "PLAYWRIGHT_BROWSERS_PATH=`pwd` pnpm install && "
+                "PLAYWRIGHT_BROWSERS_PATH=`pwd` pnpm exec playwright test"
+            ],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "PLAYWRIGHT_BROWSERS_PATH=`pwd` pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "PLAYWRIGHT_BROWSERS_PATH=`pwd` pnpm exec playwright test"),
+        ]
+        assert commands[1].command.required is False
+
     def test_validate_browser_install_ignores_separators_inside_shell_comment(
         self,
     ) -> None:
