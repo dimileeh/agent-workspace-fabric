@@ -27,6 +27,19 @@ def _parse_marker_timestamp(state: MonitorState) -> datetime | None:
 
 
 @pytest.mark.unit
+def test_merge_block_attention_active_false_without_marker() -> None:
+    state = MonitorState()
+
+    assert (
+        state.merge_block_attention_active(
+            now=datetime(2026, 6, 22, 12, 0, tzinfo=UTC),
+            ttl_seconds=120.0,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
 def test_mark_merge_block_attention_stamps_wall_clock_timestamp() -> None:
     """``mark_merge_block_attention`` stores an ISO-8601 wall-clock timestamp."""
     state = MonitorState()
