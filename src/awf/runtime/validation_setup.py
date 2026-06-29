@@ -722,18 +722,23 @@ def _inject_deferred_browser_install_into_dependency_install_chain(
             browser_install,
             browser_install_scope_prefix,
         )
-        joiner = {
-            "\n": "\n",
-            ";": "; ",
-            "&&": " && ",
-        }[separator]
-        injected_command = joiner.join(
-            (
-                install_command,
-                scoped_browser_install.command.command,
-                trailing_command,
+        if separator == "&&":
+            injected_command = (
+                f"{install_command} && "
+                f"{{ {scoped_browser_install.command.command}; {trailing_command}; }}"
             )
-        )
+        else:
+            joiner = {
+                "\n": "\n",
+                ";": "; ",
+            }[separator]
+            injected_command = joiner.join(
+                (
+                    install_command,
+                    scoped_browser_install.command.command,
+                    trailing_command,
+                )
+            )
         return replace(
             command,
             command=command.command.model_copy(update={"command": injected_command}),
