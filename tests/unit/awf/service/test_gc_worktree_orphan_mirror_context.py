@@ -67,7 +67,7 @@ async def test_remove_orphan_worktree_skips_existing_non_git_directory(
     mock_gm_cls.assert_not_called()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 async def test_remove_orphan_worktree_uses_companion_path_name_as_worktree_id(
     tmp_path: Path,
 ) -> None:
