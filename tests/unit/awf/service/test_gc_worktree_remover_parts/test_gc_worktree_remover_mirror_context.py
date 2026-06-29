@@ -13,7 +13,12 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitOperationError, mirror_path_for_worktree
 from awf.service.gc import WorkspaceGCCandidate, WorkspaceGCPath, _default_worktree_remover
-from awf.service.gc_worktrees import remove_orphan_worktree
+from awf.service.gc_worktrees import (
+    _managed_mirror_path,
+    _mirror_registry_points_to_worktree,
+    is_existing_non_git_worktree,
+    remove_orphan_worktree,
+)
 from tests.unit.awf.service.gc_worktree_test_helpers import _make_mirror_with_worktree, _write
 from tests.unit.service.test_gc_worktree_remover import _workspace
 
@@ -355,3 +360,116 @@ async def test_remove_orphan_worktree_falls_back_when_linked_mirror_registry_mis
         workspace_id=workspace_id,
         mirror_path=correct_mirror.resolve(),
     )
+
+
+@pytest.mark.unit
+async def test_remove_orphan_worktree_falls_back_when_linked_metadata_dir_is_missing(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    stale_mirror = work_dir / "git" / "mirrors" / "stale.git"
+    correct_mirror = work_dir / "git" / "mirrors" / "correct.git"
+    stale_linked_git_dir = stale_mirror / "worktrees" / workspace_id
+    correct_linked_git_dir = correct_mirror / "worktrees" / workspace_id
+    correct_linked_git_dir.mkdir(parents=True)
+    _write(worktree_path / ".git", f"gitdir: {stale_linked_git_dir}\n")
+    (correct_linked_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    mock_gm.remove_worktree_from_mirror.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        mirror_path=correct_mirror.resolve(),
+    )
+
+
+@pytest.mark.unit
+def test_mirror_registry_probe_uses_absolute_worktree_when_resolve_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "service" / "git" / "worktrees" / "ws_rowless"
+    mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
+    linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+    linked_git_dir.mkdir(parents=True)
+    _write(linked_git_dir / "gitdir", str(worktree_path.absolute() / ".git"))
+    original_resolve = Path.resolve
+
+    def resolve_or_fail(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == worktree_path:
+            raise OSError("synthetic resolve failure")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_or_fail)
+
+    assert _mirror_registry_points_to_worktree(mirror_path, worktree_path) is True
+
+
+@pytest.mark.unit
+def test_managed_mirror_path_uses_absolute_paths_when_resolve_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mirrors_root = tmp_path / "service" / "git" / "mirrors"
+    mirror_path = mirrors_root / "repo.git"
+    original_resolve = Path.resolve
+
+    def resolve_or_fail(path: Path, *args: object, **kwargs: object) -> Path:
+        if path in {mirror_path, mirrors_root}:
+            raise OSError("synthetic resolve failure")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_or_fail)
+
+    assert _managed_mirror_path(mirror_path, mirrors_root) == mirror_path.absolute()
+
+
+@pytest.mark.unit
+def test_missing_path_is_not_existing_non_git_worktree(tmp_path: Path) -> None:
+    assert (
+        is_existing_non_git_worktree(tmp_path / "service" / "git" / "worktrees" / "ws_missing")
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_existing_directory_without_work_dir_context_is_non_git_worktree(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "service" / "git" / "worktrees" / "ws_salvage"
+    worktree_path.mkdir(parents=True)
+
+    assert is_existing_non_git_worktree(worktree_path) is True
+
+
+@pytest.mark.unit
+def test_managed_git_context_is_not_existing_non_git_worktree(tmp_path: Path) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    _make_mirror_with_worktree(tmp_path, work_dir, workspace_id)
+
+    assert (
+        is_existing_non_git_worktree(
+            work_dir / "git" / "worktrees" / workspace_id,
+            work_dir=work_dir,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_existing_directory_without_git_context_is_non_git_worktree(tmp_path: Path) -> None:
+    work_dir = tmp_path / "service"
+    worktree_path = work_dir / "git" / "worktrees" / "ws_salvage"
+    worktree_path.mkdir(parents=True)
+
+    assert is_existing_non_git_worktree(worktree_path, work_dir=work_dir) is True
