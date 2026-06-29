@@ -46,6 +46,7 @@ _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS = frozenset(
     {"--cwd", "--dir", "--filter", "--prefix", "--workspace", "-C", "-F", "-w"}
 )
 _NODE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset({"--cwd", "--dir", "--prefix", "-C"})
+_PNPM_PRESERVED_VALUELESS_SCOPE_FLAGS = frozenset({"--recursive", "-r"})
 _PNPM_VALUELESS_WORKSPACE_ROOT_FLAGS = frozenset({"--workspace-root", "-w"})
 _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS: dict[str, frozenset[str]] = {
     "yarn": frozenset({"--frozen-lockfile", "--immutable", "--immutable-cache"})

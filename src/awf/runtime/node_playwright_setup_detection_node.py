@@ -21,6 +21,7 @@ from awf.runtime.node_playwright_setup import (
     _NPM_DIRECT_SCRIPT_VALIDATION_SUBCOMMANDS,
     _NPM_EXEC_VALIDATION_SUBCOMMANDS,
     _NPM_SCRIPT_VALIDATION_SUBCOMMANDS,
+    _PNPM_PRESERVED_VALUELESS_SCOPE_FLAGS,
     _PNPM_VALUELESS_WORKSPACE_ROOT_FLAGS,
     _SETUP_DEPENDENCY_GLOBAL_INSTALL_FLAGS,
     _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS,
@@ -617,6 +618,10 @@ def _node_scoped_package_manager_from_tokens(
                 if _node_pm_location_value_uses_shell_expansion(option_name, option_value):
                     return None
                 location_tokens.append(token)
+            command_index += 1
+            continue
+        if executable == "pnpm" and token in _PNPM_PRESERVED_VALUELESS_SCOPE_FLAGS:
+            location_tokens.append(token)
             command_index += 1
             continue
         if token.startswith("-"):

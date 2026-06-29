@@ -145,6 +145,32 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "pnpm --filter web exec playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace"
 
+    @pytest.mark.parametrize(
+        ("validate_command", "expected"),
+        [
+            ("pnpm -r test:e2e", "pnpm -r exec playwright install chromium"),
+            (
+                "pnpm --recursive test:e2e",
+                "pnpm --recursive exec playwright install chromium",
+            ),
+        ],
+    )
+    def test_root_pnpm_setup_uses_recursive_validate_scope_for_browser_install(
+        self,
+        validate_command: str,
+        expected: str,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["pnpm install --frozen-lockfile"],
+            validate=[validate_command],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == expected
+        assert browser_probe_workdir(profile) == "/workspace"
+
     def test_root_pnpm_setup_does_not_satisfy_filtered_validate_install(self) -> None:
         profile = _profile_with_setup_validate_and_browsers(
             setup=["pnpm install --frozen-lockfile"],
