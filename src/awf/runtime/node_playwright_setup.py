@@ -38,9 +38,9 @@ def playwright_command(package_manager: str, *args: str) -> str:
 
 
 def _profile_install_commands(profile: WorkspaceProfile) -> list[str]:
+    """Return install commands that run before the generated browser setup."""
     commands = [c.command for c in profile.phases.setup if c.command]
     commands += [c.command for c in profile.database.generated_setup if c.command]
-    commands += [c.command for c in profile.phases.pre_agent if c.command]
     return commands
 
 

@@ -108,6 +108,21 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
 
 
 @pytest.mark.unit
+def test_browser_install_does_not_infer_node_manager_from_future_pre_agent() -> None:
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"pre_agent": ["pnpm install", "pnpm exec playwright test"]},
+        }
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == "npx playwright install chromium"
+
+
+@pytest.mark.unit
 def test_browser_install_uses_python_interpreter_when_no_node_manager() -> None:
     profile = _profile(
         {
