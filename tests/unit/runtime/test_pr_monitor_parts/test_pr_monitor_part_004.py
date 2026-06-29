@@ -281,7 +281,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_structured_test_evidence_is_advisory_for_transient_ci_rerun(self) -> None:
+    def test_structured_test_evidence_prevents_transient_ci_rerun(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
@@ -297,7 +297,7 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, RerunTransientCI)
+        assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
 
     @pytest.mark.unit

@@ -1139,7 +1139,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_docker_pull_with_structured_test_evidence_dispatches_rerun(self) -> None:
+    def test_docker_pull_with_structured_test_evidence_reports_ci_failure(self) -> None:
         failure = CheckFailure(
             name="python-coverage-shards (2)",
             conclusion="FAILURE",
@@ -1159,7 +1159,7 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, RerunTransientCI)
+        assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
 
     @pytest.mark.unit

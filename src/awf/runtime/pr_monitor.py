@@ -677,6 +677,14 @@ def _log_shows_code_failure(log_text: str) -> bool:
     return False
 
 
+def _failure_has_parsed_code_evidence(failure: CheckFailure) -> bool:
+    if failure.test_node_ids or failure.assertion_snippets:
+        return True
+    if failure.error_summaries:
+        return _log_shows_code_failure("\n".join(failure.error_summaries).lower())
+    return False
+
+
 def _ci_failure_identity(failure: CheckFailure) -> tuple[str, str, str]:
     """Stable identity for one failing check inside a retry-budget key.
 
@@ -856,6 +864,8 @@ def _ci_transient_infra_wait_seconds(
 def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     """True for retryable infrastructure flakes."""
 
+    if _failure_has_parsed_code_evidence(failure):
+        return False
     log_text = failure.log_excerpt.lower()
     if not log_text.strip():
         return bool(failure.run_id) and failure.conclusion.upper() == "TIMED_OUT"
