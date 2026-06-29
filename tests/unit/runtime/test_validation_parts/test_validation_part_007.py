@@ -123,7 +123,7 @@ class TestBrowserPhaseCommandPlan:
         assert [(command.phase, command.command.command) for command in commands] == [
             ("setup", "set -e; pnpm install"),
             ("setup", "pnpm exec playwright install chromium"),
-            ("setup", "pnpm exec playwright test --project=setup"),
+            ("setup", "set -e && pnpm exec playwright test --project=setup"),
         ]
         assert commands[1].command.required is False
 

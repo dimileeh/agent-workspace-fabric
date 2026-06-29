@@ -69,6 +69,7 @@ from awf.runtime.node_playwright_setup import (
 )
 from awf.runtime.validation_command_probe import (
     _ENV_ASSIGNMENT_RE,
+    _VALIDATE_PROBE_LEADING_GUARDS,
 )
 from awf.runtime.validation_command_probe import (
     _first_non_assignment_token_index as _first_non_assignment_token_index,
@@ -550,7 +551,10 @@ def _dependency_install_chain_trailing_scope_prefix(
     ):
         scope_prefix = install_command[:separator_index].strip()
         scoped_install_command = install_command[separator_index + len(separator) :].strip()
-        if not _command_starts_with_cd_scope(scope_prefix) or not scoped_install_command:
+        if (
+            not _command_preserves_install_trailing_scope(scope_prefix)
+            or not scoped_install_command
+        ):
             continue
         command_package_manager = _node_dependency_install_package_manager(scoped_install_command)
         if _node_dependency_install_satisfies_browser_install(
@@ -559,6 +563,10 @@ def _dependency_install_chain_trailing_scope_prefix(
         ):
             return scope_prefix
     return None
+
+
+def _command_preserves_install_trailing_scope(command: str) -> bool:
+    return _command_starts_with_cd_scope(command) or _command_is_shell_guard_scope(command)
 
 
 def _command_starts_with_cd_scope(command: str) -> bool:
@@ -572,6 +580,23 @@ def _command_starts_with_cd_scope(command: str) -> bool:
         if command_index < len(tokens) and tokens[command_index] == "cd":
             return True
     return False
+
+
+def _command_is_shell_guard_scope(command: str) -> bool:
+    tokens = _shell_tokens(command)
+    if tokens is None:
+        return False
+    if any(token in {"||", "|", "|&", "&"} for token in tokens):
+        return False
+    saw_guard = False
+    for command_index in _sequential_shell_command_indices(tokens):
+        command_index += _first_non_assignment_token_index(tokens[command_index:])
+        if command_index >= len(tokens):
+            continue
+        if tokens[command_index] not in _VALIDATE_PROBE_LEADING_GUARDS:
+            return False
+        saw_guard = True
+    return saw_guard
 
 
 def _sequential_shell_command_indices(tokens: list[str]) -> list[int]:

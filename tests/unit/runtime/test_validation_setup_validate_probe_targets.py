@@ -689,6 +689,23 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    def test_validate_browser_install_split_preserves_guard_for_trailing_command(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["set -e; pnpm install; npm run build; pnpm test:e2e"],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "set -e; pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "set -e && npm run build; pnpm test:e2e"),
+        ]
+        assert commands[1].command.required is False
+
     def test_pnpm_workspace_root_install_gets_browser_install_before_pre_agent(
         self,
     ) -> None:
