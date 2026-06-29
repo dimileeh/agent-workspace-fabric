@@ -694,6 +694,7 @@ def _requested_pre_validate_playwright_usage_exists(
 ) -> bool:
     return any(
         _node_command_uses_playwright(command.command)
+        or _command_invokes_python_playwright(command.command)
         for command in _requested_pre_validate_node_dependency_install_commands(
             profile,
             requested_phases,

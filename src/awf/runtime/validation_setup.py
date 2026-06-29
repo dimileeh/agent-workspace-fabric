@@ -27,6 +27,9 @@ from awf.runtime.node_playwright_setup import (
     _command_installs_python_playwright as _command_installs_python_playwright,
 )
 from awf.runtime.node_playwright_setup import (
+    _command_invokes_python_playwright as _command_invokes_python_playwright,
+)
+from awf.runtime.node_playwright_setup import (
     _node_command_uses_playwright as _node_command_uses_playwright,
 )
 from awf.runtime.node_playwright_setup import (
@@ -274,7 +277,10 @@ def profile_phase_command_plan(
             deferred_browser_install is not None
             and not defer_browser_install_until_validate_install
             and command.phase in {"setup", DB_GENERATED_SETUP_PHASE, "pre_agent"}
-            and _node_command_uses_playwright(command.command.command)
+            and (
+                _node_command_uses_playwright(command.command.command)
+                or _command_invokes_python_playwright(command.command.command)
+            )
         ):
             commands.append(deferred_browser_install)
             deferred_browser_install = None
