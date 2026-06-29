@@ -260,16 +260,22 @@ def _python_playwright_executable(
     *,
     workspace_root: Path | None = None,
 ) -> str | None:
-    for command in (
+    commands = (
         *profile.phases.setup,
         *profile.database.generated_setup,
         *profile.phases.pre_agent,
         *profile.phases.post_agent,
         *profile.phases.validate_commands,
-    ):
+    )
+    infer_from_pytest_selector = any(
+        _command_installs_python_playwright(command.command, workspace_root=workspace_root)
+        for command in commands
+    )
+    for command in commands:
         executable = _command_python_playwright_executable(
             command.command,
             workspace_root=workspace_root,
+            infer_from_pytest_selector=infer_from_pytest_selector,
         )
         if executable is not None:
             return executable
@@ -399,6 +405,7 @@ def _command_python_playwright_executable(
     command: str,
     *,
     workspace_root: Path | None = None,
+    infer_from_pytest_selector: bool = True,
 ) -> str | None:
     tokens = _shell_tokens(command, comments=True)
     if tokens is None:
@@ -420,6 +427,7 @@ def _command_python_playwright_executable(
                     package_dir,
                     workspace_root=workspace_root,
                 ),
+                infer_from_pytest_selector=infer_from_pytest_selector,
             )
             if executable is not None:
                 return f"{shlex.join(['cd', package_dir])} && {executable}"
@@ -432,6 +440,7 @@ def _command_python_playwright_executable(
             tokens,
             index,
             workspace_root=workspace_root,
+            infer_from_pytest_selector=infer_from_pytest_selector,
         )
         if executable is not None:
             return executable
@@ -462,6 +471,7 @@ def _command_segment_python_playwright_executable(
     *,
     workspace_root: Path | None = None,
     requirement_base_dir: Path | None = None,
+    infer_from_pytest_selector: bool = True,
 ) -> str | None:
     executable = tokens[index]
     if _is_python_executable(executable) and tokens[index + 1 : index + 3] == [
@@ -470,6 +480,8 @@ def _command_segment_python_playwright_executable(
     ]:
         return executable
     if _command_segment_invokes_pytest_playwright(tokens, index):
+        if not infer_from_pytest_selector:
+            return None
         if _is_python_executable(executable):
             return executable
         return "python"
@@ -771,7 +783,13 @@ def _should_defer_browser_install_until_validate_install(
     ):
         return True
     if _requested_pre_validate_playwright_usage_exists(profile, requested_phases):
-        return False
+        return _requested_pre_validate_python_playwright_usage_exists(
+            profile,
+            requested_phases,
+        ) and _validate_python_playwright_dependency_install_exists(
+            profile,
+            workspace_root=workspace_root,
+        )
     return _validate_node_dependency_install_exists(
         profile
     ) or _validate_python_playwright_dependency_install_exists(
@@ -924,6 +942,19 @@ def _requested_pre_validate_playwright_usage_exists(
     return any(
         _node_command_uses_playwright(command.command)
         or _command_invokes_python_playwright(command.command)
+        for command in _requested_pre_validate_node_dependency_install_commands(
+            profile,
+            requested_phases,
+        )
+    )
+
+
+def _requested_pre_validate_python_playwright_usage_exists(
+    profile: WorkspaceProfile,
+    requested_phases: set[str],
+) -> bool:
+    return any(
+        _command_invokes_python_playwright(command.command)
         for command in _requested_pre_validate_node_dependency_install_commands(
             profile,
             requested_phases,

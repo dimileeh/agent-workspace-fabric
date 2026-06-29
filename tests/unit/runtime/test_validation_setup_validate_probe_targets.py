@@ -992,6 +992,36 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    def test_validate_python_playwright_dependency_install_not_inserted_before_pre_agent(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-profile",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "pre_agent": ["pytest --browser chromium"],
+                    "validate": [
+                        "python -m pip install pytest-playwright",
+                        "pytest --browser chromium",
+                    ],
+                },
+            }
+        )
+
+        pre_agent_commands = profile_phase_command_plan(profile, ["setup", "pre_agent"])
+        validate_commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in pre_agent_commands] == [
+            ("pre_agent", "pytest --browser chromium"),
+        ]
+        assert [(command.phase, command.command.command) for command in validate_commands] == [
+            ("validate", "python -m pip install pytest-playwright"),
+            ("setup", "python -m playwright install chromium"),
+            ("validate", "pytest --browser chromium"),
+        ]
+        assert validate_commands[1].command.required is False
+
     def test_scoped_validate_python_requirement_install_uses_cd_directory(
         self,
         tmp_path: Path,
