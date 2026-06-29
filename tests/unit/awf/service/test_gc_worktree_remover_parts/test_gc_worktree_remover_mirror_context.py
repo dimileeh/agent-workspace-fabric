@@ -473,3 +473,36 @@ def test_existing_directory_without_git_context_is_non_git_worktree(tmp_path: Pa
     worktree_path.mkdir(parents=True)
 
     assert is_existing_non_git_worktree(worktree_path, work_dir=work_dir) is True
+
+
+@pytest.mark.unit
+async def test_remove_orphan_worktree_skips_stale_managed_linked_mirror(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    deleted_mirror = work_dir / "git" / "mirrors" / "deleted.git"
+    deleted_linked_git_dir = deleted_mirror / "worktrees" / workspace_id
+    _write(worktree_path / ".git", f"gitdir: {deleted_linked_git_dir}\n")
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "skipped"
+    assert result.reason_code == "WORKTREE_NOT_GIT_MANAGED"
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": workspace_id,
+            "status": "skipped",
+            "reason_code": "WORKTREE_NOT_GIT_MANAGED",
+        }
+    ]
+    assert is_existing_non_git_worktree(worktree_path, work_dir=work_dir) is True
+    mock_gm.remove_worktree_from_mirror.assert_not_awaited()

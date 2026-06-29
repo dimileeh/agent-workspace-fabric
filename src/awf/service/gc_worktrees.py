@@ -454,7 +454,11 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
 
     mirrors_root = work_dir / "git" / "mirrors"
     try:
-        linked_mirror_path = _managed_mirror_path(mirror_path_for_worktree(path), mirrors_root)
+        linked_mirror_path = _managed_mirror_path(
+            mirror_path_for_worktree(path),
+            mirrors_root,
+            require_existing_dir=True,
+        )
     except (OSError, RuntimeError) as exc:
         raise GitOperationError(
             operation="worktree.git_context_probe",
@@ -494,7 +498,12 @@ def _mirror_registry_points_to_worktree(mirror_path: Path, worktree_path: Path) 
         return False
 
 
-def _managed_mirror_path(path: Path | None, mirrors_root: Path) -> Path | None:
+def _managed_mirror_path(
+    path: Path | None,
+    mirrors_root: Path,
+    *,
+    require_existing_dir: bool = False,
+) -> Path | None:
     if path is None:
         return None
     try:
@@ -507,7 +516,20 @@ def _managed_mirror_path(path: Path | None, mirrors_root: Path) -> Path | None:
         resolved_path.relative_to(resolved_root)
     except ValueError:
         return None
+    if require_existing_dir and not resolved_path.is_dir():
+        return None
     return resolved_path
+
+
+def _has_stale_managed_linked_mirror(path: Path, *, work_dir: Path) -> bool:
+    from awf.node.git_manager import mirror_path_for_worktree
+
+    mirrors_root = work_dir / "git" / "mirrors"
+    try:
+        linked_mirror_path = _managed_mirror_path(mirror_path_for_worktree(path), mirrors_root)
+    except (OSError, RuntimeError):
+        return False
+    return linked_mirror_path is not None and not linked_mirror_path.is_dir()
 
 
 def is_existing_non_git_worktree(path: Path, *, work_dir: Path | None = None) -> bool:
@@ -518,6 +540,8 @@ def is_existing_non_git_worktree(path: Path, *, work_dir: Path | None = None) ->
         return not git_entry.exists()
     if git_context_mirror_path_for_worktree(path, work_dir=work_dir):
         return False
+    if git_entry.is_file() and _has_stale_managed_linked_mirror(path, work_dir=work_dir):
+        return True
     return not git_entry.is_file()
 
 
