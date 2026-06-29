@@ -143,6 +143,10 @@ def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
             if dependency_install_package_manager is None:
                 dependency_install_package_manager = package_manager
     for command in profile.phases.validate_commands:
+        package_manager = _node_scoped_playwright_validation_package_manager(command.command)
+        if package_manager is not None:
+            return package_manager
+    for command in profile.phases.validate_commands:
         package_manager = _node_scoped_validation_package_manager(command.command)
         if package_manager is not None:
             return package_manager
@@ -263,6 +267,76 @@ def _node_scoped_validation_package_manager(command: str) -> str | None:
             return None
         command_index = corepack_command_index
     return None
+
+
+def _node_scoped_playwright_validation_package_manager(command: str) -> str | None:
+    tokens = _shell_tokens(command, comments=True)
+    if tokens is None:
+        return None
+    index = _first_non_assignment_token_index(tokens)
+    while index < len(tokens):
+        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+            index += 1
+        if index >= len(tokens):
+            return None
+        package_manager = _node_scoped_playwright_package_manager_from_tokens(tokens, index, [])
+        if package_manager is not None:
+            return package_manager
+        scoped_command = _leading_cd_package_scope(tokens, index)
+        if scoped_command is not None:
+            package_dir, command_index = scoped_command
+            while command_index < len(tokens):
+                while command_index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(
+                    tokens[command_index]
+                ):
+                    command_index += 1
+                if command_index >= len(tokens):
+                    return None
+                package_manager = _node_scoped_playwright_package_manager_from_tokens(
+                    tokens,
+                    command_index,
+                    _node_package_manager_cd_location_tokens(tokens[command_index], package_dir),
+                )
+                if package_manager is not None:
+                    return package_manager
+                next_command_index = _corepack_preamble_next_command_index(
+                    tokens,
+                    command_index,
+                )
+                if next_command_index is None:
+                    next_command_index = _sequential_command_next_index(tokens, command_index)
+                if next_command_index is None:
+                    return None
+                command_index = next_command_index
+            return None
+        next_command_index = _corepack_preamble_next_command_index(tokens, index)
+        if next_command_index is None:
+            next_command_index = _sequential_command_next_index(tokens, index)
+        if next_command_index is None:
+            return None
+        index = next_command_index
+    return None
+
+
+def _node_scoped_playwright_package_manager_from_tokens(
+    tokens: list[str],
+    index: int,
+    location_tokens: list[str],
+) -> str | None:
+    if not _command_segment_invokes_playwright(tokens, index):
+        return None
+    return _node_scoped_package_manager_from_tokens(tokens, index, location_tokens)
+
+
+def _command_segment_invokes_playwright(tokens: list[str], index: int) -> bool:
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return False
+        if token == "playwright":
+            return True
+        index += 1
+    return False
 
 
 def _node_validation_package_manager(command: str) -> str | None:
@@ -442,6 +516,10 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
 def _setup_preamble_next_command_index(tokens: list[str], index: int) -> int | None:
     if index >= len(tokens) or tokens[index] == "corepack":
         return None
+    return _sequential_command_next_index(tokens, index)
+
+
+def _sequential_command_next_index(tokens: list[str], index: int) -> int | None:
     command_index = index + 1
     while command_index < len(tokens):
         token = tokens[command_index]
