@@ -112,7 +112,21 @@ def _browser_probe_script(node_runtime: str) -> str:
 
 
 def _browser_probe_python_script(python_runtime: str) -> str:
-    return _BROWSER_PROBE_PYTHON_SCRIPT_TEMPLATE.replace("__PYTHON_RUNTIME__", python_runtime, 1)
+    return _BROWSER_PROBE_PYTHON_SCRIPT_TEMPLATE.replace(
+        "__PYTHON_RUNTIME__",
+        _browser_probe_python_runtime(python_runtime),
+        1,
+    )
+
+
+def _browser_probe_python_runtime(python_runtime: str) -> str:
+    try:
+        python_runtime_tokens = shlex.split(python_runtime)
+    except ValueError:
+        return python_runtime
+    if python_runtime_tokens == ["uv", "run"]:
+        return shlex.join([*python_runtime_tokens, "python"])
+    return python_runtime
 
 
 def _browser_probe_node_runtime(package_manager: str) -> str:

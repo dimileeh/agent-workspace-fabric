@@ -142,6 +142,17 @@ class TestProbeRuntimeBrowsers:
         assert spy.calls[0][2].startswith('python - "$@" <<')
         assert spy.calls[0][-1] == "chromium"
 
+    async def test_uv_python_playwright_profile_runs_probe_through_uv_python(self) -> None:
+        profile = _profile_with_setup_and_browsers(["uv add playwright"])
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
+
+        findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+        assert len(spy.calls) == 1
+        assert spy.calls[0][2].startswith('uv run python - "$@" <<')
+        assert spy.calls[0][-1] == "chromium"
+
     async def test_mixed_python_and_node_profile_keeps_node_probe(self) -> None:
         profile = WorkspaceProfile.model_validate(
             {
