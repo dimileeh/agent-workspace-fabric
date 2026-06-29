@@ -162,6 +162,32 @@ class TestBrowserPhaseCommandPlan:
         assert commands[2].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_appends_deferred_browser_install_without_matching_validate_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-unmatched-validate-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "validate": [
+                        "npm install",
+                        "pnpm --filter web test:e2e",
+                    ],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("validate",))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "npm install"),
+            ("setup", "pnpm --filter web exec playwright install chromium"),
+            ("validate", "pnpm --filter web test:e2e"),
+        ]
+        assert commands[1].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_defers_browser_install_across_production_batches(
         self,
     ) -> None:
