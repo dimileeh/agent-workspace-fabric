@@ -457,6 +457,12 @@ def _split_dependency_install_chain(
             browser_install_package_manager,
         ):
             continue
+        trailing_scope_prefix = _dependency_install_chain_trailing_scope_prefix(
+            install_command,
+            browser_install_package_manager,
+        )
+        if trailing_scope_prefix is not None:
+            trailing_command = f"{trailing_scope_prefix} && {trailing_command}"
         return (
             replace(
                 command,
@@ -468,6 +474,34 @@ def _split_dependency_install_chain(
             ),
         )
     return None
+
+
+def _dependency_install_chain_trailing_scope_prefix(
+    install_command: str,
+    browser_install_package_manager: str | None,
+) -> str | None:
+    for separator_index in reversed(_unquoted_and_separator_indices(install_command)):
+        scope_prefix = install_command[:separator_index].strip()
+        scoped_install_command = install_command[separator_index + 2 :].strip()
+        if not _command_starts_with_cd_scope(scope_prefix) or not scoped_install_command:
+            continue
+        command_package_manager = _node_dependency_install_package_manager(scoped_install_command)
+        if _node_dependency_install_satisfies_browser_install(
+            command_package_manager,
+            browser_install_package_manager,
+        ):
+            return scope_prefix
+    return None
+
+
+def _command_starts_with_cd_scope(command: str) -> bool:
+    tokens = _shell_tokens(command)
+    if tokens is None:
+        return False
+    command_index = _first_non_assignment_token_index(tokens)
+    if command_index >= len(tokens) or tokens[command_index] != "cd":
+        return False
+    return not any(token in {"||", "|", "|&", "&"} for token in tokens)
 
 
 def _first_unquoted_and_separator(command: str) -> int | None:
