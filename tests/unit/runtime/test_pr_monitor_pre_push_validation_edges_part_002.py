@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -21,6 +22,7 @@ from awf.profiles.models import (
 )
 from awf.runtime.pr_monitor_runner import pre_push_validation
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+from awf.runtime.validation_types import ValidationResult
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -30,6 +32,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     seed_monitoring_workspace,
 )
 from tests.unit.runtime._pre_push_validation_helpers import (
+    _command_result,
     _FakeValidation,
     _mark_git_worktree,
     _set_resolved_profile,
@@ -51,6 +54,108 @@ async def _existing_mirror_commit(
 ) -> bool:
     del self, mirror_path, commit_sha
     return True
+
+
+def _deferred_browser_profile() -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "browser-pre-push-helper-profile",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["node scripts/generate-config.js"],
+                "validate": ["pnpm install --frozen-lockfile", "pnpm test:e2e"],
+            },
+        }
+    )
+
+
+@pytest.mark.unit
+def test_deferred_browser_install_completed_after_green_pre_push_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A green pre-push result is ready for the deferred browser probe."""
+    monkeypatch.setattr(
+        pre_push_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(command="pnpm install --frozen-lockfile"),
+            ),
+            SimpleNamespace(
+                phase="setup",
+                command=SimpleNamespace(command="pnpm exec playwright install chromium"),
+            ),
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(command="pnpm test:e2e"),
+            ),
+        ],
+    )
+
+    assert pre_push_validation._deferred_runtime_browser_install_completed(
+        _deferred_browser_profile(),
+        worktree_path=tmp_path,
+        result=ValidationResult(
+            commands=[
+                _command_result(
+                    tmp_path,
+                    ok=True,
+                    command="pnpm install --frozen-lockfile",
+                    artifact_name="pnpm_install",
+                ),
+                _command_result(
+                    tmp_path,
+                    ok=True,
+                    command="pnpm test:e2e",
+                    artifact_name="pnpm_test_e2e",
+                ),
+            ],
+        ),
+    )
+
+
+@pytest.mark.unit
+def test_deferred_browser_install_completed_after_later_blocking_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocking command after the deferred install means the probe can run."""
+    monkeypatch.setattr(
+        pre_push_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(command="pnpm install --frozen-lockfile"),
+            ),
+            SimpleNamespace(
+                phase="setup",
+                command=SimpleNamespace(command="pnpm exec playwright install chromium"),
+            ),
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(command="pnpm test:e2e"),
+            ),
+        ],
+    )
+
+    assert pre_push_validation._deferred_runtime_browser_install_completed(
+        _deferred_browser_profile(),
+        worktree_path=tmp_path,
+        result=ValidationResult(
+            commands=[
+                _command_result(
+                    tmp_path,
+                    ok=False,
+                    command="pnpm test:e2e",
+                    reason_code="VALIDATION_COMMAND_FAILED",
+                    artifact_name="pnpm_test_e2e_failed",
+                ),
+            ],
+        ),
+    )
 
 
 @pytest.mark.unit

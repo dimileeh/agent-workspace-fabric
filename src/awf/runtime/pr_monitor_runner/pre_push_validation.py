@@ -357,17 +357,33 @@ def _deferred_runtime_browser_install_completed(
         ("post_agent", "validate"),
         workspace_root=worktree_path,
     )
-    install_commands = tuple(
-        step.command.command for step in validation_command_plan if step.phase == "setup"
+    validation_commands = [step.command.command for step in validation_command_plan]
+    install_command_indexes = tuple(
+        index for index, step in enumerate(validation_command_plan) if step.phase == "setup"
     )
+    install_commands = tuple(validation_commands[index] for index in install_command_indexes)
     if not install_commands:
         return False
+    if result.all_passed:
+        return True
     pending = list(install_commands)
     for command_result in result.commands:
         if command_result.command == pending[0]:
             pending.pop(0)
             if not pending:
                 return True
+    last_install_index = max(install_command_indexes)
+    validation_command_indexes = {
+        command: index for index, command in enumerate(validation_commands)
+    }
+    for command_result in result.commands:
+        command_index = validation_command_indexes.get(command_result.command)
+        if (
+            command_index is not None
+            and command_index > last_install_index
+            and command_result.blocks_validation
+        ):
+            return True
     return False
 
 
