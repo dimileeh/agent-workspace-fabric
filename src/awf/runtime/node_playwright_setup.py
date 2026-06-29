@@ -571,6 +571,11 @@ def _should_defer_browser_install_until_validate_install(
         return False
     if _post_agent_node_dependency_install_exists(profile):
         return True
+    if _post_agent_python_playwright_dependency_install_exists(
+        profile,
+        workspace_root=workspace_root,
+    ):
+        return True
     if _requested_pre_validate_playwright_usage_exists(profile, requested_phases):
         return False
     return _validate_node_dependency_install_exists(
@@ -617,6 +622,17 @@ def _validate_python_playwright_dependency_install_exists(
 def _post_agent_node_dependency_install_exists(profile: WorkspaceProfile) -> bool:
     return any(
         _node_dependency_install_package_manager(command.command) is not None
+        for command in profile.phases.post_agent
+    )
+
+
+def _post_agent_python_playwright_dependency_install_exists(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> bool:
+    return any(
+        _command_installs_python_playwright(command.command, workspace_root=workspace_root)
         for command in profile.phases.post_agent
     )
 

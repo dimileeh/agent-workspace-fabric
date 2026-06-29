@@ -48,6 +48,9 @@ from awf.runtime.node_playwright_setup import (
     _post_agent_node_dependency_install_exists as _post_agent_node_dependency_install_exists,
 )
 from awf.runtime.node_playwright_setup import (
+    _post_agent_python_playwright_dependency_install_exists as _post_agent_python_playwright_dependency_install_exists,
+)
+from awf.runtime.node_playwright_setup import (
     _pre_validate_node_dependency_install_satisfies_browser_install as _pre_validate_node_dependency_install_satisfies_browser_install,
 )
 from awf.runtime.node_playwright_setup import (
@@ -461,7 +464,13 @@ def profile_phase_command_plan(
             if (
                 deferred_browser_install is None
                 and not browser_install_added
-                and _post_agent_node_dependency_install_exists(profile)
+                and (
+                    _post_agent_node_dependency_install_exists(profile)
+                    or _post_agent_python_playwright_dependency_install_exists(
+                        profile,
+                        workspace_root=workspace_root,
+                    )
+                )
             ):
                 browser_install = playwright_browser_install_command(
                     profile,

@@ -1088,6 +1088,35 @@ class TestPlaywrightBrowserInstallCommand:
             ("pre_agent", "pnpm exec playwright test"),
         ]
 
+    def test_post_agent_python_playwright_dependency_install_defers_browser_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-profile",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "pre_agent": ["python -m playwright --version"],
+                    "post_agent": [
+                        "python -m pip install playwright",
+                        "python -m playwright test",
+                    ],
+                },
+            }
+        )
+
+        pre_agent_commands = profile_phase_command_plan(profile, ["setup", "pre_agent"])
+        post_agent_commands = profile_phase_command_plan(profile, ["post_agent"])
+
+        assert [(command.phase, command.command.command) for command in pre_agent_commands] == [
+            ("pre_agent", "python -m playwright --version"),
+        ]
+        assert [(command.phase, command.command.command) for command in post_agent_commands] == [
+            ("post_agent", "python -m pip install playwright"),
+            ("setup", "python -m playwright install chromium"),
+            ("post_agent", "python -m playwright test"),
+        ]
+
     def test_yarn_version_setup_probe_defers_browser_install_until_validate_install(
         self,
     ) -> None:
