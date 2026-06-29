@@ -356,6 +356,30 @@ class TestProbeRuntimeBrowsers:
 
         assert browser_probe_workdir(profile) == "/workspace"
 
+    @pytest.mark.parametrize(
+        "later_install", ["pnpm -C docs install", "pnpm --filter docs install"]
+    )
+    def test_browser_probe_uses_playwright_install_manager_before_later_scoped_install(
+        self,
+        later_install: str,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-pre-agent-playwright-later-scoped-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["pnpm install"],
+                    "pre_agent": ["pnpm exec playwright test"],
+                    "post_agent": [later_install],
+                },
+            }
+        )
+
+        probe_command = _browser_probe_command(profile)
+
+        assert probe_command.startswith('node - "$@" <<')
+        assert browser_probe_workdir(profile) == "/workspace"
+
     def test_python_browser_probe_ignores_unrelated_node_package_workdir(
         self,
         tmp_path: Path,

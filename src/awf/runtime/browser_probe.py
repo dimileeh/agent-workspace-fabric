@@ -16,12 +16,12 @@ from awf.profiles.models import (
     runtime_browser_findings,
 )
 from awf.runtime.node_playwright_setup import (
+    _node_package_manager_package_dir,
     _playwright_browser_install_node_package_manager,
     _python_playwright_executable,
 )
 from awf.runtime.validation_setup import (
     node_package_manager_command,
-    node_package_manager_package_dir,
 )
 
 _BROWSER_PROBE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset({"--cwd", "--dir", "--prefix", "-C"})
@@ -252,8 +252,24 @@ def _browser_probe_command(
     python_runtime = _python_browser_probe_runtime(profile, workspace_root=workspace_root)
     if python_runtime is not None:
         return _browser_probe_python_script(python_runtime)
-    node_runtime = _browser_probe_node_runtime(node_package_manager_command(profile))
+    node_runtime = _browser_probe_node_runtime(
+        _node_browser_probe_package_manager(profile, workspace_root=workspace_root)
+    )
     return _browser_probe_script(node_runtime)
+
+
+def _node_browser_probe_package_manager(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> str:
+    package_manager = _playwright_browser_install_node_package_manager(
+        profile,
+        workspace_root=workspace_root,
+    )
+    if package_manager is not None:
+        return package_manager
+    return node_package_manager_command(profile)
 
 
 def _python_browser_probe_runtime(
@@ -283,7 +299,9 @@ def browser_probe_workdir(
     """Return the in-container directory where Playwright should resolve from."""
     if _python_browser_probe_runtime(profile, workspace_root=workspace_root) is not None:
         return DEFAULT_AGENT_WORKDIR
-    package_dir = node_package_manager_package_dir(profile)
+    package_dir = _node_package_manager_package_dir(
+        _node_browser_probe_package_manager(profile, workspace_root=workspace_root)
+    )
     if package_dir is None:
         return DEFAULT_AGENT_WORKDIR
     if package_dir.startswith("/"):
