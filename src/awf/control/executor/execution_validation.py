@@ -171,10 +171,13 @@ async def run_validation_and_fix_cycle(
         )
 
     deferred_runtime_browser_findings_recorded = False
+    deferred_runtime_browser_probe_ready = False
 
     async def _record_deferred_runtime_browser_findings() -> None:
         nonlocal deferred_runtime_browser_findings_recorded
         if deferred_runtime_browser_findings_recorded:
+            return
+        if not deferred_runtime_browser_probe_ready:
             return
         record_browser_findings = getattr(
             self,
@@ -242,14 +245,37 @@ async def run_validation_and_fix_cycle(
         )
         await self.enter_blocked_for_protected_violation(**block_kwargs)
 
-    validation_commands = [
-        step.command.command
-        for step in profile_phase_command_plan(
-            profile,
-            ("post_agent", "validate"),
-            workspace_root=worktree_path,
-        )
-    ]
+    validation_command_plan = profile_phase_command_plan(
+        profile,
+        ("post_agent", "validate"),
+        workspace_root=worktree_path,
+    )
+    validation_commands = [step.command.command for step in validation_command_plan]
+    deferred_runtime_browser_probe_expected = runtime_browser_probe_deferred_until_validate(
+        profile,
+        workspace_root=worktree_path,
+    )
+    deferred_runtime_browser_install_commands = (
+        tuple(step.command.command for step in validation_command_plan if step.phase == "setup")
+        if deferred_runtime_browser_probe_expected
+        else ()
+    )
+
+    def _deferred_runtime_browser_install_completed(
+        val_result: ValidationResult,
+    ) -> bool:
+        if not deferred_runtime_browser_probe_expected:
+            return False
+        if not deferred_runtime_browser_install_commands:
+            return val_result.all_passed
+        pending = list(deferred_runtime_browser_install_commands)
+        for command_result in val_result.commands:
+            if command_result.ok and command_result.command == pending[0]:
+                pending.pop(0)
+                if not pending:
+                    return True
+        return False
+
     test_commands_tuple = tuple(validation_commands)
     validation_tier = _validation_tier_for_workspace(ws, profile)
     if rebase_recovery_result is not None:
@@ -278,6 +304,7 @@ async def run_validation_and_fix_cycle(
         # post-validation conformance fix prompts. The per-category
         # counters below enforce their separate budgets.
         deferred_runtime_browser_findings_recorded = False
+        deferred_runtime_browser_probe_ready = False
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.validating,
@@ -349,6 +376,9 @@ async def run_validation_and_fix_cycle(
                 run_healthchecks=True,
                 worktree_path=worktree_path,
                 include_coverage=False,
+            )
+            deferred_runtime_browser_probe_ready = _deferred_runtime_browser_install_completed(
+                val_result,
             )
             if run_local_coverage and val_result.all_passed:
                 coverage_evidence = await self._run_final_coverage_gate(
