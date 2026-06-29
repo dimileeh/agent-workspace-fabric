@@ -101,6 +101,21 @@ def worktree_id_for_gc_path(candidate: WorkspaceGCCandidate, path: WorkspaceGCPa
     return path.path.name
 
 
+def _first_failed_target_reason_code(
+    target_results: list[WorkspaceGCWorktreeRemoveTargetResult],
+    *,
+    fallback: str,
+) -> str:
+    return next(
+        (
+            target.reason_code
+            for target in target_results
+            if target.status == "failed" and target.reason_code
+        ),
+        fallback,
+    )
+
+
 def _existing_worktree_git_context_result(
     path: Path,
     *,
@@ -141,7 +156,7 @@ async def default_worktree_remover(
     session_factory: async_sessionmaker[AsyncSession],
     work_dir: Path,
 ) -> WorkspaceGCWorktreeRemoveResult:
-    from awf.node.git_manager import GitManager
+    from awf.node.git_manager import GitManager, GitOperationError
 
     async with session_factory() as session:
         workspace = await session.get(Workspace, candidate.workspace_id)
@@ -216,7 +231,10 @@ async def default_worktree_remover(
         if errors:
             return WorkspaceGCWorktreeRemoveResult(
                 status="failed",
-                reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                reason_code=_first_failed_target_reason_code(
+                    target_results,
+                    fallback="GIT_WORKTREE_REMOVE_FAILED",
+                ),
                 error="; ".join(errors)[:1000],
                 target_results=tuple(target_results),
             )
@@ -235,6 +253,17 @@ async def default_worktree_remover(
                 )
             else:
                 await git_manager.remove_worktree(workspace_id=worktree_id, repo_url=repo_url)
+        except GitOperationError as exc:
+            error = str(exc)
+            errors.append(f"{worktree_id}: {error}")
+            target_results.append(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=worktree_id,
+                    status="failed",
+                    reason_code=exc.reason_code,
+                    error=error,
+                )
+            )
         except Exception as exc:
             error = str(exc)
             errors.append(f"{worktree_id}: {error}")
@@ -260,7 +289,10 @@ async def default_worktree_remover(
         status: Literal["failed", "partial"] = "partial" if existing_path_successes else "failed"
         return WorkspaceGCWorktreeRemoveResult(
             status=status,
-            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            reason_code=_first_failed_target_reason_code(
+                target_results,
+                fallback="GIT_WORKTREE_REMOVE_FAILED",
+            ),
             error="; ".join(errors)[:1000],
             target_results=tuple(target_results),
         )
@@ -286,7 +318,7 @@ async def remove_orphan_worktree(
     mirror lock as hook repair without re-hashing the mirror's configured
     origin URL.
     """
-    from awf.node.git_manager import GitManager
+    from awf.node.git_manager import GitManager, GitOperationError
 
     worktree_id = path.name or workspace_id
     if not path.exists():
@@ -301,8 +333,6 @@ async def remove_orphan_worktree(
                 ),
             ),
         )
-    from awf.node.git_manager import GitOperationError
-
     try:
         mirror_path = git_context_mirror_path_for_worktree(path, work_dir=work_dir)
         is_non_git_worktree = mirror_path is None and is_existing_non_git_worktree(
@@ -371,6 +401,21 @@ async def remove_orphan_worktree(
     try:
         await GitManager(work_dir / "git").remove_worktree_from_mirror(
             workspace_id=worktree_id, mirror_path=mirror_path
+        )
+    except GitOperationError as exc:
+        error = str(exc)
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code=exc.reason_code,
+            error=error,
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=worktree_id,
+                    status="failed",
+                    reason_code=exc.reason_code,
+                    error=error,
+                ),
+            ),
         )
     except Exception as exc:
         error = str(exc)
