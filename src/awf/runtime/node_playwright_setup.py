@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import tomllib
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
@@ -68,6 +69,8 @@ _PIP_REQUIREMENT_FILE_EQUALS_PREFIX = "--requirement="
 _CONTAINER_WORKSPACE_ROOT = Path("/workspace")
 _UV_PIP_PYTHON_FLAGS = frozenset({"-p", "--python"})
 _UV_PIP_PYTHON_EQUALS_PREFIXES = ("-p=", "--python=")
+_UV_SYNC_EXTRA_FLAGS = frozenset({"--extra"})
+_UV_SYNC_EXTRA_EQUALS_PREFIX = "--extra="
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
 
 
@@ -418,6 +421,13 @@ def _command_segment_installs_python_playwright(
                 workspace_root=workspace_root,
                 requirement_base_dir=requirement_base_dir,
             )
+        if tokens[index + 1] == "sync":
+            return _uv_sync_segment_installs_playwright(
+                tokens,
+                index + 2,
+                workspace_root=workspace_root,
+                requirement_base_dir=requirement_base_dir,
+            )
     return False
 
 
@@ -520,7 +530,7 @@ def _command_segment_python_playwright_executable(
 def _uv_python_playwright_install_executable(tokens: list[str], index: int) -> str | None:
     if index + 1 >= len(tokens):
         return None
-    if tokens[index + 1] == "add":
+    if tokens[index + 1] in {"add", "sync"}:
         return "uv run"
     if tokens[index + 1] != "pip":
         return None
@@ -547,6 +557,114 @@ def _python_executable_for_uv_pip_target(target: str) -> str:
     if re.fullmatch(r"\d+(?:\.\d+)*", target):
         return f"python{target}"
     return target
+
+
+def _uv_sync_segment_installs_playwright(
+    tokens: list[str],
+    index: int,
+    *,
+    workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
+) -> bool:
+    extras: set[str] = set()
+    include_all_extras = False
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            break
+        if token in _UV_SYNC_EXTRA_FLAGS:
+            if index + 1 >= len(tokens) or tokens[index + 1] in _SHELL_COMPOUND_CONTROL_TOKENS:
+                break
+            extras.add(tokens[index + 1])
+            index += 2
+            continue
+        if token.startswith(_UV_SYNC_EXTRA_EQUALS_PREFIX):
+            extras.add(token.removeprefix(_UV_SYNC_EXTRA_EQUALS_PREFIX))
+        elif token == "--all-extras":
+            include_all_extras = True
+        index += 1
+    return _pyproject_includes_python_playwright(
+        workspace_root=workspace_root,
+        requirement_base_dir=requirement_base_dir,
+        extras=extras,
+        include_all_extras=include_all_extras,
+    )
+
+
+def _pyproject_includes_python_playwright(
+    *,
+    workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
+    extras: set[str],
+    include_all_extras: bool,
+) -> bool:
+    project_path = _safe_local_pyproject_path(
+        workspace_root=workspace_root,
+        requirement_base_dir=requirement_base_dir,
+    )
+    if project_path is None:
+        return False
+    try:
+        document = tomllib.loads(project_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return False
+    project = document.get("project")
+    if not isinstance(project, dict):
+        return False
+    dependencies = project.get("dependencies")
+    if _pyproject_requirement_list_includes_playwright(dependencies):
+        return True
+    optional_dependencies = project.get("optional-dependencies")
+    if not isinstance(optional_dependencies, dict):
+        return False
+    selected_extras = (
+        optional_dependencies.values()
+        if include_all_extras
+        else (optional_dependencies.get(extra) for extra in extras)
+    )
+    return any(
+        _pyproject_requirement_list_includes_playwright(extra_dependencies)
+        for extra_dependencies in selected_extras
+    )
+
+
+def _safe_local_pyproject_path(
+    *,
+    workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
+) -> Path | None:
+    resolved_workspace_root = (workspace_root or Path.cwd()).resolve()
+    resolved_requirement_base_dir = (
+        requirement_base_dir.resolve()
+        if requirement_base_dir is not None
+        else resolved_workspace_root
+    )
+    path = resolved_requirement_base_dir / "pyproject.toml"
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(resolved_workspace_root)
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
+def _pyproject_requirement_list_includes_playwright(value: object) -> bool:
+    return isinstance(value, list) and any(
+        isinstance(requirement, str) and _pyproject_requirement_includes_playwright(requirement)
+        for requirement in value
+    )
+
+
+def _pyproject_requirement_includes_playwright(requirement: str) -> bool:
+    try:
+        tokens = shlex.split(requirement, comments=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    return _python_requirement_token_includes_playwright(tokens[0])
 
 
 def _pip_segment_installs_playwright(

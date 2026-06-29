@@ -1100,6 +1100,90 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    @pytest.mark.parametrize(
+        ("setup_command", "project_dir", "expected_install"),
+        [
+            (
+                "uv sync --extra e2e",
+                "",
+                "uv run -m playwright install chromium",
+            ),
+            (
+                "cd apps/web && uv sync --extra e2e",
+                "apps/web",
+                "cd apps/web && uv run -m playwright install chromium",
+            ),
+        ],
+    )
+    def test_uv_sync_extra_pyproject_dependency_uses_python_playwright(
+        self,
+        tmp_path: Path,
+        setup_command: str,
+        project_dir: str,
+        expected_install: str,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        project_root = workspace_root / project_dir
+        project_root.mkdir(parents=True)
+        (project_root / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "browser-profile"',
+                    'version = "0.1.0"',
+                    "[project.optional-dependencies]",
+                    'e2e = ["pytest-playwright"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[setup_command],
+            validate=["uv run pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile, workspace_root=workspace_root)
+
+        assert command is not None
+        assert command.command == expected_install
+
+    def test_uv_sync_pyproject_dependency_uses_python_playwright(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        (workspace_root / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "browser-profile"',
+                    'version = "0.1.0"',
+                    'dependencies = ["pytest-playwright >= 0.5"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["uv sync"],
+            validate=["uv run pytest --browser chromium"],
+        )
+
+        commands = profile_phase_command_plan(
+            profile,
+            ["setup", "validate"],
+            workspace_root=workspace_root,
+        )
+
+        assert [(item.phase, item.command.command) for item in commands] == [
+            ("setup", "uv sync"),
+            ("setup", "uv run -m playwright install chromium"),
+            ("validate", "uv run pytest --browser chromium"),
+        ]
+        assert commands[1].command.required is False
+
     def test_validate_python_browser_install_waits_for_path_qualified_pip_install(
         self,
     ) -> None:
