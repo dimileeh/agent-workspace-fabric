@@ -315,7 +315,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         assert _run_view_calls(fake) == []
 
     @pytest.mark.unit
-    async def test_rollup_fallback_ignores_non_actions_evidence(self) -> None:
+    async def test_rollup_fallback_synthesizes_external_failures(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")
         client = GitHubClient(fake)
@@ -326,21 +326,15 @@ class TestFetchFailingCheckLogsRollupFallback:
             head_sha="abc",
             rollup_checks=(
                 CheckTiming(
-                    name="status-context",
+                    name="circleci/status-context",
                     status="FAILURE",
-                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    details_url="https://circleci.example.test/build/123",
                 ),
                 CheckTiming(
-                    name="third-party",
+                    name="third-party/check-run",
                     conclusion="FAILURE",
-                    details_url="https://github.com/o/r/actions/runs/124/job/456",
+                    details_url="https://ci.example.test/build/124",
                     app_slug="codecov",
-                ),
-                CheckTiming(
-                    name="external",
-                    conclusion="FAILURE",
-                    details_url="https://ci.example.test/build/1",
-                    app_slug="github-actions",
                 ),
                 CheckTiming(
                     name="green-actions",
@@ -363,7 +357,14 @@ class TestFetchFailingCheckLogsRollupFallback:
             ),
         )
 
-        assert failures == ()
+        assert [
+            (failure.name, failure.conclusion, failure.log_excerpt) for failure in failures
+        ] == [
+            ("circleci/status-context", "FAILURE", ""),
+            ("third-party/check-run", "FAILURE", ""),
+        ]
+        assert all(failure.run_id is None for failure in failures)
+        assert all(failure.evidence_warnings == () for failure in failures)
         assert _run_view_calls(fake) == []
 
     @pytest.mark.unit

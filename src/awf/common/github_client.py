@@ -983,6 +983,16 @@ class GitHubClient:
                 )
             )
 
+        def _append_rollup_failure_without_log(*, run_name: str, conclusion: str) -> None:
+            failures.append(
+                CheckFailure(
+                    name=run_name,
+                    conclusion=conclusion,
+                    log_excerpt="",
+                    run_id=None,
+                )
+            )
+
         for run in runs_raw or []:
             conclusion = run.get("conclusion") or ""
             conclusion_upper = conclusion.upper()
@@ -1001,9 +1011,19 @@ class GitHubClient:
                 run_name=run_name,
                 conclusion=conclusion_upper,
             )
-        for check in _rollup_action_run_failures(rollup_checks):
+        for check in rollup_checks:
+            conclusion = _rollup_check_failure_conclusion(check)
+            if conclusion is None:
+                continue
             run_id = _actions_run_id_from_details_url(check.details_url)
-            if run_id is None or run_id in seen_run_ids:
+            if run_id is None:
+                if _rollup_check_has_external_details_url(check):
+                    _append_rollup_failure_without_log(
+                        run_name=check.name,
+                        conclusion=conclusion,
+                    )
+                continue
+            if not _rollup_check_is_github_actions(check) or run_id in seen_run_ids:
                 continue
             if status_by_run.get(run_id) not in (None, "completed"):
                 runs_in_progress = True
@@ -1013,7 +1033,7 @@ class GitHubClient:
             await _append_failure(
                 run_id=run_id,
                 run_name=check.name,
-                conclusion=(check.conclusion or "FAILURE").upper(),
+                conclusion=conclusion,
             )
         return CheckFailureLogResult(
             failures=tuple(failures),
@@ -1376,25 +1396,26 @@ def _flatten_branch_rules_pages(payload: list[Any]) -> list[Any]:
     return [rule for page in payload for rule in page]
 
 
-def _rollup_action_run_failures(checks: Sequence[CheckTiming]) -> tuple[CheckTiming, ...]:
-    """Return failed GitHub Actions rollup checks with parseable run details URLs."""
-    failures: list[CheckTiming] = []
-    for check in checks:
-        conclusion = (check.conclusion or "").upper()
-        if conclusion not in _FAILED_CHECK_CONCLUSIONS:
-            continue
-        if not _rollup_check_is_github_actions(check):
-            continue
-        if _actions_run_id_from_details_url(check.details_url) is None:
-            continue
-        failures.append(check)
-    return tuple(failures)
+def _rollup_check_failure_conclusion(check: CheckTiming) -> str | None:
+    """Return the terminal failure value carried by a rollup check/status."""
+    for value in (check.conclusion, check.status):
+        conclusion = (value or "").upper()
+        if conclusion in _FAILED_CHECK_CONCLUSIONS or conclusion == "ERROR":
+            return conclusion
+    return None
 
 
 def _rollup_check_is_github_actions(check: CheckTiming) -> bool:
     app_slug = (check.app_slug or "").lower()
     app_name = (check.app_name or "").lower()
     return app_slug in {"", "github-actions"} or app_name == "github actions"
+
+
+def _rollup_check_has_external_details_url(check: CheckTiming) -> bool:
+    details_url = check.details_url
+    if not details_url:
+        return False
+    return urlsplit(details_url).netloc.lower() != "github.com"
 
 
 def _actions_run_id_from_details_url(details_url: str | None) -> str | None:
