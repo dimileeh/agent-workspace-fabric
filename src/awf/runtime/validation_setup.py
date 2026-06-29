@@ -593,9 +593,10 @@ def _dependency_install_chain_trailing_scope_prefix(
         trailing_scope_prefix = _command_install_trailing_scope_prefix(scope_prefix)
         if trailing_scope_prefix is None or not scoped_install_command:
             continue
+        scoped_install_with_prefix = f"{trailing_scope_prefix}; {scoped_install_command}"
         if _command_satisfies_deferred_browser_install(
-            scoped_install_command,
-            _node_dependency_install_package_manager(scoped_install_command),
+            scoped_install_with_prefix,
+            _node_dependency_install_package_manager(scoped_install_with_prefix),
             browser_install_package_manager,
             workspace_root=workspace_root,
         ):

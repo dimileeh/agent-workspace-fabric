@@ -710,6 +710,24 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "pnpm --filter web exec playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace"
 
+    def test_root_pnpm_setup_does_not_satisfy_filtered_validate_install(self) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["pnpm install --frozen-lockfile"],
+            validate=[
+                "pnpm --filter web install --frozen-lockfile",
+                "pnpm --filter web test:e2e",
+            ],
+        )
+
+        commands = profile_phase_command_plan(profile, ["setup", "validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "pnpm install --frozen-lockfile"),
+            ("validate", "pnpm --filter web install --frozen-lockfile"),
+            ("setup", "pnpm --filter web exec playwright install chromium"),
+            ("validate", "pnpm --filter web test:e2e"),
+        ]
+
     def test_late_scoped_playwright_validate_overrides_earlier_scoped_lint(
         self,
     ) -> None:

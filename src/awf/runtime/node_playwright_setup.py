@@ -781,7 +781,9 @@ def _node_dependency_install_satisfies_browser_install(
     except ValueError:
         return False
     return (
-        len(command_tokens) == 1 and bool(browser_tokens) and command_tokens[0] == browser_tokens[0]
+        len(command_tokens) == 1
+        and len(browser_tokens) == 1
+        and command_tokens[0] == browser_tokens[0]
     )
 
 
