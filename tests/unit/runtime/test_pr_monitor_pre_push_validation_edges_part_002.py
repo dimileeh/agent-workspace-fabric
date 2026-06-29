@@ -119,6 +119,52 @@ def test_deferred_browser_install_completed_after_green_pre_push_result(
 
 
 @pytest.mark.unit
+def test_deferred_browser_install_completed_for_validate_runtime_browser_install_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate-phase browser install injections are install evidence."""
+    monkeypatch.setattr(
+        pre_push_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(
+                    command="source .env && pnpm install",
+                    runtime_browser_install=True,
+                ),
+            ),
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(command="pnpm exec playwright test"),
+            ),
+        ],
+    )
+
+    assert pre_push_validation._deferred_runtime_browser_install_completed(
+        _deferred_browser_profile(),
+        worktree_path=tmp_path,
+        result=ValidationResult(
+            commands=[
+                _command_result(
+                    tmp_path,
+                    ok=True,
+                    command="source .env && pnpm install",
+                    artifact_name="pnpm_install",
+                ),
+                _command_result(
+                    tmp_path,
+                    ok=True,
+                    command="pnpm exec playwright test",
+                    artifact_name="playwright_test",
+                ),
+            ],
+        ),
+    )
+
+
+@pytest.mark.unit
 def test_deferred_browser_install_completed_after_later_blocking_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
