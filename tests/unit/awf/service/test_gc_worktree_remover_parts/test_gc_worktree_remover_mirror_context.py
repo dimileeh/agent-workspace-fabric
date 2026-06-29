@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -294,6 +295,38 @@ def test_git_context_mirror_path_fails_closed_when_registry_fails_before_linked_
 
     assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
     assert "empty linked-worktree gitdir back-reference" in raised.value.stderr
+
+
+@pytest.mark.unit
+def test_git_context_mirror_path_fails_closed_when_bare_probe_fails(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    mirror_path = work_dir / "git" / "mirrors" / "repo.git"
+    _make_synthetic_mirror_link(
+        mirror=mirror_path,
+        worktree=worktree_path,
+        include_worktree_gitfile=False,
+    )
+
+    with (
+        patch(
+            "awf.service.gc_worktrees.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["git"],
+                returncode=128,
+                stdout="",
+                stderr="fatal: cannot inspect mirror",
+            ),
+        ),
+        pytest.raises(GitOperationError) as raised,
+    ):
+        git_context_mirror_path_for_worktree(worktree_path, work_dir=work_dir)
+
+    assert raised.value.reason_code == "WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED"
+    assert "fatal: cannot inspect mirror" in raised.value.stderr
 
 
 @pytest.mark.unit

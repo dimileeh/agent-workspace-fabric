@@ -531,19 +531,50 @@ def _managed_bare_mirror_path(path: Path | None, mirrors_root: Path) -> Path | N
     mirror_path = _managed_mirror_path(path, mirrors_root, require_existing_dir=True)
     if mirror_path is None:
         return None
-    if not _is_bare_git_repository(mirror_path):
+    if not _is_bare_git_repository(mirror_path, fail_closed=True):
         return None
     return mirror_path
 
 
-def _is_bare_git_repository(path: Path) -> bool:
-    probe = subprocess.run(
-        ["git", "--bare", "--git-dir", str(path), "rev-parse", "--is-bare-repository"],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
+def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
+    from awf.node.git_manager import GitOperationError
+
+    operation = "worktree.git_context_probe"
+    try:
+        probe = subprocess.run(
+            ["git", "--bare", "--git-dir", str(path), "rev-parse", "--is-bare-repository"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError as exc:
+        if fail_closed:
+            raise GitOperationError(
+                operation=operation,
+                returncode=1,
+                stdout="",
+                stderr=f"could not probe bare mirror {path}: {exc}",
+                reason_code="WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
+            ) from exc
+        raise
+    if fail_closed and probe.returncode != 0 and _looks_like_bare_git_repository(path):
+        raise GitOperationError(
+            operation=operation,
+            returncode=probe.returncode,
+            stdout=probe.stdout,
+            stderr=probe.stderr,
+            reason_code="WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
+        )
     return probe.returncode == 0 and probe.stdout.strip() == "true"
+
+
+def _looks_like_bare_git_repository(path: Path) -> bool:
+    return (
+        (path / "config").is_file()
+        and (path / "HEAD").is_file()
+        and (path / "objects").is_dir()
+        and (path / "refs").is_dir()
+    )
 
 
 def _has_stale_managed_linked_mirror(path: Path, *, work_dir: Path) -> bool:
