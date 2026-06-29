@@ -23,6 +23,7 @@ import hashlib
 import os
 import re
 import shutil
+import subprocess
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -1036,6 +1037,8 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
         linked_git_dir = mirror_path / "worktrees" / worktree_name
         if not linked_git_dir.is_dir():
             continue
+        if not _is_bare_registered_mirror_candidate(mirror_path):
+            continue
         try:
             registered_worktree = _linked_worktree_path_from_git_dir(linked_git_dir)
         except GitOperationError as exc:
@@ -1054,6 +1057,32 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
     if first_probe_error is not None:
         raise first_probe_error
     return None
+
+
+def _is_bare_registered_mirror_candidate(mirror_path: Path) -> bool:
+    try:
+        probe = subprocess.run(
+            [
+                "git",
+                "--bare",
+                "--git-dir",
+                str(mirror_path),
+                "rev-parse",
+                "--is-bare-repository",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError as exc:
+        raise GitOperationError(
+            operation="mirror_registry_scan",
+            returncode=1,
+            stdout="",
+            stderr=f"could not probe bare mirror {mirror_path}: {exc}",
+            reason_code="MIRROR_REGISTRY_SCAN_FAILED",
+        ) from exc
+    return probe.returncode == 0 and probe.stdout.strip() == "true"
 
 
 async def read_mirror_origin_url(mirror_path: Path) -> str | None:
