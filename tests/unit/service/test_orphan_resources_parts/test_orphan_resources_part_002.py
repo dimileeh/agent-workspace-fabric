@@ -443,6 +443,66 @@ def test_reaper_refuses_symlinked_worktree_before_git_remover(
 
 
 @pytest.mark.unit
+def test_reaper_reports_worktree_probe_os_error_as_partial_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.gc_classify import PATH_DELETE_FAILED
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: ../mirrors/repo.git/worktrees/ws_dead\n")
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+
+    def _probe_fails(path: Path, *, work_dir: Path | None = None) -> bool:
+        del path, work_dir
+        raise OSError("bad gitdir")
+
+    async def _git_aware_remover(
+        *, workspace_id: str, path: Path, work_dir: Path
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        raise AssertionError(f"git-aware removal used after failed probe: {path}")
+
+    def _direct_delete_forbidden(
+        kind: str, path: Path, *, work_dir: Path
+    ) -> tuple[bool, str | None, str | None]:
+        raise AssertionError(f"direct filesystem delete used after failed probe: {kind} {path}")
+
+    monkeypatch.setattr("awf.service.orphan_resources.is_existing_non_git_worktree", _probe_fails)
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
+    )
+
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            min_age_hours=0,
+            worktree_remover=_git_aware_remover,
+        )
+    )
+
+    assert result.status == "partial"
+    assert result.reason_code == "ORPHAN_REAP_PARTIAL"
+    assert result.reaped == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].kind == "worktree"
+    assert result.errors[0].workspace_id == "ws_dead"
+    assert result.errors[0].status == "failed"
+    assert result.errors[0].reason_code == PATH_DELETE_FAILED
+    assert result.errors[0].error == "bad gitdir"
+    assert worktree.exists()
+
+
+@pytest.mark.unit
 def test_reaper_reports_git_aware_worktree_remover_failure_without_direct_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

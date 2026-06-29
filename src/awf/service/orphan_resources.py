@@ -863,6 +863,17 @@ async def reap_classified_orphans(
             errors.append(outcome)
             _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
             continue
+        except (OSError, RuntimeError) as exc:
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="failed",
+                reason_code=PATH_DELETE_FAILED,
+                error=str(exc),
+            )
+            errors.append(outcome)
+            _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+            continue
 
         if use_git_aware_remover:
             removal = await resolved_worktree_remover(
