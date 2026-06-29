@@ -71,6 +71,50 @@ def test_runtime_toolchains_explicit_none_is_treated_as_empty() -> None:
 
 
 @pytest.mark.unit
+def test_runtime_browsers_absent_none_and_empty_are_noops() -> None:
+    assert ProfileRuntime().browsers == []
+    assert ProfileRuntime.model_validate({"browsers": None}).browsers == []
+    assert ProfileRuntime.model_validate({"browsers": []}).browsers == []
+
+
+@pytest.mark.unit
+def test_runtime_browsers_accepts_allowlist_lowercases_and_dedupes() -> None:
+    runtime = ProfileRuntime.model_validate(
+        {"browsers": ["CHROMIUM", "firefox", "chromium", "WebKit"]}
+    )
+
+    assert runtime.browsers == ["chromium", "firefox", "webkit"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_browser", ["chrome", "edge", "", " chromium "])
+def test_runtime_browsers_rejects_unknown_names(bad_browser: str) -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"browsers": [bad_browser]})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_value", ["chromium", {"name": "chromium"}, [17]])
+def test_runtime_browsers_rejects_invalid_shapes(bad_value: object) -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"browsers": bad_value})
+
+
+@pytest.mark.unit
+def test_runtime_browsers_caps_declaration_count_before_deduping() -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"browsers": ["chromium"] * 9})
+
+
+@pytest.mark.unit
+def test_runtime_browsers_schema_exposes_allowlist_and_count_bound() -> None:
+    schema = ProfileRuntime.model_json_schema()["properties"]["browsers"]
+
+    assert schema["maxItems"] == 8
+    assert schema["items"]["enum"] == ["chromium", "firefox", "webkit"]
+
+
+@pytest.mark.unit
 def test_runtime_toolchains_rejects_non_string_language_key() -> None:
     with pytest.raises(ValidationError):
         ProfileRuntime.model_validate({"toolchains": {17: ["17"]}})
@@ -230,6 +274,53 @@ def test_normalize_inline_profile_snapshot_preserves_present_monitor_grace() -> 
     assert normalized == explicit
     assert normalized is not explicit
     assert normalized["monitor"] == explicit["monitor"]
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_backfills_missing_runtime_browsers() -> None:
+    """A legacy snapshot's ``runtime`` lacks ``browsers``; normalization adds the
+    input default so it compares equal to a fresh replay that dumps
+    ``runtime.browsers=[]``."""
+    legacy = {
+        "name": "inline",
+        "forge": "auto",
+        "runtime": {"environment": {"NODE_ENV": "test"}},
+    }
+
+    normalized = normalize_inline_profile_snapshot(legacy)
+
+    assert normalized == {
+        "name": "inline",
+        "forge": "auto",
+        "runtime": {"environment": {"NODE_ENV": "test"}, "browsers": []},
+    }
+    assert legacy == {
+        "name": "inline",
+        "forge": "auto",
+        "runtime": {"environment": {"NODE_ENV": "test"}},
+    }
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_preserves_present_runtime_browsers() -> None:
+    explicit = {"name": "inline", "forge": "auto", "runtime": {"browsers": ["chromium"]}}
+
+    normalized = normalize_inline_profile_snapshot(explicit)
+
+    assert normalized == explicit
+    assert normalized is not explicit
+    assert normalized["runtime"] == explicit["runtime"]
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_skips_runtime_when_not_a_dict() -> None:
+    """A malformed ``runtime`` must not crash normalization; it is passed through
+    untouched so downstream validation surfaces the problem."""
+    malformed = {"name": "inline", "forge": "auto", "runtime": "not-a-dict"}
+
+    normalized = normalize_inline_profile_snapshot(malformed)
+
+    assert normalized == malformed
 
 
 @pytest.mark.unit

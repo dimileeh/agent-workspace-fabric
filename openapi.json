@@ -3166,6 +3166,20 @@
             ],
             "title": "Agent Image"
           },
+          "browsers": {
+            "description": "Playwright browser binaries the workspace setup must install, e.g. [\"chromium\"]. Absent or empty means no browser provisioning is requested.",
+            "items": {
+              "enum": [
+                "chromium",
+                "firefox",
+                "webkit"
+              ],
+              "type": "string"
+            },
+            "maxItems": 8,
+            "title": "Browsers",
+            "type": "array"
+          },
           "environment": {
             "additionalProperties": {
               "type": "string"

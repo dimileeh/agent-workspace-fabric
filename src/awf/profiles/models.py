@@ -13,7 +13,7 @@ import shlex
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 from urllib.parse import urlparse, urlsplit
 
 from pydantic import (
@@ -61,6 +61,9 @@ _TOOLCHAIN_LANGUAGE_PATTERN = re.compile(r"^[a-z][a-z0-9+_.-]*$")
 _TOOLCHAIN_VERSION_PATTERN = re.compile(r"^[0-9]+(\.[0-9]+){0,3}$")
 _MAX_TOOLCHAIN_LANGUAGES = 16
 _MAX_TOOLCHAIN_VERSIONS = 16
+_RuntimeBrowser = Literal["chromium", "firefox", "webkit"]
+_ALLOWED_RUNTIME_BROWSERS: frozenset[str] = frozenset(get_args(_RuntimeBrowser))
+_MAX_RUNTIME_BROWSERS = 8
 
 
 class ProfileRuntime(BaseModel):
@@ -85,6 +88,13 @@ class ProfileRuntime(BaseModel):
             "``runtime_toolchain_findings`` lint seam yields a non-blocking "
             "``RUNTIME_TOOLCHAIN_UNAVAILABLE`` warning when a declared version is "
             "missing from the runtime image."
+        ),
+    )
+    browsers: Annotated[list[_RuntimeBrowser], Field(max_length=_MAX_RUNTIME_BROWSERS)] = Field(
+        default_factory=list,
+        description=(
+            "Playwright browser binaries the workspace setup must install, e.g. "
+            '["chromium"]. Absent or empty means no browser provisioning is requested.'
         ),
     )
 
@@ -145,6 +155,32 @@ class ProfileRuntime(BaseModel):
                 seen.add(version)
             normalized[language] = versions
         return normalized
+
+    @field_validator("browsers", mode="before")
+    @classmethod
+    def _validate_browsers(cls, value: object) -> object:
+        """Normalize and bound declared Playwright browser requirements."""
+        if value is None:
+            return []
+        if isinstance(value, str) or not isinstance(value, (list, tuple)):
+            raise ValueError("runtime.browsers must be a list of browser names")
+        if len(value) > _MAX_RUNTIME_BROWSERS:
+            raise ValueError(
+                f"runtime.browsers declares too many browsers (max {_MAX_RUNTIME_BROWSERS})"
+            )
+        browsers: list[str] = []
+        seen: set[str] = set()
+        for raw_browser in value:
+            if not isinstance(raw_browser, str):
+                raise ValueError("runtime.browsers entries must be strings")
+            browser = raw_browser.lower()
+            if browser not in _ALLOWED_RUNTIME_BROWSERS:
+                raise ValueError(f"invalid runtime browser: {raw_browser!r}")
+            if browser in seen:
+                continue
+            browsers.append(browser)
+            seen.add(browser)
+        return browsers
 
 
 class ProfileDocker(BaseModel):
@@ -977,8 +1013,10 @@ def normalize_inline_profile_snapshot(
     added after some inline-profile workspaces were persisted, so their stored
     ``monitor`` sub-dict lacks the key while an otherwise-identical replay now
     dumps the ``600.0`` default. Backfill a missing value there too so legacy
-    inline-profile replays stay idempotent. Returns a shallow copy; the input is
-    never mutated (the ``monitor`` sub-dict is copied only when backfilled).
+    inline-profile replays stay idempotent. ``runtime.browsers`` was added later
+    with an empty-list default, so missing values in legacy ``runtime`` sub-dicts
+    are backfilled the same way. Returns a shallow copy; the input is never
+    mutated (nested sub-dicts are copied only when backfilled).
     """
     if profile is None:
         return None
@@ -993,6 +1031,9 @@ def normalize_inline_profile_snapshot(
                 _MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT
             ),
         }
+    runtime = result.get("runtime")
+    if isinstance(runtime, dict) and "browsers" not in runtime:
+        result["runtime"] = {**runtime, "browsers": []}
     return result
 
 
