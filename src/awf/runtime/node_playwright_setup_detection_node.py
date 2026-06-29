@@ -832,6 +832,13 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     package_manager = _node_dependency_install_package_manager_from_tokens(tokens, index, [])
     if package_manager is not None:
         return package_manager
+    package_manager = _node_conditional_dependency_install_package_manager_from_tokens(
+        tokens,
+        index,
+        [],
+    )
+    if package_manager is not None:
+        return package_manager
     scoped_install = _leading_cd_package_scope(tokens, index)
     while scoped_install is None:
         corepack_install_index = _corepack_preamble_next_command_index(tokens, index)
@@ -849,6 +856,13 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
         package_manager = _node_dependency_install_package_manager_from_tokens(tokens, index, [])
         if package_manager is not None:
             return package_manager
+        package_manager = _node_conditional_dependency_install_package_manager_from_tokens(
+            tokens,
+            index,
+            [],
+        )
+        if package_manager is not None:
+            return package_manager
         scoped_install = _leading_cd_package_scope(tokens, index)
     package_dir, install_index = scoped_install
     index = install_index
@@ -864,6 +878,14 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
         )
         if inferred_package_manager is not None:
             return inferred_package_manager
+        inferred_package_manager = _node_conditional_dependency_install_package_manager_from_tokens(
+            tokens,
+            command_index,
+            [],
+            package_dir=package_dir,
+        )
+        if inferred_package_manager is not None:
+            return inferred_package_manager
         corepack_install_index = _corepack_preamble_next_command_index(tokens, command_index)
         next_scoped_command_index: int | None
         if corepack_install_index is not None:
@@ -873,6 +895,59 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
         if next_scoped_command_index is None:
             return None
         index = next_scoped_command_index
+    return None
+
+
+def _node_conditional_dependency_install_package_manager_from_tokens(
+    tokens: list[str],
+    index: int,
+    location_tokens: list[str],
+    *,
+    package_dir: str | None = None,
+) -> str | None:
+    if index >= len(tokens) or tokens[index] != "if":
+        return None
+    block = _shell_if_block_body_bounds(tokens, index)
+    if block is None:
+        return None
+    body_start, body_end = block
+    for command_index in range(body_start, body_end):
+        scoped_location_tokens = location_tokens
+        if package_dir is not None and tokens[command_index] in _NODE_PACKAGE_MANAGERS:
+            scoped_location_tokens = _node_package_manager_cd_location_tokens(
+                tokens[command_index],
+                package_dir,
+            )
+        package_manager = _node_dependency_install_package_manager_from_tokens(
+            tokens,
+            command_index,
+            scoped_location_tokens,
+        )
+        if package_manager is not None:
+            return package_manager
+    return None
+
+
+def _shell_if_block_body_bounds(tokens: list[str], index: int) -> tuple[int, int] | None:
+    if index >= len(tokens) or tokens[index] != "if":
+        return None
+    depth = 0
+    body_start: int | None = None
+    for token_index in range(index, len(tokens)):
+        token = tokens[token_index]
+        if token == "if":
+            depth += 1
+            continue
+        if token == "then" and depth == 1 and body_start is None:
+            body_start = token_index + 1
+            continue
+        if token != "fi":
+            continue
+        depth -= 1
+        if depth == 0:
+            if body_start is None:
+                return None
+            return body_start, token_index
     return None
 
 

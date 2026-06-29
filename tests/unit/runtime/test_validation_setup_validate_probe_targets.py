@@ -994,6 +994,25 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[0].runtime_browser_install is True
 
+    def test_validate_conditional_install_defers_browser_install_until_after_if_block(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[
+                "if [ ! -d node_modules ]; then pnpm install; fi && pnpm exec playwright test"
+            ],
+        )
+
+        commands = profile_phase_command_plan(profile, ["setup", "validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "if [ ! -d node_modules ]; then pnpm install; fi"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm exec playwright test"),
+        ]
+        assert commands[1].runtime_browser_install is True
+
     @pytest.mark.parametrize(
         ("validate_command", "expected"),
         [
@@ -1161,6 +1180,24 @@ class TestPlaywrightBrowserInstallCommand:
         expected: str,
     ) -> None:
         assert _node_dependency_install_package_manager(command) == expected
+
+    def test_dependency_install_parser_rejects_incomplete_conditional_install(
+        self,
+    ) -> None:
+        assert (
+            _node_dependency_install_package_manager("if [ ! -d node_modules ]; then pnpm install")
+            is None
+        )
+
+    def test_dependency_install_parser_preserves_cd_scope_for_conditional_install(
+        self,
+    ) -> None:
+        assert (
+            _node_dependency_install_package_manager(
+                "cd apps/web && if [ ! -d node_modules ]; then pnpm install; fi"
+            )
+            == "pnpm -C apps/web"
+        )
 
     @pytest.mark.parametrize(
         "command",
