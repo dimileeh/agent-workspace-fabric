@@ -403,7 +403,6 @@ def profile_phase_command_plan(
             if (
                 deferred_browser_install is None
                 and not browser_install_added
-                and not _validate_node_dependency_install_exists(profile)
                 and _post_agent_node_dependency_install_exists(profile)
             ):
                 browser_install = playwright_browser_install_command(profile)
