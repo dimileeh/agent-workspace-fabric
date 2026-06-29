@@ -985,13 +985,21 @@ class GitHubClient:
                 )
             )
 
-        def _append_rollup_failure_without_log(*, run_name: str, conclusion: str) -> None:
+        def _append_rollup_failure_without_log(
+            *, run_name: str, conclusion: str, details_url: str | None
+        ) -> None:
+            evidence_warnings = (
+                (f"External check details URL: {redact_ci_log(details_url)}",)
+                if details_url
+                else ()
+            )
             failures.append(
                 CheckFailure(
                     name=run_name,
                     conclusion=conclusion,
                     log_excerpt="",
                     run_id=None,
+                    evidence_warnings=evidence_warnings,
                 )
             )
 
@@ -1025,6 +1033,7 @@ class GitHubClient:
                     _append_rollup_failure_without_log(
                         run_name=check.name,
                         conclusion=conclusion,
+                        details_url=check.details_url,
                     )
                 continue
             if not _rollup_check_is_github_actions(check) or run_id in seen_run_ids:

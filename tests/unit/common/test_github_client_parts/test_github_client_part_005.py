@@ -364,7 +364,10 @@ class TestFetchFailingCheckLogsRollupFallback:
             ("third-party/check-run", "FAILURE", ""),
         ]
         assert all(failure.run_id is None for failure in failures)
-        assert all(failure.evidence_warnings == () for failure in failures)
+        assert [failure.evidence_warnings for failure in failures] == [
+            ("External check details URL: https://circleci.example.test/build/123",),
+            ("External check details URL: https://ci.example.test/build/124",),
+        ]
         assert _run_view_calls(fake) == []
 
     @pytest.mark.unit
