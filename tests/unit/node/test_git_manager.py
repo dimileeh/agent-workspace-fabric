@@ -770,6 +770,61 @@ def test_mirror_path_for_worktree_handles_commondir_and_unreadable_commondir(
 
 
 @pytest.mark.unit
+def test_mirror_path_for_registered_worktree_prefers_newest_duplicate_match(
+    tmp_path: Path,
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    old_mirror = mirrors_dir / "a-old.git"
+    active_mirror = mirrors_dir / "z-active.git"
+    old_linked_git_dir = old_mirror / "worktrees" / "ws"
+    active_linked_git_dir = active_mirror / "worktrees" / "ws"
+    old_linked_git_dir.mkdir(parents=True)
+    active_linked_git_dir.mkdir(parents=True)
+    for linked_git_dir in (old_linked_git_dir, active_linked_git_dir):
+        (linked_git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    os.utime(old_linked_git_dir, ns=(1, 1))
+    os.utime(active_linked_git_dir, ns=(2, 2))
+
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+        == active_mirror.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_ignores_earlier_unreadable_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    unreadable_mirror = mirrors_dir / "a-unreadable.git"
+    active_mirror = mirrors_dir / "z-active.git"
+    unreadable_gitdir = unreadable_mirror / "worktrees" / "ws" / "gitdir"
+    active_gitdir = active_mirror / "worktrees" / "ws" / "gitdir"
+    unreadable_gitdir.parent.mkdir(parents=True)
+    active_gitdir.parent.mkdir(parents=True)
+    unreadable_gitdir.write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    active_gitdir.write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def _raise_for_unreadable_gitdir(path: Path, *args: object, **kwargs: object) -> str:
+        if path == unreadable_gitdir:
+            raise PermissionError("permission denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_unreadable_gitdir)
+
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+        == active_mirror.resolve()
+    )
+
+
+@pytest.mark.unit
 async def test_read_mirror_origin_url_returns_configured_origin(tmp_path: Path) -> None:
     repo_url = "git@github.com:example/repo.git"
     mirror = tmp_path / "repo.git"
