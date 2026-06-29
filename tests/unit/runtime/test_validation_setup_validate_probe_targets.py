@@ -1460,52 +1460,52 @@ class TestPlaywrightBrowserInstallCommand:
             (
                 "uv sync --extra e2e",
                 "",
-                "uv run -m playwright install chromium",
+                "uv run --extra e2e -m playwright install chromium",
             ),
             (
                 "cd apps/web && uv sync --extra e2e",
                 "apps/web",
-                "cd apps/web && uv run -m playwright install chromium",
+                "cd apps/web && uv run --extra e2e -m playwright install chromium",
             ),
             (
                 "uv sync --project apps/web --group e2e",
                 "apps/web",
-                "uv run --project apps/web -m playwright install chromium",
+                "uv run --project apps/web --group e2e -m playwright install chromium",
             ),
             (
                 "uv sync --project=apps/web --extra=e2e",
                 "apps/web",
-                "uv run --project apps/web -m playwright install chromium",
+                "uv run --project apps/web --extra e2e -m playwright install chromium",
             ),
             (
                 "uv sync --project /workspace/apps/web --group e2e",
                 "apps/web",
-                "uv run --project /workspace/apps/web -m playwright install chromium",
+                "uv run --project /workspace/apps/web --group e2e -m playwright install chromium",
             ),
             (
                 "uv sync --project=/workspace/apps/web --extra=e2e",
                 "apps/web",
-                "uv run --project /workspace/apps/web -m playwright install chromium",
+                "uv run --project /workspace/apps/web --extra e2e -m playwright install chromium",
             ),
             (
                 "uv sync --directory apps/web --group e2e",
                 "apps/web",
-                "uv run --directory apps/web -m playwright install chromium",
+                "uv run --directory apps/web --group e2e -m playwright install chromium",
             ),
             (
                 "uv sync --directory=apps/web --extra=e2e",
                 "apps/web",
-                "uv run --directory apps/web -m playwright install chromium",
+                "uv run --directory apps/web --extra e2e -m playwright install chromium",
             ),
             (
                 "uv sync --directory /workspace/apps/web --group e2e",
                 "apps/web",
-                "uv run --directory /workspace/apps/web -m playwright install chromium",
+                "uv run --directory /workspace/apps/web --group e2e -m playwright install chromium",
             ),
             (
                 "uv sync --directory=/workspace/apps/web --extra=e2e",
                 "apps/web",
-                "uv run --directory /workspace/apps/web -m playwright install chromium",
+                "uv run --directory /workspace/apps/web --extra e2e -m playwright install chromium",
             ),
         ],
     )
@@ -1549,11 +1549,11 @@ class TestPlaywrightBrowserInstallCommand:
         [
             (
                 "uv sync --package web --group e2e",
-                "uv run --package web -m playwright install chromium",
+                "uv run --package web --group e2e -m playwright install chromium",
             ),
             (
                 "uv sync --package=web --extra=e2e",
-                "uv run --package web -m playwright install chromium",
+                "uv run --package web --extra e2e -m playwright install chromium",
             ),
         ],
     )
@@ -1605,17 +1605,18 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == expected_install
 
     @pytest.mark.parametrize(
-        "setup_command",
+        ("setup_command", "expected_install"),
         [
-            "uv sync --group e2e",
-            "uv sync --group=e2e",
-            "uv sync --all-groups",
+            ("uv sync --group e2e", "uv run --group e2e -m playwright install chromium"),
+            ("uv sync --group=e2e", "uv run --group e2e -m playwright install chromium"),
+            ("uv sync --all-groups", "uv run --all-groups -m playwright install chromium"),
         ],
     )
     def test_uv_sync_dependency_group_uses_python_playwright(
         self,
         tmp_path: Path,
         setup_command: str,
+        expected_install: str,
     ) -> None:
         workspace_root = tmp_path / "workspace"
         workspace_root.mkdir()
@@ -1641,7 +1642,7 @@ class TestPlaywrightBrowserInstallCommand:
         command = playwright_browser_install_command(profile, workspace_root=workspace_root)
 
         assert command is not None
-        assert command.command == "uv run -m playwright install chromium"
+        assert command.command == expected_install
 
     def test_uv_sync_dependency_group_include_uses_python_playwright(
         self,
@@ -1671,7 +1672,7 @@ class TestPlaywrightBrowserInstallCommand:
         command = playwright_browser_install_command(profile, workspace_root=workspace_root)
 
         assert command is not None
-        assert command.command == "uv run -m playwright install chromium"
+        assert command.command == "uv run --group dev -m playwright install chromium"
 
     @pytest.mark.parametrize(
         ("pyproject_lines", "setup_command"),

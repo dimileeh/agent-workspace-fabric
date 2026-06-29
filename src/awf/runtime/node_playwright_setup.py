@@ -88,6 +88,16 @@ _UV_SYNC_SCOPE_EQUALS_PREFIXES = (
     ("--directory=", "--directory"),
     ("--package=", "--package"),
 )
+_UV_SYNC_RUN_SELECTOR_VALUE_FLAGS = frozenset({"--extra", "--group", "--only-group", "--no-group"})
+_UV_SYNC_RUN_SELECTOR_EQUALS_PREFIXES = (
+    ("--extra=", "--extra"),
+    ("--group=", "--group"),
+    ("--only-group=", "--only-group"),
+    ("--no-group=", "--no-group"),
+)
+_UV_SYNC_RUN_SELECTOR_VALUELESS_FLAGS = frozenset(
+    {"--all-extras", "--all-groups", "--no-default-groups", "--no-dev", "--only-dev"}
+)
 _UV_RUN_MODULE_FLAGS = frozenset({"-m", "--module"})
 _UV_RUN_OPTION_VALUE_FLAGS = frozenset(
     {
@@ -785,16 +795,16 @@ def _uv_python_playwright_install_executable(
         _, run_scope_tokens = scope
         return shlex.join(["uv", "run", *run_scope_tokens])
     if tokens[index + 1] == "sync":
-        scope = _uv_sync_scope(
+        run_context = _uv_sync_run_context(
             tokens,
             index + 2,
             workspace_root=workspace_root,
             requirement_base_dir=requirement_base_dir,
         )
-        if scope is None:
+        if run_context is None:
             return None
-        _, run_scope_tokens = scope
-        return shlex.join(["uv", "run", *run_scope_tokens])
+        _, run_context_tokens = run_context
+        return shlex.join(["uv", "run", *run_context_tokens])
     if tokens[index + 1] != "pip":
         return None
     return _uv_pip_python_target_executable(tokens, index + 2) or "python"
@@ -971,6 +981,63 @@ def _uv_sync_scope(
             run_scope_tokens.extend((scope_option, scope_value))
         index += 1
     return scoped_requirement_base_dir, run_scope_tokens
+
+
+def _uv_sync_run_context(
+    tokens: list[str],
+    index: int,
+    *,
+    workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
+) -> tuple[Path | None, list[str]] | None:
+    scope = _uv_sync_scope(
+        tokens,
+        index,
+        workspace_root=workspace_root,
+        requirement_base_dir=requirement_base_dir,
+    )
+    if scope is None:
+        return None
+    scoped_requirement_base_dir, run_tokens = scope
+    selector_tokens = _uv_sync_run_selector_tokens(tokens, index)
+    if selector_tokens is None:
+        return None
+    return scoped_requirement_base_dir, [*run_tokens, *selector_tokens]
+
+
+def _uv_sync_run_selector_tokens(tokens: list[str], index: int) -> list[str] | None:
+    run_selector_tokens: list[str] = []
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            break
+        if token in _UV_SYNC_RUN_SELECTOR_VALUE_FLAGS:
+            if (
+                index + 1 >= len(tokens)
+                or tokens[index + 1] in _SHELL_COMPOUND_CONTROL_TOKENS
+                or tokens[index + 1].startswith("-")
+            ):
+                return None
+            run_selector_tokens.extend((token, tokens[index + 1]))
+            index += 2
+            continue
+        selector_option = _uv_sync_run_selector_equals_option(token)
+        if selector_option is not None:
+            selector_value = token.removeprefix(f"{selector_option}=")
+            if not selector_value:
+                return None
+            run_selector_tokens.extend((selector_option, selector_value))
+        elif token in _UV_SYNC_RUN_SELECTOR_VALUELESS_FLAGS:
+            run_selector_tokens.append(token)
+        index += 1
+    return run_selector_tokens
+
+
+def _uv_sync_run_selector_equals_option(token: str) -> str | None:
+    for prefix, option in _UV_SYNC_RUN_SELECTOR_EQUALS_PREFIXES:
+        if token.startswith(prefix):
+            return option
+    return None
 
 
 def _uv_sync_scope_equals_option(token: str) -> str | None:
