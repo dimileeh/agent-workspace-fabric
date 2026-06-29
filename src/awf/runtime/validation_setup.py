@@ -233,7 +233,6 @@ def profile_phase_command_plan(
         command: ProfileExecutionCommand,
     ) -> None:
         nonlocal browser_install_added, deferred_browser_install
-        commands.append(command)
         command_package_manager = _node_dependency_install_package_manager(command.command.command)
         if (
             deferred_browser_install is not None
@@ -243,9 +242,22 @@ def profile_phase_command_plan(
                 browser_install_package_manager,
             )
         ):
+            split_command = _split_dependency_install_chain(
+                command,
+                browser_install_package_manager,
+            )
+            if split_command is None:
+                commands.append(command)
+            else:
+                command, trailing_command = split_command
+                commands.append(command)
             commands.append(deferred_browser_install)
+            if split_command is not None:
+                commands.append(trailing_command)
             deferred_browser_install = None
             browser_install_added = True
+            return
+        commands.append(command)
 
     for phase in sorted(
         phase_names,
@@ -331,7 +343,7 @@ def profile_phase_command_plan(
                         browser_install_package_manager,
                     )
                 ):
-                    split_validate_command = _split_validate_dependency_install_chain(
+                    split_validate_command = _split_dependency_install_chain(
                         validate_command,
                         browser_install_package_manager,
                     )
@@ -430,36 +442,40 @@ def _node_dependency_install_satisfies_browser_install(
     )
 
 
-def _split_validate_dependency_install_chain(
+def _split_dependency_install_chain(
     command: ProfileExecutionCommand,
     browser_install_package_manager: str | None,
 ) -> tuple[ProfileExecutionCommand, ProfileExecutionCommand] | None:
-    separator_index = _first_unquoted_and_separator(command.command.command)
-    if separator_index is None:
-        return None
-    install_command = command.command.command[:separator_index].strip()
-    trailing_command = command.command.command[separator_index + 2 :].strip()
-    if not install_command or not trailing_command:
-        return None
-    command_package_manager = _node_dependency_install_package_manager(install_command)
-    if not _node_dependency_install_satisfies_browser_install(
-        command_package_manager,
-        browser_install_package_manager,
-    ):
-        return None
-    return (
-        replace(
-            command,
-            command=command.command.model_copy(update={"command": install_command}),
-        ),
-        replace(
-            command,
-            command=command.command.model_copy(update={"command": trailing_command}),
-        ),
-    )
+    for separator_index in _unquoted_and_separator_indices(command.command.command):
+        install_command = command.command.command[:separator_index].strip()
+        trailing_command = command.command.command[separator_index + 2 :].strip()
+        if not install_command or not trailing_command:
+            continue
+        command_package_manager = _node_dependency_install_package_manager(install_command)
+        if not _node_dependency_install_satisfies_browser_install(
+            command_package_manager,
+            browser_install_package_manager,
+        ):
+            continue
+        return (
+            replace(
+                command,
+                command=command.command.model_copy(update={"command": install_command}),
+            ),
+            replace(
+                command,
+                command=command.command.model_copy(update={"command": trailing_command}),
+            ),
+        )
+    return None
 
 
 def _first_unquoted_and_separator(command: str) -> int | None:
+    return next(iter(_unquoted_and_separator_indices(command)), None)
+
+
+def _unquoted_and_separator_indices(command: str) -> list[int]:
+    separator_indices: list[int] = []
     in_single_quote = False
     in_double_quote = False
     escaped = False
@@ -489,9 +505,11 @@ def _first_unquoted_and_separator(command: str) -> int | None:
         elif char == '"':
             in_double_quote = True
         elif command[index : index + 2] == "&&":
-            return index
+            separator_indices.append(index)
+            index += 2
+            continue
         index += 1
-    return None
+    return separator_indices
 
 
 def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecutionCommand]:

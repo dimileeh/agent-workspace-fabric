@@ -82,6 +82,54 @@ class TestBrowserPhaseCommandPlan:
         assert commands[1].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_splits_setup_install_chain_before_browser_work(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-setup-chain-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["pnpm install && pnpm exec playwright test --project=setup"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup",))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("setup", "pnpm exec playwright test --project=setup"),
+        ]
+        assert commands[1].command.required is False
+
+    @pytest.mark.unit
+    def test_profile_phase_command_plan_splits_pre_agent_install_chain_after_preamble(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-pre-agent-chain-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["node scripts/generate-config.js"],
+                    "pre_agent": ["corepack enable && pnpm install && pnpm exec playwright test"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup", "pre_agent"))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "node scripts/generate-config.js"),
+            ("pre_agent", "corepack enable && pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("pre_agent", "pnpm exec playwright test"),
+        ]
+        assert commands[2].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_uses_pre_agent_dependency_install_for_browser_install(
         self,
     ) -> None:
