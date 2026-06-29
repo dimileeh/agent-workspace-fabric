@@ -69,24 +69,42 @@ _UV_PIP_PYTHON_EQUALS_PREFIXES = ("-p=", "--python=")
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
 
 
+def _executable_name(executable: str) -> str:
+    return executable.rsplit("/", 1)[-1]
+
+
+def _replace_executable_name(executable: str, replacement: str) -> str:
+    prefix, separator, _name = executable.rpartition("/")
+    if not separator:
+        return replacement
+    return f"{prefix}/{replacement}"
+
+
 def _is_python_executable(executable: str) -> bool:
-    return _PYTHON_EXECUTABLE_RE.fullmatch(executable) is not None
+    return _PYTHON_EXECUTABLE_RE.fullmatch(_executable_name(executable)) is not None
 
 
 def _is_pip_executable(executable: str) -> bool:
-    return _PIP_EXECUTABLE_RE.fullmatch(executable) is not None
+    return _PIP_EXECUTABLE_RE.fullmatch(_executable_name(executable)) is not None
 
 
 def _is_pytest_executable(executable: str) -> bool:
-    return _PYTEST_EXECUTABLE_RE.fullmatch(executable) is not None
+    return _PYTEST_EXECUTABLE_RE.fullmatch(_executable_name(executable)) is not None
 
 
 def _python_executable_for_install_executable(executable: str) -> str | None:
     if _is_python_executable(executable):
         return executable
     if _is_pip_executable(executable):
-        suffix = executable.removeprefix("pip")
-        return f"python{suffix}"
+        suffix = _executable_name(executable).removeprefix("pip")
+        return _replace_executable_name(executable, f"python{suffix}")
+    return None
+
+
+def _python_executable_for_pytest_executable(executable: str) -> str | None:
+    if _is_pytest_executable(executable):
+        suffix = _executable_name(executable).removeprefix("pytest")
+        return _replace_executable_name(executable, f"python{suffix}")
     return None
 
 
@@ -484,7 +502,7 @@ def _command_segment_python_playwright_executable(
             return None
         if _is_python_executable(executable):
             return executable
-        return "python"
+        return _python_executable_for_pytest_executable(executable) or "python"
     if _command_segment_installs_python_playwright(
         tokens,
         index,

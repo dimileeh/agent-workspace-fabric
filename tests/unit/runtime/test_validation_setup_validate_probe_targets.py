@@ -237,6 +237,56 @@ class TestPlaywrightBrowserInstallCommand:
     @pytest.mark.parametrize(
         ("setup_command", "expected_command"),
         [
+            (
+                ".venv/bin/python -m pip install playwright",
+                ".venv/bin/python -m playwright install chromium",
+            ),
+            (
+                ".venv/bin/pip install playwright",
+                ".venv/bin/python -m playwright install chromium",
+            ),
+            (
+                ".venv/bin/pip3.12 install playwright",
+                ".venv/bin/python3.12 -m playwright install chromium",
+            ),
+        ],
+    )
+    def test_python_playwright_profile_preserves_path_qualified_install_executable(
+        self,
+        setup_command: str,
+        expected_command: str,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[setup_command],
+            validate=[".venv/bin/pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == expected_command
+        assert command.required is False
+
+    def test_python_playwright_profile_preserves_path_qualified_pytest_executable(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[
+                ".venv/bin/pytest --browser chromium",
+                "python -m pip install playwright",
+            ],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == ".venv/bin/python -m playwright install chromium"
+        assert command.required is False
+
+    @pytest.mark.parametrize(
+        ("setup_command", "expected_command"),
+        [
             ("python3.12 -m pip install playwright", "python3.12 -m playwright install chromium"),
             ("pip3.12 install playwright", "python3.12 -m playwright install chromium"),
         ],
@@ -1005,6 +1055,26 @@ class TestPlaywrightBrowserInstallCommand:
             ("validate", "python -m pip install playwright"),
             ("setup", "python -m playwright install chromium"),
             ("validate", "pytest --browser chromium"),
+        ]
+        assert commands[1].command.required is False
+
+    def test_validate_python_browser_install_waits_for_path_qualified_pip_install(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[
+                ".venv/bin/pip install playwright",
+                ".venv/bin/pytest --browser chromium",
+            ],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", ".venv/bin/pip install playwright"),
+            ("setup", ".venv/bin/python -m playwright install chromium"),
+            ("validate", ".venv/bin/pytest --browser chromium"),
         ]
         assert commands[1].command.required is False
 
