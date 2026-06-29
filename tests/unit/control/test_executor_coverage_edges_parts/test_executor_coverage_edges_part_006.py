@@ -295,42 +295,6 @@ def test_validation_run_command_records_delay_healthchecks_until_validate_phase(
     ]
 
 
-@pytest.mark.unit
-def test_validation_run_command_records_use_workspace_root_for_python_playwright(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    worktree_path = tmp_path / "worktree"
-    host_path = tmp_path / "host"
-    worktree_path.mkdir()
-    host_path.mkdir()
-    monkeypatch.chdir(host_path)
-    (worktree_path / "requirements.txt").write_text("playwright\n", encoding="utf-8")
-    profile = WorkspaceProfile.model_validate(
-        {
-            "name": "records-rooted-python-playwright",
-            "runtime": {"browsers": ["chromium"]},
-            "phases": {
-                "post_agent": ["python -m pip install -r requirements.txt"],
-                "validate": ["python -m playwright test"],
-            },
-        }
-    )
-
-    records = _validation_run_command_records(
-        profile=profile,
-        phase_names=("post_agent", "validate"),
-        run_healthchecks=True,
-        workspace_root=worktree_path,
-    )
-
-    assert [record["command"] for record in records] == [
-        "python -m pip install -r requirements.txt",
-        "python -m playwright install chromium",
-        "python -m playwright test",
-    ]
-
-
 def test_validation_run_command_records_skips_alembic_policy_if_validation_alembic_is_none() -> (
     None
 ):

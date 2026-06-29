@@ -20,19 +20,16 @@ from awf.control.executor.logging_ops import (
 )
 from awf.control.executor.mirror_hooks_repair import repair_mirror_hooks_path_or_mark_failed
 from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.session import session_scope
 from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
     verify_head_object_exists,
 )
-from awf.profiles.models import WorkspaceProfile
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
-from awf.runtime.validation_setup import runtime_browser_probe_deferred_until_validate
 
 _log = get_logger(__name__)
 
@@ -323,7 +320,6 @@ async def _run_monitor_handoff_profile_setup(
             profile=profile,
             phase_names=("setup", "pre_agent"),
             worktree_path=worktree_path,
-            allow_browser_install_defer_to_unrequested_phase=False,
         )
     except _MonitorHandoffSetupFailureError:
         raise
@@ -393,33 +389,6 @@ async def _run_monitor_handoff_profile_setup(
                 reason_code=getattr(exc, "reason_code", None),
                 error=redact_secrets(str(exc))[:1000],
             )
-        record_browser_findings = getattr(self, "_record_runtime_browser_findings", None)
-        browser_probe_deferred = isinstance(
-            profile,
-            WorkspaceProfile,
-        ) and runtime_browser_probe_deferred_until_validate(
-            profile,
-            workspace_root=worktree_path,
-            allow_browser_install_defer_to_unrequested_phase=False,
-        )
-        if callable(record_browser_findings) and not browser_probe_deferred:
-            try:
-                async with session_scope(self._session_factory) as session:
-                    await record_browser_findings(
-                        workspace_id=workspace_id,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        profile=profile,
-                        worktree_path=worktree_path,
-                        session=session,
-                    )
-            except Exception as exc:
-                _log.warning(
-                    "executor.monitor_handoff_runtime_browser_probe_record_failed",
-                    workspace_id=workspace_id,
-                    reason_code=getattr(exc, "reason_code", None),
-                    error=redact_secrets(str(exc))[:1000],
-                )
         # Adopt-pr skips the agent, so the only thing that provisions the validate
         # toolchain is the setup phase just run. Fail early + clearly if a validate
         # tool is still missing, before transitioning to monitoring_pr.

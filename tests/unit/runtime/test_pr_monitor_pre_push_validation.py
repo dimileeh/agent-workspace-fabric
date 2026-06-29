@@ -5,25 +5,15 @@ from __future__ import annotations
 import ast
 from collections.abc import AsyncIterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.audit import REDACTION_MARKER
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
-from awf.control.executor.constants import RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
-from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.profiles.models import (
-    RUNTIME_BROWSER_UNAVAILABLE,
-    ProfileLintFinding,
-    ProfileLintSeverity,
-    WorkspaceProfile,
-)
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
 from awf.runtime.pr_monitor_runner import pre_push_validation_failures
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -39,7 +29,6 @@ from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
     ValidationWorktreeCheck,
-    ValidationWorktreeCleanup,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -118,49 +107,6 @@ def test_pre_push_validation_structural_helpers_are_single_source() -> None:
 
 
 @pytest.mark.unit
-def test_deferred_browser_install_not_completed_without_setup_install_command(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A passing validation is not ready for deferred probing without install evidence."""
-    profile = WorkspaceProfile.model_validate(
-        {
-            "name": "deferred-browser-profile",
-            "runtime": {"browsers": ["chromium"]},
-            "phases": {
-                "validate": [
-                    "python -m pip install playwright",
-                    "pytest --browser chromium",
-                ],
-            },
-        }
-    )
-    monkeypatch.setattr(
-        pre_push_validation_module,
-        "profile_phase_command_plan",
-        lambda *_args, **_kwargs: [
-            SimpleNamespace(
-                phase="validate",
-                command=SimpleNamespace(command="python -m pip install playwright"),
-            ),
-            SimpleNamespace(
-                phase="validate",
-                command=SimpleNamespace(command="pytest --browser chromium"),
-            ),
-        ],
-    )
-
-    assert (
-        pre_push_validation_module._deferred_runtime_browser_install_completed(
-            profile,
-            worktree_path=tmp_path,
-            result=_validation_result(tmp_path, ok=True),
-        )
-        is False
-    )
-
-
-@pytest.mark.unit
 async def test_pre_push_validation_records_target_head_before_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -199,152 +145,6 @@ async def test_pre_push_validation_records_target_head_before_push(
     assert pre_push_run.target_head_sha == local_head
     assert pre_push_run.target_branch == f"awf/{workspace_id}"
     assert pre_push_run.status == "succeeded"
-
-
-@pytest.mark.unit
-async def test_pre_push_validation_records_deferred_browser_findings_after_validate(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Deferred browser installs should still be probed in monitor pre-push validation."""
-    workspace_id = await seed_monitoring_workspace(factory)
-    profile = WorkspaceProfile.model_validate(
-        {
-            "name": "browser-pre-push-profile",
-            "runtime": {"browsers": ["chromium"]},
-            "phases": {
-                "setup": ["node scripts/generate-config.js"],
-                "validate": ["pnpm install --frozen-lockfile", "pnpm test:e2e"],
-            },
-        }
-    )
-    async with factory() as session:
-        ws = await WorkspaceRepository(session).get(workspace_id)
-        assert ws is not None
-        ws.resolved_profile = profile.model_dump(mode="json", by_alias=True)
-        await session.commit()
-    worktree = tmp_path / "worktrees" / workspace_id
-    worktree.mkdir(parents=True)
-    cmd = FakeCommandRunner()
-    local_head = "e" * 40
-    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
-    cmd.queue_result(returncode=0, stdout="", stderr="")
-    order: list[str] = []
-
-    async def _cleanup(
-        _self: Any,
-        *,
-        worktree_path: Path,
-        restore_ref: str,
-    ) -> ValidationWorktreeCleanup:
-        order.append("cleanup")
-        return ValidationWorktreeCleanup(
-            cleaned=True,
-            check=ValidationWorktreeCheck(clean=True),
-            restore_ref=restore_ref,
-        )
-
-    class _BrowserValidation(_FakeValidation):
-        def __init__(self) -> None:
-            super().__init__(
-                ValidationResult(
-                    commands=[
-                        _command_result(
-                            tmp_path,
-                            ok=True,
-                            command="pnpm install --frozen-lockfile",
-                            artifact_name="pnpm_install",
-                        ),
-                        _command_result(
-                            tmp_path,
-                            ok=True,
-                            command="pnpm exec playwright install chromium",
-                            artifact_name="playwright_install",
-                        ),
-                        _command_result(
-                            tmp_path,
-                            ok=True,
-                            command="pnpm test:e2e",
-                            artifact_name="pnpm_test_e2e",
-                        ),
-                    ]
-                )
-            )
-            self.probe_calls: list[dict[str, object]] = []
-
-        async def probe_runtime_browser_findings(
-            self, **kwargs: object
-        ) -> tuple[ProfileLintFinding, ...]:
-            assert self.calls, "browser probe must run after pre-push validation"
-            assert "git push" not in [" ".join(call.args) for call in cmd.calls]
-            order.append("browser_probe")
-            self.probe_calls.append(dict(kwargs))
-            return (
-                ProfileLintFinding(
-                    reason_code=RUNTIME_BROWSER_UNAVAILABLE,
-                    message=(
-                        "runtime does not provide Playwright browser chromium "
-                        "with token=ghp_FAKESECRET0000000"
-                    ),
-                    path="runtime.browsers.Authorization: Bearer ghp_FAKEPATH0000000",
-                    severity=ProfileLintSeverity.warning,
-                    details={
-                        "browser": "chromium",
-                        "available_browsers": ["firefox", "ghp_FAKEDETAIL0000000"],
-                    },
-                ),
-            )
-
-    validation = _BrowserValidation()
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    runner._deps.validation = validation  # type: ignore[assignment]
-    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", _cleanup)
-
-    result = await runner._validated_git_push_result(
-        workspace_id=workspace_id,
-        worktree_path=worktree,
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.failed is False
-    assert validation.probe_calls == [
-        {
-            "workspace_id": workspace_id,
-            "compose_project": "proj",
-            "compose_file": tmp_path / "compose.yml",
-            "profile": profile,
-            "worktree_path": worktree,
-        }
-    ]
-    assert order == ["browser_probe", "cleanup"]
-    async with factory() as session:
-        ws = await WorkspaceRepository(session).get(workspace_id)
-        assert ws is not None
-        browser_events = [
-            event
-            for event in ws.events
-            if event.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
-        ]
-    assert len(browser_events) == 1
-    assert browser_events[0].reason_code == RUNTIME_BROWSER_UNAVAILABLE
-    assert browser_events[0].payload == {
-        "browser": "chromium",
-        "available_browsers": ["firefox", REDACTION_MARKER],
-        "path": f"runtime.browsers.Authorization: Bearer {REDACTION_MARKER}",
-        "message": (
-            f"runtime does not provide Playwright browser chromium with token={REDACTION_MARKER}"
-        ),
-    }
-    assert "ghp_FAKE" not in str(browser_events[0].payload)
 
 
 @pytest.mark.unit
@@ -1459,3 +1259,105 @@ async def test_pre_push_validation_coverage_provider_failure_without_command_ski
     assert len(validation.calls) == 1
     assert adapter.calls == []
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_coverage_provider_skip_still_pushes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A configured coverage provider may decline to emit a result."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id, include_coverage=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'9' * 40}\n")
+    cmd.queue_result(returncode=0, stdout="", stderr="")
+    validation = _FakeValidation(
+        _validation_result(tmp_path, ok=True),
+        coverage_result=None,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert result.pushed is True
+    assert len(validation.coverage_calls) == 1
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].status == "succeeded"
+    assert runs[-1].coverage is None
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_reports_failed_rollback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the fix agent raises and worktree rollback fails, surface the rollback reason."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "a" * 40
+    # _run_pre_push_validation: rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    # _run_pre_push_validation_fix_pass: fix_start_head
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+
+    validation = _FakeValidation(_validation_result(tmp_path, ok=False))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    async def _failed_rollback(*_args: object, **_kwargs: object) -> str:
+        """Simulate a recovery rollback that cannot complete."""
+        return pre_push_validation_module.PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _failed_rollback,
+    )
+
+    adapter = FakeAdapter()
+    adapter.queue(exc=RuntimeError("fix agent exploded"))
+    runner._deps.adapter = adapter  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert (
+        result.reason_code == pre_push_validation_module.PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
+    )
+    assert result.details is not None
+    assert "rollback failed" in str(result.details.get("error_message", "")).lower()

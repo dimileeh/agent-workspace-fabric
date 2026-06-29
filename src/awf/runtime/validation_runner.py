@@ -46,13 +46,6 @@ from awf.runtime.alembic_validation import (
     alembic_policy_metadata,
     validate_alembic_migration_chain,
 )
-from awf.runtime.browser_probe import (
-    ProbeExecResult as BrowserProbeExecResult,
-)
-from awf.runtime.browser_probe import (
-    browser_probe_workdir,
-    probe_runtime_browsers,
-)
 from awf.runtime.logs import LogStore
 from awf.runtime.toolchain_probe import ProbeExecResult, probe_runtime_toolchains
 from awf.runtime.validation_coverage import (
@@ -430,75 +423,6 @@ class ValidationRunner:
 
         return await probe_runtime_toolchains(profile=profile, exec_in_container=_exec)
 
-    async def probe_runtime_browser_findings(
-        self,
-        *,
-        workspace_id: str,
-        compose_project: str,
-        compose_file: Path,
-        profile: WorkspaceProfile,
-        worktree_path: Path | None = None,
-    ) -> tuple[ProfileLintFinding, ...]:
-        """Discover declared Playwright browsers in the container; return findings."""
-        if not profile.runtime.browsers:
-            return ()
-
-        async def _exec(cli_args: list[str]) -> BrowserProbeExecResult:
-            probe_cli_args = cli_args
-            if len(cli_args) >= 3 and cli_args[:2] == ["sh", "-lc"]:
-                probe_cli_args = [
-                    *cli_args[:2],
-                    _VENV_ACTIVATE_PREAMBLE + cli_args[2],
-                    *cli_args[3:],
-                ]
-            invocation = build_tracked_compose_exec(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                cli_args=probe_cli_args,
-                source="browser_probe",
-                label="browser_probe",
-                workdir=browser_probe_workdir(profile, workspace_root=worktree_path),
-            )
-            try:
-                result = await asyncio.wait_for(
-                    self._runner.run(invocation.args),
-                    timeout=_TOOLCHAIN_PROBE_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                with suppress(ComposeExecCleanupError, TimeoutError):
-                    await asyncio.wait_for(
-                        cleanup_compose_exec_invocation(
-                            self._runner,
-                            invocation,
-                            workspace_id=workspace_id,
-                        ),
-                        timeout=_TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS,
-                    )
-                return BrowserProbeExecResult(
-                    returncode=124,
-                    stdout="",
-                    stderr=f"browser probe timed out after {_TOOLCHAIN_PROBE_TIMEOUT_SECONDS}s",
-                )
-            except asyncio.CancelledError:
-                await cleanup_compose_exec_invocation_after_cancellation(
-                    self._runner,
-                    invocation,
-                    workspace_id=workspace_id,
-                )
-                raise
-            return BrowserProbeExecResult(
-                returncode=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
-            )
-
-        return await probe_runtime_browsers(
-            profile=profile,
-            exec_in_container=_exec,
-            workspace_root=worktree_path,
-            raise_on_probe_failure=True,
-        )
-
     async def probe_validate_command_tools(
         self,
         *,
@@ -596,7 +520,6 @@ class ValidationRunner:
         run_healthchecks: bool = False,
         worktree_path: Path | None = None,
         include_coverage: bool = True,
-        allow_browser_install_defer_to_unrequested_phase: bool = True,
     ) -> ValidationResult:
         """Run the selected profile phases in order."""
         requested_phases = set(phase_names)
@@ -616,14 +539,7 @@ class ValidationRunner:
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
-            commands=profile_phase_command_plan(
-                profile,
-                phase_names,
-                workspace_root=worktree_path,
-                allow_browser_install_defer_to_unrequested_phase=(
-                    allow_browser_install_defer_to_unrequested_phase
-                ),
-            ),
+            commands=profile_phase_command_plan(profile, phase_names),
             healthchecks=list(healthchecks),
             legacy_command_labels=False,
             retry_budget=profile.validation.retry_budget,

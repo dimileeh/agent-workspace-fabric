@@ -16,7 +16,6 @@ class ProfileExecutionCommand:
     command: ProfileCommand
     database_hook: bool = False
     hook_kind: str | None = None
-    runtime_browser_install: bool = False
 
 
 @dataclass(frozen=True)

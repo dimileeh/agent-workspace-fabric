@@ -25,7 +25,7 @@ from awf.profiles.models import (
     ProfileValidation,
     WorkspaceProfile,
 )
-from awf.runtime.validation_setup import playwright_command
+from awf.runtime.node_playwright_setup import playwright_command
 
 _COMPOSE_FILENAMES = (
     "compose.yml",

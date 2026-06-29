@@ -151,7 +151,6 @@ async def _run_final_coverage_gate(
     profile: WorkspaceProfile,
     validation_tier: int,
     workspace_head_sha: str | None,
-    worktree_path: Path | None = None,
 ) -> _CoverageEvidenceResult:
     from awf.control.executor.quality_gates import _run_final_coverage_gate
 
@@ -163,7 +162,6 @@ async def _run_final_coverage_gate(
         profile=profile,
         validation_tier=validation_tier,
         workspace_head_sha=workspace_head_sha,
-        worktree_path=worktree_path,
     )
 
 

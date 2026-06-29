@@ -25,7 +25,6 @@ import subprocess
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
@@ -403,102 +402,6 @@ class _ValidationSideEffectRunner:
         )
 
 
-class _DeferredBrowserValidationRunner:
-    """Validation fake for deferred-browser probe gating."""
-
-    def __init__(
-        self,
-        *,
-        artifacts_dir: Path,
-        install_completed: bool,
-        browser_install_returncode: int = 0,
-        failed_command: str = "python -m pip install playwright",
-    ) -> None:
-        """Capture artifacts and probe calls for the deferred-browser regression."""
-        self._artifacts_dir = artifacts_dir
-        self._install_completed = install_completed
-        self._browser_install_returncode = browser_install_returncode
-        self._failed_command = failed_command
-        self.probe_calls: list[dict[str, object]] = []
-
-    async def run_profile_coverage(self, **_kwargs: object) -> None:
-        """No-op coverage phase for the validation simulation."""
-        ...
-
-    async def run_profile_phases(
-        self,
-        *,
-        workspace_id: str,
-        phase_names: tuple[str, ...] | list[str],
-        **_kwargs: object,
-    ) -> ValidationResult:
-        """Return a scripted validate-phase result."""
-        if tuple(phase_names) == ("setup", "pre_agent"):
-            return ValidationResult()
-
-        artifacts = self._artifacts_dir / workspace_id
-        artifacts.mkdir(parents=True, exist_ok=True)
-        stdout = artifacts / "01_validate.stdout"
-        stderr = artifacts / "01_validate.stderr"
-        stdout.write_text(
-            "ok\n" if self._install_completed else "dependency install failed\n",
-            encoding="utf-8",
-        )
-        stderr.write_text(
-            "" if self._install_completed else "pip install failed\n",
-            encoding="utf-8",
-        )
-        commands = [
-            ValidationCommandResult(
-                command=(
-                    "python -m pip install playwright"
-                    if self._install_completed
-                    else self._failed_command
-                ),
-                returncode=0 if self._install_completed else 1,
-                duration_seconds=0.1,
-                stdout_path=stdout,
-                stderr_path=stderr,
-                reason_code="VALIDATION_OK" if self._install_completed else "COMMAND_FAILED",
-            )
-        ]
-        if self._install_completed:
-            commands.extend(
-                [
-                    ValidationCommandResult(
-                        command="python -m playwright install chromium",
-                        returncode=self._browser_install_returncode,
-                        duration_seconds=0.1,
-                        stdout_path=stdout,
-                        stderr_path=stderr,
-                        phase="setup",
-                        reason_code=(
-                            "VALIDATION_OK"
-                            if self._browser_install_returncode == 0
-                            else "COMMAND_FAILED"
-                        ),
-                        required=False,
-                    ),
-                    ValidationCommandResult(
-                        command="pytest --browser chromium",
-                        returncode=0,
-                        duration_seconds=0.1,
-                        stdout_path=stdout,
-                        stderr_path=stderr,
-                        reason_code="VALIDATION_OK",
-                    ),
-                ]
-            )
-        return ValidationResult(
-            commands=commands,
-        )
-
-    async def probe_runtime_browser_findings(self, **kwargs: object) -> tuple[object, ...]:
-        """Record any browser probe attempt."""
-        self.probe_calls.append(dict(kwargs))
-        return ()
-
-
 class _IgnoredFileMutatingRunner:
     """Validation fake that mutates a pre-existing gitignored file (e.g. .venv)."""
 
@@ -779,272 +682,6 @@ class TestValidationPassesOnFirstTry:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_url == "https://github.com/x/y/pull/1"
-
-
-class TestDeferredRuntimeBrowserProbe:
-    """Executor wiring for deferred runtime browser probing."""
-
-    @pytest.mark.unit
-    async def test_failed_validation_result_does_not_probe_deferred_browsers(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        """A failure before the deferred install command should not emit browser warnings."""
-        validation = _DeferredBrowserValidationRunner(
-            artifacts_dir=tmp_path / "artifacts",
-            install_completed=False,
-        )
-        executor = _make_executor(
-            fake=fake,
-            factory=factory,
-            tmp_path=tmp_path,
-            max_fix_passes=0,
-            validation=validation,
-        )
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "deferred-browser-profile",
-                "runtime": {"browsers": ["chromium"]},
-                "phases": {
-                    "post_agent": [],
-                    "validate": [
-                        "python -m pip install playwright",
-                        "pytest --browser chromium",
-                    ],
-                },
-            },
-        )
-        _queue_initial_pass(fake)
-
-        await executor.execute(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "validation_failure"
-
-        assert validation.probe_calls == []
-
-    @pytest.mark.unit
-    async def test_duplicate_command_before_deferred_install_does_not_probe_browsers(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A repeated command before install should not inherit the later position."""
-        validation = _DeferredBrowserValidationRunner(
-            artifacts_dir=tmp_path / "artifacts",
-            install_completed=False,
-            failed_command="pytest --browser chromium",
-        )
-        executor = _make_executor(
-            fake=fake,
-            factory=factory,
-            tmp_path=tmp_path,
-            max_fix_passes=0,
-            validation=validation,
-        )
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "deferred-browser-profile",
-                "runtime": {"browsers": ["chromium"]},
-                "phases": {
-                    "post_agent": [],
-                    "validate": [
-                        "pytest --browser chromium",
-                        "python -m pip install playwright",
-                        "pytest --browser chromium",
-                    ],
-                },
-            },
-        )
-        monkeypatch.setattr(
-            execution_validation_mod,
-            "profile_phase_command_plan",
-            lambda *_args, **_kwargs: [
-                SimpleNamespace(
-                    phase="validate",
-                    command=SimpleNamespace(command="pytest --browser chromium"),
-                ),
-                SimpleNamespace(
-                    phase="setup",
-                    command=SimpleNamespace(command="python -m playwright install chromium"),
-                ),
-                SimpleNamespace(
-                    phase="validate",
-                    command=SimpleNamespace(command="pytest --browser chromium"),
-                ),
-            ],
-        )
-        _queue_initial_pass(fake)
-
-        await executor.execute(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "validation_failure"
-
-        assert validation.probe_calls == []
-
-    @pytest.mark.unit
-    async def test_successful_validation_result_probes_deferred_browsers(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        """A successful deferred install should allow the post-validation browser probe."""
-        validation = _DeferredBrowserValidationRunner(
-            artifacts_dir=tmp_path / "artifacts",
-            install_completed=True,
-        )
-        executor = _make_executor(
-            fake=fake,
-            factory=factory,
-            tmp_path=tmp_path,
-            max_fix_passes=0,
-            validation=validation,
-        )
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "deferred-browser-profile",
-                "runtime": {"browsers": ["chromium"]},
-                "phases": {
-                    "post_agent": [],
-                    "validate": [
-                        "python -m pip install playwright",
-                        "pytest --browser chromium",
-                    ],
-                },
-            },
-        )
-        _queue_initial_pass(fake)
-        _queue_push_and_pr(fake)
-
-        await executor.execute(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
-
-        assert len(validation.probe_calls) == 1
-
-    @pytest.mark.unit
-    async def test_passing_validation_without_planned_install_skips_deferred_browser_probe(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A passing validation is not enough without a planned setup install."""
-        validation = _DeferredBrowserValidationRunner(
-            artifacts_dir=tmp_path / "artifacts",
-            install_completed=True,
-        )
-        executor = _make_executor(
-            fake=fake,
-            factory=factory,
-            tmp_path=tmp_path,
-            max_fix_passes=0,
-            validation=validation,
-        )
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "deferred-browser-profile",
-                "runtime": {"browsers": ["chromium"]},
-                "phases": {
-                    "post_agent": [],
-                    "validate": [
-                        "python -m pip install playwright",
-                        "pytest --browser chromium",
-                    ],
-                },
-            },
-        )
-        monkeypatch.setattr(
-            execution_validation_mod,
-            "profile_phase_command_plan",
-            lambda *_args, **_kwargs: [
-                SimpleNamespace(
-                    phase="validate",
-                    command=SimpleNamespace(command="python -m pip install playwright"),
-                ),
-                SimpleNamespace(
-                    phase="validate",
-                    command=SimpleNamespace(command="pytest --browser chromium"),
-                ),
-            ],
-        )
-        _queue_initial_pass(fake)
-        _queue_push_and_pr(fake)
-
-        await executor.execute(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
-
-        assert validation.probe_calls == []
-
-    @pytest.mark.unit
-    async def test_failed_advisory_deferred_install_still_probes_browsers(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        """A failed advisory deferred install should still allow the browser probe."""
-        validation = _DeferredBrowserValidationRunner(
-            artifacts_dir=tmp_path / "artifacts",
-            install_completed=True,
-            browser_install_returncode=1,
-        )
-        executor = _make_executor(
-            fake=fake,
-            factory=factory,
-            tmp_path=tmp_path,
-            max_fix_passes=0,
-            validation=validation,
-        )
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "deferred-browser-profile",
-                "runtime": {"browsers": ["chromium"]},
-                "phases": {
-                    "post_agent": [],
-                    "validate": [
-                        "python -m pip install playwright",
-                        "pytest --browser chromium",
-                    ],
-                },
-            },
-        )
-        _queue_initial_pass(fake)
-        _queue_push_and_pr(fake)
-
-        await executor.execute(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
-
-        assert len(validation.probe_calls) == 1
 
 
 class TestValidationSideEffectCleanup:
@@ -1504,3 +1141,216 @@ class TestFixCycleRecoversAfterOneFailure:
         assert "pytest -q" in fix_prompt  # the failing command
         assert "attempt 1 of 5" in fix_prompt
         assert "AssertionError" in fix_prompt or "FAILED tests/foo.py" in fix_prompt
+
+
+class TestFixCycleMissingWorktree:
+    """Validate missing-worktree behavior during validation retries."""
+
+    @pytest.mark.unit
+    async def test_missing_worktree_before_fix_agent_stops_without_fix_attempt(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A disappearing worktree must stop before attempting a fix pass."""
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        fake = _RemoveWorktreeOnCall(
+            worktree_path,
+            predicate=lambda args, result: (
+                bool(args) and args[-1].endswith("pytest -q") and result.returncode != 0
+            ),
+        )
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")
+
+        await executor.execute(ws_id)
+
+        adapter_calls = [c for c in fake.calls if "exec" in c.args and "codex" in c.args]
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "WORKTREE_MISSING" in (ws.failure_message or "")
+        assert "validation_fix_agent_run" in (ws.failure_message or "")
+        assert len(adapter_calls) == 1
+
+    @pytest.mark.unit
+    async def test_missing_worktree_during_fix_pass_stops_without_repeated_attempts(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Missing worktrees during fix pass should not trigger another retry."""
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        fake = _RemoveWorktreeAfterSecondAdapterRun(worktree_path)
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        async with factory() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO operations (
+                        id,
+                        workspace_id,
+                        type,
+                        status,
+                        payload,
+                        created_at
+                    )
+                    VALUES (
+                        'op_validate_missing_worktree',
+                        :workspace_id,
+                        'validate',
+                        'pending',
+                        '{"reason":"manual_validate"}',
+                        :created_at
+                    )
+                    """
+                ),
+                {"workspace_id": ws_id, "created_at": datetime.now(UTC)},
+            )
+            await session.commit()
+
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")  # initial validation fails
+        fake.queue_result(returncode=0)  # fix-agent returns, then the runner removes worktree
+
+        await executor.execute(ws_id)
+
+        adapter_calls = [c for c in fake.calls if "exec" in c.args and "codex" in c.args]
+        validation_calls = [c for c in fake.calls if c.args and c.args[-1].endswith("pytest -q")]
+        git_add_calls = [
+            c for c in fake.calls if c.args[:1] == ["git"] and c.args[-2:] == ["add", "-A"]
+        ]
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            operation = (
+                (
+                    await session.execute(
+                        text(
+                            """
+                        SELECT status, error_code, error_message, result
+                        FROM operations
+                        WHERE id = 'op_validate_missing_worktree'
+                        """
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            runs = (
+                (
+                    await session.execute(
+                        text(
+                            """
+                        SELECT status, reason_code
+                        FROM validation_runs
+                        WHERE workspace_id = :workspace_id
+                        """
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "WORKTREE_MISSING" in (ws.failure_message or "")
+        assert str(worktree_path) in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == "WORKTREE_MISSING"
+        assert operation["status"] == "failed"
+        assert operation["error_code"] == "WORKTREE_MISSING"
+        assert "WORKTREE_MISSING" in (operation["error_message"] or "")
+        assert "validation_run_id" in operation["result"]
+        assert runs == [{"status": "failed", "reason_code": "COMMAND_FAILED"}]
+        assert len(adapter_calls) == 2
+        assert len(validation_calls) == 1
+        assert len(git_add_calls) == 1
+
+    @pytest.mark.unit
+    async def test_missing_worktree_after_fix_add_stops_before_diff(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """If worktree disappears after fix add, diff/commit steps must be skipped."""
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        fake = _RemoveWorktreeOnCall(
+            worktree_path,
+            predicate=lambda args, _result: args[:1] == ["git"] and args[-2:] == ["add", "-A"],
+            occurrence=2,
+        )
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")
+        fake.queue_result(returncode=0)  # fix-agent
+        fake.queue_result(returncode=0)  # fix add removes worktree after returning
+
+        await executor.execute(ws_id)
+
+        git_diff_calls = [
+            c
+            for c in fake.calls
+            if c.args[:1] == ["git"] and c.args[-3:] == ["diff", "--cached", "--name-only"]
+        ]
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "validation_fix_git_diff" in (ws.failure_message or "")
+        assert len(git_diff_calls) == 1
+
+    @pytest.mark.unit
+    async def test_missing_worktree_after_fix_diff_stops_before_commit(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """If worktree disappears while computing fix diff, skip commit."""
+        ws_id = await _seed_ready_workspace(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        fake = _RemoveWorktreeOnCall(
+            worktree_path,
+            predicate=lambda args, _result: (
+                args[:1] == ["git"] and args[-3:] == ["diff", "--cached", "--name-only"]
+            ),
+            occurrence=2,
+        )
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")
+        fake.queue_result(returncode=0)  # fix-agent
+        fake.queue_result(returncode=0)  # fix add
+        fake.queue_result(returncode=0, stdout="a.py\n")  # fix diff removes worktree
+
+        await executor.execute(ws_id)
+
+        fix_commit_calls = [
+            c
+            for c in fake.calls
+            if c.args[:1] == ["git"]
+            and "commit" in c.args
+            and any("fix pass" in arg for arg in c.args)
+        ]
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "validation_fix_git_commit" in (ws.failure_message or "")
+        assert fix_commit_calls == []

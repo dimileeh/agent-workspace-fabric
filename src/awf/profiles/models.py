@@ -1046,10 +1046,6 @@ def _normalized_endpoint_env_name(name: str) -> str:
 # strings consumed by preflight/console, not part of the generated doctor catalog.
 RUNTIME_TOOLCHAIN_UNAVAILABLE = "RUNTIME_TOOLCHAIN_UNAVAILABLE"
 
-# Reason code emitted when a profile declares Playwright browser binaries that
-# were not present in the workspace after setup.
-RUNTIME_BROWSER_UNAVAILABLE = "RUNTIME_BROWSER_UNAVAILABLE"
-
 
 def runtime_toolchain_findings(
     profile: WorkspaceProfile,
@@ -1101,43 +1097,6 @@ def runtime_toolchain_findings(
                     },
                 )
             )
-    return tuple(findings)
-
-
-def runtime_browser_findings(
-    profile: WorkspaceProfile,
-    available: Mapping[str, bool] | None,
-) -> tuple[ProfileLintFinding, ...]:
-    """Warn about declared Playwright browsers missing after setup.
-
-    ``available is None`` means the browser state is unknown, so this helper
-    stays silent. For every declared browser absent from a reachable availability
-    mapping, return a non-blocking ``RUNTIME_BROWSER_UNAVAILABLE`` warning.
-    """
-    if available is None:
-        return ()
-    available_lower: dict[str, bool] = {}
-    for browser, is_available in available.items():
-        available_lower[browser.lower()] = bool(is_available)
-    available_browsers = sorted(
-        browser for browser, is_available in available_lower.items() if is_available
-    )
-    findings: list[ProfileLintFinding] = []
-    for browser in profile.runtime.browsers:
-        if available_lower.get(browser, False):
-            continue
-        findings.append(
-            ProfileLintFinding(
-                reason_code=RUNTIME_BROWSER_UNAVAILABLE,
-                message=f"runtime does not provide Playwright browser {browser}",
-                path="runtime.browsers",
-                severity=ProfileLintSeverity.warning,
-                details={
-                    "browser": browser,
-                    "available_browsers": available_browsers,
-                },
-            )
-        )
     return tuple(findings)
 
 

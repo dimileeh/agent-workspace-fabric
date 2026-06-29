@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any, cast
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from awf.common.audit import redact_audit_value
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import (
     _EXECUTOR_AUDIT_ACTOR,
-    RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE,
     RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
@@ -25,8 +20,7 @@ from awf.control.executor.logging_ops import (
 from awf.control.executor.metadata import _metadata_int
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import session_scope
-from awf.profiles.models import RUNTIME_BROWSER_UNAVAILABLE, RUNTIME_TOOLCHAIN_UNAVAILABLE
+from awf.profiles.models import RUNTIME_TOOLCHAIN_UNAVAILABLE
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_RETRY,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
@@ -280,118 +274,3 @@ async def _record_runtime_toolchain_findings_safe(
             reason_code=getattr(exc, "reason_code", None),
             error=redact_secrets(str(exc))[:1000],
         )
-
-
-async def _record_runtime_browser_findings(
-    self: Any,
-    *,
-    workspace_id: str,
-    compose_project: str,
-    compose_file: Any,
-    profile: Any,
-    worktree_path: Path | None = None,
-    session: AsyncSession,
-) -> bool:
-    """Probe the container for declared Playwright browsers; record warnings."""
-    probe = getattr(self._validation, "probe_runtime_browser_findings", None)
-    if not callable(probe):
-        return True
-    try:
-        findings = await probe(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-            worktree_path=worktree_path,
-        )
-    except OSError as exc:
-        _log.warning(
-            "executor.runtime_browser_probe_failed",
-            workspace_id=workspace_id,
-            reason_code=getattr(exc, "reason_code", None),
-            error=redact_secrets(str(exc))[:1000],
-        )
-        return False
-    if not findings:
-        return True
-
-    repo = WorkspaceRepository(session)
-    workspace = await repo.get(workspace_id)
-    if workspace is None:  # pragma: no cover - destroyed mid-flight
-        return True
-    recorded_browsers = {
-        browser.lower()
-        for event in workspace.events
-        if event.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
-        and event.reason_code == RUNTIME_BROWSER_UNAVAILABLE
-        and isinstance(event.payload, Mapping)
-        and isinstance(browser := event.payload.get("browser"), str)
-    }
-    for finding in findings:
-        details = dict(finding.details)
-        browser = details.get("browser")
-        browser_key = browser.lower() if isinstance(browser, str) else None
-        if browser_key is not None and browser_key in recorded_browsers:
-            continue
-        await repo.add_event(
-            workspace,
-            event_type=RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE,
-            reason_code=RUNTIME_BROWSER_UNAVAILABLE,
-            payload=cast(
-                "dict[str, Any]",
-                redact_audit_value(
-                    {
-                        "browser": browser,
-                        "available_browsers": details.get("available_browsers"),
-                        "path": finding.path,
-                        "message": finding.message,
-                    }
-                ),
-            ),
-        )
-        if browser_key is not None:
-            recorded_browsers.add(browser_key)
-    await session.flush()
-    return True
-
-
-async def _record_runtime_browser_findings_safe(
-    self: Any,
-    *,
-    workspace_id: str,
-    compose_project: str,
-    compose_file: Any,
-    profile: Any,
-    worktree_path: Path | None = None,
-    session: AsyncSession | None = None,
-) -> bool:
-    """Double-guarded call-site wrapper for the runtime browser probe."""
-    try:
-        if session is None:
-            async with session_scope(self._session_factory) as owned_session:
-                recorded = await self._record_runtime_browser_findings(
-                    workspace_id=workspace_id,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    profile=profile,
-                    worktree_path=worktree_path,
-                    session=owned_session,
-                )
-        else:
-            recorded = await self._record_runtime_browser_findings(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                profile=profile,
-                worktree_path=worktree_path,
-                session=session,
-            )
-        return recorded is not False
-    except Exception as exc:
-        _log.warning(
-            "executor.runtime_browser_probe_record_failed",
-            workspace_id=workspace_id,
-            reason_code=getattr(exc, "reason_code", None),
-            error=redact_secrets(str(exc))[:1000],
-        )
-        return False

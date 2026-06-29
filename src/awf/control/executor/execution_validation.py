@@ -153,39 +153,21 @@ async def run_validation_and_fix_cycle(
     )
 
     def _deposit_planning_artifacts_if_required() -> None:
-        # Best-effort artifact deposit for terminal paths that bypass the
-        # preserving helpers below; idempotent and gated on planning.required.
+        # Best-effort deposit for terminal paths that do not already pass through
+        # one of the preserving helpers below. In particular, when the workspace
+        # reaches a callback-terminal status during validation,
+        # ``_finish_validation_callback_if_terminal`` returns True and this
+        # cycle returns stop=True before the normal validation-success deposit.
+        # The console keys its artifact refetch on ``updated_at``; depositing
+        # before the caller observes the terminal status orders artifact
+        # availability ahead of the polling signal. Idempotent and gated on
+        # ``planning.required``.
         _planning_artifacts._deposit_planning_artifacts_best_effort(
             self,
             profile=profile,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
         )
-
-    deferred_runtime_browser_findings_recorded = False
-    deferred_runtime_browser_probe_ready = False
-
-    async def _record_deferred_runtime_browser_findings() -> None:
-        nonlocal deferred_runtime_browser_findings_recorded
-        if deferred_runtime_browser_findings_recorded:
-            return
-        if not deferred_runtime_browser_probe_ready:
-            return
-        record_browser_findings = getattr(
-            self,
-            "_record_runtime_browser_findings_safe",
-            None,
-        )
-        if callable(record_browser_findings):
-            recorded = await record_browser_findings(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                profile=profile,
-                worktree_path=worktree_path,
-            )
-            if recorded is not False:
-                deferred_runtime_browser_findings_recorded = True
 
     if not await self._transition_if_current(
         workspace_id,
@@ -202,8 +184,17 @@ async def run_validation_and_fix_cycle(
         )
 
     async def _mark_failed_preserving_planning_artifacts(**mark_kwargs: Any) -> None:
-        # Publish planning artifacts before terminal status updates so console
-        # polling observes artifact availability and status in the right order.
+        # Deposit the worktree plan + conformance report into the served
+        # artifact dir BEFORE publishing the terminal FAILED status. The console
+        # keys its artifact refetch on the workspace ``updated_at``
+        # (TaskArtifactsSection ``refreshKey``); ``_mark_failed`` bumps
+        # ``updated_at`` when it publishes FAILED, but the filesystem deposit
+        # does not touch the row. Marking FAILED first would let a poll observe
+        # the terminal status in the window before the post-cycle deposit (in
+        # ``execution_flow``), record an empty artifact list, then never refetch
+        # — hiding the Plan/Validation controls on the preserved-FAILED
+        # workspace. Depositing here orders artifact availability ahead of the
+        # polling signal. Best-effort, idempotent, gated on ``planning.required``.
         _planning_artifacts._deposit_planning_artifacts_best_effort(
             self,
             profile=profile,
@@ -213,7 +204,10 @@ async def run_validation_and_fix_cycle(
         await self._mark_failed(**mark_kwargs)
 
     async def _enter_blocked_preserving_planning_artifacts(**block_kwargs: Any) -> None:
-        # Same artifact-ordering rationale as the FAILED path above.
+        # Same artifact-ordering rationale as the FAILED path above: deposit the
+        # plan + conformance report BEFORE the block transition bumps
+        # ``updated_at`` (the console's artifact refetch key). A protected
+        # quality-gate violation pauses for an operator instead of failing.
         _planning_artifacts._deposit_planning_artifacts_best_effort(
             self,
             profile=profile,
@@ -222,51 +216,10 @@ async def run_validation_and_fix_cycle(
         )
         await self.enter_blocked_for_protected_violation(**block_kwargs)
 
-    validation_command_plan = profile_phase_command_plan(
-        profile,
-        ("post_agent", "validate"),
-        workspace_root=worktree_path,
-    )
-    validation_commands = [step.command.command for step in validation_command_plan]
-    validation_runtime_browser_install_command_indexes = tuple(
-        index
-        for index, step in enumerate(validation_command_plan)
-        if step.phase == "setup" or getattr(step, "runtime_browser_install", False)
-    )
-    validation_runtime_browser_install_commands = tuple(
-        validation_commands[index] for index in validation_runtime_browser_install_command_indexes
-    )
-
-    def _validation_runtime_browser_install_completed(
-        val_result: ValidationResult,
-    ) -> bool:
-        if not validation_runtime_browser_install_commands:
-            return False
-        if val_result.all_passed:
-            return True
-        pending = list(validation_runtime_browser_install_commands)
-        for command_result in val_result.commands:
-            if command_result.command == pending[0]:
-                pending.pop(0)
-                if not pending:
-                    return True
-        last_install_index = max(validation_runtime_browser_install_command_indexes)
-        next_command_index = 0
-        for command_result in val_result.commands:
-            command_index = None
-            for candidate_index in range(next_command_index, len(validation_commands)):
-                if validation_commands[candidate_index] == command_result.command:
-                    command_index = candidate_index
-                    next_command_index = candidate_index + 1
-                    break
-            if (
-                command_index is not None
-                and command_index > last_install_index
-                and command_result.blocks_validation
-            ):
-                return True
-        return False
-
+    validation_commands = [
+        step.command.command
+        for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
+    ]
     test_commands_tuple = tuple(validation_commands)
     validation_tier = _validation_tier_for_workspace(ws, profile)
     if rebase_recovery_result is not None:
@@ -285,12 +238,15 @@ async def run_validation_and_fix_cycle(
         else 0
     )
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
-    # Per-category budgets guarantee the final attempt exits via success break
-    # or terminal return; the trailing return is a defensive backstop.
+    # The loop always exits via ``break`` (validation+conformance success) or a
+    # terminal ``return`` (budget exhausted / hard failure); the per-category
+    # budgets guarantee the final attempt hits one of those paths, so the
+    # ``range`` is never exhausted by natural fall-through to the trailing
+    # ``return`` below. The fall-through branch is kept as a defensive backstop.
     for pass_number in range(max_validation_attempts):  # pragma: no branch
-        # Initial validation plus validation/conformance fix prompts.
-        deferred_runtime_browser_findings_recorded = False
-        deferred_runtime_browser_probe_ready = False
+        # This loop covers the initial validation plus any validation or
+        # post-validation conformance fix prompts. The per-category
+        # counters below enforce their separate budgets.
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.validating,
@@ -319,7 +275,6 @@ async def run_validation_and_fix_cycle(
             target_branch=expected_branch,
             target_head_sha=None,
             tier=validation_tier,
-            worktree_path=worktree_path,
         )
         if not pre_validation_check.clean:
             reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
@@ -363,9 +318,6 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 include_coverage=False,
             )
-            deferred_runtime_browser_probe_ready = _validation_runtime_browser_install_completed(
-                val_result,
-            )
             if run_local_coverage and val_result.all_passed:
                 coverage_evidence = await self._run_final_coverage_gate(
                     workspace_id=workspace_id,
@@ -374,7 +326,6 @@ async def run_validation_and_fix_cycle(
                     profile=profile,
                     validation_tier=validation_tier,
                     workspace_head_sha=validation_workspace_head_sha,
-                    worktree_path=worktree_path,
                 )
                 val_result = replace(val_result, coverage=coverage_evidence.coverage)
         except ComposeExecCleanupError as exc:
@@ -388,7 +339,6 @@ async def run_validation_and_fix_cycle(
                 invocation_id=exc.invocation_id,
                 reason_code=exc.reason_code,
             )
-            await _record_deferred_runtime_browser_findings()
             callback_ignored = await self._finish_validation_callback_if_terminal(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
@@ -449,7 +399,6 @@ async def run_validation_and_fix_cycle(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
             )
-            await _record_deferred_runtime_browser_findings()
             callback_ignored = await self._finish_validation_callback_if_terminal(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
@@ -503,7 +452,6 @@ async def run_validation_and_fix_cycle(
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
             )
-        await _record_deferred_runtime_browser_findings()
         cleanup_result = await cleanup_validation_worktree_side_effects(
             run_git=git_in_worktree,
             worktree_path=worktree_path,
@@ -1337,8 +1285,22 @@ async def run_validation_and_fix_cycle(
                 base_commit=base_commit,
                 staged_paths=fix_staged_paths,
             ):
-                # Plan-only failure uses bare _mark_failed, so deposit artifacts
-                # first to preserve console refetch ordering.
+                # Plan-only fix-pass output marks the workspace FAILED. Deposit
+                # the worktree plan + conformance report BEFORE
+                # ``_fail_if_plan_only_paths`` publishes the terminal status —
+                # mirroring the post-agent plan-only gate in ``execution_flow``
+                # and the ``_mark_failed_preserving_planning_artifacts`` helper
+                # every other terminal path in this cycle uses. The console keys
+                # its artifact refetch on the workspace ``updated_at``
+                # (TaskArtifactsSection ``refreshKey``), and
+                # ``_fail_if_plan_only_paths`` routes through bare
+                # ``_mark_failed`` (not the preserving helper), so marking FAILED
+                # first would bump ``updated_at`` and let a poll observe it in
+                # the window before the post-cycle deposit (in
+                # ``execution_flow``), record an empty artifact list, then never
+                # refetch — hiding the Plan/Validation controls on the
+                # preserved-FAILED workspace. Best-effort, idempotent, gated on
+                # ``planning.required``.
                 _planning_artifacts._deposit_planning_artifacts_best_effort(
                     self,
                     profile=profile,

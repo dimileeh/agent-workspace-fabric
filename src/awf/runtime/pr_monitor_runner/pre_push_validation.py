@@ -8,11 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from awf.common.audit import redact_audit_text, redact_audit_value
+from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
-from awf.common.redaction import redact_secrets
-from awf.control.executor.constants import RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
 from awf.control.executor.helpers import (
     _profile_for_workspace,
     _should_run_local_coverage,
@@ -32,7 +30,6 @@ from awf.node.git_manager import (
     repair_mirror_hooks_path,
     verify_head_object_exists,
 )
-from awf.profiles.models import RUNTIME_BROWSER_UNAVAILABLE
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -98,7 +95,6 @@ from awf.runtime.validation_identity import (
     environment_identity_inputs,
     resolved_profile_digest,
 )
-from awf.runtime.validation_setup import runtime_browser_probe_deferred_until_validate
 from awf.runtime.validation_types import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -235,173 +231,6 @@ class _PrePushValidationResult:
             )
             details["failing_returncode"] = first_failure.returncode
         return details
-
-
-async def _record_deferred_runtime_browser_findings_safe(
-    self: Any,
-    *,
-    workspace_id: str,
-    compose_project: str,
-    compose_file: Path,
-    profile: Any,
-    worktree_path: Path,
-) -> None:
-    """Record deferred browser probe warnings after monitor pre-push validation."""
-    try:
-        await _record_deferred_runtime_browser_findings(
-            self,
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-            worktree_path=worktree_path,
-        )
-    except Exception as exc:
-        _log.warning(
-            "pre_push_validation.runtime_browser_probe_record_failed",
-            workspace_id=workspace_id,
-            reason_code=getattr(exc, "reason_code", None),
-            error=redact_secrets(str(exc))[:1000],
-        )
-
-
-async def _record_deferred_runtime_browser_findings_if_install_completed(
-    self: Any, **kwargs: Any
-) -> None:
-    """Record deferred browser findings when completed validation proves install ran."""
-    result = cast("ValidationResult | None", kwargs.pop("result"))
-    if result is None:
-        return
-    worktree_path = cast("Path", kwargs["worktree_path"])
-    if not _deferred_runtime_browser_install_completed(
-        kwargs["profile"], worktree_path=worktree_path, result=result
-    ):
-        return
-    await _record_deferred_runtime_browser_findings_safe(self, **kwargs)
-
-
-async def _record_deferred_runtime_browser_findings(
-    self: Any,
-    *,
-    workspace_id: str,
-    compose_project: str,
-    compose_file: Path,
-    profile: Any,
-    worktree_path: Path,
-) -> None:
-    if not runtime_browser_probe_deferred_until_validate(
-        profile,
-        workspace_root=worktree_path,
-    ):
-        return
-    validation = self._deps.validation
-    probe = getattr(validation, "probe_runtime_browser_findings", None)
-    if not callable(probe):
-        return
-    try:
-        findings = await probe(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-            worktree_path=worktree_path,
-        )
-    except OSError as exc:
-        _log.warning(
-            "pre_push_validation.runtime_browser_probe_failed",
-            workspace_id=workspace_id,
-            reason_code=getattr(exc, "reason_code", None),
-            error=redact_secrets(str(exc))[:1000],
-        )
-        return
-    if not findings:
-        return
-    async with self._deps.session_factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        if workspace is None:  # pragma: no cover - destroyed mid-flight
-            return
-        recorded_browsers = {
-            browser.lower()
-            for event in workspace.events
-            if event.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
-            and event.reason_code == RUNTIME_BROWSER_UNAVAILABLE
-            and isinstance(event.payload, Mapping)
-            and isinstance(browser := event.payload.get("browser"), str)
-        }
-        for finding in findings:
-            details = dict(finding.details)
-            browser = details.get("browser")
-            browser_key = browser.lower() if isinstance(browser, str) else None
-            if browser_key is not None and browser_key in recorded_browsers:
-                continue
-            await repo.add_event(
-                workspace,
-                event_type=RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE,
-                reason_code=RUNTIME_BROWSER_UNAVAILABLE,
-                payload=cast(
-                    "dict[str, Any]",
-                    redact_audit_value(
-                        {
-                            "browser": browser,
-                            "available_browsers": details.get("available_browsers"),
-                            "path": finding.path,
-                            "message": finding.message,
-                        }
-                    ),
-                ),
-            )
-            if browser_key is not None:
-                recorded_browsers.add(browser_key)
-        await session.commit()
-
-
-def _deferred_runtime_browser_install_completed(
-    profile: Any,
-    *,
-    worktree_path: Path,
-    result: ValidationResult,
-) -> bool:
-    if not runtime_browser_probe_deferred_until_validate(
-        profile,
-        workspace_root=worktree_path,
-    ):
-        return False
-    validation_command_plan = profile_phase_command_plan(
-        profile,
-        ("post_agent", "validate"),
-        workspace_root=worktree_path,
-    )
-    validation_commands = [step.command.command for step in validation_command_plan]
-    install_command_indexes = tuple(
-        index
-        for index, step in enumerate(validation_command_plan)
-        if step.phase == "setup" or getattr(step, "runtime_browser_install", False)
-    )
-    if not install_command_indexes:
-        return False
-    if result.all_passed:
-        return True
-    matched_commands: list[tuple[int, ValidationCommandResult]] = []
-    next_plan_index = 0
-    for command_result in result.commands:
-        for command_index in range(next_plan_index, len(validation_commands)):
-            if validation_commands[command_index] == command_result.command:
-                matched_commands.append((command_index, command_result))
-                next_plan_index = command_index + 1
-                break
-    matched_install_indexes = {
-        command_index
-        for command_index, _command_result in matched_commands
-        if command_index in install_command_indexes
-    }
-    if len(matched_install_indexes) == len(install_command_indexes):
-        return True
-    last_install_index = max(install_command_indexes)
-    for command_index, command_result in matched_commands:
-        if command_index > last_install_index and command_result.blocks_validation:
-            return True
-    return False
 
 
 async def _validated_git_push_result(
@@ -696,11 +525,7 @@ async def _pre_push_validation_commands(
         profile = _profile_for_workspace(ws, worktree_path=worktree_path)
     return tuple(
         step.command.command
-        for step in profile_phase_command_plan(
-            profile,
-            ("post_agent", "validate"),
-            workspace_root=worktree_path,
-        )
+        for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
     )
 
 
@@ -925,11 +750,7 @@ async def _run_pre_push_validation(
             )
         command_evidence = tuple(
             step.command.command
-            for step in profile_phase_command_plan(
-                profile,
-                ("post_agent", "validate"),
-                workspace_root=worktree_path,
-            )
+            for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
         )
         try:
             recovered = await _recover_missing_head_object_from_filesystem(
@@ -1152,7 +973,6 @@ async def _run_pre_push_validation(
         workspace_head_sha=workspace_head_sha,
         target_branch=remote_branch,
         tier=validation_tier,
-        worktree_path=worktree_path,
     )
     if validation_run_id is None:
         return _PrePushValidationResult(
@@ -1162,14 +982,6 @@ async def _run_pre_push_validation(
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
             message="workspace has no task attempt before PR monitor pre-push validation",
         )
-    runtime_browser_probe_kwargs = {
-        "workspace_id": workspace_id,
-        "compose_project": compose_project,
-        "compose_file": compose_file,
-        "profile": profile,
-        "worktree_path": worktree_path,
-    }
-    result: ValidationResult | None = None
     coverage_result: ValidationCoverageResult | None = None
     try:
         assert self._deps.validation is not None
@@ -1210,11 +1022,6 @@ async def _run_pre_push_validation(
             compose_exec_label=exc.label,
             compose_exec_invocation_id=exc.invocation_id,
             compose_exec_message=message,
-        )
-        await _record_deferred_runtime_browser_findings_if_install_completed(
-            self,
-            **runtime_browser_probe_kwargs,
-            result=result,
         )
         cleanup_result = await _pre_push_validation_cleanup(
             self,
@@ -1275,11 +1082,6 @@ async def _run_pre_push_validation(
             error_type=exc.__class__.__name__,
             error_message=message,
         )
-        await _record_deferred_runtime_browser_findings_if_install_completed(
-            self,
-            **runtime_browser_probe_kwargs,
-            result=result,
-        )
         cleanup_result = await _pre_push_validation_cleanup(
             self,
             worktree_path=worktree_path,
@@ -1328,12 +1130,6 @@ async def _run_pre_push_validation(
             message=message,
         )
 
-    await _record_deferred_runtime_browser_findings_if_install_completed(
-        self,
-        **runtime_browser_probe_kwargs,
-        result=result,
-    )
-    assert result is not None
     cleanup_result = await _pre_push_validation_cleanup(
         self,
         worktree_path=worktree_path,
@@ -1442,14 +1238,12 @@ async def _start_pre_push_validation_run(
     workspace_head_sha: str,
     target_branch: str,
     tier: int,
-    worktree_path: Path | None = None,
 ) -> str | None:
     """Create and start a pre-push validation run record."""
     command_records = _validation_run_command_records(
         profile=profile,
         phase_names=("post_agent", "validate"),
         run_healthchecks=True,
-        workspace_root=worktree_path,
     )
     async with self._deps.session_factory() as session:
         attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
