@@ -143,6 +143,40 @@ async def test_remove_orphan_worktree_uses_mirror_registry_when_gitfile_is_missi
 
 
 @pytest.mark.unit
+async def test_remove_orphan_worktree_registry_probe_ignores_git_object_lookup_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_poisoned_git_env"
+    mirror = work_dir / "git" / "mirrors" / "repo.git"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    _make_synthetic_mirror_link(
+        mirror=mirror,
+        worktree=worktree_path,
+        include_worktree_gitfile=False,
+    )
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(tmp_path / "missing-objects"))
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", str(tmp_path / "missing-alternates"))
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    mock_gm.remove_worktree_from_mirror.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        mirror_path=mirror.resolve(),
+    )
+
+
+@pytest.mark.unit
 async def test_remove_orphan_worktree_does_not_rehash_rewritten_origin_url(
     tmp_path: Path,
 ) -> None:

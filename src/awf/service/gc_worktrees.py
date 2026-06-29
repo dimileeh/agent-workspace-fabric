@@ -541,7 +541,7 @@ def _managed_bare_mirror_path(path: Path | None, mirrors_root: Path) -> Path | N
 
 
 def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
-    from awf.node.git_manager import GitOperationError
+    from awf.node.git_manager import GitOperationError, git_env_without_object_lookup_overrides
 
     operation = "worktree.git_context_probe"
     try:
@@ -549,6 +549,7 @@ def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
             ["git", "--bare", "--git-dir", str(path), "rev-parse", "--is-bare-repository"],
             capture_output=True,
             check=False,
+            env=git_env_without_object_lookup_overrides(),
             text=True,
         )
     except OSError as exc:

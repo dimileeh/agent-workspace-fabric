@@ -1072,6 +1072,7 @@ def _is_bare_registered_mirror_candidate(mirror_path: Path) -> bool:
             ],
             capture_output=True,
             check=False,
+            env=git_env_without_object_lookup_overrides(),
             text=True,
         )
     except OSError as exc:
