@@ -691,6 +691,10 @@ class GitManager:
         and end up with a dangling worktree entry or a corrupted HEAD ref.
         """
         mirror_path = self._mirror_path(repo_url)
+        await self.remove_worktree_from_mirror(workspace_id=workspace_id, mirror_path=mirror_path)
+
+    async def remove_worktree_from_mirror(self, *, workspace_id: str, mirror_path: Path) -> None:
+        """Remove a worktree using an already-resolved mirror path."""
         worktree_path = self._worktrees_dir / workspace_id
 
         lock = self._lock_for_mirror(mirror_path)

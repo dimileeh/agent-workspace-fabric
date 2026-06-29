@@ -252,9 +252,10 @@ async def remove_orphan_worktree(
 
     Classified orphan reaping may not have a ``Workspace`` row, so it cannot use
     ``default_worktree_remover`` to fetch ``repo_url`` from the DB. Resolve the
-    linked bare mirror from the worktree's ``.git`` file, read the mirror's
-    origin URL, then call ``GitManager.remove_worktree`` so removal serializes
-    on the same mirror lock as hook repair.
+    linked bare mirror from the worktree's ``.git`` file, then call
+    ``GitManager.remove_worktree_from_mirror`` so removal serializes on the same
+    mirror lock as hook repair without re-hashing the mirror's configured
+    origin URL.
     """
     from awf.node.git_manager import GitManager
 
@@ -322,27 +323,9 @@ async def remove_orphan_worktree(
             ),
         )
 
-    from awf.node.git_manager import read_mirror_origin_url
-
-    repo_url = await read_mirror_origin_url(mirror_path)
-    if repo_url is None:
-        return WorkspaceGCWorktreeRemoveResult(
-            status="failed",
-            reason_code="ORPHAN_WORKTREE_REPO_URL_UNRESOLVED",
-            error=f"could not resolve repo URL from orphan worktree mirror {mirror_path}",
-            target_results=(
-                WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=worktree_id,
-                    status="failed",
-                    reason_code="ORPHAN_WORKTREE_REPO_URL_UNRESOLVED",
-                    error=f"could not resolve repo URL from orphan worktree mirror {mirror_path}",
-                ),
-            ),
-        )
-
     try:
-        await GitManager(work_dir / "git").remove_worktree(
-            workspace_id=worktree_id, repo_url=repo_url
+        await GitManager(work_dir / "git").remove_worktree_from_mirror(
+            workspace_id=worktree_id, mirror_path=mirror_path
         )
     except Exception as exc:
         error = str(exc)
