@@ -470,15 +470,26 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
             stderr=f"could not resolve linked git context for worktree {path}: {exc}",
             reason_code="WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
         ) from exc
+    linked_registry_matches = (
+        linked_mirror_path is not None
+        and _mirror_registry_points_to_worktree(linked_mirror_path, path)
+    )
+    registered_mirror_path = (
+        None
+        if linked_registry_matches
+        else _registered_mirror_path_from_metadata(path, mirrors_root)
+    )
     if linked_mirror_path is None:
         return _managed_bare_mirror_path(
-            mirror_path_for_registered_worktree(path, mirrors_root),
+            registered_mirror_path or mirror_path_for_registered_worktree(path, mirrors_root),
             mirrors_root,
         )
     try:
-        registered_mirror_path = mirror_path_for_registered_worktree(path, mirrors_root)
+        registered_mirror_path = registered_mirror_path or mirror_path_for_registered_worktree(
+            path, mirrors_root
+        )
     except GitOperationError:
-        if _mirror_registry_points_to_worktree(linked_mirror_path, path):
+        if linked_registry_matches:
             return linked_mirror_path
         raise
     registered_mirror_path = _managed_bare_mirror_path(registered_mirror_path, mirrors_root)
@@ -486,9 +497,59 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
         return linked_mirror_path
     if linked_mirror_path == registered_mirror_path:
         return linked_mirror_path
-    if _mirror_registry_points_to_worktree(linked_mirror_path, path):
+    if linked_registry_matches:
         return linked_mirror_path
     return registered_mirror_path
+
+
+def _registered_mirror_path_from_metadata(worktree_path: Path, mirrors_root: Path) -> Path | None:
+    from awf.node.git_manager import GitOperationError, _linked_worktree_path_from_git_dir
+
+    if not mirrors_root.exists():
+        return None
+    try:
+        resolved_worktree = worktree_path.resolve()
+    except OSError as exc:
+        raise GitOperationError(
+            operation="mirror_registry_scan",
+            returncode=1,
+            stdout="",
+            stderr=f"cannot resolve worktree path {worktree_path}: {exc}",
+            reason_code="MIRROR_REGISTRY_SCAN_FAILED",
+        ) from exc
+    except RuntimeError:
+        resolved_worktree = worktree_path.absolute()
+    try:
+        mirror_paths = sorted(path for path in mirrors_root.iterdir() if path.is_dir())
+    except OSError as exc:
+        raise GitOperationError(
+            operation="mirror_registry_scan",
+            returncode=1,
+            stdout="",
+            stderr=str(exc),
+            reason_code="MIRROR_REGISTRY_SCAN_FAILED",
+        ) from exc
+    best_match: tuple[int, Path] | None = None
+    for mirror_path in mirror_paths:
+        linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+        if not linked_git_dir.is_dir():
+            continue
+        try:
+            registered_worktree = _linked_worktree_path_from_git_dir(linked_git_dir)
+        except GitOperationError as exc:
+            if exc.stderr.startswith("cannot read linked-worktree gitdir back-reference at "):
+                continue
+            raise
+        if registered_worktree == resolved_worktree:
+            try:
+                registered_mtime_ns = linked_git_dir.stat().st_mtime_ns
+            except OSError:
+                registered_mtime_ns = 0
+            if best_match is None or registered_mtime_ns >= best_match[0]:
+                best_match = (registered_mtime_ns, mirror_path)
+    if best_match is None:
+        return None
+    return best_match[1]
 
 
 def _mirror_registry_points_to_worktree(mirror_path: Path, worktree_path: Path) -> bool:
