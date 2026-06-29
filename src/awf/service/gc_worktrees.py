@@ -63,6 +63,12 @@ class WorkspaceGCWorktreeRemoveResult:
         return payload
 
 
+@dataclass(frozen=True)
+class _ExistingWorktreeGitContext:
+    is_non_git_worktree: bool
+    mirror_path: Path | None = None
+
+
 def blocked_worktree_paths_after_remove(
     candidate: WorkspaceGCCandidate,
     worktree_remove: WorkspaceGCWorktreeRemoveResult,
@@ -95,18 +101,21 @@ def worktree_id_for_gc_path(candidate: WorkspaceGCCandidate, path: WorkspaceGCPa
     return path.path.name
 
 
-def _is_existing_non_git_worktree_result(
+def _existing_worktree_git_context_result(
     path: Path,
     *,
     work_dir: Path,
     worktree_id: str,
     target_results: list[WorkspaceGCWorktreeRemoveTargetResult],
     errors: list[str],
-) -> bool | None:
+) -> _ExistingWorktreeGitContext | None:
     from awf.node.git_manager import GitOperationError
 
+    if not path.exists() or (path / ".git").exists():
+        return _ExistingWorktreeGitContext(is_non_git_worktree=False)
+
     try:
-        return is_existing_non_git_worktree(path, work_dir=work_dir)
+        mirror_path = git_context_mirror_path_for_worktree(path, work_dir=work_dir)
     except GitOperationError as exc:
         error = str(exc)
         errors.append(f"{worktree_id}: {error}")
@@ -119,6 +128,11 @@ def _is_existing_non_git_worktree_result(
             )
         )
         return None
+
+    return _ExistingWorktreeGitContext(
+        is_non_git_worktree=mirror_path is None,
+        mirror_path=mirror_path,
+    )
 
 
 async def default_worktree_remover(
@@ -137,20 +151,20 @@ async def default_worktree_remover(
             reason_code="NO_REPO_URL",
         )
     git_manager = GitManager(work_dir / "git")
-    worktree_targets: list[tuple[str, str, bool]] = []
+    worktree_targets: list[tuple[str, str, Path | None, bool]] = []
     target_results: list[WorkspaceGCWorktreeRemoveTargetResult] = []
     errors: list[str] = []
     primary_path_exists = candidate.worktree.exists or candidate.worktree.path.exists()
-    primary_non_git = _is_existing_non_git_worktree_result(
+    primary_git_context = _existing_worktree_git_context_result(
         candidate.worktree.path,
         work_dir=work_dir,
         worktree_id=candidate.workspace_id,
         target_results=target_results,
         errors=errors,
     )
-    if primary_non_git is None:
+    if primary_git_context is None:
         pass
-    elif primary_non_git:
+    elif primary_git_context.is_non_git_worktree:
         target_results.append(
             WorkspaceGCWorktreeRemoveTargetResult(
                 worktree_id=candidate.workspace_id,
@@ -159,15 +173,22 @@ async def default_worktree_remover(
             )
         )
     else:
-        worktree_targets.append((candidate.workspace_id, workspace.repo_url, primary_path_exists))
+        worktree_targets.append(
+            (
+                candidate.workspace_id,
+                workspace.repo_url,
+                primary_git_context.mirror_path,
+                primary_path_exists,
+            )
+        )
     companion_paths = {item.path.name: item for item in candidate.companion_worktrees}
     for worktree_id, repo_url in companion_worktree_remove_targets(workspace):
         companion_path = companion_paths.get(worktree_id)
         companion_path_exists = companion_path is not None and (
             companion_path.exists or companion_path.path.exists()
         )
-        companion_non_git = (
-            _is_existing_non_git_worktree_result(
+        companion_git_context = (
+            _existing_worktree_git_context_result(
                 companion_path.path,
                 work_dir=work_dir,
                 worktree_id=worktree_id,
@@ -175,11 +196,11 @@ async def default_worktree_remover(
                 errors=errors,
             )
             if companion_path is not None
-            else False
+            else _ExistingWorktreeGitContext(is_non_git_worktree=False)
         )
-        if companion_non_git is None:
+        if companion_git_context is None:
             continue
-        if companion_non_git:
+        if companion_git_context.is_non_git_worktree:
             target_results.append(
                 WorkspaceGCWorktreeRemoveTargetResult(
                     worktree_id=worktree_id,
@@ -188,7 +209,9 @@ async def default_worktree_remover(
                 )
             )
             continue
-        worktree_targets.append((worktree_id, repo_url, companion_path_exists))
+        worktree_targets.append(
+            (worktree_id, repo_url, companion_git_context.mirror_path, companion_path_exists)
+        )
     if not worktree_targets:
         if errors:
             return WorkspaceGCWorktreeRemoveResult(
@@ -203,9 +226,15 @@ async def default_worktree_remover(
             target_results=tuple(target_results),
         )
     existing_path_successes: set[str] = set()
-    for worktree_id, repo_url, path_existed in worktree_targets:
+    for worktree_id, repo_url, mirror_path, path_existed in worktree_targets:
         try:
-            await git_manager.remove_worktree(workspace_id=worktree_id, repo_url=repo_url)
+            if mirror_path is not None:
+                await git_manager.remove_worktree_from_mirror(
+                    workspace_id=worktree_id,
+                    mirror_path=mirror_path,
+                )
+            else:
+                await git_manager.remove_worktree(workspace_id=worktree_id, repo_url=repo_url)
         except Exception as exc:
             error = str(exc)
             errors.append(f"{worktree_id}: {error}")
