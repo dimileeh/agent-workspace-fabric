@@ -730,12 +730,27 @@ def _command_has_unpreserved_shell_state_scope(command: str) -> bool:
             continue
         if command_tokens[command_index] in {"eval", "export", "source", "."}:
             return True
+        if _command_changes_toolchain_shell_state(command_tokens, command_index):
+            return True
         if command_tokens[command_index] == "cd" and not _command_is_safe_cd_scope(
             command_tokens,
             command_index,
         ):
             return True
     return False
+
+
+def _command_changes_toolchain_shell_state(
+    command_tokens: list[str],
+    command_index: int,
+) -> bool:
+    command = command_tokens[command_index]
+    subcommands = _SHELL_STATEFUL_TOOLCHAIN_SUBCOMMANDS.get(command)
+    return (
+        subcommands is not None
+        and command_index + 1 < len(command_tokens)
+        and command_tokens[command_index + 1] in subcommands
+    )
 
 
 def _command_is_safe_cd_scope(command_tokens: list[str], command_index: int) -> bool:
@@ -1160,6 +1175,15 @@ _UV_SETUP_DEPENDENCY_NESTED_SUBCOMMAND_TOKENS = {
     "tool": frozenset({"install", "upgrade"}),
 }
 _SHELL_COMPOUND_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "|&", "&"})
+_SHELL_STATEFUL_TOOLCHAIN_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "asdf": frozenset({"shell"}),
+    "fnm": frozenset({"use"}),
+    "mise": frozenset({"shell", "use"}),
+    "nvm": frozenset({"install", "use"}),
+    "pyenv": frozenset({"activate", "shell"}),
+    "rbenv": frozenset({"shell"}),
+    "rtx": frozenset({"shell", "use"}),
+}
 _SETUP_DEPENDENCY_SIMPLE_INDEX_RE = re.compile(r"(?i)/simple(?:[/?#:\s]|$)")
 _SETUP_DEPENDENCY_KNOWN_INDEX_HOSTS = frozenset(
     {

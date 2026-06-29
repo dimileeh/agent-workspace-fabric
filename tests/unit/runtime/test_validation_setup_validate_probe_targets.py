@@ -1811,6 +1811,23 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    def test_validate_browser_install_does_not_split_toolchain_switcher_state(
+        self,
+    ) -> None:
+        validate_command = "nvm use 20; pnpm install; pnpm exec playwright test"
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[validate_command],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", validate_command),
+            ("setup", "pnpm exec playwright install chromium"),
+        ]
+        assert commands[1].command.required is False
+
     def test_validate_browser_install_split_preserves_cd_scope_for_trailing_command(
         self,
     ) -> None:
