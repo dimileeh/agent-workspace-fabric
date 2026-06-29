@@ -267,7 +267,7 @@ async def run_validation_and_fix_cycle(
         if not deferred_runtime_browser_probe_expected:
             return False
         if not deferred_runtime_browser_install_commands:
-            return val_result.all_passed
+            return False
         pending = list(deferred_runtime_browser_install_commands)
         for command_result in val_result.commands:
             if command_result.command == pending[0]:

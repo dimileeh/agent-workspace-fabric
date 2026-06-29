@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -114,6 +115,49 @@ def test_pre_push_validation_structural_helpers_are_single_source() -> None:
     assert isinstance(retry_function.body[-1], ast.While)
     assert isinstance(retry_function.body[-1].test, ast.Constant)
     assert retry_function.body[-1].test.value is True
+
+
+@pytest.mark.unit
+def test_deferred_browser_install_not_completed_without_setup_install_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A passing validation is not ready for deferred probing without install evidence."""
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "deferred-browser-profile",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "validate": [
+                    "python -m pip install playwright",
+                    "pytest --browser chromium",
+                ],
+            },
+        }
+    )
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(command="python -m pip install playwright"),
+            ),
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(command="pytest --browser chromium"),
+            ),
+        ],
+    )
+
+    assert (
+        pre_push_validation_module._deferred_runtime_browser_install_completed(
+            profile,
+            worktree_path=tmp_path,
+            result=_validation_result(tmp_path, ok=True),
+        )
+        is False
+    )
 
 
 @pytest.mark.unit

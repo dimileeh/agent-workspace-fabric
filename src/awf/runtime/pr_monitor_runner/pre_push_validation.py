@@ -361,7 +361,7 @@ def _deferred_runtime_browser_install_completed(
         step.command.command for step in validation_command_plan if step.phase == "setup"
     )
     if not install_commands:
-        return result.all_passed
+        return False
     pending = list(install_commands)
     for command_result in result.commands:
         if command_result.command == pending[0]:

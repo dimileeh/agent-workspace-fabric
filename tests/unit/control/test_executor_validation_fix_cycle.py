@@ -25,6 +25,7 @@ import subprocess
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
@@ -866,6 +867,66 @@ class TestDeferredRuntimeBrowserProbe:
             assert ws.status == WorkspaceStatus.completed.value
 
         assert len(validation.probe_calls) == 1
+
+    @pytest.mark.unit
+    async def test_passing_validation_without_planned_install_skips_deferred_browser_probe(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A passing validation is not enough without a planned setup install."""
+        validation = _DeferredBrowserValidationRunner(
+            artifacts_dir=tmp_path / "artifacts",
+            install_completed=True,
+        )
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=0,
+            validation=validation,
+        )
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "deferred-browser-profile",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "post_agent": [],
+                    "validate": [
+                        "python -m pip install playwright",
+                        "pytest --browser chromium",
+                    ],
+                },
+            },
+        )
+        monkeypatch.setattr(
+            execution_validation_mod,
+            "profile_phase_command_plan",
+            lambda *_args, **_kwargs: [
+                SimpleNamespace(
+                    phase="validate",
+                    command=SimpleNamespace(command="python -m pip install playwright"),
+                ),
+                SimpleNamespace(
+                    phase="validate",
+                    command=SimpleNamespace(command="pytest --browser chromium"),
+                ),
+            ],
+        )
+        _queue_initial_pass(fake)
+        _queue_push_and_pr(fake)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+
+        assert validation.probe_calls == []
 
     @pytest.mark.unit
     async def test_failed_advisory_deferred_install_still_probes_browsers(
