@@ -1519,6 +1519,36 @@ class TestPlaywrightBrowserInstallCommand:
         assert command is not None
         assert command.command == "uv run -m playwright install chromium"
 
+    def test_uv_sync_dependency_group_include_uses_python_playwright(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        (workspace_root / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "browser-profile"',
+                    'version = "0.1.0"',
+                    "[dependency-groups]",
+                    'dev = [{include-group = "e2e"}]',
+                    'e2e = ["pytest-playwright"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["uv sync --group dev"],
+            validate=["uv run pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile, workspace_root=workspace_root)
+
+        assert command is not None
+        assert command.command == "uv run -m playwright install chromium"
+
     @pytest.mark.parametrize(
         ("pyproject_lines", "setup_command"),
         [

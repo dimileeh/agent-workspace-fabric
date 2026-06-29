@@ -6,6 +6,7 @@ import re
 import shlex
 import tomllib
 from collections.abc import Callable, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from pathlib import Path
 
@@ -975,11 +976,15 @@ def _pyproject_includes_python_playwright(
         include_all_groups=include_all_groups,
         include_default_groups=include_default_groups,
     )
-    selected_groups = (dependency_groups.get(group) for group in selected_group_names)
-    return any(
-        _pyproject_requirement_list_includes_playwright(group_dependencies)
-        for group_dependencies in selected_groups
-    )
+    for group_name in selected_group_names:
+        if _pyproject_requirement_list_includes_playwright(
+            dependency_groups.get(group_name),
+            dependency_groups=dependency_groups,
+            excluded_groups=excluded_groups,
+            visited_groups={group_name},
+        ):
+            return True
+    return False
 
 
 def _pyproject_selected_dependency_group_names(
@@ -1042,11 +1047,34 @@ def _safe_local_pyproject_path(
     return resolved
 
 
-def _pyproject_requirement_list_includes_playwright(value: object) -> bool:
-    return isinstance(value, list) and any(
-        isinstance(requirement, str) and _pyproject_requirement_includes_playwright(requirement)
-        for requirement in value
-    )
+def _pyproject_requirement_list_includes_playwright(
+    value: object,
+    *,
+    dependency_groups: dict[str, object] | None = None,
+    excluded_groups: AbstractSet[str] = frozenset(),
+    visited_groups: AbstractSet[str] = frozenset(),
+) -> bool:
+    if not isinstance(value, list):
+        return False
+    for requirement in value:
+        if isinstance(requirement, str) and _pyproject_requirement_includes_playwright(requirement):
+            return True
+        if not isinstance(requirement, dict) or dependency_groups is None:
+            continue
+        include_group = requirement.get("include-group")
+        if (
+            isinstance(include_group, str)
+            and include_group not in excluded_groups
+            and include_group not in visited_groups
+            and _pyproject_requirement_list_includes_playwright(
+                dependency_groups.get(include_group),
+                dependency_groups=dependency_groups,
+                excluded_groups=excluded_groups,
+                visited_groups={*visited_groups, include_group},
+            )
+        ):
+            return True
+    return False
 
 
 def _pyproject_requirement_includes_playwright(requirement: str) -> bool:
