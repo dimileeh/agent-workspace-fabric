@@ -204,6 +204,33 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "npx playwright install chromium"
         assert command.timeout_seconds == 900
 
+    def test_python_playwright_profile_uses_python_browser_install_without_node_package_manager(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["python -m pip install playwright"],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "python -m playwright install chromium"
+        assert command.required is False
+
+    def test_node_package_manager_takes_precedence_over_python_playwright_install(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["python -m pip install playwright", "pnpm install --frozen-lockfile"],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "pnpm exec playwright install chromium"
+
     def test_preserves_package_directory_from_leading_cd_setup_install(self) -> None:
         profile = _profile_with_setup_and_browsers(["cd apps/web && npm ci"])
 

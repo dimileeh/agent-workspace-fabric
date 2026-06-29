@@ -55,6 +55,11 @@ _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS: dict[str, frozenset[str]] = {
 _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS = frozenset({"--help", "--version", "-h", "-v"})
 _SHELL_COMPOUND_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "|&", "&"})
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+_PYTHON_EXECUTABLES = frozenset({"python", "python3"})
+_PIP_EXECUTABLES = frozenset({"pip", "pip3"})
+_PYTHON_PLAYWRIGHT_REQUIREMENT_RE = re.compile(
+    r"(?i)^(?:playwright|pytest-playwright)(?:\[.*\])?(?:[<>=!~]=?.*)?$"
+)
 
 
 def _shell_tokens(command: str, *, comments: bool = False) -> list[str] | None:
@@ -103,9 +108,15 @@ def playwright_browser_install_command(profile: WorkspaceProfile) -> ProfileComm
     """Return the generated setup command for declared Playwright browsers."""
     if not profile.runtime.browsers:
         return None
-    package_manager = _infer_node_package_manager(profile)
+    package_manager = _detected_node_package_manager(profile)
+    if package_manager is not None:
+        command = playwright_command(package_manager, "install", *profile.runtime.browsers)
+    elif _uses_python_playwright(profile):
+        command = shlex.join(["python", "-m", "playwright", "install", *profile.runtime.browsers])
+    else:
+        command = playwright_command("npm", "install", *profile.runtime.browsers)
     return ProfileCommand(
-        command=playwright_command(package_manager, "install", *profile.runtime.browsers),
+        command=command,
         timeout_seconds=_PLAYWRIGHT_BROWSER_INSTALL_TIMEOUT_SECONDS,
         required=False,
     )
@@ -122,6 +133,10 @@ def node_package_manager_command(profile: WorkspaceProfile) -> str:
 
 
 def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
+    return _detected_node_package_manager(profile) or "npm"
+
+
+def _detected_node_package_manager(profile: WorkspaceProfile) -> str | None:
     fallback_package_manager: str | None = None
     dependency_install_package_manager: str | None = None
     scoped_dependency_install_package_manager: str | None = None
@@ -177,8 +192,98 @@ def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
         or dependency_install_package_manager
         or validate_package_manager
         or fallback_package_manager
-        or "npm"
     )
+
+
+def _uses_python_playwright(profile: WorkspaceProfile) -> bool:
+    return any(
+        _command_installs_python_playwright(command.command)
+        or _command_invokes_python_playwright(command.command)
+        for command in (
+            *profile.phases.setup,
+            *profile.database.generated_setup,
+            *profile.phases.pre_agent,
+            *profile.phases.post_agent,
+            *profile.phases.validate_commands,
+        )
+    )
+
+
+def _command_installs_python_playwright(command: str) -> bool:
+    tokens = _shell_tokens(command, comments=True)
+    if tokens is None:
+        return False
+    index = _first_non_assignment_token_index(tokens)
+    while index < len(tokens):
+        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+            index += 1
+        if index >= len(tokens):
+            return False
+        if _command_segment_installs_python_playwright(tokens, index):
+            return True
+        next_command_index = _sequential_command_next_index(tokens, index)
+        if next_command_index is None:
+            return False
+        index = next_command_index
+    return False
+
+
+def _command_segment_installs_python_playwright(tokens: list[str], index: int) -> bool:
+    executable = tokens[index]
+    if executable in _PIP_EXECUTABLES:
+        return _pip_segment_installs_playwright(tokens, index + 1)
+    if executable in _PYTHON_EXECUTABLES and tokens[index + 1 : index + 3] == ["-m", "pip"]:
+        return _pip_segment_installs_playwright(tokens, index + 3)
+    if executable == "uv" and index + 1 < len(tokens):
+        if tokens[index + 1] == "pip":
+            return _pip_segment_installs_playwright(tokens, index + 2)
+        if tokens[index + 1] == "add":
+            return _python_requirements_include_playwright(tokens, index + 2)
+    return False
+
+
+def _pip_segment_installs_playwright(tokens: list[str], index: int) -> bool:
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return False
+        if token == "install":
+            return _python_requirements_include_playwright(tokens, index + 1)
+        index += 1
+    return False
+
+
+def _python_requirements_include_playwright(tokens: list[str], index: int) -> bool:
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return False
+        if _PYTHON_PLAYWRIGHT_REQUIREMENT_RE.fullmatch(token):
+            return True
+        index += 1
+    return False
+
+
+def _command_invokes_python_playwright(command: str) -> bool:
+    tokens = _shell_tokens(command, comments=True)
+    if tokens is None:
+        return False
+    index = _first_non_assignment_token_index(tokens)
+    while index < len(tokens):
+        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+            index += 1
+        if index >= len(tokens):
+            return False
+        if tokens[index] in _PYTHON_EXECUTABLES and tokens[index + 1 : index + 3] == [
+            "-m",
+            "playwright",
+        ]:
+            return True
+        next_command_index = _sequential_command_next_index(tokens, index)
+        if next_command_index is None:
+            return False
+        index = next_command_index
+    return False
 
 
 def _node_package_manager_has_scope(package_manager: str) -> bool:
