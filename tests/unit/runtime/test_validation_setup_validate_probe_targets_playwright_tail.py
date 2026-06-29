@@ -1247,7 +1247,7 @@ class TestPlaywrightBrowserInstallCommand:
             ("pre_agent", "pnpm exec playwright test"),
         ]
 
-    def test_post_agent_playwright_dependency_install_not_inserted_before_pre_agent(
+    def test_post_agent_playwright_dependency_install_does_not_defer_pre_agent_usage(
         self,
     ) -> None:
         profile = WorkspaceProfile.model_validate(
@@ -1264,10 +1264,11 @@ class TestPlaywrightBrowserInstallCommand:
         commands = profile_phase_command_plan(profile, ["setup", "pre_agent"])
 
         assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "pnpm exec playwright install chromium"),
             ("pre_agent", "pnpm exec playwright test"),
         ]
 
-    def test_post_agent_python_playwright_dependency_install_defers_browser_install(
+    def test_post_agent_python_playwright_dependency_install_does_not_defer_pre_agent_usage(
         self,
     ) -> None:
         profile = WorkspaceProfile.model_validate(
@@ -1288,6 +1289,7 @@ class TestPlaywrightBrowserInstallCommand:
         post_agent_commands = profile_phase_command_plan(profile, ["post_agent"])
 
         assert [(command.phase, command.command.command) for command in pre_agent_commands] == [
+            ("setup", "python -m playwright install chromium"),
             ("pre_agent", "python -m playwright --version"),
         ]
         assert [(command.phase, command.command.command) for command in post_agent_commands] == [
