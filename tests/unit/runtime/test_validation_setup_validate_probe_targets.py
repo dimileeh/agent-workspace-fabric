@@ -245,6 +245,20 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "uv run -m playwright install chromium"
         assert command.required is False
 
+    def test_python_playwright_profile_preserves_scoped_uv_project_environment(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["cd apps/web && uv add playwright"],
+            validate=["cd apps/web && uv run pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "cd apps/web && uv run -m playwright install chromium"
+        assert command.required is False
+
     @pytest.mark.parametrize(
         ("setup_command", "requirements_content"),
         [

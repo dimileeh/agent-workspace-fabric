@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from awf.profiles.models import ProfileCommand, WorkspaceProfile
@@ -125,15 +125,9 @@ def playwright_browser_install_command(
         workspace_root=workspace_root,
     )
     if package_manager is None and python_playwright_executable is not None:
-        python_playwright_executable_tokens = shlex.split(python_playwright_executable)
-        command = shlex.join(
-            [
-                *python_playwright_executable_tokens,
-                "-m",
-                "playwright",
-                "install",
-                *profile.runtime.browsers,
-            ]
+        command = _python_playwright_install_command(
+            python_playwright_executable,
+            profile.runtime.browsers,
         )
     elif package_manager is not None:
         command = playwright_command(package_manager, "install", *profile.runtime.browsers)
@@ -358,6 +352,16 @@ def _command_python_playwright_executable(
             index += 1
         if index >= len(tokens):
             return None
+        scoped_command = _leading_cd_package_scope(tokens, index)
+        if scoped_command is not None:
+            package_dir, command_index = scoped_command
+            executable = _command_segment_python_playwright_executable(
+                tokens,
+                command_index,
+                workspace_root=workspace_root,
+            )
+            if executable is not None:
+                return f"{shlex.join(['cd', package_dir])} && {executable}"
         executable = _command_segment_python_playwright_executable(
             tokens,
             index,
@@ -370,6 +374,20 @@ def _command_python_playwright_executable(
             return None
         index = next_command_index
     return None
+
+
+def _python_playwright_install_command(executable: str, browsers: Sequence[str]) -> str:
+    executable_tokens = shlex.split(executable)
+    if "&&" in executable_tokens:
+        separator_index = executable_tokens.index("&&")
+        prefix_tokens = executable_tokens[:separator_index]
+        scoped_executable_tokens = executable_tokens[separator_index + 1 :]
+        if prefix_tokens and scoped_executable_tokens:
+            return (
+                f"{shlex.join(prefix_tokens)} && "
+                f"{shlex.join([*scoped_executable_tokens, '-m', 'playwright', 'install', *browsers])}"
+            )
+    return shlex.join([*executable_tokens, "-m", "playwright", "install", *browsers])
 
 
 def _command_segment_python_playwright_executable(
