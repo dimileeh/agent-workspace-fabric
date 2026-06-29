@@ -445,6 +445,61 @@ def test_reaper_reports_damaged_mirror_registry_without_direct_delete(
 
 
 @pytest.mark.unit
+def test_reaper_reports_unscannable_mirror_registry_without_direct_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    mirrors_dir = tmp_path / "git" / "mirrors"
+    mirrors_dir.mkdir(parents=True)
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+    original_iterdir = Path.iterdir
+
+    def _raise_for_mirrors_dir(path: Path):
+        if path == mirrors_dir:
+            raise PermissionError("permission denied")
+        return original_iterdir(path)
+
+    def _direct_delete_forbidden(
+        kind: str, path: Path, *, work_dir: Path
+    ) -> tuple[bool, str | None, str | None]:
+        raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
+
+    monkeypatch.setattr(Path, "iterdir", _raise_for_mirrors_dir)
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
+    )
+
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            min_age_hours=0,
+        )
+    )
+
+    assert result.status == "partial"
+    assert result.reason_code == "ORPHAN_REAP_PARTIAL"
+    assert result.reaped == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].kind == "worktree"
+    assert result.errors[0].workspace_id == "ws_dead"
+    assert result.errors[0].reason_code == "MIRROR_REGISTRY_SCAN_FAILED"
+    assert "permission denied" in (result.errors[0].error or "")
+    assert worktree.exists()
+
+
+@pytest.mark.unit
 def test_reaper_flag_off_is_dry_run_and_noop(tmp_path: Path) -> None:
     from awf.service.orphan_resources import reap_classified_orphans
 

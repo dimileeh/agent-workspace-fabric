@@ -825,6 +825,31 @@ def test_mirror_path_for_registered_worktree_ignores_earlier_unreadable_match(
 
 
 @pytest.mark.unit
+def test_mirror_path_for_registered_worktree_fails_closed_when_registry_unscannable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    mirrors_dir.mkdir()
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    original_iterdir = Path.iterdir
+
+    def _raise_for_mirrors_dir(path: Path):
+        if path == mirrors_dir:
+            raise PermissionError("permission denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", _raise_for_mirrors_dir)
+
+    with pytest.raises(GitOperationError) as raised:
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+
+    assert raised.value.reason_code == "MIRROR_REGISTRY_SCAN_FAILED"
+    assert "permission denied" in raised.value.stderr
+
+
+@pytest.mark.unit
 async def test_read_mirror_origin_url_returns_configured_origin(tmp_path: Path) -> None:
     repo_url = "git@github.com:example/repo.git"
     mirror = tmp_path / "repo.git"

@@ -989,8 +989,14 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
         return None
     try:
         mirror_paths = sorted(path for path in mirrors_dir.iterdir() if path.is_dir())
-    except OSError:
-        return None
+    except OSError as exc:
+        raise GitOperationError(
+            operation="mirror_registry_scan",
+            returncode=1,
+            stdout="",
+            stderr=str(exc),
+            reason_code="MIRROR_REGISTRY_SCAN_FAILED",
+        ) from exc
 
     worktree_name = worktree_path.name
     try:
