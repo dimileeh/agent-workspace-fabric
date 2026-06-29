@@ -142,6 +142,8 @@ with sync_playwright() as playwright:
                 executable_path = ""
             else:
                 executable_path = getattr(browser_type, "executable_path")
+                if callable(executable_path):
+                    executable_path = executable_path()
         if executable_path and Path(executable_path).exists():
             statuses.append(f"OK {name}")
         else:

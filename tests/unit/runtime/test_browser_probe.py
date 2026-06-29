@@ -582,6 +582,54 @@ def sync_playwright():
         assert result.returncode == 0
         assert result.stdout.splitlines() == ["OK chromium", "MISSING firefox"]
 
+    def test_embedded_python_probe_invokes_executable_path_callable(self, tmp_path) -> None:
+        if shutil.which("python") is None:
+            pytest.skip("python is required to exercise the embedded Python probe script")
+        browser_bin = tmp_path / "chromium"
+        browser_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        package_dir = tmp_path / "playwright"
+        package_dir.mkdir()
+        package_dir.joinpath("__init__.py").write_text("", encoding="utf-8")
+        package_dir.joinpath("sync_api.py").write_text(
+            f"""
+class _Browser:
+    def executable_path(self):
+        return {str(browser_bin)!r}
+
+
+class _Playwright:
+    chromium = _Browser()
+
+
+class _SyncPlaywright:
+    def __enter__(self):
+        return _Playwright()
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def sync_playwright():
+    return _SyncPlaywright()
+""",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+
+        result = subprocess.run(
+            ["sh", "-lc", _BROWSER_PROBE_PYTHON_SCRIPT, "browser_probe", "chromium"],
+            cwd=tmp_path,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.splitlines() == ["OK chromium"]
+        assert result.stderr == ""
+
     def test_embedded_python_probe_reports_missing_when_playwright_sync_api_missing(
         self, tmp_path
     ) -> None:
