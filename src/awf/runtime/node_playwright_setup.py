@@ -229,6 +229,7 @@ def playwright_command(package_manager: str, *args: str) -> str:
         package_manager_tokens = [package_manager]
     executable = package_manager_tokens[0] if package_manager_tokens else "npm"
     if executable == "pnpm":
+        package_manager_tokens = _pnpm_playwright_package_manager_tokens(package_manager_tokens)
         if len(package_manager_tokens) > 1:
             return shlex.join([*package_manager_tokens, "exec", "playwright", *args])
         return f"pnpm exec playwright {escaped_args}"
@@ -251,6 +252,25 @@ def playwright_command(package_manager: str, *args: str) -> str:
     if executable == "npm" and len(package_manager_tokens) > 1:
         return shlex.join([*package_manager_tokens, "exec", "--", "playwright", *args])
     return f"npx playwright {escaped_args}"
+
+
+def _pnpm_playwright_package_manager_tokens(package_manager_tokens: list[str]) -> list[str]:
+    cleaned_tokens = [package_manager_tokens[0]]
+    token_index = 1
+    while token_index < len(package_manager_tokens):
+        token = package_manager_tokens[token_index]
+        if _node_pm_option_takes_value("pnpm", token):
+            cleaned_tokens.append(token)
+            if token_index + 1 < len(package_manager_tokens):
+                cleaned_tokens.append(package_manager_tokens[token_index + 1])
+            token_index += 2
+            continue
+        if token in _PNPM_PRESERVED_VALUELESS_SCOPE_FLAGS:
+            token_index += 1
+            continue
+        cleaned_tokens.append(token)
+        token_index += 1
+    return cleaned_tokens
 
 
 def playwright_browser_install_command(

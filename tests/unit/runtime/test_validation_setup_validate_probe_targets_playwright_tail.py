@@ -148,14 +148,14 @@ class TestPlaywrightBrowserInstallCommand:
     @pytest.mark.parametrize(
         ("validate_command", "expected"),
         [
-            ("pnpm -r test:e2e", "pnpm -r exec playwright install chromium"),
+            ("pnpm -r test:e2e", "pnpm exec playwright install chromium"),
             (
                 "pnpm --recursive test:e2e",
-                "pnpm --recursive exec playwright install chromium",
+                "pnpm exec playwright install chromium",
             ),
         ],
     )
-    def test_root_pnpm_setup_uses_recursive_validate_scope_for_browser_install(
+    def test_root_pnpm_setup_drops_recursive_validate_scope_for_browser_install(
         self,
         validate_command: str,
         expected: str,
