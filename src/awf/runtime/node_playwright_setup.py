@@ -71,6 +71,8 @@ _UV_PIP_PYTHON_FLAGS = frozenset({"-p", "--python"})
 _UV_PIP_PYTHON_EQUALS_PREFIXES = ("-p=", "--python=")
 _UV_SYNC_EXTRA_FLAGS = frozenset({"--extra"})
 _UV_SYNC_EXTRA_EQUALS_PREFIX = "--extra="
+_UV_SYNC_GROUP_FLAGS = frozenset({"--group"})
+_UV_SYNC_GROUP_EQUALS_PREFIX = "--group="
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
 
 
@@ -597,7 +599,9 @@ def _uv_sync_segment_installs_playwright(
     requirement_base_dir: Path | None = None,
 ) -> bool:
     extras: set[str] = set()
+    groups: set[str] = set()
     include_all_extras = False
+    include_all_groups = False
     while index < len(tokens):
         token = tokens[index]
         if token in _SHELL_COMPOUND_CONTROL_TOKENS:
@@ -612,12 +616,24 @@ def _uv_sync_segment_installs_playwright(
             extras.add(token.removeprefix(_UV_SYNC_EXTRA_EQUALS_PREFIX))
         elif token == "--all-extras":
             include_all_extras = True
+        elif token in _UV_SYNC_GROUP_FLAGS:
+            if index + 1 >= len(tokens) or tokens[index + 1] in _SHELL_COMPOUND_CONTROL_TOKENS:
+                break
+            groups.add(tokens[index + 1])
+            index += 2
+            continue
+        elif token.startswith(_UV_SYNC_GROUP_EQUALS_PREFIX):
+            groups.add(token.removeprefix(_UV_SYNC_GROUP_EQUALS_PREFIX))
+        elif token == "--all-groups":
+            include_all_groups = True
         index += 1
     return _pyproject_includes_python_playwright(
         workspace_root=workspace_root,
         requirement_base_dir=requirement_base_dir,
         extras=extras,
         include_all_extras=include_all_extras,
+        groups=groups,
+        include_all_groups=include_all_groups,
     )
 
 
@@ -627,6 +643,8 @@ def _pyproject_includes_python_playwright(
     requirement_base_dir: Path | None = None,
     extras: set[str],
     include_all_extras: bool,
+    groups: set[str],
+    include_all_groups: bool,
 ) -> bool:
     project_path = _safe_local_pyproject_path(
         workspace_root=workspace_root,
@@ -639,22 +657,33 @@ def _pyproject_includes_python_playwright(
     except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
         return False
     project = document.get("project")
-    if not isinstance(project, dict):
+    if isinstance(project, dict):
+        dependencies = project.get("dependencies")
+        if _pyproject_requirement_list_includes_playwright(dependencies):
+            return True
+        optional_dependencies = project.get("optional-dependencies")
+        if isinstance(optional_dependencies, dict):
+            selected_extras = (
+                optional_dependencies.values()
+                if include_all_extras
+                else (optional_dependencies.get(extra) for extra in extras)
+            )
+            if any(
+                _pyproject_requirement_list_includes_playwright(extra_dependencies)
+                for extra_dependencies in selected_extras
+            ):
+                return True
+    dependency_groups = document.get("dependency-groups")
+    if not isinstance(dependency_groups, dict):
         return False
-    dependencies = project.get("dependencies")
-    if _pyproject_requirement_list_includes_playwright(dependencies):
-        return True
-    optional_dependencies = project.get("optional-dependencies")
-    if not isinstance(optional_dependencies, dict):
-        return False
-    selected_extras = (
-        optional_dependencies.values()
-        if include_all_extras
-        else (optional_dependencies.get(extra) for extra in extras)
+    selected_groups = (
+        dependency_groups.values()
+        if include_all_groups
+        else (dependency_groups.get(group) for group in groups)
     )
     return any(
-        _pyproject_requirement_list_includes_playwright(extra_dependencies)
-        for extra_dependencies in selected_extras
+        _pyproject_requirement_list_includes_playwright(group_dependencies)
+        for group_dependencies in selected_groups
     )
 
 
