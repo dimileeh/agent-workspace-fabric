@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 from collections.abc import Callable
+from pathlib import Path
 
 from awf.profiles.models import ProfileCommand, WorkspaceProfile
 from awf.runtime.validation_command_probe import (
@@ -60,6 +61,8 @@ _PIP_EXECUTABLES = frozenset({"pip", "pip3"})
 _PYTHON_PLAYWRIGHT_REQUIREMENT_RE = re.compile(
     r"(?i)^(?:playwright|pytest-playwright)(?:\[.*\])?(?:[<>=!~]=?.*)?$"
 )
+_PIP_REQUIREMENT_FILE_FLAGS = frozenset({"-r", "--requirement"})
+_PIP_REQUIREMENT_FILE_EQUALS_PREFIX = "--requirement="
 
 
 def _shell_tokens(command: str, *, comments: bool = False) -> list[str] | None:
@@ -254,14 +257,97 @@ def _pip_segment_installs_playwright(tokens: list[str], index: int) -> bool:
 
 
 def _python_requirements_include_playwright(tokens: list[str], index: int) -> bool:
+    seen_requirement_files: set[Path] = set()
     while index < len(tokens):
         token = tokens[index]
         if token in _SHELL_COMPOUND_CONTROL_TOKENS:
             return False
+        requirement_file, token_width = _pip_requirement_file_argument(tokens, index)
+        if requirement_file is not None and _python_requirement_file_includes_playwright(
+            requirement_file,
+            seen_requirement_files,
+        ):
+            return True
         if _PYTHON_PLAYWRIGHT_REQUIREMENT_RE.fullmatch(token):
             return True
-        index += 1
+        index += token_width
     return False
+
+
+def _pip_requirement_file_argument(tokens: list[str], index: int) -> tuple[str | None, int]:
+    token = tokens[index]
+    if token in _PIP_REQUIREMENT_FILE_FLAGS:
+        if index + 1 >= len(tokens) or tokens[index + 1] in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return None, 1
+        return tokens[index + 1], 2
+    if token.startswith("-r") and token != "-r":
+        return token[2:], 1
+    if token.startswith(_PIP_REQUIREMENT_FILE_EQUALS_PREFIX):
+        return token.removeprefix(_PIP_REQUIREMENT_FILE_EQUALS_PREFIX), 1
+    return None, 1
+
+
+def _python_requirement_file_includes_playwright(
+    requirement_file: str,
+    seen_requirement_files: set[Path],
+) -> bool:
+    path = _safe_local_requirement_file_path(requirement_file)
+    if path is None or path in seen_requirement_files:
+        return False
+    seen_requirement_files.add(path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    return any(
+        _python_requirement_line_includes_playwright(line, path.parent, seen_requirement_files)
+        for line in lines
+    )
+
+
+def _safe_local_requirement_file_path(requirement_file: str) -> Path | None:
+    if not requirement_file or requirement_file.startswith("-"):
+        return None
+    workspace_root = Path.cwd().resolve()
+    path = Path(requirement_file)
+    if not path.is_absolute():
+        path = workspace_root / path
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(workspace_root)
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
+def _python_requirement_line_includes_playwright(
+    line: str,
+    parent: Path,
+    seen_requirement_files: set[Path],
+) -> bool:
+    requirement = line.split("#", 1)[0].strip()
+    if not requirement:
+        return False
+    try:
+        tokens = shlex.split(requirement, comments=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    if _PYTHON_PLAYWRIGHT_REQUIREMENT_RE.fullmatch(tokens[0]):
+        return True
+    nested_requirement_file, _ = _pip_requirement_file_argument(tokens, 0)
+    if nested_requirement_file is None:
+        return False
+    nested_path = Path(nested_requirement_file)
+    if not nested_path.is_absolute():
+        nested_path = parent / nested_path
+    return _python_requirement_file_includes_playwright(
+        str(nested_path),
+        seen_requirement_files,
+    )
 
 
 def _command_invokes_python_playwright(command: str) -> bool:

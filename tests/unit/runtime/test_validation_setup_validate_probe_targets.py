@@ -218,6 +218,80 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "python -m playwright install chromium"
         assert command.required is False
 
+    @pytest.mark.parametrize(
+        ("setup_command", "requirements_content"),
+        [
+            ("python -m pip install -r requirements.txt", "pytest-playwright==0.5.0\n"),
+            ("pip install --requirement requirements.txt", "playwright>=1.42\n"),
+            ("pip install -rrequirements.txt", "pytest-playwright\n"),
+            ("pip install --requirement=requirements.txt", "playwright\n"),
+        ],
+    )
+    def test_python_playwright_profile_detects_pip_requirement_files(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+        setup_command: str,
+        requirements_content: str,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "requirements.txt").write_text(requirements_content, encoding="utf-8")
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[setup_command],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "python -m playwright install chromium"
+        assert command.required is False
+
+    def test_python_playwright_profile_detects_nested_pip_requirement_file(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "requirements.txt").write_text("-r nested.txt\n", encoding="utf-8")
+        (tmp_path / "nested.txt").write_text("playwright # browser runtime\n", encoding="utf-8")
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["pip install -r requirements.txt"],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "python -m playwright install chromium"
+
+    @pytest.mark.parametrize(
+        "setup_command",
+        [
+            "pip install -r playwright",
+            "pip install --requirement ../requirements.txt",
+        ],
+    )
+    def test_python_playwright_profile_ignores_unreadable_pip_requirement_files(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+        setup_command: str,
+    ) -> None:
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        monkeypatch.chdir(project_root)
+        (tmp_path / "requirements.txt").write_text("playwright\n", encoding="utf-8")
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[setup_command],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "npx playwright install chromium"
+
     def test_node_package_manager_takes_precedence_over_python_playwright_install(
         self,
     ) -> None:
