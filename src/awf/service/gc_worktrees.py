@@ -409,7 +409,7 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
     if linked_mirror_path is None:
         return registered_mirror_path
     if registered_mirror_path is None:
-        return None
+        return linked_mirror_path
     if linked_mirror_path == registered_mirror_path:
         return linked_mirror_path
     return registered_mirror_path
