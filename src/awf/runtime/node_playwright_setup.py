@@ -89,6 +89,7 @@ _UV_SYNC_SCOPE_EQUALS_PREFIXES = (
     ("--package=", "--package"),
 )
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
+_NODE_PLAYWRIGHT_INSTALL_RUNNERS = frozenset({"pnpx", "bunx"})
 
 
 def _executable_name(executable: str) -> str:
@@ -184,6 +185,8 @@ def playwright_command(package_manager: str, *args: str) -> str:
                 )
             return shlex.join([*package_manager_tokens, "x", "playwright", *args])
         return f"bunx playwright {escaped_args}"
+    if executable in _NODE_PLAYWRIGHT_INSTALL_RUNNERS:
+        return f"{executable} playwright {escaped_args}"
     if executable == "npm" and len(package_manager_tokens) > 1:
         return shlex.join([*package_manager_tokens, "exec", "--", "playwright", *args])
     return f"npx playwright {escaped_args}"
@@ -2011,6 +2014,8 @@ def _node_validation_package_manager(command: str) -> str | None:
             return None
         if _command_segment_invokes_node_playwright(tokens, index):
             if executable in _NODE_PACKAGE_MANAGERS:
+                return executable
+            if executable in _NODE_PLAYWRIGHT_INSTALL_RUNNERS:
                 return executable
             return None
         next_command_index = _corepack_preamble_next_command_index(tokens, index)

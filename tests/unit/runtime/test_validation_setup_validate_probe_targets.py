@@ -899,6 +899,28 @@ class TestPlaywrightBrowserInstallCommand:
         ]
 
     @pytest.mark.parametrize(
+        ("validate_command", "expected"),
+        [
+            ("pnpx playwright test", "pnpx playwright install chromium"),
+            ("bunx playwright test", "bunx playwright install chromium"),
+        ],
+    )
+    def test_browser_install_preserves_direct_playwright_runner_from_validate(
+        self,
+        validate_command: str,
+        expected: str,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[validate_command],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == expected
+
+    @pytest.mark.parametrize(
         ("setup_command", "expected"),
         [
             ("'unterminated", "npx playwright install chromium"),
