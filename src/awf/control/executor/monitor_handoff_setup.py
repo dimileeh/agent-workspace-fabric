@@ -400,7 +400,6 @@ async def _run_monitor_handoff_profile_setup(
         ) and runtime_browser_probe_deferred_until_validate(
             profile,
             workspace_root=worktree_path,
-            allow_browser_install_defer_to_unrequested_phase=False,
         )
         if callable(record_browser_findings) and not browser_probe_deferred:
             try:
