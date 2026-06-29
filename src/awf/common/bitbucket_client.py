@@ -406,6 +406,8 @@ class BitbucketClient:
         failed = [s for s in statuses if str(s.get("state") or "").upper() in {"FAILED", "STOPPED"}]
         if not failed:
             return CheckFailureLogResult(runs_in_progress=runs_in_progress)
+        # Active sibling statuses should not hide failure evidence from the
+        # repair loop. Only the no-failure snapshot above is a wait signal.
 
         pipeline = await self._find_pipeline_for_commit(repo, head_sha, pr_number, source_branch)
         if pipeline is None:
@@ -414,7 +416,6 @@ class BitbucketClient:
                     self._external_status_failure(status, pytest_fallback_commands)
                     for status in failed
                 ),
-                runs_in_progress=runs_in_progress,
             )
 
         pipeline_uuid = _clean_optional_str(pipeline.get("uuid"))
@@ -429,7 +430,6 @@ class BitbucketClient:
                     self._external_status_failure(status, pytest_fallback_commands)
                     for status in failed
                 ),
-                runs_in_progress=runs_in_progress,
             )
 
         failures: list[CheckFailure] = []
@@ -472,7 +472,6 @@ class BitbucketClient:
         )
         return CheckFailureLogResult(
             failures=tuple(failures),
-            runs_in_progress=runs_in_progress,
         )
 
     async def rerun_failed_workflow_jobs(

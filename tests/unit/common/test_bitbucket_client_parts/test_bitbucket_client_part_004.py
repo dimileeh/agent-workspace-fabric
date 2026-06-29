@@ -120,7 +120,7 @@ async def test_failing_check_logs_external_status_falls_back_to_pytest() -> None
     assert failures[0].evidence_warnings  # surfaced the no-log fallback warning
 
 
-async def test_failing_check_logs_external_status_preserves_active_sibling_status() -> None:
+async def test_failing_external_status_does_not_wait_for_active_sibling() -> None:
     fake = FakeBitbucket()
     fake.page(
         "GET",
@@ -134,7 +134,7 @@ async def test_failing_check_logs_external_status_preserves_active_sibling_statu
     client = make_client(fake)
     failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
     assert [failure.name for failure in failures] == ["external-linter"]
-    assert failures.runs_in_progress is True
+    assert failures.runs_in_progress is False
 
 
 async def test_failing_check_logs_pipeline_without_failing_step_falls_back() -> None:
@@ -156,7 +156,7 @@ async def test_failing_check_logs_pipeline_without_failing_step_falls_back() -> 
     assert failures[0].run_id is None  # external fallback path
 
 
-async def test_failing_check_logs_pipeline_fallback_preserves_active_sibling_status() -> None:
+async def test_failing_pipeline_fallback_does_not_wait_for_active_sibling() -> None:
     fake = FakeBitbucket()
     fake.page(
         "GET",
@@ -175,7 +175,7 @@ async def test_failing_check_logs_pipeline_fallback_preserves_active_sibling_sta
     client = make_client(fake)
     failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
     assert [failure.name for failure in failures] == ["Pipeline #5"]
-    assert failures.runs_in_progress is True
+    assert failures.runs_in_progress is False
 
 
 async def test_failing_check_logs_stopped_pipeline_step_keeps_log_evidence() -> None:
@@ -264,7 +264,7 @@ async def test_failing_check_logs_surfaces_external_status_alongside_failing_ste
     assert by_name["external-linter"].log_excerpt == ""
 
 
-async def test_failing_check_logs_pipeline_steps_preserve_active_sibling_status() -> None:
+async def test_failing_pipeline_steps_do_not_wait_for_active_sibling() -> None:
     fake = FakeBitbucket()
     fake.page(
         "GET",
@@ -288,7 +288,7 @@ async def test_failing_check_logs_pipeline_steps_preserve_active_sibling_status(
     client = make_client(fake)
     failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
     assert [failure.name for failure in failures] == ["Test"]
-    assert failures.runs_in_progress is True
+    assert failures.runs_in_progress is False
 
 
 async def test_failing_check_logs_skips_pipeline_status_identified_by_url() -> None:
