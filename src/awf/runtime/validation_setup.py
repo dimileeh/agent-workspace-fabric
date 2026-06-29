@@ -247,14 +247,17 @@ def profile_phase_command_plan(
         if (
             deferred_browser_install is not None
             and not defer_browser_install_until_validate_install
-            and _node_dependency_install_satisfies_browser_install(
+            and _command_satisfies_deferred_browser_install(
+                command.command.command,
                 command_package_manager,
                 browser_install_package_manager,
+                workspace_root=workspace_root,
             )
         ):
             split_command = _split_dependency_install_chain(
                 command,
                 browser_install_package_manager,
+                workspace_root=workspace_root,
             )
             if split_command is None:
                 commands.append(command)
