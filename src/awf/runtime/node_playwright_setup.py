@@ -36,6 +36,7 @@ _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS = frozenset(
     {"--cwd", "--dir", "--filter", "--prefix", "--workspace", "-C", "-F", "-w"}
 )
 _NODE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset({"--cwd", "--dir", "--prefix", "-C"})
+_PNPM_VALUELESS_WORKSPACE_ROOT_FLAGS = frozenset({"--workspace-root", "-w"})
 _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS: dict[str, frozenset[str]] = {
     "yarn": frozenset({"--frozen-lockfile", "--immutable", "--immutable-cache"})
 }
@@ -279,7 +280,7 @@ def _node_scoped_package_manager_from_tokens(
         token = tokens[command_index]
         if token in _SHELL_COMPOUND_CONTROL_TOKENS:
             break
-        if token in _NODE_PM_OPTION_VALUE_FLAGS:
+        if _node_pm_option_takes_value(executable, token):
             if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
                 if command_index + 1 >= len(tokens):
                     return None
@@ -337,7 +338,7 @@ def _node_npm_validation_workspace_package_manager(
         token = tokens[option_index]
         if token in _SHELL_COMPOUND_CONTROL_TOKENS or token == "--":
             break
-        if token in _NODE_PM_OPTION_VALUE_FLAGS:
+        if _node_pm_option_takes_value("npm", token):
             if option_index + 1 >= len(tokens):
                 return None
             if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
@@ -491,7 +492,7 @@ def _node_dependency_install_package_manager_from_tokens(
         token = tokens[subcommand_index]
         if token in _SHELL_COMPOUND_CONTROL_TOKENS:
             break
-        if token in _NODE_PM_OPTION_VALUE_FLAGS:
+        if _node_pm_option_takes_value(executable, token):
             if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS and subcommand_index + 1 < len(
                 tokens
             ):
@@ -552,6 +553,12 @@ def _node_dependency_install_package_manager_from_tokens(
     if executable == "yarn" and (yarn_option_only_install_seen or yarn_location_only_arguments):
         return _node_package_manager_command(executable, inferred_location_tokens)
     return None
+
+
+def _node_pm_option_takes_value(executable: str, token: str) -> bool:
+    if executable == "pnpm" and token in _PNPM_VALUELESS_WORKSPACE_ROOT_FLAGS:
+        return False
+    return token in _NODE_PM_OPTION_VALUE_FLAGS
 
 
 def _node_yarn_workspace_install_package_manager(

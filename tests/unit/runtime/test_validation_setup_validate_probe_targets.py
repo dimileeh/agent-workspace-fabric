@@ -605,6 +605,28 @@ class TestPlaywrightBrowserInstallCommand:
             ("validate", "pnpm test"),
         ]
 
+    def test_pnpm_workspace_root_install_gets_browser_install_before_pre_agent(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-profile",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["pnpm -w install"],
+                    "pre_agent": ["pnpm exec playwright test"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ["setup", "pre_agent"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "pnpm -w install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("pre_agent", "pnpm exec playwright test"),
+        ]
+
     def test_yarn_version_setup_probe_defers_browser_install_until_validate_install(
         self,
     ) -> None:
