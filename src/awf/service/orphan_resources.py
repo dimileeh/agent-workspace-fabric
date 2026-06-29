@@ -989,14 +989,16 @@ async def reap_classified_orphans(
                 work_dir=resolved_work_dir,
             )
             if removal.ok:
-                outcome = OrphanReapOutcome(
-                    kind="worktree",
-                    workspace_id=record.workspace_id,
-                    status="reaped" if removal.status == "succeeded" else "already_removed",
-                    reason_code=removal.reason_code,
-                )
-                reaped.append(outcome)
-                _log.info("orphan_resources.reaped_worktree", **outcome.to_dict())
+                if removal.status == "succeeded" or removal.reason_code == PATH_ALREADY_REMOVED:
+                    outcome = OrphanReapOutcome(
+                        kind="worktree",
+                        workspace_id=record.workspace_id,
+                        status=("reaped" if removal.status == "succeeded" else "already_removed"),
+                        reason_code=removal.reason_code,
+                    )
+                    reaped.append(outcome)
+                    _log.info("orphan_resources.reaped_worktree", **outcome.to_dict())
+                    continue
             else:
                 outcome = OrphanReapOutcome(
                     kind="worktree",
@@ -1007,7 +1009,7 @@ async def reap_classified_orphans(
                 )
                 errors.append(outcome)
                 _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
-            continue
+                continue
 
         # Build the GC path (a recursive ``rglob`` byte estimate over a full
         # worktree checkout) and delete it inside one ``to_thread`` so the scan
