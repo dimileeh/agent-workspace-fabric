@@ -449,6 +449,11 @@ def _split_dependency_install_chain(
             install_command,
             browser_install_package_manager,
         )
+        if trailing_scope_prefix is None and _dependency_install_chain_has_unpreserved_export_scope(
+            install_command,
+            browser_install_package_manager,
+        ):
+            return None
         if trailing_scope_prefix is not None:
             trailing_command = f"{trailing_scope_prefix} && {trailing_command}"
         return (
@@ -487,8 +492,45 @@ def _dependency_install_chain_trailing_scope_prefix(
     return None
 
 
+def _dependency_install_chain_has_unpreserved_export_scope(
+    install_command: str,
+    browser_install_package_manager: str | None,
+) -> bool:
+    for separator_index, separator in reversed(
+        _unquoted_install_chain_separator_spans(install_command)
+    ):
+        scope_prefix = install_command[:separator_index].strip()
+        scoped_install_command = install_command[separator_index + len(separator) :].strip()
+        if not scoped_install_command:
+            continue
+        command_package_manager = _node_dependency_install_package_manager(scoped_install_command)
+        if _node_dependency_install_satisfies_browser_install(
+            command_package_manager,
+            browser_install_package_manager,
+        ):
+            return _command_has_unpreserved_export_scope(scope_prefix)
+    return False
+
+
+def _command_has_unpreserved_export_scope(command: str) -> bool:
+    tokens = _shell_tokens(command)
+    if tokens is None or _command_is_safe_export_scope(command):
+        return False
+    for command_start, command_end in _sequential_shell_command_ranges(tokens):
+        command_index = command_start + _first_non_assignment_token_index(
+            tokens[command_start:command_end]
+        )
+        if command_index < command_end and tokens[command_index] == "export":
+            return True
+    return False
+
+
 def _command_preserves_install_trailing_scope(command: str) -> bool:
-    return _command_starts_with_cd_scope(command) or _command_is_shell_guard_scope(command)
+    return (
+        _command_starts_with_cd_scope(command)
+        or _command_is_shell_guard_scope(command)
+        or _command_is_safe_export_scope(command)
+    )
 
 
 def _command_starts_with_cd_scope(command: str) -> bool:
@@ -521,6 +563,33 @@ def _command_is_shell_guard_scope(command: str) -> bool:
     return saw_guard
 
 
+def _command_is_safe_export_scope(command: str) -> bool:
+    tokens = _shell_tokens(command)
+    if tokens is None:
+        return False
+    if any(token in {"||", "|", "|&", "&"} for token in tokens):
+        return False
+    if "$(" in command or "`" in command:
+        return False
+    saw_export = False
+    for command_start, command_end in _sequential_shell_command_ranges(tokens):
+        command_index = command_start + _first_non_assignment_token_index(
+            tokens[command_start:command_end]
+        )
+        if command_index >= command_end:
+            continue
+        token = tokens[command_index]
+        if token in _VALIDATE_PROBE_LEADING_GUARDS:
+            continue
+        if token != "export":
+            return False
+        exports = tokens[command_index + 1 : command_end]
+        if not exports or not all(_ENV_ASSIGNMENT_RE.fullmatch(export) for export in exports):
+            return False
+        saw_export = True
+    return saw_export
+
+
 def _sequential_shell_command_indices(tokens: list[str]) -> list[int]:
     command_indices = [0]
     command_indices.extend(
@@ -529,6 +598,16 @@ def _sequential_shell_command_indices(tokens: list[str]) -> list[int]:
         if token in {"&&", ";"} and index + 1 < len(tokens)
     )
     return command_indices
+
+
+def _sequential_shell_command_ranges(tokens: list[str]) -> list[tuple[int, int]]:
+    command_starts = _sequential_shell_command_indices(tokens)
+    return [
+        (command_start, command_starts[index + 1] - 1)
+        if index + 1 < len(command_starts)
+        else (command_start, len(tokens))
+        for index, command_start in enumerate(command_starts)
+    ]
 
 
 def _first_unquoted_and_separator(command: str) -> int | None:

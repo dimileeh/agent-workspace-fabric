@@ -655,6 +655,40 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    def test_validate_browser_install_split_replays_exported_state_for_trailing_command(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["export BASE_URL=http://app; pnpm install; pnpm test:e2e"],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "export BASE_URL=http://app; pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "export BASE_URL=http://app && pnpm test:e2e"),
+        ]
+        assert commands[1].command.required is False
+
+    def test_validate_browser_install_does_not_split_unpreserved_exported_state(
+        self,
+    ) -> None:
+        validate_command = "export BASE_URL; pnpm install; pnpm test:e2e"
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[validate_command],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", validate_command),
+            ("setup", "pnpm exec playwright install chromium"),
+        ]
+        assert commands[1].command.required is False
+
     def test_validate_browser_install_split_preserves_cd_scope_for_trailing_command(
         self,
     ) -> None:
