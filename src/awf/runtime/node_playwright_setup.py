@@ -125,9 +125,10 @@ def playwright_browser_install_command(
         workspace_root=workspace_root,
     )
     if package_manager is None and python_playwright_executable is not None:
+        python_playwright_executable_tokens = shlex.split(python_playwright_executable)
         command = shlex.join(
             [
-                python_playwright_executable,
+                *python_playwright_executable_tokens,
                 "-m",
                 "playwright",
                 "install",
@@ -390,6 +391,8 @@ def _command_segment_python_playwright_executable(
     ):
         if executable in {"python3", "pip3"}:
             return "python3"
+        if executable == "uv":
+            return "uv run"
         return "python"
     return None
 
