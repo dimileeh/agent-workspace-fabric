@@ -387,6 +387,7 @@ def profile_phase_command_plan(
                 deferred_browser_install = ProfileExecutionCommand(
                     phase="setup",
                     command=browser_install,
+                    runtime_browser_install=True,
                 )
                 defer_browser_install_until_validate_install = (
                     _should_defer_browser_install_until_validate_install(
@@ -446,6 +447,7 @@ def profile_phase_command_plan(
                     browser_install_command = ProfileExecutionCommand(
                         phase="setup",
                         command=browser_install,
+                        runtime_browser_install=True,
                     )
                     if defer_browser_install_until_validate_install:
                         browser_install_package_manager = (
@@ -591,6 +593,7 @@ def profile_phase_command_plan(
                     deferred_browser_install = ProfileExecutionCommand(
                         phase="setup",
                         command=browser_install,
+                        runtime_browser_install=True,
                     )
             for post_agent_command in _phase_commands(profile, phase):
                 append_command_with_deferred_browser_install(post_agent_command)
@@ -742,6 +745,7 @@ def _inject_deferred_browser_install_into_dependency_install_chain(
         return replace(
             command,
             command=command.command.model_copy(update={"command": injected_command}),
+            runtime_browser_install=True,
         )
     return None
 

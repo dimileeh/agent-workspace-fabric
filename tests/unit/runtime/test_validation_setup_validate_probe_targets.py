@@ -992,6 +992,7 @@ class TestPlaywrightBrowserInstallCommand:
                 "{ pnpm exec playwright install chromium; pnpm exec playwright test; }",
             ),
         ]
+        assert commands[0].runtime_browser_install is True
 
     @pytest.mark.parametrize(
         ("validate_command", "expected"),

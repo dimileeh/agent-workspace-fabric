@@ -229,7 +229,9 @@ async def run_validation_and_fix_cycle(
     )
     validation_commands = [step.command.command for step in validation_command_plan]
     validation_runtime_browser_install_command_indexes = tuple(
-        index for index, step in enumerate(validation_command_plan) if step.phase == "setup"
+        index
+        for index, step in enumerate(validation_command_plan)
+        if step.phase == "setup" or getattr(step, "runtime_browser_install", False)
     )
     validation_runtime_browser_install_commands = tuple(
         validation_commands[index] for index in validation_runtime_browser_install_command_indexes
