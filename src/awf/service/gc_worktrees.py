@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
     from awf.service.gc import WorkspaceGCCandidate, WorkspaceGCPath
 
+_GIT_BARE_PROBE_ENV_KEYS = ("GIT_WORK_TREE",)
+
 
 @dataclass(frozen=True)
 class WorkspaceGCWorktreeRemoveTargetResult:
@@ -609,7 +611,7 @@ def _managed_bare_mirror_path(path: Path | None, mirrors_root: Path) -> Path | N
 
 
 def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
-    from awf.node.git_manager import GitOperationError, git_env_without_object_lookup_overrides
+    from awf.node.git_manager import GitOperationError
 
     operation = "worktree.git_context_probe"
     try:
@@ -617,7 +619,7 @@ def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
             ["git", "--bare", "--git-dir", str(path), "rev-parse", "--is-bare-repository"],
             capture_output=True,
             check=False,
-            env=git_env_without_object_lookup_overrides(),
+            env=_git_bare_probe_env(),
             text=True,
         )
     except OSError as exc:
@@ -639,6 +641,15 @@ def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
             reason_code="WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
         )
     return probe.returncode == 0 and probe.stdout.strip() == "true"
+
+
+def _git_bare_probe_env() -> dict[str, str]:
+    from awf.node.git_manager import git_env_without_object_lookup_overrides
+
+    env = git_env_without_object_lookup_overrides()
+    for key in _GIT_BARE_PROBE_ENV_KEYS:
+        env.pop(key, None)
+    return env
 
 
 def _looks_like_bare_git_repository(path: Path) -> bool:
