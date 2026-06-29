@@ -357,7 +357,7 @@ async def _record_runtime_browser_findings_safe(
     profile: Any,
     worktree_path: Path | None = None,
     session: AsyncSession | None = None,
-) -> None:
+) -> bool:
     """Double-guarded call-site wrapper for the runtime browser probe."""
     try:
         if session is None:
@@ -379,6 +379,7 @@ async def _record_runtime_browser_findings_safe(
                 worktree_path=worktree_path,
                 session=session,
             )
+        return True
     except Exception as exc:
         _log.warning(
             "executor.runtime_browser_probe_record_failed",
@@ -386,3 +387,4 @@ async def _record_runtime_browser_findings_safe(
             reason_code=getattr(exc, "reason_code", None),
             error=redact_secrets(str(exc))[:1000],
         )
+        return False

@@ -265,7 +265,7 @@ class TestRecordRuntimeBrowserFindings:
                 )
 
         with structlog.testing.capture_logs() as captured:
-            await _record_runtime_browser_findings_safe(
+            recorded = await _record_runtime_browser_findings_safe(
                 _Executor(),
                 workspace_id=ws_id,
                 compose_project="awf_x",
@@ -273,6 +273,7 @@ class TestRecordRuntimeBrowserFindings:
                 profile=object(),
             )
 
+        assert recorded is False
         assert not [e for e in captured if e["event"] == "executor.runtime_browser_probe_failed"]
         entry = next(
             e for e in captured if e["event"] == "executor.runtime_browser_probe_record_failed"
@@ -322,7 +323,7 @@ class TestRecordRuntimeBrowserFindings:
                 raise _RecorderError("record failed ghp_FAKESECRET0000000")
 
         with structlog.testing.capture_logs() as captured:
-            await _record_runtime_browser_findings_safe(
+            recorded = await _record_runtime_browser_findings_safe(
                 _Executor(),
                 workspace_id="ws-1",
                 compose_project="awf_x",
@@ -331,6 +332,7 @@ class TestRecordRuntimeBrowserFindings:
                 session=cast(AsyncSession, object()),
             )
 
+        assert recorded is False
         entry = next(
             e for e in captured if e["event"] == "executor.runtime_browser_probe_record_failed"
         )
@@ -338,3 +340,34 @@ class TestRecordRuntimeBrowserFindings:
         assert entry["reason_code"] == "RUNTIME_BROWSER_RECORD_BROKE"
         assert "ghp_FAKESECRET0000000" not in entry["error"]
         assert "<redacted>" in entry["error"]
+
+    @pytest.mark.unit
+    async def test_safe_wrapper_reports_success(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        class _Executor:
+            async def _record_runtime_browser_findings(self, **kwargs: Any) -> None:
+                calls.append(kwargs)
+
+        session = cast(AsyncSession, object())
+        profile = object()
+        recorded = await _record_runtime_browser_findings_safe(
+            _Executor(),
+            workspace_id="ws-1",
+            compose_project="awf_x",
+            compose_file=Path("/tmp/compose.yml"),
+            profile=profile,
+            session=session,
+        )
+
+        assert recorded is True
+        assert calls == [
+            {
+                "workspace_id": "ws-1",
+                "compose_project": "awf_x",
+                "compose_file": Path("/tmp/compose.yml"),
+                "profile": profile,
+                "worktree_path": None,
+                "session": session,
+            }
+        ]

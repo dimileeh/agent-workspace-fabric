@@ -185,14 +185,15 @@ async def run_validation_and_fix_cycle(
             profile,
             workspace_root=worktree_path,
         ):
-            deferred_runtime_browser_findings_recorded = True
-            await record_browser_findings(
+            recorded = await record_browser_findings(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
                 worktree_path=worktree_path,
             )
+            if recorded is not False:
+                deferred_runtime_browser_findings_recorded = True
 
     if not await self._transition_if_current(
         workspace_id,
