@@ -77,8 +77,12 @@ _UV_SYNC_ONLY_GROUP_FLAGS = frozenset({"--only-group"})
 _UV_SYNC_ONLY_GROUP_EQUALS_PREFIX = "--only-group="
 _UV_SYNC_NO_GROUP_FLAGS = frozenset({"--no-group"})
 _UV_SYNC_NO_GROUP_EQUALS_PREFIX = "--no-group="
-_UV_SYNC_SCOPE_FLAGS = frozenset({"--project", "--directory"})
-_UV_SYNC_SCOPE_EQUALS_PREFIXES = (("--project=", "--project"), ("--directory=", "--directory"))
+_UV_SYNC_SCOPE_FLAGS = frozenset({"--project", "--directory", "--package"})
+_UV_SYNC_SCOPE_EQUALS_PREFIXES = (
+    ("--project=", "--project"),
+    ("--directory=", "--directory"),
+    ("--package=", "--package"),
+)
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
 
 
@@ -560,18 +564,34 @@ def _command_segment_python_playwright_executable(
         requirement_base_dir=requirement_base_dir,
     ):
         if executable == "uv":
-            return _uv_python_playwright_install_executable(tokens, index)
+            return _uv_python_playwright_install_executable(
+                tokens,
+                index,
+                workspace_root=workspace_root,
+                requirement_base_dir=requirement_base_dir,
+            )
         return _python_executable_for_install_executable(executable) or "python"
     return None
 
 
-def _uv_python_playwright_install_executable(tokens: list[str], index: int) -> str | None:
+def _uv_python_playwright_install_executable(
+    tokens: list[str],
+    index: int,
+    *,
+    workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
+) -> str | None:
     if index + 1 >= len(tokens):
         return None
     if tokens[index + 1] == "add":
         return "uv run"
     if tokens[index + 1] == "sync":
-        scope = _uv_sync_scope(tokens, index + 2)
+        scope = _uv_sync_scope(
+            tokens,
+            index + 2,
+            workspace_root=workspace_root,
+            requirement_base_dir=requirement_base_dir,
+        )
         if scope is None:
             return None
         _, run_scope_tokens = scope
@@ -722,6 +742,7 @@ def _uv_sync_scope(
                 return None
             scope_value = tokens[index + 1]
             scoped_requirement_base_dir = _uv_sync_scope_base_dir(
+                token,
                 scope_value,
                 workspace_root=workspace_root,
                 requirement_base_dir=requirement_base_dir,
@@ -735,6 +756,7 @@ def _uv_sync_scope(
         if scope_option is not None:
             scope_value = token.removeprefix(f"{scope_option}=")
             scoped_requirement_base_dir = _uv_sync_scope_base_dir(
+                scope_option,
                 scope_value,
                 workspace_root=workspace_root,
                 requirement_base_dir=requirement_base_dir,
@@ -754,6 +776,7 @@ def _uv_sync_scope_equals_option(token: str) -> str | None:
 
 
 def _uv_sync_scope_base_dir(
+    scope_option: str,
     scope_value: str,
     *,
     workspace_root: Path | None = None,
@@ -761,10 +784,70 @@ def _uv_sync_scope_base_dir(
 ) -> Path | None:
     if not scope_value or _package_scope_uses_shell_expansion(scope_value):
         return None
+    if scope_option == "--package":
+        return _uv_workspace_package_base_dir(
+            scope_value,
+            workspace_root=workspace_root,
+            requirement_base_dir=requirement_base_dir,
+        )
     scope_path = Path(scope_value)
     if scope_path.is_absolute():
         return scope_path
     return (requirement_base_dir or workspace_root or Path.cwd()) / scope_path
+
+
+def _uv_workspace_package_base_dir(
+    package_name: str,
+    *,
+    workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
+) -> Path | None:
+    workspace_base_dir = requirement_base_dir or workspace_root or Path.cwd()
+    workspace_pyproject_path = _safe_local_pyproject_path(
+        workspace_root=workspace_root,
+        requirement_base_dir=workspace_base_dir,
+    )
+    if workspace_pyproject_path is None:
+        return None
+    try:
+        workspace_document = tomllib.loads(workspace_pyproject_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return None
+    if _pyproject_project_name(workspace_document) == package_name:
+        return workspace_pyproject_path.parent
+    tool = workspace_document.get("tool")
+    uv = tool.get("uv") if isinstance(tool, dict) else None
+    workspace = uv.get("workspace") if isinstance(uv, dict) else None
+    members = workspace.get("members") if isinstance(workspace, dict) else None
+    if not isinstance(members, list):
+        return None
+    for member in members:
+        if not isinstance(member, str) or _package_scope_uses_shell_expansion(member):
+            continue
+        try:
+            member_dirs = sorted(workspace_pyproject_path.parent.glob(member))
+        except ValueError:
+            continue
+        for member_dir in member_dirs:
+            member_pyproject_path = _safe_local_pyproject_path(
+                workspace_root=workspace_root,
+                requirement_base_dir=member_dir,
+            )
+            if member_pyproject_path is None:
+                continue
+            try:
+                member_document = tomllib.loads(member_pyproject_path.read_text(encoding="utf-8"))
+            except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+                continue
+            if _pyproject_project_name(member_document) == package_name:
+                return member_pyproject_path.parent
+    return None
+
+
+def _pyproject_project_name(document: dict[str, object]) -> str | None:
+    project = document.get("project")
+    name = project.get("name") if isinstance(project, dict) else None
+    return name if isinstance(name, str) else None
 
 
 def _pyproject_includes_python_playwright(

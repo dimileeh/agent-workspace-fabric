@@ -1218,6 +1218,66 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == expected_install
 
     @pytest.mark.parametrize(
+        ("setup_command", "expected_install"),
+        [
+            (
+                "uv sync --package web --group e2e",
+                "uv run --package web -m playwright install chromium",
+            ),
+            (
+                "uv sync --package=web --extra=e2e",
+                "uv run --package web -m playwright install chromium",
+            ),
+        ],
+    )
+    def test_uv_sync_package_scope_uses_workspace_member_python_playwright(
+        self,
+        tmp_path: Path,
+        setup_command: str,
+        expected_install: str,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        project_root = workspace_root / "apps" / "web"
+        project_root.mkdir(parents=True)
+        (workspace_root / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "root"',
+                    'version = "0.1.0"',
+                    "[tool.uv.workspace]",
+                    'members = ["apps/*"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (project_root / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "web"',
+                    'version = "0.1.0"',
+                    "[project.optional-dependencies]",
+                    'e2e = ["pytest-playwright"]',
+                    "[dependency-groups]",
+                    'e2e = ["pytest-playwright"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[setup_command],
+            validate=["uv run --package web pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile, workspace_root=workspace_root)
+
+        assert command is not None
+        assert command.command == expected_install
+
+    @pytest.mark.parametrize(
         "setup_command",
         [
             "uv sync --group e2e",
