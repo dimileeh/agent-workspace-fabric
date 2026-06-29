@@ -331,10 +331,20 @@ def profile_phase_command_plan(
                         browser_install_package_manager,
                     )
                 ):
+                    split_validate_command = _split_validate_dependency_install_chain(
+                        validate_command,
+                        browser_install_package_manager,
+                    )
                     commands.extend(pending_validate_commands)
                     pending_validate_commands = []
-                    commands.append(validate_command)
+                    if split_validate_command is None:
+                        commands.append(validate_command)
+                    else:
+                        validate_command, trailing_validate_command = split_validate_command
+                        commands.append(validate_command)
                     commands.append(deferred_browser_install)
+                    if split_validate_command is not None:
+                        commands.append(trailing_validate_command)
                     deferred_browser_install = None
                     browser_install_added = True
                     defer_browser_install_until_validate_install = False
@@ -418,6 +428,70 @@ def _node_dependency_install_satisfies_browser_install(
     return (
         len(command_tokens) == 1 and bool(browser_tokens) and command_tokens[0] == browser_tokens[0]
     )
+
+
+def _split_validate_dependency_install_chain(
+    command: ProfileExecutionCommand,
+    browser_install_package_manager: str | None,
+) -> tuple[ProfileExecutionCommand, ProfileExecutionCommand] | None:
+    separator_index = _first_unquoted_and_separator(command.command.command)
+    if separator_index is None:
+        return None
+    install_command = command.command.command[:separator_index].strip()
+    trailing_command = command.command.command[separator_index + 2 :].strip()
+    if not install_command or not trailing_command:
+        return None
+    command_package_manager = _node_dependency_install_package_manager(install_command)
+    if not _node_dependency_install_satisfies_browser_install(
+        command_package_manager,
+        browser_install_package_manager,
+    ):
+        return None
+    return (
+        replace(
+            command,
+            command=command.command.model_copy(update={"command": install_command}),
+        ),
+        replace(
+            command,
+            command=command.command.model_copy(update={"command": trailing_command}),
+        ),
+    )
+
+
+def _first_unquoted_and_separator(command: str) -> int | None:
+    in_single_quote = False
+    in_double_quote = False
+    escaped = False
+    index = 0
+    while index < len(command) - 1:
+        char = command[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and not in_single_quote:
+            escaped = True
+            index += 1
+            continue
+        if in_single_quote:
+            if char == "'":
+                in_single_quote = False
+            index += 1
+            continue
+        if in_double_quote:
+            if char == '"':
+                in_double_quote = False
+            index += 1
+            continue
+        if char == "'":
+            in_single_quote = True
+        elif char == '"':
+            in_double_quote = True
+        elif command[index : index + 2] == "&&":
+            return index
+        index += 1
+    return None
 
 
 def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecutionCommand]:
