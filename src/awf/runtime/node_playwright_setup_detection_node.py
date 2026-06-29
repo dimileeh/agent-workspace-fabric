@@ -72,12 +72,18 @@ def _should_defer_browser_install_until_validate_install(
     ):
         return False
     if _requested_pre_validate_playwright_usage_exists(profile, requested_phases):
-        return _requested_pre_validate_python_playwright_usage_exists(
-            profile,
-            requested_phases,
-        ) and _validate_python_playwright_dependency_install_exists(
-            profile,
-            workspace_root=workspace_root,
+        return (
+            _requested_pre_validate_node_playwright_usage_exists(profile, requested_phases)
+            and _validate_node_dependency_install_exists(profile)
+        ) or (
+            _requested_pre_validate_python_playwright_usage_exists(
+                profile,
+                requested_phases,
+            )
+            and _validate_python_playwright_dependency_install_exists(
+                profile,
+                workspace_root=workspace_root,
+            )
         )
     if "post_agent" in requested_phases or (
         "validate" not in requested_phases and allow_browser_install_defer_to_unrequested_phase
@@ -247,6 +253,19 @@ def _requested_pre_validate_playwright_usage_exists(
     return any(
         _node_command_uses_playwright(command.command)
         or _command_invokes_python_playwright(command.command)
+        for command in _requested_pre_validate_node_dependency_install_commands(
+            profile,
+            requested_phases,
+        )
+    )
+
+
+def _requested_pre_validate_node_playwright_usage_exists(
+    profile: WorkspaceProfile,
+    requested_phases: set[str],
+) -> bool:
+    return any(
+        _node_command_uses_playwright(command.command)
         for command in _requested_pre_validate_node_dependency_install_commands(
             profile,
             requested_phases,

@@ -643,6 +643,14 @@ class TestPlaywrightBrowserInstallCommand:
             workspace_root=project_root,
         )
 
+    def test_node_playwright_usage_defers_to_validate_node_install(self) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["pnpm exec playwright test"],
+            validate=["pnpm install --frozen-lockfile"],
+        )
+
+        assert runtime_browser_probe_deferred_until_validate(profile)
+
     @pytest.mark.parametrize(
         "setup_command",
         [
