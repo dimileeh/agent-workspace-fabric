@@ -119,7 +119,8 @@ class TestPlaywrightBrowserInstallCommand:
         ("package_manager", "expected"),
         [
             ("yarn --cwd apps/web", "yarn --cwd apps/web playwright test"),
-            ("bun --cwd apps/web", "bun --cwd apps/web x playwright test"),
+            ("bun --cwd apps/web", "cd apps/web && bunx playwright test"),
+            ("bun --cwd=apps/web", "cd apps/web && bunx playwright test"),
             ('npm "unterminated', "npx playwright test"),
         ],
     )
@@ -362,6 +363,16 @@ class TestPlaywrightBrowserInstallCommand:
                 "corepack enable && bun install --frozen-lockfile",
                 "bunx playwright install chromium",
                 "/workspace",
+            ),
+            (
+                "corepack enable && bun install --cwd apps/web --frozen-lockfile",
+                "cd apps/web && bunx playwright install chromium",
+                "/workspace/apps/web",
+            ),
+            (
+                "corepack enable && cd apps/web && bun install --frozen-lockfile",
+                "cd apps/web && bunx playwright install chromium",
+                "/workspace/apps/web",
             ),
         ],
     )

@@ -73,6 +73,12 @@ def playwright_command(package_manager: str, *args: str) -> str:
         return f"yarn playwright {escaped_args}"
     if executable == "bun":
         if len(package_manager_tokens) > 1:
+            package_dir = _node_package_manager_package_dir(package_manager)
+            if package_dir is not None:
+                return (
+                    f"{shlex.join(['cd', package_dir])} && "
+                    f"{shlex.join(['bunx', 'playwright', *args])}"
+                )
             return shlex.join([*package_manager_tokens, "x", "playwright", *args])
         return f"bunx playwright {escaped_args}"
     if executable == "npm" and len(package_manager_tokens) > 1:
