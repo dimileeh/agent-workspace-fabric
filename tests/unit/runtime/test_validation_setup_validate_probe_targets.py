@@ -921,6 +921,29 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == expected
 
     @pytest.mark.parametrize(
+        ("validate_command", "expected"),
+        [
+            ("pnpm test:e2e", "pnpm exec playwright install chromium"),
+            ("bun test:e2e", "bunx playwright install chromium"),
+            ("npm run test:e2e", "npx playwright install chromium"),
+        ],
+    )
+    def test_browser_install_infers_manager_from_unscoped_browser_script(
+        self,
+        validate_command: str,
+        expected: str,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[validate_command],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == expected
+
+    @pytest.mark.parametrize(
         ("setup_command", "expected"),
         [
             ("'unterminated", "npx playwright install chromium"),

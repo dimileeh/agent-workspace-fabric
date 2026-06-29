@@ -2012,7 +2012,10 @@ def _node_validation_package_manager(command: str) -> str | None:
         executable = tokens[index]
         if executable == "cd":
             return None
-        if _command_segment_invokes_node_playwright(tokens, index):
+        if _command_segment_invokes_node_playwright(
+            tokens,
+            index,
+        ) or _command_segment_invokes_browser_script(tokens, index):
             if executable in _NODE_PACKAGE_MANAGERS:
                 return executable
             if executable in _NODE_PLAYWRIGHT_INSTALL_RUNNERS:
