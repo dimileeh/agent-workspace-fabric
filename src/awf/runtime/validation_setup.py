@@ -543,16 +543,27 @@ def _command_install_trailing_scope_prefix(command: str) -> str | None:
             continue
         if token != "export":
             continue
+        leading_assignments = tokens[command_start:command_index]
         exports = tokens[command_index + 1 : command_end]
         if (
             exports
-            and all(_ENV_ASSIGNMENT_RE.fullmatch(export) for export in exports)
-            and not any("$(" in export or "`" in export for export in exports)
+            and all(_replay_safe_env_assignment(assignment) for assignment in leading_assignments)
+            and all(_replay_safe_env_assignment(export) for export in exports)
         ):
             safe_commands.append(shlex.join(command_tokens))
+            continue
+        return None
     if not safe_commands:
         return None
     return "; ".join(safe_commands)
+
+
+def _replay_safe_env_assignment(assignment: str) -> bool:
+    return (
+        _ENV_ASSIGNMENT_RE.fullmatch(assignment) is not None
+        and "$" not in assignment
+        and "`" not in assignment
+    )
 
 
 def _command_is_safe_export_scope(command: str) -> bool:
@@ -560,8 +571,6 @@ def _command_is_safe_export_scope(command: str) -> bool:
     if tokens is None:
         return False
     if any(token in {"||", "|", "|&", "&"} for token in tokens):
-        return False
-    if "$(" in command or "`" in command:
         return False
     saw_export = False
     for command_start, command_end in _sequential_shell_command_ranges(tokens):
@@ -575,8 +584,15 @@ def _command_is_safe_export_scope(command: str) -> bool:
             continue
         if token != "export":
             return False
+        leading_assignments = tokens[command_start:command_index]
         exports = tokens[command_index + 1 : command_end]
-        if not exports or not all(_ENV_ASSIGNMENT_RE.fullmatch(export) for export in exports):
+        if (
+            not exports
+            or not all(
+                _replay_safe_env_assignment(assignment) for assignment in leading_assignments
+            )
+            or not all(_replay_safe_env_assignment(export) for export in exports)
+        ):
             return False
         saw_export = True
     return saw_export
