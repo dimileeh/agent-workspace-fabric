@@ -252,6 +252,10 @@ class TestProbeRuntimeBrowsers:
             )
 
         assert exc_info.value.reason_code == "RUNTIME_BROWSER_PROBE_FAILED"
+        assert exc_info.value.returncode is None
+        assert exc_info.value.stdout == ""
+        assert exc_info.value.stderr == "cannot exec into container"
+        assert "cannot exec into container" in str(exc_info.value)
         assert len(spy.calls) == 1
 
     async def test_probe_exec_unexpected_exception_propagates(self) -> None:
@@ -274,12 +278,18 @@ class TestProbeRuntimeBrowsers:
         profile = _profile_with_browsers(["chromium"])
         spy = _SpyExec([ProbeExecResult(returncode=1, stdout="", stderr="exec failed")])
 
-        with pytest.raises(RuntimeBrowserProbeError):
+        with pytest.raises(RuntimeBrowserProbeError) as exc_info:
             await probe_runtime_browsers(
                 profile=profile,
                 exec_in_container=spy,
                 raise_on_probe_failure=True,
             )
+
+        assert exc_info.value.returncode == 1
+        assert exc_info.value.stdout == ""
+        assert exc_info.value.stderr == "exec failed"
+        assert "exit=1" in str(exc_info.value)
+        assert "exec failed" in str(exc_info.value)
 
     async def test_reachable_probe_without_parseable_status_is_silent(self) -> None:
         profile = _profile_with_browsers(["chromium"])
@@ -289,6 +299,25 @@ class TestProbeRuntimeBrowsers:
 
         assert findings == ()
 
+    async def test_reachable_probe_without_parseable_status_raises_when_requested(
+        self,
+    ) -> None:
+        profile = _profile_with_browsers(["chromium"])
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="noise\n", stderr="trace")])
+
+        with pytest.raises(RuntimeBrowserProbeError) as exc_info:
+            await probe_runtime_browsers(
+                profile=profile,
+                exec_in_container=spy,
+                raise_on_probe_failure=True,
+            )
+
+        assert exc_info.value.returncode == 0
+        assert exc_info.value.stdout == "noise\n"
+        assert exc_info.value.stderr == "trace"
+        assert "exit=0" in str(exc_info.value)
+        assert "trace" in str(exc_info.value)
+
     async def test_reachable_probe_with_partial_statuses_is_silent(self) -> None:
         profile = _profile_with_browsers(["chromium", "firefox"])
         spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
@@ -296,6 +325,25 @@ class TestProbeRuntimeBrowsers:
         findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
 
         assert findings == ()
+
+    async def test_reachable_probe_with_partial_statuses_raises_when_requested(
+        self,
+    ) -> None:
+        profile = _profile_with_browsers(["chromium", "firefox"])
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="trace")])
+
+        with pytest.raises(RuntimeBrowserProbeError) as exc_info:
+            await probe_runtime_browsers(
+                profile=profile,
+                exec_in_container=spy,
+                raise_on_probe_failure=True,
+            )
+
+        assert exc_info.value.returncode == 0
+        assert exc_info.value.stdout == "OK chromium\n"
+        assert exc_info.value.stderr == "trace"
+        assert "exit=0" in str(exc_info.value)
+        assert "trace" in str(exc_info.value)
 
     def test_browser_probe_workdir_uses_scoped_npm_package_directory(self) -> None:
         profile = _profile_with_setup_and_browsers(["npm --prefix apps/web ci"])

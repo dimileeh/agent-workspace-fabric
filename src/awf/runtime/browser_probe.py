@@ -44,6 +44,26 @@ class RuntimeBrowserProbeError(OSError):
 
     reason_code = "RUNTIME_BROWSER_PROBE_FAILED"
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        returncode: int | None = None,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> None:
+        """Capture probe process details for operator-facing diagnostics."""
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        rendered = message
+        if returncode is not None:
+            rendered = f"{rendered} (exit={returncode})"
+        detail = stderr.strip() or stdout.strip()
+        if detail:
+            rendered = f"{rendered}: {detail}"
+        super().__init__(rendered)
+
 
 _BROWSER_PROBE_SCRIPT_TEMPLATE = r"""
 __NODE_RUNTIME__ - "$@" <<'NODE' || true
@@ -252,11 +272,19 @@ async def probe_runtime_browsers(
         )
     except OSError as exc:
         if raise_on_probe_failure:
-            raise RuntimeBrowserProbeError("runtime browser probe exec failed") from exc
+            raise RuntimeBrowserProbeError(
+                "runtime browser probe exec failed",
+                stderr=str(exc),
+            ) from exc
         return runtime_browser_findings(profile, None)
     if result.returncode != 0:
         if raise_on_probe_failure:
-            raise RuntimeBrowserProbeError("runtime browser probe command failed")
+            raise RuntimeBrowserProbeError(
+                "runtime browser probe command failed",
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
         return runtime_browser_findings(profile, None)
 
     available: dict[str, bool] = {}
@@ -264,12 +292,22 @@ async def probe_runtime_browsers(
         available[match.group("browser")] = match.group("status") == "OK"
     if not available:
         if raise_on_probe_failure:
-            raise RuntimeBrowserProbeError("runtime browser probe reported no browsers")
+            raise RuntimeBrowserProbeError(
+                "runtime browser probe reported no browsers",
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
         return runtime_browser_findings(profile, None)
     declared_browsers = {browser.lower() for browser in profile.runtime.browsers}
     reported_browsers = {browser.lower() for browser in available}
     if not declared_browsers.issubset(reported_browsers):
         if raise_on_probe_failure:
-            raise RuntimeBrowserProbeError("runtime browser probe omitted declared browsers")
+            raise RuntimeBrowserProbeError(
+                "runtime browser probe omitted declared browsers",
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
         return runtime_browser_findings(profile, None)
     return runtime_browser_findings(profile, available)
