@@ -1199,6 +1199,78 @@ class TestPlaywrightBrowserInstallCommand:
         assert commands[1].command.required is False
 
     @pytest.mark.parametrize(
+        ("setup_command", "expected_install"),
+        [
+            (
+                "uv add --project apps/web playwright",
+                "uv run --project apps/web -m playwright install chromium",
+            ),
+            (
+                "uv add --project=apps/web playwright",
+                "uv run --project apps/web -m playwright install chromium",
+            ),
+            (
+                "uv add --directory apps/web playwright",
+                "uv run --directory apps/web -m playwright install chromium",
+            ),
+            (
+                "uv add --directory=apps/web playwright",
+                "uv run --directory apps/web -m playwright install chromium",
+            ),
+            (
+                "uv add --package web playwright",
+                "uv run --package web -m playwright install chromium",
+            ),
+            (
+                "uv add --package=web playwright",
+                "uv run --package web -m playwright install chromium",
+            ),
+        ],
+    )
+    def test_uv_add_scope_uses_python_playwright(
+        self,
+        tmp_path: Path,
+        setup_command: str,
+        expected_install: str,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        project_root = workspace_root / "apps" / "web"
+        project_root.mkdir(parents=True)
+        (workspace_root / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "workspace"',
+                    'version = "0.1.0"',
+                    "[tool.uv.workspace]",
+                    'members = ["apps/*"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (project_root / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "web"',
+                    'version = "0.1.0"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[setup_command],
+            validate=["uv run --project apps/web pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile, workspace_root=workspace_root)
+
+        assert command is not None
+        assert command.command == expected_install
+
+    @pytest.mark.parametrize(
         ("setup_command", "project_dir", "expected_install"),
         [
             (

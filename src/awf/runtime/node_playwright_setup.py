@@ -637,7 +637,16 @@ def _uv_python_playwright_install_executable(
     if index + 1 >= len(tokens):
         return None
     if tokens[index + 1] == "add":
-        return "uv run"
+        scope = _uv_sync_scope(
+            tokens,
+            index + 2,
+            workspace_root=workspace_root,
+            requirement_base_dir=requirement_base_dir,
+        )
+        if scope is None:
+            return "uv run"
+        _, run_scope_tokens = scope
+        return shlex.join(["uv", "run", *run_scope_tokens])
     if tokens[index + 1] == "sync":
         scope = _uv_sync_scope(
             tokens,
