@@ -28,6 +28,9 @@ from awf.runtime.node_playwright_setup import (
     _command_invokes_python_playwright as _command_invokes_python_playwright,
 )
 from awf.runtime.node_playwright_setup import (
+    _command_segment_invokes_node_playwright as _command_segment_invokes_node_playwright,
+)
+from awf.runtime.node_playwright_setup import (
     _node_command_uses_playwright as _node_command_uses_playwright,
 )
 from awf.runtime.node_playwright_setup import (
@@ -226,6 +229,20 @@ def _shell_tokens(command: str, *, comments: bool = False) -> list[str] | None:
         return list(lexer)
     except ValueError:
         return None
+
+
+def _command_directly_invokes_node_playwright(command: str) -> bool:
+    tokens = _shell_tokens(command, comments=True)
+    if tokens is None:
+        return False
+    for command_start, command_end in _sequential_shell_command_ranges(tokens):
+        command_tokens = tokens[command_start:command_end]
+        index = _first_non_assignment_token_index(command_tokens)
+        while index < len(command_tokens) and _ENV_ASSIGNMENT_RE.fullmatch(command_tokens[index]):
+            index += 1
+        if _command_segment_invokes_node_playwright(command_tokens, index):
+            return True
+    return False
 
 
 PYTEST_TEST_FAILURE = "PYTEST_TEST_FAILURE"
@@ -494,7 +511,25 @@ def profile_phase_command_plan(
                         browser_install_package_manager,
                         workspace_root=workspace_root,
                     )
-                    commands.extend(pending_validate_commands)
+                    first_pending_browser_use_index = next(
+                        (
+                            index
+                            for index, pending_command in enumerate(pending_validate_commands)
+                            if _command_directly_invokes_node_playwright(
+                                pending_command.command.command
+                            )
+                            or _command_invokes_python_playwright(pending_command.command.command)
+                        ),
+                        None,
+                    )
+                    pending_after_browser_install: list[ProfileExecutionCommand] = []
+                    if first_pending_browser_use_index is None:
+                        commands.extend(pending_validate_commands)
+                    else:
+                        commands.extend(pending_validate_commands[:first_pending_browser_use_index])
+                        pending_after_browser_install = pending_validate_commands[
+                            first_pending_browser_use_index:
+                        ]
                     pending_validate_commands = []
                     browser_install_scope_prefix = None
                     if split_validate_command is None:
@@ -511,6 +546,7 @@ def profile_phase_command_plan(
                             commands.append(deferred_browser_install)
                         else:
                             commands.append(injected_validate_command)
+                        commands.extend(pending_after_browser_install)
                     else:
                         (
                             validate_command,
@@ -524,6 +560,7 @@ def profile_phase_command_plan(
                                 browser_install_scope_prefix,
                             )
                         )
+                        commands.extend(pending_after_browser_install)
                         commands.append(trailing_validate_command)
                     deferred_browser_install = None
                     browser_install_added = True

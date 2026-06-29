@@ -355,6 +355,32 @@ class TestBrowserPhaseCommandPlan:
         assert commands[2].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_installs_browser_before_pending_validate_playwright(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-pending-validate-playwright-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "validate": [
+                        "pnpm exec playwright test",
+                        "pnpm install",
+                    ],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("validate",))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm exec playwright test"),
+        ]
+        assert commands[1].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_appends_deferred_browser_install_without_matching_validate_install(
         self,
     ) -> None:
