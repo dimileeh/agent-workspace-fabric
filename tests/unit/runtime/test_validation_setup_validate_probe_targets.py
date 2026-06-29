@@ -1057,15 +1057,23 @@ class TestPlaywrightBrowserInstallCommand:
     ) -> None:
         profile = _profile_with_setup_validate_and_browsers(
             setup=[],
-            validate=["export BASE_URL=http://app; pnpm install; pnpm test:e2e"],
+            validate=[
+                "export PLAYWRIGHT_BROWSERS_PATH=.pw; pnpm install; pnpm exec playwright test"
+            ],
         )
 
         commands = profile_phase_command_plan(profile, ["validate"])
 
         assert [(command.phase, command.command.command) for command in commands] == [
-            ("validate", "export BASE_URL=http://app; pnpm install"),
-            ("setup", "pnpm exec playwright install chromium"),
-            ("validate", "export BASE_URL=http://app && pnpm test:e2e"),
+            ("validate", "export PLAYWRIGHT_BROWSERS_PATH=.pw; pnpm install"),
+            (
+                "setup",
+                "export PLAYWRIGHT_BROWSERS_PATH=.pw && pnpm exec playwright install chromium",
+            ),
+            (
+                "validate",
+                "export PLAYWRIGHT_BROWSERS_PATH=.pw && pnpm exec playwright test",
+            ),
         ]
         assert commands[1].command.required is False
 

@@ -633,7 +633,7 @@ def _dependency_install_chain_scope_prefixes(
         ):
             return (
                 trailing_scope_prefix,
-                _command_install_assignment_only_scope_prefix(scope_prefix),
+                _command_install_browser_scope_prefix(scope_prefix),
             )
     return None
 
@@ -714,17 +714,34 @@ def _command_install_trailing_scope_prefix(command: str) -> str | None:
     return "; ".join(safe_commands)
 
 
-def _command_install_assignment_only_scope_prefix(command: str) -> str | None:
+def _command_install_browser_scope_prefix(command: str) -> str | None:
     tokens = _shell_tokens(command)
     if tokens is None or any(token in {"||", "|", "|&", "&"} for token in tokens):
         return None
-    safe_commands = [
-        command_text
-        for command_text, command_tokens in _sequential_shell_command_text_ranges(command)
-        if command_tokens
-        and _first_non_assignment_token_index(command_tokens) >= len(command_tokens)
-        and all(_replay_safe_assignment_only_state(assignment) for assignment in command_tokens)
-    ]
+    safe_commands: list[str] = []
+    for command_text, command_tokens in _sequential_shell_command_text_ranges(command):
+        command_index = _first_non_assignment_token_index(command_tokens)
+        if command_index >= len(command_tokens):
+            if command_tokens and all(
+                _replay_safe_assignment_only_state(assignment) for assignment in command_tokens
+            ):
+                safe_commands.append(command_text)
+            continue
+        token = command_tokens[command_index]
+        if token in _VALIDATE_PROBE_LEADING_GUARDS:
+            continue
+        if token != "export":
+            continue
+        leading_assignments = command_tokens[:command_index]
+        exports = command_tokens[command_index + 1 :]
+        if (
+            exports
+            and all(_replay_safe_env_assignment(assignment) for assignment in leading_assignments)
+            and all(_replay_safe_env_assignment(export) for export in exports)
+        ):
+            safe_commands.append(shlex.join(command_tokens))
+            continue
+        return None
     if not safe_commands:
         return None
     return "; ".join(safe_commands)
