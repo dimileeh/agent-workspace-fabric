@@ -1271,7 +1271,7 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     tokens = _shell_tokens(command, comments=True)
     if tokens is None:
         return None
-    index = _first_non_assignment_token_index(tokens)
+    index = _assignment_preamble_command_index(tokens, 0)
     package_manager = _node_dependency_install_package_manager_from_tokens(tokens, index, [])
     if package_manager is not None:
         return package_manager
@@ -1286,8 +1286,7 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
         if next_command_index is None:
             return None
         index = next_command_index
-        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
-            index += 1
+        index = _assignment_preamble_command_index(tokens, index)
         package_manager = _node_dependency_install_package_manager_from_tokens(tokens, index, [])
         if package_manager is not None:
             return package_manager
@@ -1295,8 +1294,7 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     package_dir, install_index = scoped_install
     index = install_index
     while index < len(tokens):
-        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
-            index += 1
+        index = _assignment_preamble_command_index(tokens, index)
         if index >= len(tokens):
             return None
         package_manager = tokens[index]
@@ -1317,6 +1315,20 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
             return None
         index = next_scoped_command_index
     return None
+
+
+def _assignment_preamble_command_index(tokens: list[str], index: int) -> int:
+    assignment_start = index
+    while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+        index += 1
+    if (
+        index > assignment_start
+        and index < len(tokens)
+        and tokens[index] in {"&&", ";"}
+        and index + 1 < len(tokens)
+    ):
+        return index + 1
+    return index
 
 
 def _setup_preamble_next_command_index(tokens: list[str], index: int) -> int | None:
@@ -1525,8 +1537,7 @@ def _leading_cd_package_scope(tokens: list[str], index: int) -> tuple[str, int] 
     if separator_index >= len(tokens) or tokens[separator_index] not in {"&&", ";"}:
         return None
     install_index = separator_index + 1
-    while install_index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[install_index]):
-        install_index += 1
+    install_index = _assignment_preamble_command_index(tokens, install_index)
     if install_index >= len(tokens):
         return None
     return package_dir, install_index

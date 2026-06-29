@@ -1001,6 +1001,30 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    @pytest.mark.parametrize("phase", ["setup", "validate"])
+    def test_browser_install_splits_assignment_only_install_preamble(
+        self,
+        phase: str,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-profile",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    phase: ["PATH=/opt/node/bin:$PATH; pnpm install; pnpm exec playwright test"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, [phase])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            (phase, "PATH=/opt/node/bin:$PATH; pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            (phase, "pnpm exec playwright test"),
+        ]
+        assert commands[1].command.required is False
+
     def test_validate_browser_install_ignores_separators_inside_shell_comment(
         self,
     ) -> None:
