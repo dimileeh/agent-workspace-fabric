@@ -952,6 +952,21 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    def test_validate_browser_install_splits_env_wrapped_install_and_test_chain(self) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["env CI=1 pnpm install && pnpm exec playwright test"],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "env CI=1 pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm exec playwright test"),
+        ]
+        assert commands[1].command.required is False
+
     def test_validate_browser_install_preserves_npm_workspaces_install_scope(
         self,
     ) -> None:

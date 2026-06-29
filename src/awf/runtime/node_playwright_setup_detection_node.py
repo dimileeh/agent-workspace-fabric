@@ -44,7 +44,11 @@ from awf.runtime.node_playwright_setup_shell import (
     _package_scope_uses_shell_expansion,
     _sequential_command_next_index,
 )
-from awf.runtime.validation_command_probe import _first_non_assignment_token_index
+from awf.runtime.validation_command_probe import (
+    _first_non_assignment_token_index,
+    _resolve_env_wrapper,
+)
+from awf.runtime.validation_coverage import _command_token_name
 
 _NPM_PRESERVED_VALUELESS_INSTALL_FLAGS = frozenset({"--workspaces"})
 
@@ -822,7 +826,9 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     tokens = _shell_tokens(command, comments=True)
     if tokens is None:
         return None
-    index = _assignment_preamble_command_index(tokens, 0)
+    index = _node_dependency_install_command_index(tokens, 0)
+    if index is None:
+        return None
     package_manager = _node_dependency_install_package_manager_from_tokens(tokens, index, [])
     if package_manager is not None:
         return package_manager
@@ -837,7 +843,9 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
         if next_command_index is None:
             return None
         index = next_command_index
-        index = _assignment_preamble_command_index(tokens, index)
+        index = _node_dependency_install_command_index(tokens, index)
+        if index is None:
+            return None
         package_manager = _node_dependency_install_package_manager_from_tokens(tokens, index, [])
         if package_manager is not None:
             return package_manager
@@ -845,27 +853,37 @@ def _node_dependency_install_package_manager(command: str) -> str | None:
     package_dir, install_index = scoped_install
     index = install_index
     while index < len(tokens):
-        index = _assignment_preamble_command_index(tokens, index)
-        if index >= len(tokens):
+        command_index = _node_dependency_install_command_index(tokens, index)
+        if command_index is None:
             return None
-        package_manager = tokens[index]
+        package_manager = tokens[command_index]
         inferred_package_manager = _node_dependency_install_package_manager_from_tokens(
             tokens,
-            index,
+            command_index,
             _node_package_manager_cd_location_tokens(package_manager, package_dir),
         )
         if inferred_package_manager is not None:
             return inferred_package_manager
-        corepack_install_index = _corepack_preamble_next_command_index(tokens, index)
+        corepack_install_index = _corepack_preamble_next_command_index(tokens, command_index)
         next_scoped_command_index: int | None
         if corepack_install_index is not None:
             next_scoped_command_index = corepack_install_index
         else:
-            next_scoped_command_index = _setup_preamble_next_command_index(tokens, index)
+            next_scoped_command_index = _setup_preamble_next_command_index(tokens, command_index)
         if next_scoped_command_index is None:
             return None
         index = next_scoped_command_index
     return None
+
+
+def _node_dependency_install_command_index(tokens: list[str], index: int) -> int | None:
+    index = _assignment_preamble_command_index(tokens, index)
+    while index < len(tokens) and _command_token_name(tokens[index]) == "env":
+        resolved = _resolve_env_wrapper(tokens, index)
+        if not isinstance(resolved, int):
+            return None
+        index = resolved
+    return index
 
 
 def _setup_preamble_next_command_index(tokens: list[str], index: int) -> int | None:
