@@ -367,6 +367,53 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.required is False
 
     @pytest.mark.parametrize(
+        ("setup_command", "expected_command"),
+        [
+            (
+                "cd apps/web && . .venv/bin/activate && pip install playwright",
+                "cd apps/web && .venv/bin/python -m playwright install chromium",
+            ),
+            (
+                "cd apps/web && source .venv/bin/activate && python -m pip install playwright",
+                "cd apps/web && .venv/bin/python -m playwright install chromium",
+            ),
+            (
+                "cd apps/web && . .venv/bin/activate && pip3.12 install playwright",
+                "cd apps/web && .venv/bin/python3.12 -m playwright install chromium",
+            ),
+        ],
+    )
+    def test_python_playwright_profile_preserves_cd_scope_after_venv_activation(
+        self,
+        setup_command: str,
+        expected_command: str,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[setup_command],
+            validate=["cd apps/web && . .venv/bin/activate && pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == expected_command
+        assert command.required is False
+
+    def test_python_playwright_profile_ignores_non_venv_source_before_scoped_pip(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["cd apps/web && . .env && pip install playwright"],
+            validate=["cd apps/web && pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "cd apps/web && python -m playwright install chromium"
+        assert command.required is False
+
+    @pytest.mark.parametrize(
         ("setup_command", "requirements_content"),
         [
             ("python -m pip install -r requirements.txt", "pytest-playwright==0.5.0\n"),

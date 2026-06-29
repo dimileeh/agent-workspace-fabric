@@ -126,6 +126,23 @@ def _python_executable_for_pytest_executable(executable: str) -> str | None:
     return None
 
 
+def _active_python_executable_for_command_executable(
+    executable: str,
+    active_python_executable: str | None,
+) -> str | None:
+    if active_python_executable is None or "/" in executable:
+        return None
+    if _is_python_executable(executable):
+        suffix = _executable_name(executable).removeprefix("python")
+    elif _is_pip_executable(executable):
+        suffix = _executable_name(executable).removeprefix("pip")
+    elif _is_pytest_executable(executable):
+        suffix = _executable_name(executable).removeprefix("pytest")
+    else:
+        return None
+    return _replace_executable_name(active_python_executable, f"python{suffix}")
+
+
 def _shell_tokens(command: str, *, comments: bool = False) -> list[str] | None:
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
@@ -484,6 +501,9 @@ def _command_python_playwright_executable(
     if tokens is None:
         return None
     index = _first_non_assignment_token_index(tokens)
+    active_package_dir: str | None = None
+    active_requirement_base_dir: Path | None = None
+    active_python_executable: str | None = None
     while index < len(tokens):
         while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
             index += 1
@@ -491,32 +511,30 @@ def _command_python_playwright_executable(
             return None
         scoped_command = _leading_cd_package_scope(tokens, index)
         if scoped_command is not None:
-            package_dir, command_index = scoped_command
-            executable = _command_segment_python_playwright_executable(
-                tokens,
-                command_index,
+            active_package_dir, index = scoped_command
+            active_requirement_base_dir = _requirement_base_dir_for_scope(
+                active_package_dir,
                 workspace_root=workspace_root,
-                requirement_base_dir=_requirement_base_dir_for_scope(
-                    package_dir,
-                    workspace_root=workspace_root,
-                ),
-                infer_from_pytest_selector=infer_from_pytest_selector,
             )
-            if executable is not None:
-                return f"{shlex.join(['cd', package_dir])} && {executable}"
-            next_command_index = _sequential_command_next_index(tokens, command_index)
-            if next_command_index is None:
-                return None
-            index = next_command_index
-            continue
+            active_python_executable = None
         executable = _command_segment_python_playwright_executable(
             tokens,
             index,
             workspace_root=workspace_root,
+            requirement_base_dir=active_requirement_base_dir,
             infer_from_pytest_selector=infer_from_pytest_selector,
+            active_python_executable=active_python_executable,
         )
         if executable is not None:
+            if active_package_dir is not None:
+                return f"{shlex.join(['cd', active_package_dir])} && {executable}"
             return executable
+        activated_python_executable = _python_executable_for_activation_segment(
+            tokens,
+            index,
+        )
+        if activated_python_executable is not None:
+            active_python_executable = activated_python_executable
         next_command_index = _sequential_command_next_index(tokens, index)
         if next_command_index is None:
             return None
@@ -545,6 +563,7 @@ def _command_segment_python_playwright_executable(
     workspace_root: Path | None = None,
     requirement_base_dir: Path | None = None,
     infer_from_pytest_selector: bool = True,
+    active_python_executable: str | None = None,
 ) -> str | None:
     executable = tokens[index]
     if _is_python_executable(executable) and tokens[index + 1 : index + 3] == [
@@ -556,8 +575,21 @@ def _command_segment_python_playwright_executable(
         if not infer_from_pytest_selector:
             return None
         if _is_python_executable(executable):
-            return executable
-        return _python_executable_for_pytest_executable(executable) or "python"
+            return (
+                _active_python_executable_for_command_executable(
+                    executable,
+                    active_python_executable,
+                )
+                or executable
+            )
+        return (
+            _active_python_executable_for_command_executable(
+                executable,
+                active_python_executable,
+            )
+            or _python_executable_for_pytest_executable(executable)
+            or "python"
+        )
     if _command_segment_installs_python_playwright(
         tokens,
         index,
@@ -571,8 +603,28 @@ def _command_segment_python_playwright_executable(
                 workspace_root=workspace_root,
                 requirement_base_dir=requirement_base_dir,
             )
-        return _python_executable_for_install_executable(executable) or "python"
+        return (
+            _active_python_executable_for_command_executable(
+                executable,
+                active_python_executable,
+            )
+            or _python_executable_for_install_executable(executable)
+            or "python"
+        )
     return None
+
+
+def _python_executable_for_activation_segment(tokens: list[str], index: int) -> str | None:
+    if index + 1 >= len(tokens) or tokens[index] not in {".", "source"}:
+        return None
+    activation_path = tokens[index + 1]
+    if (
+        _package_scope_uses_shell_expansion(activation_path)
+        or Path(activation_path).name != "activate"
+        or Path(activation_path).parent.name != "bin"
+    ):
+        return None
+    return str(Path(activation_path).parent / "python")
 
 
 def _uv_python_playwright_install_executable(
