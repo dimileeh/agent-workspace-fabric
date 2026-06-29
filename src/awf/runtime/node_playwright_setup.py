@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from pathlib import Path
 
 from awf.profiles.models import ProfileCommand, WorkspaceProfile
@@ -64,6 +65,7 @@ _PYTHON_PLAYWRIGHT_REQUIREMENT_RE = re.compile(
 )
 _PIP_REQUIREMENT_FILE_FLAGS = frozenset({"-r", "--requirement"})
 _PIP_REQUIREMENT_FILE_EQUALS_PREFIX = "--requirement="
+_CONTAINER_WORKSPACE_ROOT = Path("/workspace")
 _UV_PIP_PYTHON_FLAGS = frozenset({"-p", "--python"})
 _UV_PIP_PYTHON_EQUALS_PREFIXES = ("-p=", "--python=")
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
@@ -653,7 +655,10 @@ def _safe_local_requirement_file_path(
         else resolved_workspace_root
     )
     path = Path(requirement_file)
-    if not path.is_absolute():
+    if path.is_absolute() and workspace_root is not None:
+        with suppress(ValueError):
+            path = resolved_workspace_root / path.relative_to(_CONTAINER_WORKSPACE_ROOT)
+    elif not path.is_absolute():
         path = resolved_requirement_base_dir / path
     try:
         resolved = path.resolve(strict=True)

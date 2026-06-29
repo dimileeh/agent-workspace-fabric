@@ -444,6 +444,28 @@ class TestPlaywrightBrowserInstallCommand:
             ("validate", "pytest --browser chromium"),
         ]
 
+    def test_python_playwright_profile_maps_container_workspace_requirement_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_root = tmp_path / "project"
+        host_root = tmp_path / "host"
+        project_root.mkdir()
+        host_root.mkdir()
+        monkeypatch.chdir(host_root)
+        (project_root / "requirements.txt").write_text("playwright\n", encoding="utf-8")
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["python -m pip install -r /workspace/requirements.txt"],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile, workspace_root=project_root)
+
+        assert command is not None
+        assert command.command == "python -m playwright install chromium"
+        assert command.required is False
+
     def test_browser_probe_deferral_resolves_validate_requirements_from_workspace_root(
         self,
         tmp_path: Path,
@@ -488,6 +510,26 @@ class TestPlaywrightBrowserInstallCommand:
         )
 
         command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "npx playwright install chromium"
+
+    def test_python_playwright_profile_rejects_host_absolute_requirement_outside_workspace(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        project_root = tmp_path / "project"
+        outside_root = tmp_path / "outside"
+        project_root.mkdir()
+        outside_root.mkdir()
+        outside_requirements = outside_root / "requirements.txt"
+        outside_requirements.write_text("playwright\n", encoding="utf-8")
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[f"python -m pip install -r {outside_requirements}"],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile, workspace_root=project_root)
 
         assert command is not None
         assert command.command == "npx playwright install chromium"
