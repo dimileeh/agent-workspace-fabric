@@ -84,7 +84,6 @@ from awf.runtime.validation import (
     ValidationResult,
     profile_phase_command_plan,
 )
-from awf.runtime.validation_setup import runtime_browser_probe_deferred_until_validate
 from awf.runtime.validation_worktree import (
     VALIDATION_INFRASTRUCTURE_ERROR,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
@@ -184,10 +183,7 @@ async def run_validation_and_fix_cycle(
             "_record_runtime_browser_findings_safe",
             None,
         )
-        if callable(record_browser_findings) and runtime_browser_probe_deferred_until_validate(
-            profile,
-            workspace_root=worktree_path,
-        ):
+        if callable(record_browser_findings):
             recorded = await record_browser_findings(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -251,29 +247,38 @@ async def run_validation_and_fix_cycle(
         workspace_root=worktree_path,
     )
     validation_commands = [step.command.command for step in validation_command_plan]
-    deferred_runtime_browser_probe_expected = runtime_browser_probe_deferred_until_validate(
-        profile,
-        workspace_root=worktree_path,
+    validation_runtime_browser_install_command_indexes = tuple(
+        index for index, step in enumerate(validation_command_plan) if step.phase == "setup"
     )
-    deferred_runtime_browser_install_commands = (
-        tuple(step.command.command for step in validation_command_plan if step.phase == "setup")
-        if deferred_runtime_browser_probe_expected
-        else ()
+    validation_runtime_browser_install_commands = tuple(
+        validation_commands[index] for index in validation_runtime_browser_install_command_indexes
     )
+    validation_command_indexes = {
+        command: index for index, command in enumerate(validation_commands)
+    }
 
-    def _deferred_runtime_browser_install_completed(
+    def _validation_runtime_browser_install_completed(
         val_result: ValidationResult,
     ) -> bool:
-        if not deferred_runtime_browser_probe_expected:
+        if not validation_runtime_browser_install_commands:
             return False
-        if not deferred_runtime_browser_install_commands:
-            return False
-        pending = list(deferred_runtime_browser_install_commands)
+        if val_result.all_passed:
+            return True
+        pending = list(validation_runtime_browser_install_commands)
         for command_result in val_result.commands:
             if command_result.command == pending[0]:
                 pending.pop(0)
                 if not pending:
                     return True
+        last_install_index = max(validation_runtime_browser_install_command_indexes)
+        for command_result in val_result.commands:
+            command_index = validation_command_indexes.get(command_result.command)
+            if (
+                command_index is not None
+                and command_index > last_install_index
+                and command_result.blocks_validation
+            ):
+                return True
         return False
 
     test_commands_tuple = tuple(validation_commands)
@@ -304,7 +309,7 @@ async def run_validation_and_fix_cycle(
         # post-validation conformance fix prompts. The per-category
         # counters below enforce their separate budgets.
         deferred_runtime_browser_findings_recorded = False
-        deferred_runtime_browser_probe_ready = False
+        deferred_runtime_browser_probe_ready = bool(validation_runtime_browser_install_commands)
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.validating,
@@ -377,7 +382,7 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 include_coverage=False,
             )
-            deferred_runtime_browser_probe_ready = _deferred_runtime_browser_install_completed(
+            deferred_runtime_browser_probe_ready = _validation_runtime_browser_install_completed(
                 val_result,
             )
             if run_local_coverage and val_result.all_passed:
