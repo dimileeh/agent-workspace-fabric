@@ -405,7 +405,14 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
 
     mirrors_root = work_dir / "git" / "mirrors"
     linked_mirror_path = _managed_mirror_path(mirror_path_for_worktree(path), mirrors_root)
-    return linked_mirror_path or mirror_path_for_registered_worktree(path, mirrors_root)
+    registered_mirror_path = mirror_path_for_registered_worktree(path, mirrors_root)
+    if linked_mirror_path is None:
+        return registered_mirror_path
+    if registered_mirror_path is None:
+        return None
+    if linked_mirror_path == registered_mirror_path:
+        return linked_mirror_path
+    return registered_mirror_path
 
 
 def _managed_mirror_path(path: Path | None, mirrors_root: Path) -> Path | None:

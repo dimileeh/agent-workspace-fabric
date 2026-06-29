@@ -974,6 +974,39 @@ async def test_remove_orphan_worktree_fails_closed_for_external_linked_mirror(
 
 
 @pytest.mark.unit
+async def test_remove_orphan_worktree_falls_back_when_linked_mirror_registry_mismatches(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    correct_mirror = work_dir / "git" / "mirrors" / "correct.git"
+    wrong_mirror = work_dir / "git" / "mirrors" / "wrong.git"
+    wrong_linked_git_dir = wrong_mirror / "worktrees" / workspace_id
+    correct_linked_git_dir = correct_mirror / "worktrees" / workspace_id
+    wrong_linked_git_dir.mkdir(parents=True)
+    correct_linked_git_dir.mkdir(parents=True)
+    _write(worktree_path / ".git", f"gitdir: {wrong_linked_git_dir}\n")
+    (correct_linked_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    mock_gm.remove_worktree_from_mirror.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        mirror_path=correct_mirror.resolve(),
+    )
+
+
+@pytest.mark.unit
 async def test_remove_orphan_worktree_uses_companion_path_name_as_worktree_id(
     tmp_path: Path,
 ) -> None:
