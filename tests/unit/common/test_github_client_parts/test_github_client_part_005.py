@@ -315,6 +315,59 @@ class TestFetchFailingCheckLogsRollupFallback:
         assert _run_view_calls(fake) == []
 
     @pytest.mark.unit
+    async def test_rollup_fallback_waits_when_run_in_progress_not_in_failed_list(self) -> None:
+        # The run is listed by ``gh run list`` but still in progress (no failed
+        # conclusion), so loop 1 skips it on the conclusion check. The rollup
+        # fallback then maps the failed rollup check to that run, sees its
+        # non-completed status, and WAITS (runs_in_progress) instead of fetching
+        # an empty in-progress ``--log-failed`` archive. Covers the rollup-loop
+        # run-completion gate.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 123,
+                        "name": "python-coverage-shards (7)",
+                        "conclusion": None,
+                        "status": "in_progress",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (7)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert result.failures == ()
+        assert result.runs_in_progress is True
+        assert _run_view_calls(fake) == []
+
+    @pytest.mark.unit
+    async def test_fetch_repo_merge_methods_raises_when_response_not_object(self) -> None:
+        # gh api repos/<slug> must return a JSON object; a non-object response
+        # (e.g. a list when the API is degraded) raises rather than silently
+        # returning no merge methods.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=json.dumps([1, 2, 3]))
+        client = GitHubClient(fake)
+        with pytest.raises(GitHubClientError):
+            await client.fetch_repo_merge_methods(repo=RepoRef(owner="o", name="r"))
+
+    @pytest.mark.unit
     async def test_rollup_fallback_fetches_logs_when_actions_run_absent_from_list(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
