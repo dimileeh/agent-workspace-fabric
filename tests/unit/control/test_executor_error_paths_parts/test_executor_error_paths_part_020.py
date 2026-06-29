@@ -127,7 +127,7 @@ class TestHandoffSetupRunsBrowserProbe:
         ]
 
     @pytest.mark.unit
-    async def test_setup_defers_browser_findings_when_validate_install_is_unrequested(
+    async def test_setup_records_browser_findings_after_forced_validate_install(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -164,11 +164,12 @@ class TestHandoffSetupRunsBrowserProbe:
         assert ok is True
         assert validation.calls == [("setup", "pre_agent")]
         assert validation.allow_browser_install_defer_flags == [False]
-        assert browser_calls == []
+        assert browser_calls == ["called"]
         assert trace == [
             "run_profile_phases",
             "record_setup_dependency_network_events",
             "record_runtime_toolchain_findings",
+            "record_runtime_browser_findings",
         ]
 
     @pytest.mark.unit
