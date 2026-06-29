@@ -15,7 +15,7 @@ from awf.runtime.validation_command_probe import (
 
 _PLAYWRIGHT_BROWSER_INSTALL_TIMEOUT_SECONDS = 900
 _NODE_PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun"})
-_NODE_DEPENDENCY_INSTALL_SUBCOMMANDS = frozenset({"ci", "i", "install"})
+_NODE_DEPENDENCY_INSTALL_SUBCOMMANDS = frozenset({"add", "ci", "i", "install"})
 _NPM_SCRIPT_VALIDATION_SUBCOMMANDS = frozenset({"run", "run-script"})
 _NPM_DIRECT_SCRIPT_VALIDATION_SUBCOMMANDS = frozenset({"test", "t"})
 _NPM_EXEC_VALIDATION_SUBCOMMANDS = frozenset({"exec", "x"})

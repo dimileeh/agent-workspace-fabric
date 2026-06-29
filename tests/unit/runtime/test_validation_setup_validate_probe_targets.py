@@ -712,6 +712,22 @@ class TestPlaywrightBrowserInstallCommand:
         assert _node_dependency_install_package_manager("npm --userconfig=.npmrc ci") == "npm"
 
     @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("npm add @playwright/test", "npm"),
+            ("pnpm add @playwright/test", "pnpm"),
+            ("yarn add @playwright/test", "yarn"),
+            ("bun add @playwright/test", "bun"),
+        ],
+    )
+    def test_dependency_install_parser_treats_add_as_install(
+        self,
+        command: str,
+        expected: str,
+    ) -> None:
+        assert _node_dependency_install_package_manager(command) == expected
+
+    @pytest.mark.parametrize(
         "command",
         [
             "node scripts/write-npmrc.js || pnpm install",
@@ -1327,6 +1343,23 @@ class TestPlaywrightBrowserInstallCommand:
             ("validate", "set -e; pnpm install"),
             ("setup", "pnpm exec playwright install chromium"),
             ("validate", "set -e && npm run build; pnpm test:e2e"),
+        ]
+        assert commands[1].command.required is False
+
+    def test_validate_browser_install_split_treats_package_add_as_install(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["pnpm add @playwright/test && pnpm exec playwright test"],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "pnpm add @playwright/test"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm exec playwright test"),
         ]
         assert commands[1].command.required is False
 
