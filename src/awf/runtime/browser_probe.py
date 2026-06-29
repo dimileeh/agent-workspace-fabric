@@ -248,8 +248,14 @@ def _python_browser_probe_runtime(
     return python_runtime
 
 
-def browser_probe_workdir(profile: WorkspaceProfile) -> str:
+def browser_probe_workdir(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> str:
     """Return the in-container directory where Playwright should resolve from."""
+    if _python_browser_probe_runtime(profile, workspace_root=workspace_root) is not None:
+        return DEFAULT_AGENT_WORKDIR
     package_dir = node_package_manager_package_dir(profile)
     if package_dir is None:
         return DEFAULT_AGENT_WORKDIR

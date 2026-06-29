@@ -19,6 +19,7 @@ from awf.runtime.browser_probe import (
     _BROWSER_PROBE_SCRIPT,
     ProbeExecResult,
     RuntimeBrowserProbeError,
+    _browser_probe_command,
     _browser_probe_node_runtime,
     browser_probe_workdir,
     probe_runtime_browsers,
@@ -354,6 +355,43 @@ class TestProbeRuntimeBrowsers:
         profile = _profile_with_setup_and_browsers(["npm ci"])
 
         assert browser_probe_workdir(profile) == "/workspace"
+
+    def test_python_browser_probe_ignores_unrelated_node_package_workdir(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        project_root = workspace_root / "apps" / "web"
+        project_root.mkdir(parents=True)
+        (project_root / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "web"',
+                    'version = "0.1.0"',
+                    "[dependency-groups]",
+                    'e2e = ["pytest-playwright"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-profile",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["uv sync --project apps/web --group e2e"],
+                    "post_agent": ["pnpm -C docs install"],
+                    "validate": ["uv run --project apps/web pytest --browser chromium"],
+                },
+            }
+        )
+
+        probe_command = _browser_probe_command(profile, workspace_root=workspace_root)
+        assert "from playwright.sync_api import sync_playwright" in probe_command
+        assert not probe_command.startswith("pnpm")
+        assert browser_probe_workdir(profile, workspace_root=workspace_root) == "/workspace"
 
     @pytest.mark.parametrize(
         "setup_command",

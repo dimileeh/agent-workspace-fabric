@@ -457,7 +457,7 @@ class ValidationRunner:
                 cli_args=probe_cli_args,
                 source="browser_probe",
                 label="browser_probe",
-                workdir=browser_probe_workdir(profile),
+                workdir=browser_probe_workdir(profile, workspace_root=worktree_path),
             )
             try:
                 result = await asyncio.wait_for(
