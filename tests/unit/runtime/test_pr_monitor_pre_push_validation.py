@@ -203,7 +203,30 @@ async def test_pre_push_validation_records_deferred_browser_findings_after_valid
 
     class _BrowserValidation(_FakeValidation):
         def __init__(self) -> None:
-            super().__init__(_validation_result(tmp_path, ok=True))
+            super().__init__(
+                ValidationResult(
+                    commands=[
+                        _command_result(
+                            tmp_path,
+                            ok=True,
+                            command="pnpm install --frozen-lockfile",
+                            artifact_name="pnpm_install",
+                        ),
+                        _command_result(
+                            tmp_path,
+                            ok=True,
+                            command="pnpm exec playwright install chromium",
+                            artifact_name="playwright_install",
+                        ),
+                        _command_result(
+                            tmp_path,
+                            ok=True,
+                            command="pnpm test:e2e",
+                            artifact_name="pnpm_test_e2e",
+                        ),
+                    ]
+                )
+            )
             self.probe_calls: list[dict[str, object]] = []
 
         async def probe_runtime_browser_findings(

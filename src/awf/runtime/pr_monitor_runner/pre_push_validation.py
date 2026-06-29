@@ -341,6 +341,36 @@ async def _record_deferred_runtime_browser_findings(
         await session.commit()
 
 
+def _deferred_runtime_browser_install_completed(
+    profile: Any,
+    *,
+    worktree_path: Path,
+    result: ValidationResult,
+) -> bool:
+    if not runtime_browser_probe_deferred_until_validate(
+        profile,
+        workspace_root=worktree_path,
+    ):
+        return False
+    validation_command_plan = profile_phase_command_plan(
+        profile,
+        ("post_agent", "validate"),
+        workspace_root=worktree_path,
+    )
+    install_commands = tuple(
+        step.command.command for step in validation_command_plan if step.phase == "setup"
+    )
+    if not install_commands:
+        return result.all_passed
+    pending = list(install_commands)
+    for command_result in result.commands:
+        if command_result.command == pending[0]:
+            pending.pop(0)
+            if not pending:
+                return True
+    return False
+
+
 async def _validated_git_push_result(
     self: Any,
     *,
@@ -1263,14 +1293,19 @@ async def _run_pre_push_validation(
             message=message,
         )
 
-    await _record_deferred_runtime_browser_findings_safe(
-        self,
-        workspace_id=workspace_id,
-        compose_project=compose_project,
-        compose_file=compose_file,
-        profile=profile,
+    if _deferred_runtime_browser_install_completed(
+        profile,
         worktree_path=worktree_path,
-    )
+        result=result,
+    ):
+        await _record_deferred_runtime_browser_findings_safe(
+            self,
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+            worktree_path=worktree_path,
+        )
     cleanup_result = await _pre_push_validation_cleanup(
         self,
         worktree_path=worktree_path,

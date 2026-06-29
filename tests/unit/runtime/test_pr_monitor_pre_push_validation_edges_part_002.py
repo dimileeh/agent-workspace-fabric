@@ -158,6 +158,109 @@ async def test_pre_push_validation_records_deferred_browser_findings_before_infr
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_skips_deferred_browser_probe_before_install_runs(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-install validation failure must not be reported as a browser gap."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "browser-pre-push-early-failure-profile",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "post_agent": ["exit 1"],
+                "validate": ["pnpm install --frozen-lockfile", "pnpm test:e2e"],
+            },
+        }
+    )
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.resolved_profile = profile.model_dump(mode="json", by_alias=True)
+        await session.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "e" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+
+    async def _cleanup(
+        _self: object,
+        *,
+        worktree_path: Path,
+        restore_ref: str,
+    ) -> ValidationWorktreeCleanup:
+        del _self, worktree_path
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=restore_ref,
+        )
+
+    class _BrowserValidation(_FakeValidation):
+        def __init__(self) -> None:
+            super().__init__(
+                _validation_result(
+                    tmp_path,
+                    ok=False,
+                    command="exit 1",
+                    reason_code="POST_AGENT_FAILED",
+                )
+            )
+            self.probe_calls: list[dict[str, object]] = []
+
+        async def probe_runtime_browser_findings(
+            self, **kwargs: object
+        ) -> tuple[ProfileLintFinding, ...]:
+            self.probe_calls.append(dict(kwargs))
+            return (
+                ProfileLintFinding(
+                    reason_code=RUNTIME_BROWSER_UNAVAILABLE,
+                    message="runtime does not provide Playwright browser chromium",
+                    path="runtime.browsers",
+                    severity=ProfileLintSeverity.warning,
+                    details={"browser": "chromium", "available_browsers": []},
+                ),
+            )
+
+    validation = _BrowserValidation()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=0,
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    monkeypatch.setattr(pre_push_validation, "_pre_push_validation_cleanup", _cleanup)
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
+    assert validation.probe_calls == []
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        browser_events = [
+            event
+            for event in ws.events
+            if event.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
+        ]
+    assert browser_events == []
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_recovered_head_committed_diff_error_blocks_validation(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
