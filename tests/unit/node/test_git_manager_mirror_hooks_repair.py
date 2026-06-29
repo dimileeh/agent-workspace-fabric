@@ -694,6 +694,7 @@ class TestRepairMirrorHooksPath:
         worktree = tmp_path / "workspace"
         worktree.mkdir()
         (linked_git_dir / "gitdir").write_text(str(worktree / ".git"), encoding="utf-8")
+        (worktree / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
         (linked_git_dir / "config.worktree").write_text("", encoding="utf-8")
         calls: list[tuple[tuple[str, ...], tuple[str, ...], Path, str]] = []
 
@@ -728,6 +729,45 @@ class TestRepairMirrorHooksPath:
                 "worktree",
             ),
         ]
+
+    @pytest.mark.unit
+    async def test_existing_registered_worktree_missing_gitfile_is_stale_before_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        linked_git_dir = mirror / "worktrees" / "workspace"
+        linked_git_dir.mkdir(parents=True)
+        worktree = tmp_path / "workspace"
+        worktree.mkdir()
+        (linked_git_dir / "gitdir").write_text(str(worktree / ".git"), encoding="utf-8")
+        repair_prefixes: list[str] = []
+        prune_calls = 0
+
+        async def _repair_hooks_path_config(
+            *,
+            git_args: tuple[str, ...],
+            config_scope_args: tuple[str, ...],
+            config_path: Path,
+            operation_prefix: str,
+        ) -> bool:
+            del git_args, config_scope_args, config_path
+            repair_prefixes.append(operation_prefix)
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            nonlocal prune_calls
+            prune_calls += 1
+            assert path == mirror
+            shutil.rmtree(linked_git_dir)
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is False
+        assert prune_calls == 1
+        assert repair_prefixes == ["mirror", "mirror"]
 
     @pytest.mark.unit
     async def test_removes_worktree_include_exposing_poisoned_hooks_path(

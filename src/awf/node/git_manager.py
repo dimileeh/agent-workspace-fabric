@@ -1140,6 +1140,9 @@ async def _repair_mirror_hooks_path_once(mirror_path: Path) -> tuple[bool, bool]
         if not worktree_path.exists():
             stale_worktree_metadata = True
             continue
+        if not (worktree_path / ".git").exists():
+            stale_worktree_metadata = True
+            continue
         repaired = (
             await _repair_hooks_path_config(
                 git_args=(
