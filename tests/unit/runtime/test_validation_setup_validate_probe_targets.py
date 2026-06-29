@@ -287,6 +287,14 @@ class TestPlaywrightBrowserInstallCommand:
         [
             ("python -m pip install -r requirements.txt", "pytest-playwright==0.5.0\n"),
             ("pip install --requirement requirements.txt", "playwright>=1.42\n"),
+            (
+                "python -m pip install -r requirements.txt",
+                'playwright==1.42; python_version >= "3.8"\n',
+            ),
+            (
+                "pip install --requirement requirements.txt",
+                'pytest-playwright; sys_platform == "linux"\n',
+            ),
             ("pip install -rrequirements.txt", "pytest-playwright\n"),
             ("pip install --requirement=requirements.txt", "playwright\n"),
         ],

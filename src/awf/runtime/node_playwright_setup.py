@@ -516,7 +516,7 @@ def _python_requirements_include_playwright(
             requirement_base_dir=requirement_base_dir,
         ):
             return True
-        if _PYTHON_PLAYWRIGHT_REQUIREMENT_RE.fullmatch(token):
+        if _python_requirement_token_includes_playwright(token):
             return True
         index += token_width
     return False
@@ -608,7 +608,7 @@ def _python_requirement_line_includes_playwright(
         return False
     if not tokens:
         return False
-    if _PYTHON_PLAYWRIGHT_REQUIREMENT_RE.fullmatch(tokens[0]):
+    if _python_requirement_token_includes_playwright(tokens[0]):
         return True
     nested_requirement_file, _ = _pip_requirement_file_argument(tokens, 0)
     if nested_requirement_file is None:
@@ -621,6 +621,11 @@ def _python_requirement_line_includes_playwright(
         seen_requirement_files,
         workspace_root=workspace_root,
     )
+
+
+def _python_requirement_token_includes_playwright(token: str) -> bool:
+    requirement = token.split(";", 1)[0].strip()
+    return _PYTHON_PLAYWRIGHT_REQUIREMENT_RE.fullmatch(requirement) is not None
 
 
 def _requirement_base_dir_for_scope(
