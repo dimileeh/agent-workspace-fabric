@@ -191,9 +191,11 @@ def _should_defer_browser_install_until_validate_install(
         requested_phases,
     ):
         return False
-    return _post_agent_node_dependency_install_exists(
-        profile
-    ) or _validate_node_dependency_install_exists(profile)
+    if _post_agent_node_dependency_install_exists(profile):
+        return True
+    if _requested_pre_validate_playwright_usage_exists(profile, requested_phases):
+        return False
+    return _validate_node_dependency_install_exists(profile)
 
 
 def runtime_browser_probe_deferred_until_validate(profile: WorkspaceProfile) -> bool:
@@ -277,6 +279,47 @@ def _requested_pre_validate_node_dependency_install_commands(
     if "pre_agent" in requested_phases:
         commands.extend(profile.phases.pre_agent)
     return commands
+
+
+def _requested_pre_validate_playwright_usage_exists(
+    profile: WorkspaceProfile,
+    requested_phases: set[str],
+) -> bool:
+    return any(
+        _node_command_uses_playwright(command.command)
+        for command in _requested_pre_validate_node_dependency_install_commands(
+            profile,
+            requested_phases,
+        )
+    )
+
+
+def _node_command_uses_playwright(command: str) -> bool:
+    tokens = _shell_tokens(command, comments=True)
+    if tokens is None:
+        return False
+    index = _first_non_assignment_token_index(tokens)
+    while index < len(tokens):
+        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+            index += 1
+        if index >= len(tokens):
+            return False
+        if _command_segment_invokes_playwright(
+            tokens,
+            index,
+        ) or _command_segment_invokes_browser_script(tokens, index):
+            return True
+        scoped_command = _leading_cd_package_scope(tokens, index)
+        if scoped_command is not None:
+            _, index = scoped_command
+            continue
+        next_command_index = _corepack_preamble_next_command_index(tokens, index)
+        if next_command_index is None:
+            next_command_index = _sequential_command_next_index(tokens, index)
+        if next_command_index is None:
+            return False
+        index = next_command_index
+    return False
 
 
 def _node_dependency_install_satisfies_browser_install(
