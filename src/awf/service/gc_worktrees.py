@@ -447,6 +447,8 @@ async def remove_orphan_worktree(
 
 
 def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path | None:
+    """Return the managed bare mirror that owns a worktree path, if resolvable."""
+
     from awf.node.git_manager import (
         GitOperationError,
         mirror_path_for_registered_worktree,
@@ -589,6 +591,8 @@ def _has_stale_managed_linked_mirror(path: Path, *, work_dir: Path) -> bool:
 
 
 def is_existing_non_git_worktree(path: Path, *, work_dir: Path | None = None) -> bool:
+    """Return whether an existing worktree path lacks usable Git management metadata."""
+
     if not path.exists():
         return False
     git_entry = path / ".git"

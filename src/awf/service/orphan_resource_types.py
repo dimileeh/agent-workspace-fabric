@@ -23,12 +23,16 @@ class WorkspaceIdView:
 
 @dataclass(frozen=True)
 class DockerResourceCommand:
+    """Docker inventory command for one managed resource kind."""
+
     kind: ResourceKind
     args: list[str]
 
 
 @dataclass(frozen=True)
 class DetectedResource:
+    """Raw resource record discovered during an orphan-resource scan."""
+
     kind: ResourceKind
     workspace_id: str
     compose_project: str | None = None
@@ -44,6 +48,8 @@ class DetectedResource:
 
 @dataclass(frozen=True)
 class ClassifiedResource:
+    """Detected resource annotated with AWF orphan classification evidence."""
+
     resource: DetectedResource
     classification: Classification
     reason: str
@@ -84,6 +90,8 @@ class ClassifiedResource:
 
 @dataclass(frozen=True)
 class ResourceScan:
+    """Summary of one resource-kind scanner run."""
+
     ok: bool
     status: str
     reason: str
@@ -104,6 +112,8 @@ class ResourceScan:
 
 @dataclass(frozen=True)
 class CleanupReadiness:
+    """Readiness decision for whether detected orphans may be reaped."""
+
     ready: bool
     status: str
     reason: str
@@ -122,6 +132,8 @@ class CleanupReadiness:
 
 @dataclass(frozen=True)
 class OrphanResourceSummary:
+    """Aggregate orphan-resource scan result returned to callers."""
+
     ok: bool
     status: str
     reason: str

@@ -131,6 +131,8 @@ class OrphanResourceComposeTeardown(Protocol):
 
 
 class OrphanResourceWorktreeRemover(Protocol):
+    """Callable contract for Git-aware row-less orphan worktree removal."""
+
     def __call__(  # pragma: no cover - Protocol method declaration only.
         self,
         *,
