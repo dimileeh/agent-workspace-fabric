@@ -88,6 +88,62 @@ _UV_SYNC_SCOPE_EQUALS_PREFIXES = (
     ("--directory=", "--directory"),
     ("--package=", "--package"),
 )
+_UV_RUN_MODULE_FLAGS = frozenset({"-m", "--module"})
+_UV_RUN_OPTION_VALUE_FLAGS = frozenset(
+    {
+        "--allow-insecure-host",
+        "--cache-dir",
+        "--color",
+        "--config-file",
+        "--config-setting",
+        "--config-settings-package",
+        "--default-index",
+        "--directory",
+        "--env-file",
+        "--exclude-newer",
+        "--exclude-newer-package",
+        "--extra",
+        "--extra-index-url",
+        "--find-links",
+        "--fork-strategy",
+        "--group",
+        "--index",
+        "--index-strategy",
+        "--index-url",
+        "--keyring-provider",
+        "--link-mode",
+        "--no-binary-package",
+        "--no-build-isolation-package",
+        "--no-build-package",
+        "--no-editable-package",
+        "--no-extra",
+        "--no-group",
+        "--no-sources-package",
+        "--only-group",
+        "--package",
+        "--prerelease",
+        "--project",
+        "--python",
+        "--python-platform",
+        "--refresh-package",
+        "--reinstall-package",
+        "--resolution",
+        "--upgrade-group",
+        "--upgrade-package",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "-C",
+        "-P",
+        "-f",
+        "-i",
+        "-p",
+        "-w",
+    }
+)
+_UV_RUN_OPTION_VALUE_EQUALS_PREFIXES = tuple(
+    f"{option}=" for option in _UV_RUN_OPTION_VALUE_FLAGS if option.startswith("--")
+)
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
 _NODE_PLAYWRIGHT_INSTALL_RUNNERS = frozenset({"pnpx", "bunx"})
 
@@ -646,6 +702,12 @@ def _command_segment_python_playwright_executable(
         "playwright",
     ]:
         return executable
+    if executable == "uv":
+        uv_run_executable = _uv_run_pytest_playwright_executable(tokens, index)
+        if uv_run_executable is not None:
+            if infer_from_pytest_selector:
+                return uv_run_executable
+            return None
     if _command_segment_invokes_pytest_playwright(tokens, index):
         if not infer_from_pytest_selector:
             return None
@@ -1474,7 +1536,66 @@ def _command_segment_invokes_pytest_playwright(tokens: list[str], index: int) ->
         "pytest",
     ]:
         return _pytest_segment_has_browser_selector(tokens, index + 3)
+    if executable == "uv":
+        return _uv_run_pytest_playwright_executable(tokens, index) is not None
     return False
+
+
+def _uv_run_pytest_playwright_executable(tokens: list[str], index: int) -> str | None:
+    if index + 1 >= len(tokens) or tokens[index + 1] != "run":
+        return None
+    executable_tokens = ["uv", "run"]
+    cursor = index + 2
+    while cursor < len(tokens):
+        token = tokens[cursor]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return None
+        if token == "--":
+            cursor += 1
+            break
+        if token in _UV_RUN_MODULE_FLAGS:
+            module_index = cursor + 1
+            if (
+                module_index < len(tokens)
+                and _is_pytest_executable(tokens[module_index])
+                and _pytest_segment_has_browser_selector(tokens, module_index + 1)
+            ):
+                return shlex.join(executable_tokens)
+            return None
+        if token in _UV_RUN_OPTION_VALUE_FLAGS:
+            value_index = cursor + 1
+            if value_index >= len(tokens) or tokens[value_index] in _SHELL_COMPOUND_CONTROL_TOKENS:
+                return None
+            executable_tokens.extend((token, tokens[value_index]))
+            cursor = value_index + 1
+            continue
+        if token.startswith(_UV_RUN_OPTION_VALUE_EQUALS_PREFIXES):
+            executable_tokens.append(token)
+            cursor += 1
+            continue
+        if token.startswith("-") and token != "-":
+            executable_tokens.append(token)
+            cursor += 1
+            continue
+        break
+    if cursor >= len(tokens):
+        return None
+    if _is_pytest_executable(tokens[cursor]) and _pytest_segment_has_browser_selector(
+        tokens,
+        cursor + 1,
+    ):
+        return shlex.join(executable_tokens)
+    if (
+        _is_python_executable(tokens[cursor])
+        and tokens[cursor + 1 : cursor + 3]
+        == [
+            "-m",
+            "pytest",
+        ]
+        and _pytest_segment_has_browser_selector(tokens, cursor + 3)
+    ):
+        return shlex.join([*executable_tokens, tokens[cursor]])
+    return None
 
 
 def _pytest_segment_has_browser_selector(tokens: list[str], index: int) -> bool:
