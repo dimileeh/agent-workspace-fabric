@@ -574,6 +574,18 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == expected
         assert browser_probe_workdir(profile) == "/workspace"
 
+    def test_validate_playwright_command_infers_unscoped_package_manager(self) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["yarn playwright test"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "yarn playwright install chromium"
+        assert browser_probe_workdir(profile) == "/workspace"
+
     def test_validate_browser_install_preserves_pre_install_validate_order(self) -> None:
         profile = _profile_with_setup_validate_and_browsers(
             setup=[],

@@ -38,6 +38,16 @@ def _profile_with_setup_and_browsers(commands: list[str]) -> WorkspaceProfile:
     )
 
 
+def _profile_with_validate_and_browsers(commands: list[str]) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "browser-profile",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"validate": commands},
+        }
+    )
+
+
 class _SpyExec:
     def __init__(self, results: list[ProbeExecResult] | None = None) -> None:
         self.calls: list[list[str]] = []
@@ -78,6 +88,17 @@ class TestProbeRuntimeBrowsers:
 
     async def test_yarn_profile_runs_probe_through_yarn_node_hook(self) -> None:
         profile = _profile_with_setup_and_browsers(["yarn install --frozen-lockfile"])
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
+
+        findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+        assert len(spy.calls) == 1
+        assert spy.calls[0][2].startswith('yarn node - "$@" <<')
+        assert spy.calls[0][-1] == "chromium"
+
+    async def test_yarn_validate_profile_runs_probe_through_yarn_node_hook(self) -> None:
+        profile = _profile_with_validate_and_browsers(["yarn playwright test"])
         spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
 
         findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)

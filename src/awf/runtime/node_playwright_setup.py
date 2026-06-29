@@ -138,7 +138,18 @@ def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
         package_manager = _node_scoped_validation_package_manager(command.command)
         if package_manager is not None:
             return package_manager
-    return dependency_install_package_manager or fallback_package_manager or "npm"
+    validate_package_manager: str | None = None
+    for command in profile.phases.validate_commands:
+        package_manager = _node_validation_package_manager(command.command)
+        if package_manager is not None:
+            validate_package_manager = package_manager
+            break
+    return (
+        dependency_install_package_manager
+        or validate_package_manager
+        or fallback_package_manager
+        or "npm"
+    )
 
 
 def _node_package_manager_has_scope(package_manager: str) -> bool:
@@ -242,6 +253,13 @@ def _node_scoped_validation_package_manager(command: str) -> str | None:
         if corepack_command_index is None:
             return None
         command_index = corepack_command_index
+    return None
+
+
+def _node_validation_package_manager(command: str) -> str | None:
+    executable = _leading_executable(command)
+    if executable in _NODE_PACKAGE_MANAGERS:
+        return executable
     return None
 
 
