@@ -170,7 +170,12 @@ async def run_validation_and_fix_cycle(
             worktree_path=worktree_path,
         )
 
+    deferred_runtime_browser_findings_recorded = False
+
     async def _record_deferred_runtime_browser_findings() -> None:
+        nonlocal deferred_runtime_browser_findings_recorded
+        if deferred_runtime_browser_findings_recorded:
+            return
         record_browser_findings = getattr(
             self,
             "_record_runtime_browser_findings_safe",
@@ -179,6 +184,7 @@ async def run_validation_and_fix_cycle(
         if callable(record_browser_findings) and runtime_browser_probe_deferred_until_validate(
             profile
         ):
+            deferred_runtime_browser_findings_recorded = True
             await record_browser_findings(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
