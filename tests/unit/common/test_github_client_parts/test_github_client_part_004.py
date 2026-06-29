@@ -22,6 +22,7 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
 )
+from awf.runtime.pr_monitor import CheckTiming
 
 
 def _adoption_pr_payload(
@@ -900,6 +901,34 @@ class TestFetchFailingCheckLogs:
 
         assert len(failures) == 1
         assert failures[0].name == "run/unknown"
+        assert failures[0].run_id is None
+        assert failures[0].log_excerpt == ""
+        assert len(fake.calls) == 1
+
+    @pytest.mark.unit
+    async def test_failed_rollup_status_without_target_url_synthesizes_no_log_failure(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=json.dumps([]))
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="external-ci/build",
+                    status="FAILURE",
+                    details_url=None,
+                ),
+            ),
+        )
+
+        assert len(failures) == 1
+        assert failures[0].name == "external-ci/build"
+        assert failures[0].conclusion == "FAILURE"
         assert failures[0].run_id is None
         assert failures[0].log_excerpt == ""
         assert len(fake.calls) == 1

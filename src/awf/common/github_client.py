@@ -910,7 +910,9 @@ class GitHubClient:
         workflow runs for the head SHA, find the failing ones, and grab their
         failed-step logs. If ``gh run list --commit`` misses a failed Actions
         run that the PR rollup already exposed, fall back to the check's
-        ``detailsUrl`` run id instead of returning an empty failure snapshot.
+        ``detailsUrl`` run id. If a failed rollup check has no Actions run id,
+        report its context name without log text instead of returning an empty
+        failure snapshot.
         """
         runs_raw = await self._gh_json(
             [
@@ -1017,11 +1019,10 @@ class GitHubClient:
                 continue
             run_id = _actions_run_id_from_details_url(check.details_url)
             if run_id is None:
-                if _rollup_check_has_external_details_url(check):
-                    _append_rollup_failure_without_log(
-                        run_name=check.name,
-                        conclusion=conclusion,
-                    )
+                _append_rollup_failure_without_log(
+                    run_name=check.name,
+                    conclusion=conclusion,
+                )
                 continue
             if not _rollup_check_is_github_actions(check) or run_id in seen_run_ids:
                 continue
