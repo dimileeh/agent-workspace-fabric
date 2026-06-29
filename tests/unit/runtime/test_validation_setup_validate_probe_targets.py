@@ -937,6 +937,24 @@ class TestPlaywrightBrowserInstallCommand:
             ("setup", "pnpm exec playwright test"),
         ]
 
+    def test_deferred_browser_install_stays_before_unsplittable_validate_test(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["source .env; pnpm install; pnpm exec playwright test"],
+        )
+
+        commands = profile_phase_command_plan(profile, ["setup", "validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            (
+                "validate",
+                "source .env; pnpm install; "
+                "pnpm exec playwright install chromium; pnpm exec playwright test",
+            ),
+        ]
+
     @pytest.mark.parametrize(
         ("validate_command", "expected"),
         [

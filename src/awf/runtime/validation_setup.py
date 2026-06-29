@@ -495,7 +495,19 @@ def profile_phase_command_plan(
                     pending_validate_commands = []
                     browser_install_scope_prefix = None
                     if split_validate_command is None:
-                        commands.append(validate_command)
+                        injected_validate_command = (
+                            _inject_deferred_browser_install_into_dependency_install_chain(
+                                validate_command,
+                                deferred_browser_install,
+                                browser_install_package_manager,
+                                workspace_root=workspace_root,
+                            )
+                        )
+                        if injected_validate_command is None:
+                            commands.append(validate_command)
+                            commands.append(deferred_browser_install)
+                        else:
+                            commands.append(injected_validate_command)
                     else:
                         (
                             validate_command,
@@ -503,13 +515,12 @@ def profile_phase_command_plan(
                             trailing_validate_command,
                         ) = split_validate_command
                         commands.append(validate_command)
-                    commands.append(
-                        _profile_command_with_scope_prefix(
-                            deferred_browser_install,
-                            browser_install_scope_prefix,
+                        commands.append(
+                            _profile_command_with_scope_prefix(
+                                deferred_browser_install,
+                                browser_install_scope_prefix,
+                            )
                         )
-                    )
-                    if split_validate_command is not None:
                         commands.append(trailing_validate_command)
                     deferred_browser_install = None
                     browser_install_added = True
@@ -672,6 +683,61 @@ def _profile_command_with_scope_prefix(
             update={"command": f"{scope_prefix} && {command.command.command}"}
         ),
     )
+
+
+def _inject_deferred_browser_install_into_dependency_install_chain(
+    command: ProfileExecutionCommand,
+    browser_install: ProfileExecutionCommand,
+    browser_install_package_manager: str | None,
+    *,
+    workspace_root: Path | None = None,
+) -> ProfileExecutionCommand | None:
+    for separator_index, separator in _unquoted_install_chain_separator_spans(
+        command.command.command
+    ):
+        install_command = command.command.command[:separator_index].strip()
+        trailing_command = command.command.command[separator_index + len(separator) :].strip()
+        if not install_command or not trailing_command:
+            continue
+        if not _dependency_install_chain_satisfies_deferred_browser_install(
+            install_command,
+            _node_dependency_install_package_manager(install_command),
+            browser_install_package_manager,
+            workspace_root=workspace_root,
+        ):
+            continue
+        if not _dependency_install_chain_has_unpreserved_shell_state_scope(
+            install_command,
+            browser_install_package_manager,
+            workspace_root=workspace_root,
+        ):
+            continue
+        browser_install_scope_prefix = _dependency_install_inline_browser_scope_prefix(
+            install_command,
+            browser_install_package_manager,
+            workspace_root=workspace_root,
+        )
+        scoped_browser_install = _profile_command_with_scope_prefix(
+            browser_install,
+            browser_install_scope_prefix,
+        )
+        joiner = {
+            "\n": "\n",
+            ";": "; ",
+            "&&": " && ",
+        }[separator]
+        injected_command = joiner.join(
+            (
+                install_command,
+                scoped_browser_install.command.command,
+                trailing_command,
+            )
+        )
+        return replace(
+            command,
+            command=command.command.model_copy(update={"command": injected_command}),
+        )
+    return None
 
 
 def _command_satisfies_deferred_browser_install(
