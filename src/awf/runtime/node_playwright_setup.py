@@ -112,6 +112,7 @@ def node_package_manager_command(profile: WorkspaceProfile) -> str:
 def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
     fallback_package_manager: str | None = None
     dependency_install_package_manager: str | None = None
+    scoped_dependency_install_package_manager: str | None = None
     for command in (
         *profile.phases.setup,
         *profile.database.generated_setup,
@@ -120,8 +121,11 @@ def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
     ):
         package_manager = _node_dependency_install_package_manager(command.command)
         if package_manager is not None:
-            if _node_package_manager_has_scope(package_manager):
-                return package_manager
+            if (
+                _node_package_manager_has_scope(package_manager)
+                and scoped_dependency_install_package_manager is None
+            ):
+                scoped_dependency_install_package_manager = package_manager
             if dependency_install_package_manager is None:
                 dependency_install_package_manager = package_manager
             continue
@@ -131,8 +135,11 @@ def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
     for command in profile.phases.validate_commands:
         package_manager = _node_dependency_install_package_manager(command.command)
         if package_manager is not None:
-            if _node_package_manager_has_scope(package_manager):
-                return package_manager
+            if (
+                _node_package_manager_has_scope(package_manager)
+                and scoped_dependency_install_package_manager is None
+            ):
+                scoped_dependency_install_package_manager = package_manager
             if dependency_install_package_manager is None:
                 dependency_install_package_manager = package_manager
     for command in profile.phases.validate_commands:
@@ -146,7 +153,8 @@ def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
             validate_package_manager = package_manager
             break
     return (
-        dependency_install_package_manager
+        scoped_dependency_install_package_manager
+        or dependency_install_package_manager
         or validate_package_manager
         or fallback_package_manager
         or "npm"

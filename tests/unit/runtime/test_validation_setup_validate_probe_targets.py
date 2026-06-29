@@ -519,6 +519,20 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "pnpm --filter web exec playwright install chromium"
         assert browser_probe_workdir(profile) == "/workspace"
 
+    def test_late_browser_validate_scope_overrides_earlier_scoped_setup_install(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["pnpm --filter api install", "pnpm --filter web install"],
+            validate=["pnpm --filter web test:e2e"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "pnpm --filter web exec playwright install chromium"
+        assert browser_probe_workdir(profile) == "/workspace"
+
     def test_root_pnpm_setup_scans_past_corepack_validate_preamble_for_scope(self) -> None:
         profile = _profile_with_setup_validate_and_browsers(
             setup=["pnpm install --frozen-lockfile"],
