@@ -387,9 +387,25 @@ async def remove_orphan_worktree(
 def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path | None:
     from awf.node.git_manager import mirror_path_for_registered_worktree, mirror_path_for_worktree
 
-    return mirror_path_for_worktree(path) or mirror_path_for_registered_worktree(
-        path, work_dir / "git" / "mirrors"
-    )
+    mirrors_root = work_dir / "git" / "mirrors"
+    linked_mirror_path = _managed_mirror_path(mirror_path_for_worktree(path), mirrors_root)
+    return linked_mirror_path or mirror_path_for_registered_worktree(path, mirrors_root)
+
+
+def _managed_mirror_path(path: Path | None, mirrors_root: Path) -> Path | None:
+    if path is None:
+        return None
+    try:
+        resolved_path = path.resolve()
+        resolved_root = mirrors_root.resolve()
+    except RuntimeError:
+        resolved_path = path.absolute()
+        resolved_root = mirrors_root.absolute()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return resolved_path
 
 
 def is_existing_non_git_worktree(path: Path, *, work_dir: Path | None = None) -> bool:
