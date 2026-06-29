@@ -31,12 +31,12 @@ def _profile(payload: dict[str, object]) -> WorkspaceProfile:
         ("yarn", "yarn playwright install chromium"),
         ("bun", "bunx playwright install chromium"),
         ("npm", "npx playwright install chromium"),
-        ("/usr/local/bin/pnpm", "pnpm exec playwright install chromium"),
+        ("/usr/local/bin/pnpm", "/usr/local/bin/pnpm exec playwright install chromium"),
     ],
 )
 def test_playwright_command_is_package_manager_aware(package_manager: str, expected: str) -> None:
     # A bare path-qualified manager still resolves by its leading token.
-    assert playwright_command(package_manager.rsplit("/", 1)[-1], "install", "chromium") == expected
+    assert playwright_command(package_manager, "install", "chromium") == expected
 
 
 @pytest.mark.unit
@@ -105,6 +105,21 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
     assert command.command == "pnpm exec playwright install chromium firefox"
     assert command.timeout_seconds == _BROWSER_INSTALL_TIMEOUT
     assert command.required is False
+
+
+@pytest.mark.unit
+def test_browser_install_preserves_detected_node_manager_path() -> None:
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["/usr/local/bin/pnpm install"]},
+        }
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == "/usr/local/bin/pnpm exec playwright install chromium"
 
 
 @pytest.mark.unit

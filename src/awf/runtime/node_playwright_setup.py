@@ -29,7 +29,7 @@ def playwright_command(package_manager: str, *args: str) -> str:
         package_manager_tokens = [package_manager]
     executable = package_manager_tokens[0] if package_manager_tokens else "npm"
     executable_base = executable.rsplit("/", 1)[-1]
-    package_manager_invocation = shlex.join([executable_base, *package_manager_tokens[1:]])
+    package_manager_invocation = shlex.join([executable, *package_manager_tokens[1:]])
     if executable_base == "pnpm":
         return f"{package_manager_invocation} exec playwright {escaped_args}"
     if executable_base == "yarn":
@@ -60,7 +60,7 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> str | None:
             if base in _NODE_PACKAGE_MANAGERS:
                 rest = tokens[index + 1 :]
                 if not rest:
-                    return base
+                    return token
                 install_index = next(
                     (
                         offset
@@ -70,7 +70,7 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> str | None:
                     None,
                 )
                 if install_index is not None:
-                    return shlex.join([base, *rest[:install_index]])
+                    return shlex.join([token, *rest[:install_index]])
     return None
 
 
