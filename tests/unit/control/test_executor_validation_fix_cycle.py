@@ -405,10 +405,17 @@ class _ValidationSideEffectRunner:
 class _DeferredBrowserValidationRunner:
     """Validation fake for deferred-browser probe gating."""
 
-    def __init__(self, *, artifacts_dir: Path, install_completed: bool) -> None:
+    def __init__(
+        self,
+        *,
+        artifacts_dir: Path,
+        install_completed: bool,
+        browser_install_returncode: int = 0,
+    ) -> None:
         """Capture artifacts and probe calls for the deferred-browser regression."""
         self._artifacts_dir = artifacts_dir
         self._install_completed = install_completed
+        self._browser_install_returncode = browser_install_returncode
         self.probe_calls: list[dict[str, object]] = []
 
     async def run_profile_coverage(self, **_kwargs: object) -> None:
@@ -453,12 +460,17 @@ class _DeferredBrowserValidationRunner:
                 [
                     ValidationCommandResult(
                         command="python -m playwright install chromium",
-                        returncode=0,
+                        returncode=self._browser_install_returncode,
                         duration_seconds=0.1,
                         stdout_path=stdout,
                         stderr_path=stderr,
                         phase="setup",
-                        reason_code="VALIDATION_OK",
+                        reason_code=(
+                            "VALIDATION_OK"
+                            if self._browser_install_returncode == 0
+                            else "COMMAND_FAILED"
+                        ),
+                        required=False,
                     ),
                     ValidationCommandResult(
                         command="pytest --browser chromium",
@@ -821,6 +833,52 @@ class TestDeferredRuntimeBrowserProbe:
         validation = _DeferredBrowserValidationRunner(
             artifacts_dir=tmp_path / "artifacts",
             install_completed=True,
+        )
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=0,
+            validation=validation,
+        )
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "deferred-browser-profile",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "post_agent": [],
+                    "validate": [
+                        "python -m pip install playwright",
+                        "pytest --browser chromium",
+                    ],
+                },
+            },
+        )
+        _queue_initial_pass(fake)
+        _queue_push_and_pr(fake)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+
+        assert len(validation.probe_calls) == 1
+
+    @pytest.mark.unit
+    async def test_failed_advisory_deferred_install_still_probes_browsers(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A failed advisory deferred install should still allow the browser probe."""
+        validation = _DeferredBrowserValidationRunner(
+            artifacts_dir=tmp_path / "artifacts",
+            install_completed=True,
+            browser_install_returncode=1,
         )
         executor = _make_executor(
             fake=fake,
