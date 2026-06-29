@@ -372,6 +372,9 @@ def _playwright_browser_install_node_package_manager(
     pre_validate_package_manager = _pre_validate_node_playwright_package_manager(profile)
     if pre_validate_package_manager is not None:
         return pre_validate_package_manager
+    post_agent_package_manager = _post_agent_node_playwright_package_manager(profile)
+    if post_agent_package_manager is not None:
+        return post_agent_package_manager
     return _infer_node_package_manager(profile)
 
 
@@ -380,6 +383,14 @@ def _pre_validate_node_playwright_package_manager(profile: WorkspaceProfile) -> 
         profile,
         {"setup", "pre_agent"},
     )
+    return _node_playwright_package_manager(commands)
+
+
+def _post_agent_node_playwright_package_manager(profile: WorkspaceProfile) -> str | None:
+    return _node_playwright_package_manager(profile.phases.post_agent)
+
+
+def _node_playwright_package_manager(commands: Sequence[ProfileCommand]) -> str | None:
     if not any(_node_command_uses_playwright(command.command) for command in commands):
         return None
     for command in commands:

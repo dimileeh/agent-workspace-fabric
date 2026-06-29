@@ -719,6 +719,38 @@ class TestBrowserPhaseCommandPlan:
         assert commands[1].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_prefers_post_agent_playwright_scope_before_unrelated_validate_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-post-agent-scoped-validate-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "post_agent": [
+                        "pnpm install",
+                        "pnpm exec playwright test",
+                    ],
+                    "validate": [
+                        "pnpm -C docs install",
+                        "pnpm -C docs test",
+                    ],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("post_agent", "validate"))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("post_agent", "pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("post_agent", "pnpm exec playwright test"),
+            ("validate", "pnpm -C docs install"),
+            ("validate", "pnpm -C docs test"),
+        ]
+        assert commands[1].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_preserves_pre_install_validate_commands(
         self,
     ) -> None:
