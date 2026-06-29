@@ -249,6 +249,31 @@ class TestBrowserPhaseCommandPlan:
         assert commands[1].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_uses_python_setup_install_before_pre_agent_browser_use_with_post_agent_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "python-browser-pre-agent-post-agent-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["python -m pip install playwright"],
+                    "pre_agent": ["python -m playwright test"],
+                    "post_agent": ["pnpm install"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup", "pre_agent"))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "python -m pip install playwright"),
+            ("setup", "python -m playwright install chromium"),
+            ("pre_agent", "python -m playwright test"),
+        ]
+        assert commands[1].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_defers_browser_install_until_validate_install(
         self,
     ) -> None:
