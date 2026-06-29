@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -35,11 +36,26 @@ def _git(args: list[str], cwd: Path) -> None:
 
 
 def _init_bare_mirror(path: Path) -> None:
-    subprocess.run(
-        ["git", "init", "--bare", str(path)],
-        check=True,
-        capture_output=True,
+    path.mkdir(parents=True)
+    (path / "worktrees").mkdir()
+
+
+@pytest.fixture
+def synthetic_bare_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[Path], None]:
+    bare_mirrors: set[Path] = set()
+
+    def _init(path: Path) -> None:
+        _init_bare_mirror(path)
+        bare_mirrors.add(path.resolve())
+
+    monkeypatch.setattr(
+        git_manager,
+        "_is_bare_registered_mirror_candidate",
+        lambda mirror_path: mirror_path.resolve() in bare_mirrors,
     )
+    return _init
 
 
 @pytest.fixture
@@ -773,14 +789,15 @@ def test_mirror_path_for_worktree_handles_commondir_and_unreadable_commondir(
 @pytest.mark.unit
 def test_mirror_path_for_registered_worktree_prefers_newest_duplicate_match(
     tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
 ) -> None:
     mirrors_dir = tmp_path / "mirrors"
     worktree = tmp_path / "worktrees" / "ws"
     worktree.mkdir(parents=True)
     old_mirror = mirrors_dir / "a-old.git"
     active_mirror = mirrors_dir / "z-active.git"
-    _init_bare_mirror(old_mirror)
-    _init_bare_mirror(active_mirror)
+    synthetic_bare_mirror(old_mirror)
+    synthetic_bare_mirror(active_mirror)
     old_linked_git_dir = old_mirror / "worktrees" / "ws"
     active_linked_git_dir = active_mirror / "worktrees" / "ws"
     old_linked_git_dir.mkdir(parents=True)
@@ -799,13 +816,14 @@ def test_mirror_path_for_registered_worktree_prefers_newest_duplicate_match(
 @pytest.mark.unit
 def test_mirror_path_for_registered_worktree_ignores_newer_non_bare_match(
     tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
 ) -> None:
     mirrors_dir = tmp_path / "mirrors"
     worktree = tmp_path / "worktrees" / "ws"
     worktree.mkdir(parents=True)
     valid_mirror = mirrors_dir / "a-valid.git"
     invalid_mirror = mirrors_dir / "z-invalid.git"
-    _init_bare_mirror(valid_mirror)
+    synthetic_bare_mirror(valid_mirror)
     valid_linked_git_dir = valid_mirror / "worktrees" / "ws"
     invalid_linked_git_dir = invalid_mirror / "worktrees" / "ws"
     valid_linked_git_dir.mkdir(parents=True)
@@ -824,14 +842,15 @@ def test_mirror_path_for_registered_worktree_ignores_newer_non_bare_match(
 @pytest.mark.unit
 def test_mirror_path_for_registered_worktree_ignores_external_symlinked_mirror(
     tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
 ) -> None:
     mirrors_dir = tmp_path / "mirrors"
     worktree = tmp_path / "worktrees" / "ws"
     worktree.mkdir(parents=True)
     managed_mirror = mirrors_dir / "a-managed.git"
     external_mirror = tmp_path / "external.git"
-    _init_bare_mirror(managed_mirror)
-    _init_bare_mirror(external_mirror)
+    synthetic_bare_mirror(managed_mirror)
+    synthetic_bare_mirror(external_mirror)
     managed_linked_git_dir = managed_mirror / "worktrees" / "ws"
     external_linked_git_dir = external_mirror / "worktrees" / "ws"
     managed_linked_git_dir.mkdir(parents=True)
@@ -852,14 +871,15 @@ def test_mirror_path_for_registered_worktree_ignores_external_symlinked_mirror(
 def test_mirror_path_for_registered_worktree_ignores_earlier_unreadable_match(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    synthetic_bare_mirror: Callable[[Path], None],
 ) -> None:
     mirrors_dir = tmp_path / "mirrors"
     worktree = tmp_path / "worktrees" / "ws"
     worktree.mkdir(parents=True)
     unreadable_mirror = mirrors_dir / "a-unreadable.git"
     active_mirror = mirrors_dir / "z-active.git"
-    _init_bare_mirror(unreadable_mirror)
-    _init_bare_mirror(active_mirror)
+    synthetic_bare_mirror(unreadable_mirror)
+    synthetic_bare_mirror(active_mirror)
     unreadable_gitdir = unreadable_mirror / "worktrees" / "ws" / "gitdir"
     active_gitdir = active_mirror / "worktrees" / "ws" / "gitdir"
     unreadable_gitdir.parent.mkdir(parents=True)
