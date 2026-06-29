@@ -910,9 +910,9 @@ class GitHubClient:
         workflow runs for the head SHA, find the failing ones, and grab their
         failed-step logs. If ``gh run list --commit`` misses a failed Actions
         run that the PR rollup already exposed, fall back to the check's
-        ``detailsUrl`` run id. If a failed rollup check points at an external
-        details URL, report its context name without log text instead of
-        returning an empty failure snapshot.
+        ``detailsUrl`` run id. If a failed non-Actions rollup check cannot be
+        mapped to an Actions run, report its context name without log text
+        instead of returning an empty failure snapshot.
         """
         runs_raw = await self._gh_json(
             [
@@ -1019,7 +1019,9 @@ class GitHubClient:
                 continue
             run_id = _actions_run_id_from_details_url(check.details_url)
             if run_id is None:
-                if _rollup_check_has_external_details_url(check):
+                if _rollup_check_has_external_details_url(
+                    check
+                ) or not _rollup_check_is_explicit_github_actions(check):
                     _append_rollup_failure_without_log(
                         run_name=check.name,
                         conclusion=conclusion,
@@ -1411,6 +1413,12 @@ def _rollup_check_is_github_actions(check: CheckTiming) -> bool:
     app_slug = (check.app_slug or "").lower()
     app_name = (check.app_name or "").lower()
     return app_slug in {"", "github-actions"} or app_name == "github actions"
+
+
+def _rollup_check_is_explicit_github_actions(check: CheckTiming) -> bool:
+    app_slug = (check.app_slug or "").lower()
+    app_name = (check.app_name or "").lower()
+    return app_slug == "github-actions" or app_name == "github actions"
 
 
 def _rollup_check_has_external_details_url(check: CheckTiming) -> bool:
