@@ -60,6 +60,9 @@ from awf.runtime.node_playwright_setup import (
     _validate_node_dependency_install_exists as _validate_node_dependency_install_exists,
 )
 from awf.runtime.node_playwright_setup import (
+    _validate_python_playwright_dependency_install_exists as _validate_python_playwright_dependency_install_exists,
+)
+from awf.runtime.node_playwright_setup import (
     node_package_manager_command as node_package_manager_command,
 )
 from awf.runtime.node_playwright_setup import (
@@ -489,7 +492,18 @@ def profile_phase_command_plan(
                     )
             for post_agent_command in _phase_commands(profile, phase):
                 append_command_with_deferred_browser_install(post_agent_command)
-            if deferred_browser_install is not None:
+            validate_install_pending = (
+                defer_browser_install_until_validate_install
+                and "validate" in requested_phases
+                and (
+                    _validate_node_dependency_install_exists(profile)
+                    or _validate_python_playwright_dependency_install_exists(
+                        profile,
+                        workspace_root=workspace_root,
+                    )
+                )
+            )
+            if deferred_browser_install is not None and not validate_install_pending:
                 commands.append(deferred_browser_install)
                 deferred_browser_install = None
                 browser_install_added = True

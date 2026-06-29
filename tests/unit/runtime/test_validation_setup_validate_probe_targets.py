@@ -1146,6 +1146,31 @@ class TestPlaywrightBrowserInstallCommand:
             ("validate", "yarn test"),
         ]
 
+    def test_post_agent_preserves_validate_deferred_browser_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-profile",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["node --version"],
+                    "post_agent": ["echo post-agent"],
+                    "validate": ["pnpm install", "pnpm test"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ["setup", "post_agent", "validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "node --version"),
+            ("post_agent", "echo post-agent"),
+            ("validate", "pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm test"),
+        ]
+
 
 @pytest.mark.unit
 class TestLeadingExecutable:
