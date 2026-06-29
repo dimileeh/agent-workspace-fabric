@@ -128,6 +128,29 @@ class TestBrowserPhaseCommandPlan:
         assert commands[1].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_splits_newline_install_chain_before_browser_work(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-setup-newline-chain-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["pnpm install\npnpm exec playwright test --project=setup"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup",))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("setup", "pnpm exec playwright test --project=setup"),
+        ]
+        assert commands[1].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_splits_pre_agent_install_chain_after_preamble(
         self,
     ) -> None:

@@ -658,6 +658,8 @@ def _unquoted_install_chain_separator_spans(command: str) -> list[tuple[int, str
             continue
         elif char == ";":
             separator_indices.append((index, ";"))
+        elif char == "\n":
+            separator_indices.append((index, "\n"))
         index += 1
     return separator_indices
 
