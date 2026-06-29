@@ -201,3 +201,35 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
         ),
         ("inspect", {"compose_project_name": "awf_ws_1"}),
     ]
+
+
+@pytest.mark.unit
+async def test_local_runtime_driver_uses_legacy_provision_without_claim_epoch() -> None:
+    calls: list[tuple[str, str]] = []
+    provision_result = object()
+
+    class _Provisioner:
+        async def provision(self, workspace_id: str) -> object:
+            calls.append(("provision", workspace_id))
+            return provision_result
+
+        async def provision_claimed(
+            self,
+            workspace_id: str,
+            execution_claim_epoch: int | None = None,
+        ) -> object:
+            calls.append(("provision_claimed", workspace_id))
+            return object()
+
+    driver = LocalRuntimeDriver(
+        provisioner=_Provisioner(),
+        executor=object(),
+        cleaner=object(),
+        validation_runner=object(),
+    )
+
+    assert (
+        await driver.provision(WorkspaceProvisionRequest(workspace_id="ws_legacy"))
+        is provision_result
+    )
+    assert calls == [("provision", "ws_legacy")]

@@ -15,8 +15,12 @@ from awf.db.session import make_session_factory
 from awf.node.git_manager import GitOperationError, mirror_path_for_worktree
 from awf.service.gc import WorkspaceGCCandidate, WorkspaceGCPath, _default_worktree_remover
 from awf.service.gc_worktrees import (
+    _git_bare_probe_env,
+    _has_stale_managed_linked_mirror,
+    _is_bare_git_repository,
     _managed_mirror_path,
     _mirror_registry_points_to_worktree,
+    _registered_mirror_path_from_metadata,
     git_context_mirror_path_for_worktree,
     is_existing_non_git_worktree,
     remove_orphan_worktree,
@@ -365,6 +369,85 @@ def test_git_context_mirror_path_fails_closed_when_bare_probe_fails(
 
 
 @pytest.mark.unit
+def test_git_context_mirror_path_keeps_linked_registry_when_fallback_probe_fails(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    linked_mirror = work_dir / "git" / "mirrors" / "linked.git"
+    _make_synthetic_mirror_link(mirror=linked_mirror, worktree=worktree_path)
+
+    probe_results = [
+        subprocess.CompletedProcess(args=["git"], returncode=0, stdout="true\n", stderr=""),
+        subprocess.CompletedProcess(
+            args=["git"], returncode=128, stdout="", stderr="fallback failed"
+        ),
+    ]
+
+    with patch("awf.service.gc_worktrees.subprocess.run", side_effect=probe_results):
+        assert git_context_mirror_path_for_worktree(worktree_path, work_dir=work_dir) == (
+            linked_mirror.resolve()
+        )
+
+
+@pytest.mark.unit
+def test_git_context_mirror_path_keeps_linked_registry_when_fallback_resolution_fails(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    linked_mirror = work_dir / "git" / "mirrors" / "linked.git"
+    _make_synthetic_mirror_link(mirror=linked_mirror, worktree=worktree_path)
+    fallback_error = GitOperationError(
+        operation="worktree.git_context_probe",
+        returncode=1,
+        stdout="",
+        stderr="fallback resolution failed",
+        reason_code="WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
+    )
+
+    with (
+        patch(
+            "awf.service.gc_worktrees._managed_bare_mirror_path",
+            side_effect=(linked_mirror.resolve(), fallback_error),
+        ),
+        patch(
+            "awf.service.gc_worktrees._mirror_registry_points_to_worktree",
+            return_value=True,
+        ),
+    ):
+        assert git_context_mirror_path_for_worktree(worktree_path, work_dir=work_dir) == (
+            linked_mirror.resolve()
+        )
+
+
+@pytest.mark.unit
+def test_bare_git_repository_fail_closed_surfaces_probe_start_failure(
+    tmp_path: Path,
+) -> None:
+    mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
+    _write(mirror_path / "config", "[core]\n\tbare = true\n")
+    _write(mirror_path / "HEAD", "ref: refs/heads/main\n")
+    (mirror_path / "objects").mkdir(parents=True)
+    (mirror_path / "refs").mkdir()
+
+    with (
+        patch(
+            "awf.service.gc_worktrees.subprocess.run",
+            side_effect=OSError("git unavailable"),
+        ),
+        pytest.raises(GitOperationError) as raised,
+    ):
+        _is_bare_git_repository(mirror_path, fail_closed=True)
+
+    assert raised.value.reason_code == "WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED"
+    assert f"could not probe bare mirror {mirror_path}" in raised.value.stderr
+    assert "git unavailable" in raised.value.stderr
+
+
+@pytest.mark.unit
 def test_git_context_mirror_path_uses_registry_fallback_when_metadata_match_is_not_bare(
     tmp_path: Path,
 ) -> None:
@@ -387,6 +470,35 @@ def test_git_context_mirror_path_uses_registry_fallback_when_metadata_match_is_n
 
     assert git_context_mirror_path_for_worktree(worktree_path, work_dir=work_dir) == (
         valid_mirror.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_git_context_mirror_path_prefers_registered_mirror_when_linked_registry_mismatches(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    linked_mirror = work_dir / "git" / "mirrors" / "linked.git"
+    registered_mirror = work_dir / "git" / "mirrors" / "registered.git"
+    linked_git_dir = linked_mirror / "worktrees" / workspace_id
+    registered_git_dir = registered_mirror / "worktrees" / workspace_id
+    _make_synthetic_mirror_link(mirror=linked_mirror, worktree=worktree_path)
+    _make_synthetic_mirror_link(
+        mirror=registered_mirror,
+        worktree=worktree_path,
+        include_worktree_gitfile=False,
+    )
+    (linked_git_dir / "gitdir").write_text(
+        str(work_dir / "git" / "worktrees" / "other" / ".git"),
+        encoding="utf-8",
+    )
+    os.utime(linked_git_dir, ns=(2, 2))
+    os.utime(registered_git_dir, ns=(1, 1))
+
+    assert git_context_mirror_path_for_worktree(worktree_path, work_dir=work_dir) == (
+        registered_mirror.resolve()
     )
 
 
@@ -568,6 +680,160 @@ def test_mirror_registry_probe_uses_absolute_worktree_when_resolve_fails(
 
 
 @pytest.mark.unit
+def test_mirror_registry_probe_returns_false_when_link_is_missing(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "service" / "git" / "worktrees" / "ws_rowless"
+    mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
+
+    assert _mirror_registry_points_to_worktree(mirror_path, worktree_path) is False
+
+
+@pytest.mark.unit
+def test_mirror_registry_probe_returns_false_for_malformed_back_reference(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "service" / "git" / "worktrees" / "ws_rowless"
+    mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
+    linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+    linked_git_dir.mkdir(parents=True)
+    _write(linked_git_dir / "gitdir", "")
+
+    assert _mirror_registry_points_to_worktree(mirror_path, worktree_path) is False
+
+
+@pytest.mark.unit
+def test_registered_mirror_path_uses_absolute_worktree_when_resolve_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktree_path = work_dir / "git" / "worktrees" / "ws_rowless"
+    mirror_path = work_dir / "git" / "mirrors" / "repo.git"
+    linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+    linked_git_dir.mkdir(parents=True)
+    _write(linked_git_dir / "gitdir", str(worktree_path.absolute() / ".git"))
+    original_resolve = Path.resolve
+
+    def resolve_or_cycle(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == worktree_path:
+            raise RuntimeError("synthetic symlink loop")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_or_cycle)
+
+    assert _registered_mirror_path_from_metadata(worktree_path, work_dir / "git" / "mirrors") == (
+        mirror_path
+    )
+
+
+@pytest.mark.unit
+def test_registered_mirror_path_fails_closed_when_worktree_resolve_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktree_path = work_dir / "git" / "worktrees" / "ws_rowless"
+    mirrors_root = work_dir / "git" / "mirrors"
+    mirrors_root.mkdir(parents=True)
+    original_resolve = Path.resolve
+
+    def resolve_or_fail(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == worktree_path:
+            raise OSError("synthetic resolve failure")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_or_fail)
+
+    with pytest.raises(GitOperationError) as raised:
+        _registered_mirror_path_from_metadata(worktree_path, mirrors_root)
+
+    assert raised.value.reason_code == "MIRROR_REGISTRY_SCAN_FAILED"
+    assert f"cannot resolve worktree path {worktree_path}" in raised.value.stderr
+
+
+@pytest.mark.unit
+def test_registered_mirror_path_fails_closed_when_registry_listing_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktree_path = work_dir / "git" / "worktrees" / "ws_rowless"
+    mirrors_root = work_dir / "git" / "mirrors"
+    mirrors_root.mkdir(parents=True)
+    original_iterdir = Path.iterdir
+
+    def iterdir_or_fail(path: Path) -> object:
+        if path == mirrors_root:
+            raise OSError("synthetic listing failure")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir_or_fail)
+
+    with pytest.raises(GitOperationError) as raised:
+        _registered_mirror_path_from_metadata(worktree_path, mirrors_root)
+
+    assert raised.value.reason_code == "MIRROR_REGISTRY_SCAN_FAILED"
+    assert "synthetic listing failure" in raised.value.stderr
+
+
+@pytest.mark.unit
+def test_registered_mirror_path_uses_zero_mtime_when_entry_stat_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktree_path = work_dir / "git" / "worktrees" / "ws_rowless"
+    mirror_path = work_dir / "git" / "mirrors" / "repo.git"
+    linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+    _make_synthetic_mirror_link(
+        mirror=mirror_path,
+        worktree=worktree_path,
+        include_worktree_gitfile=False,
+    )
+    original_stat = Path.stat
+    original_is_dir = Path.is_dir
+
+    def stat_or_fail(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if path == linked_git_dir:
+            raise OSError("synthetic mtime failure")
+        return original_stat(path, *args, **kwargs)
+
+    def is_dir_or_linked_entry(path: Path) -> bool:
+        if path == linked_git_dir:
+            return True
+        return original_is_dir(path)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir_or_linked_entry)
+    monkeypatch.setattr(Path, "stat", stat_or_fail)
+
+    assert _registered_mirror_path_from_metadata(worktree_path, work_dir / "git" / "mirrors") == (
+        mirror_path
+    )
+
+
+@pytest.mark.unit
+def test_bare_probe_env_strips_git_object_lookup_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIT_DIR", "/tmp/foreign.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/tmp/foreign-worktree")
+    monkeypatch.setenv("GIT_COMMON_DIR", "/tmp/foreign-common")
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/tmp/foreign-objects")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/foreign-alternates")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/tmp/foreign-index")
+
+    env = _git_bare_probe_env()
+
+    assert "GIT_DIR" not in env
+    assert "GIT_WORK_TREE" not in env
+    assert "GIT_COMMON_DIR" not in env
+    assert "GIT_OBJECT_DIRECTORY" not in env
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in env
+    assert "GIT_INDEX_FILE" not in env
+
+
+@pytest.mark.unit
 def test_managed_mirror_path_uses_absolute_paths_when_resolve_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -694,3 +960,17 @@ async def test_remove_orphan_worktree_skips_stale_managed_linked_mirror(
     ]
     assert is_existing_non_git_worktree(worktree_path, work_dir=work_dir) is True
     mock_gm.remove_worktree_from_mirror.assert_not_awaited()
+
+
+@pytest.mark.unit
+def test_stale_managed_linked_mirror_probe_errors_are_not_stale(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktree_path = work_dir / "git" / "worktrees" / "ws_rowless"
+
+    with patch(
+        "awf.node.git_manager.mirror_path_for_worktree",
+        side_effect=RuntimeError("synthetic gitfile loop"),
+    ):
+        assert _has_stale_managed_linked_mirror(worktree_path, work_dir=work_dir) is False
