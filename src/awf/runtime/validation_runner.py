@@ -444,10 +444,17 @@ class ValidationRunner:
             return ()
 
         async def _exec(cli_args: list[str]) -> BrowserProbeExecResult:
+            probe_cli_args = cli_args
+            if len(cli_args) >= 3 and cli_args[:2] == ["sh", "-lc"]:
+                probe_cli_args = [
+                    *cli_args[:2],
+                    _VENV_ACTIVATE_PREAMBLE + cli_args[2],
+                    *cli_args[3:],
+                ]
             invocation = build_tracked_compose_exec(
                 compose_project=compose_project,
                 compose_file=compose_file,
-                cli_args=cli_args,
+                cli_args=probe_cli_args,
                 source="browser_probe",
                 label="browser_probe",
                 workdir=browser_probe_workdir(profile),

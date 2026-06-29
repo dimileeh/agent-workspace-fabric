@@ -124,7 +124,9 @@ class TestProbeRuntimeBrowserFindings:
         argv = fake.calls[0].args
         shell_command_indexes = [index for index, token in enumerate(argv) if token == "-lc"]
         probe_command = argv[shell_command_indexes[-1] + 1]
-        assert probe_command.startswith('python - "$@" <<')
+        assert probe_command.startswith(
+            validation_runner_module._VENV_ACTIVATE_PREAMBLE + 'python - "$@" <<'
+        )
 
     async def test_probe_skips_without_browsers(self, tmp_path: Path) -> None:
         fake = FakeCommandRunner()
