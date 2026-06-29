@@ -103,6 +103,7 @@ true
 
 _BROWSER_PROBE_PYTHON_SCRIPT_TEMPLATE = r"""
 __PYTHON_RUNTIME__ - "$@" <<'PY' || true
+import inspect
 from pathlib import Path
 import sys
 
@@ -119,13 +120,20 @@ statuses = []
 with sync_playwright() as playwright:
     for name in sys.argv[1:]:
         try:
-            browser_type = getattr(playwright, name)
+            inspect.getattr_static(playwright, name)
         except AttributeError:
             browser_type = None
-        try:
-            executable_path = getattr(browser_type, "executable_path")
-        except AttributeError:
+        else:
+            browser_type = getattr(playwright, name)
+        if browser_type is None:
             executable_path = ""
+        else:
+            try:
+                inspect.getattr_static(browser_type, "executable_path")
+            except AttributeError:
+                executable_path = ""
+            else:
+                executable_path = getattr(browser_type, "executable_path")
         if executable_path and Path(executable_path).exists():
             statuses.append(f"OK {name}")
         else:
