@@ -479,7 +479,7 @@ def profile_phase_command_plan(
                 if (
                     defer_browser_install_until_validate_install
                     and deferred_browser_install is not None
-                    and _command_satisfies_deferred_browser_install(
+                    and _dependency_install_chain_satisfies_deferred_browser_install(
                         validate_command.command.command,
                         command_package_manager,
                         browser_install_package_manager,
@@ -615,7 +615,7 @@ def _split_dependency_install_chain(
         trailing_command = command.command.command[separator_index + len(separator) :].strip()
         if not install_command or not trailing_command:
             continue
-        if not _command_satisfies_deferred_browser_install(
+        if not _dependency_install_chain_satisfies_deferred_browser_install(
             install_command,
             _node_dependency_install_package_manager(install_command),
             browser_install_package_manager,
@@ -690,6 +690,31 @@ def _command_satisfies_deferred_browser_install(
         command,
         workspace_root=workspace_root,
     )
+
+
+def _dependency_install_chain_satisfies_deferred_browser_install(
+    command: str,
+    command_package_manager: str | None,
+    browser_install_package_manager: str | None,
+    *,
+    workspace_root: Path | None = None,
+) -> bool:
+    if _command_satisfies_deferred_browser_install(
+        command,
+        command_package_manager,
+        browser_install_package_manager,
+        workspace_root=workspace_root,
+    ):
+        return True
+    for chained_command, _ in _sequential_shell_command_text_ranges(command):
+        if _command_satisfies_deferred_browser_install(
+            chained_command,
+            _node_dependency_install_package_manager(chained_command),
+            browser_install_package_manager,
+            workspace_root=workspace_root,
+        ):
+            return True
+    return False
 
 
 def _dependency_install_chain_scope_prefixes(
