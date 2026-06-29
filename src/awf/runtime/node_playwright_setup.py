@@ -66,6 +66,8 @@ _PYTHON_PLAYWRIGHT_REQUIREMENT_RE = re.compile(
 )
 _PIP_REQUIREMENT_FILE_FLAGS = frozenset({"-r", "--requirement"})
 _PIP_REQUIREMENT_FILE_EQUALS_PREFIX = "--requirement="
+_PIP_EDITABLE_FLAGS = frozenset({"-e", "--editable"})
+_PIP_EDITABLE_EQUALS_PREFIX = "--editable="
 _CONTAINER_WORKSPACE_ROOT = Path("/workspace")
 _UV_PIP_PYTHON_FLAGS = frozenset({"-p", "--python"})
 _UV_PIP_PYTHON_EQUALS_PREFIXES = ("-p=", "--python=")
@@ -1096,9 +1098,16 @@ def _python_requirements_include_playwright(
             requirement_base_dir=requirement_base_dir,
         ):
             return True
+        local_project, local_project_token_width = _pip_local_project_argument(tokens, index)
+        if local_project is not None and _python_local_project_includes_playwright(
+            local_project,
+            workspace_root=workspace_root,
+            requirement_base_dir=requirement_base_dir,
+        ):
+            return True
         if _python_requirement_token_includes_playwright(token):
             return True
-        index += token_width
+        index += max(token_width, local_project_token_width)
     return False
 
 
@@ -1113,6 +1122,69 @@ def _pip_requirement_file_argument(tokens: list[str], index: int) -> tuple[str |
     if token.startswith(_PIP_REQUIREMENT_FILE_EQUALS_PREFIX):
         return token.removeprefix(_PIP_REQUIREMENT_FILE_EQUALS_PREFIX), 1
     return None, 1
+
+
+def _pip_local_project_argument(tokens: list[str], index: int) -> tuple[str | None, int]:
+    token = tokens[index]
+    if token in _PIP_EDITABLE_FLAGS:
+        if index + 1 >= len(tokens) or tokens[index + 1] in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return None, 1
+        return tokens[index + 1], 2
+    if token.startswith(_PIP_EDITABLE_EQUALS_PREFIX):
+        return token.removeprefix(_PIP_EDITABLE_EQUALS_PREFIX), 1
+    if token.startswith("-e") and token != "-e":
+        return token[2:], 1
+    if token.startswith("-"):
+        return None, 1
+    return token, 1
+
+
+def _python_local_project_includes_playwright(
+    project_requirement: str,
+    *,
+    workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
+) -> bool:
+    project_dir, extras = _local_project_path_and_extras(project_requirement)
+    if project_dir is None:
+        return False
+    project_path = _safe_local_project_dir_path(
+        project_dir,
+        workspace_root=workspace_root,
+        requirement_base_dir=requirement_base_dir,
+    )
+    if project_path is None:
+        return False
+    return _pyproject_includes_python_playwright(
+        workspace_root=workspace_root,
+        requirement_base_dir=project_path,
+        extras=extras,
+        include_all_extras=False,
+        groups=set(),
+        only_groups=set(),
+        excluded_groups=set(),
+        include_all_groups=False,
+        include_default_groups=False,
+        include_project_dependencies=True,
+    )
+
+
+def _local_project_path_and_extras(project_requirement: str) -> tuple[str | None, set[str]]:
+    requirement = project_requirement.split(";", 1)[0].strip()
+    if not requirement:
+        return None, set()
+    extras: set[str] = set()
+    path = requirement
+    if requirement.endswith("]"):
+        extras_start = requirement.rfind("[")
+        if extras_start > max(requirement.rfind("/"), requirement.rfind("\\")):
+            path = requirement[:extras_start]
+            extras = {
+                extra.strip()
+                for extra in requirement[extras_start + 1 : -1].split(",")
+                if extra.strip()
+            }
+    return path, extras
 
 
 def _python_requirement_file_includes_playwright(
@@ -1171,6 +1243,40 @@ def _safe_local_requirement_file_path(
     except (OSError, ValueError):
         return None
     if not resolved.is_file():
+        return None
+    return resolved
+
+
+def _safe_local_project_dir_path(
+    project_dir: str,
+    *,
+    workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
+) -> Path | None:
+    if (
+        not project_dir
+        or project_dir.startswith("-")
+        or _package_scope_uses_shell_expansion(project_dir)
+    ):
+        return None
+    resolved_workspace_root = (workspace_root or Path.cwd()).resolve()
+    resolved_requirement_base_dir = (
+        requirement_base_dir.resolve()
+        if requirement_base_dir is not None
+        else resolved_workspace_root
+    )
+    path = Path(project_dir)
+    if path.is_absolute() and workspace_root is not None:
+        with suppress(ValueError):
+            path = resolved_workspace_root / path.relative_to(_CONTAINER_WORKSPACE_ROOT)
+    elif not path.is_absolute():
+        path = resolved_requirement_base_dir / path
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(resolved_workspace_root)
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_dir():
         return None
     return resolved
 

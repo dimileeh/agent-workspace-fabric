@@ -468,6 +468,43 @@ class TestPlaywrightBrowserInstallCommand:
         assert command is not None
         assert command.command == "python -m playwright install chromium"
 
+    @pytest.mark.parametrize(
+        "setup_command",
+        [
+            "python -m pip install -e .[e2e]",
+            "pip install .[e2e]",
+        ],
+    )
+    def test_python_playwright_profile_detects_pip_local_project_extra(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        setup_command: str,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "browser-profile"',
+                    'version = "0.1.0"',
+                    "[project.optional-dependencies]",
+                    'e2e = ["pytest-playwright"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[setup_command],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "python -m playwright install chromium"
+
     def test_python_playwright_profile_resolves_requirements_from_workspace_root(
         self,
         tmp_path: Path,
