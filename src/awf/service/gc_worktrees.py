@@ -323,6 +323,22 @@ async def remove_orphan_worktree(
                 ),
             ),
         )
+    except Exception as exc:
+        error = str(exc)
+        reason_code = "ORPHAN_WORKTREE_GIT_CONTEXT_PROBE_FAILED"
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code=reason_code,
+            error=error,
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=worktree_id,
+                    status="failed",
+                    reason_code=reason_code,
+                    error=error,
+                ),
+            ),
+        )
 
     if is_non_git_worktree:
         return WorkspaceGCWorktreeRemoveResult(

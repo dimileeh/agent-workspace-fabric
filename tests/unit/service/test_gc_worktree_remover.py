@@ -1139,6 +1139,45 @@ async def test_remove_orphan_worktree_reports_metadata_probe_failure(
 
 
 @pytest.mark.unit
+async def test_remove_orphan_worktree_reports_unexpected_metadata_probe_failure(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    probe_error = RuntimeError("symlink loop from linked worktree gitdir")
+
+    with (
+        patch(
+            "awf.service.gc_worktrees.git_context_mirror_path_for_worktree",
+            side_effect=probe_error,
+        ),
+        patch("awf.node.git_manager.GitManager") as mock_gm_cls,
+    ):
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "failed"
+    assert result.reason_code == "ORPHAN_WORKTREE_GIT_CONTEXT_PROBE_FAILED"
+    assert result.error == "symlink loop from linked worktree gitdir"
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": workspace_id,
+            "status": "failed",
+            "reason_code": "ORPHAN_WORKTREE_GIT_CONTEXT_PROBE_FAILED",
+            "error": "symlink loop from linked worktree gitdir",
+        }
+    ]
+    mock_gm.remove_worktree_from_mirror.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_remove_orphan_worktree_fails_loudly_when_mirror_context_unresolved(
     tmp_path: Path,
 ) -> None:
