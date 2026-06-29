@@ -799,6 +799,7 @@ def sync_playwright():
             ("pnpm --filter @repo/web", "pnpm --filter @repo/web exec node"),
             ("pnpm -F @repo/web", "pnpm -F @repo/web exec node"),
             ("pnpm dlx", "pnpm dlx --package playwright node"),
+            ("pnpx", "pnpx --package playwright node"),
             (
                 "pnpm --filter @repo/web dlx",
                 "pnpm --filter @repo/web dlx --package playwright node",

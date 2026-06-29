@@ -220,6 +220,8 @@ def _browser_probe_node_runtime(package_manager: str) -> str:
         return "bun"
     if executable == "yarn":
         return shlex.join([*package_manager_tokens, "node"])
+    if executable == "pnpx":
+        return shlex.join([*package_manager_tokens, "--package", "playwright", "node"])
     if executable == "pnpm" and _node_package_manager_tokens_use_dlx_runner(package_manager_tokens):
         return shlex.join([*package_manager_tokens, "--package", "playwright", "node"])
     if executable == "pnpm" and len(package_manager_tokens) > 1:
