@@ -14,6 +14,7 @@ from awf.profiles.models import (
     WorkspaceProfile,
 )
 from awf.runtime.browser_probe import (
+    _BROWSER_PROBE_PYTHON_SCRIPT,
     _BROWSER_PROBE_SCRIPT,
     ProbeExecResult,
     _browser_probe_node_runtime,
@@ -128,6 +129,37 @@ class TestProbeRuntimeBrowsers:
         assert findings == ()
         assert len(spy.calls) == 1
         assert spy.calls[0][2].startswith("pnpm --filter @repo/web exec node")
+        assert spy.calls[0][-1] == "chromium"
+
+    async def test_python_playwright_profile_runs_probe_through_python_runtime(self) -> None:
+        profile = _profile_with_setup_and_browsers(["python -m pip install playwright"])
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
+
+        findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+        assert len(spy.calls) == 1
+        assert spy.calls[0][2].startswith('python - "$@" <<')
+        assert spy.calls[0][-1] == "chromium"
+
+    async def test_mixed_python_and_node_profile_keeps_node_probe(self) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-profile",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["python -m pip install playwright"],
+                    "validate": ["npx playwright test"],
+                },
+            }
+        )
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
+
+        findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+        assert len(spy.calls) == 1
+        assert spy.calls[0][2].startswith('node - "$@" <<')
         assert spy.calls[0][-1] == "chromium"
 
     async def test_declared_browser_missing_warns(self) -> None:
@@ -266,6 +298,61 @@ exports.firefox = {{
 
         result = subprocess.run(
             ["sh", "-lc", _BROWSER_PROBE_SCRIPT, "browser_probe", "chromium", "firefox"],
+            cwd=tmp_path,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.splitlines() == ["OK chromium", "MISSING firefox"]
+
+    def test_embedded_python_probe_uses_python_playwright_package(self, tmp_path) -> None:
+        if shutil.which("python") is None:
+            pytest.skip("python is required to exercise the embedded Python probe script")
+        browser_bin = tmp_path / "chromium"
+        browser_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        package_dir = tmp_path / "playwright"
+        package_dir.mkdir()
+        package_dir.joinpath("__init__.py").write_text("", encoding="utf-8")
+        package_dir.joinpath("sync_api.py").write_text(
+            f"""
+class _Browser:
+    def __init__(self, executable_path):
+        self.executable_path = executable_path
+
+
+class _Playwright:
+    chromium = _Browser({str(browser_bin)!r})
+    firefox = _Browser({str(tmp_path / "missing-firefox")!r})
+
+
+class _SyncPlaywright:
+    def __enter__(self):
+        return _Playwright()
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def sync_playwright():
+    return _SyncPlaywright()
+""",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+
+        result = subprocess.run(
+            [
+                "sh",
+                "-lc",
+                _BROWSER_PROBE_PYTHON_SCRIPT,
+                "browser_probe",
+                "chromium",
+                "firefox",
+            ],
             cwd=tmp_path,
             env=env,
             check=False,

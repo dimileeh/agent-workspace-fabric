@@ -14,6 +14,10 @@ from awf.profiles.models import (
     WorkspaceProfile,
     runtime_browser_findings,
 )
+from awf.runtime.node_playwright_setup import (
+    _playwright_browser_install_node_package_manager,
+    _python_playwright_executable,
+)
 from awf.runtime.validation_setup import (
     node_package_manager_command,
     node_package_manager_package_dir,
@@ -70,8 +74,45 @@ true
 """.strip()
 
 
+_BROWSER_PROBE_PYTHON_SCRIPT_TEMPLATE = r"""
+__PYTHON_RUNTIME__ - "$@" <<'PY' || true
+from pathlib import Path
+import sys
+
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:
+    for name in sys.argv[1:]:
+        print(f"MISSING {name}")
+    sys.exit(0)
+
+try:
+    statuses = []
+    with sync_playwright() as playwright:
+        for name in sys.argv[1:]:
+            browser_type = getattr(playwright, name, None)
+            executable_path = (
+                getattr(browser_type, "executable_path", "") if browser_type else ""
+            )
+            if executable_path and Path(executable_path).exists():
+                statuses.append(f"OK {name}")
+            else:
+                statuses.append(f"MISSING {name}")
+except Exception:
+    statuses = [f"MISSING {name}" for name in sys.argv[1:]]
+for status in statuses:
+    print(status)
+PY
+true
+""".strip()
+
+
 def _browser_probe_script(node_runtime: str) -> str:
     return _BROWSER_PROBE_SCRIPT_TEMPLATE.replace("__NODE_RUNTIME__", node_runtime, 1)
+
+
+def _browser_probe_python_script(python_runtime: str) -> str:
+    return _BROWSER_PROBE_PYTHON_SCRIPT_TEMPLATE.replace("__PYTHON_RUNTIME__", python_runtime, 1)
 
 
 def _browser_probe_node_runtime(package_manager: str) -> str:
@@ -112,7 +153,25 @@ def _browser_probe_without_directory_scope(tokens: list[str]) -> list[str]:
 
 
 _BROWSER_PROBE_SCRIPT = _browser_probe_script("node")
+_BROWSER_PROBE_PYTHON_SCRIPT = _browser_probe_python_script("python")
 _BROWSER_STATUS_RE = re.compile(r"^(?P<status>OK|MISSING) (?P<browser>\S+)$", re.MULTILINE)
+
+
+def _browser_probe_command(profile: WorkspaceProfile) -> str:
+    python_runtime = _python_browser_probe_runtime(profile)
+    if python_runtime is not None:
+        return _browser_probe_python_script(python_runtime)
+    node_runtime = _browser_probe_node_runtime(node_package_manager_command(profile))
+    return _browser_probe_script(node_runtime)
+
+
+def _python_browser_probe_runtime(profile: WorkspaceProfile) -> str | None:
+    python_runtime = _python_playwright_executable(profile)
+    if python_runtime is None:
+        return None
+    if _playwright_browser_install_node_package_manager(profile) is not None:
+        return None
+    return python_runtime
 
 
 def browser_probe_workdir(profile: WorkspaceProfile) -> str:
@@ -134,12 +193,11 @@ async def probe_runtime_browsers(
     if not profile.runtime.browsers:
         return ()
     try:
-        node_runtime = _browser_probe_node_runtime(node_package_manager_command(profile))
         result = await exec_in_container(
             [
                 "sh",
                 "-lc",
-                _browser_probe_script(node_runtime),
+                _browser_probe_command(profile),
                 "browser_probe",
                 *profile.runtime.browsers,
             ]
