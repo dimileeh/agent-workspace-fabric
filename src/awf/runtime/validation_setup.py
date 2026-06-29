@@ -721,7 +721,7 @@ def _command_has_unpreserved_shell_state_scope(command: str) -> bool:
             ):
                 return True
             continue
-        if command_tokens[command_index] in {"export", "source", "."}:
+        if command_tokens[command_index] in {"eval", "export", "source", "."}:
             return True
     return False
 
