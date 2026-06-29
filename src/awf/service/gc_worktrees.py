@@ -357,7 +357,9 @@ async def remove_orphan_worktree(
     try:
         mirror_path = git_context_mirror_path_for_worktree(path, work_dir=work_dir)
         is_non_git_worktree = mirror_path is None and is_existing_non_git_worktree(
-            path, work_dir=work_dir
+            path,
+            work_dir=work_dir,
+            fail_on_metadata_probe_error=True,
         )
     except GitOperationError as exc:
         error = str(exc)
@@ -694,7 +696,12 @@ def _has_stale_managed_linked_mirror(path: Path, *, work_dir: Path) -> bool:
     return linked_mirror_path is not None and not _is_bare_git_repository(linked_mirror_path)
 
 
-def is_existing_non_git_worktree(path: Path, *, work_dir: Path | None = None) -> bool:
+def is_existing_non_git_worktree(
+    path: Path,
+    *,
+    work_dir: Path | None = None,
+    fail_on_metadata_probe_error: bool = False,
+) -> bool:
     """Return whether an existing worktree path lacks usable Git management metadata."""
 
     if not path.exists():
@@ -708,7 +715,10 @@ def is_existing_non_git_worktree(path: Path, *, work_dir: Path | None = None) ->
         try:
             return git_context_mirror_path_for_worktree(path, work_dir=work_dir) is None
         except GitOperationError as exc:
-            if exc.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED":
+            if (
+                exc.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+                and not fail_on_metadata_probe_error
+            ):
                 return True
             raise
     if git_context_mirror_path_for_worktree(path, work_dir=work_dir):
