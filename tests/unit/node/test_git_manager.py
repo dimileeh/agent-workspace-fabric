@@ -954,35 +954,60 @@ def test_mirror_path_for_registered_worktree_wraps_worktree_resolution_os_error(
 
 
 @pytest.mark.unit
-async def test_read_mirror_origin_url_returns_configured_origin(tmp_path: Path) -> None:
+async def test_read_mirror_origin_url_returns_configured_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repo_url = "git@github.com:example/repo.git"
     mirror = tmp_path / "repo.git"
-    subprocess.run(["git", "init", "--bare", str(mirror)], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "--git-dir", str(mirror), "config", "remote.origin.url", repo_url],
-        check=True,
-        capture_output=True,
-    )
+    calls: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = []
+
+    async def _fake_run_git_config(
+        *,
+        git_args: tuple[str, ...],
+        config_scope_args: tuple[str, ...],
+        args: tuple[str, ...],
+    ) -> tuple[int, str, str]:
+        calls.append((git_args, config_scope_args, args))
+        return 0, f"{repo_url}\n", ""
+
+    monkeypatch.setattr(git_manager, "_run_git_config", _fake_run_git_config)
 
     assert await git_manager.read_mirror_origin_url(mirror) == repo_url
+    assert calls == [
+        (
+            ("--git-dir", str(mirror)),
+            ("--local",),
+            ("--get", "remote.origin.url"),
+        )
+    ]
 
 
 @pytest.mark.unit
 async def test_read_mirror_origin_url_returns_none_when_unset_or_empty(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mirror = tmp_path / "repo.git"
-    subprocess.run(["git", "init", "--bare", str(mirror)], check=True, capture_output=True)
+    responses = [(1, "", ""), (0, "\n", "")]
+
+    async def _fake_run_git_config(
+        *,
+        git_args: tuple[str, ...],
+        config_scope_args: tuple[str, ...],
+        args: tuple[str, ...],
+    ) -> tuple[int, str, str]:
+        assert git_args == ("--git-dir", str(mirror))
+        assert config_scope_args == ("--local",)
+        assert args == ("--get", "remote.origin.url")
+        return responses.pop(0)
+
+    monkeypatch.setattr(git_manager, "_run_git_config", _fake_run_git_config)
 
     assert await git_manager.read_mirror_origin_url(mirror) is None
 
-    subprocess.run(
-        ["git", "--git-dir", str(mirror), "config", "remote.origin.url", ""],
-        check=True,
-        capture_output=True,
-    )
-
     assert await git_manager.read_mirror_origin_url(mirror) is None
+    assert responses == []
 
 
 @pytest.mark.unit
