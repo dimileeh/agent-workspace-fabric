@@ -265,9 +265,6 @@ def _pnpm_playwright_package_manager_tokens(package_manager_tokens: list[str]) -
                 cleaned_tokens.append(package_manager_tokens[token_index + 1])
             token_index += 2
             continue
-        if token in _PNPM_PRESERVED_VALUELESS_SCOPE_FLAGS:
-            token_index += 1
-            continue
         cleaned_tokens.append(token)
         token_index += 1
     return cleaned_tokens
