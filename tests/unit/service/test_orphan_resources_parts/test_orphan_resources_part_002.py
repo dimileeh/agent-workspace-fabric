@@ -190,10 +190,9 @@ def test_reaper_uses_git_aware_remover_for_git_managed_worktree(
     ]
 
 
-def test_reaper_direct_deletes_git_aware_non_git_skipped_worktree(
+def test_reaper_reports_git_aware_skipped_worktree_without_direct_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from awf.service.gc_classify import PATH_DELETED
     from awf.service.orphan_resources import reap_classified_orphans
 
     worktree = tmp_path / "git" / "worktrees" / "ws_dead"
@@ -207,7 +206,6 @@ def test_reaper_direct_deletes_git_aware_non_git_skipped_worktree(
         reaper_available=True,
     )
     remover_calls: list[tuple[str, Path]] = []
-    delete_calls: list[tuple[str, Path, Path]] = []
 
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
@@ -226,13 +224,14 @@ def test_reaper_direct_deletes_git_aware_non_git_skipped_worktree(
             ),
         )
 
-    def _direct_delete(
+    def _direct_delete_forbidden(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
-        delete_calls.append((kind, path, work_dir))
-        return True, None, PATH_DELETED
+        raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
 
-    monkeypatch.setattr("awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete)
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
+    )
 
     result = asyncio.run(
         reap_classified_orphans(
@@ -245,17 +244,16 @@ def test_reaper_direct_deletes_git_aware_non_git_skipped_worktree(
         )
     )
 
-    assert result.status == "ok"
+    assert result.status == "partial"
+    assert result.reason_code == "ORPHAN_REAP_PARTIAL"
+    assert result.reaped == ()
     assert remover_calls == [("ws_dead", worktree)]
-    assert delete_calls == [("worktree", worktree, tmp_path.resolve())]
-    assert [outcome.to_dict() for outcome in result.reaped] == [
-        {
-            "kind": "worktree",
-            "workspace_id": "ws_dead",
-            "status": "reaped",
-            "reason_code": PATH_DELETED,
-        }
-    ]
+    assert len(result.errors) == 1
+    assert result.errors[0].kind == "worktree"
+    assert result.errors[0].workspace_id == "ws_dead"
+    assert result.errors[0].status == "failed"
+    assert result.errors[0].reason_code == "WORKTREE_NOT_GIT_MANAGED"
+    assert worktree.exists()
 
 
 @pytest.mark.unit
