@@ -487,10 +487,23 @@ def _command_starts_with_cd_scope(command: str) -> bool:
     tokens = _shell_tokens(command)
     if tokens is None:
         return False
-    command_index = _first_non_assignment_token_index(tokens)
-    if command_index >= len(tokens) or tokens[command_index] != "cd":
+    if any(token in {"||", "|", "|&", "&"} for token in tokens):
         return False
-    return not any(token in {"||", "|", "|&", "&"} for token in tokens)
+    for command_index in _sequential_shell_command_indices(tokens):
+        command_index += _first_non_assignment_token_index(tokens[command_index:])
+        if command_index < len(tokens) and tokens[command_index] == "cd":
+            return True
+    return False
+
+
+def _sequential_shell_command_indices(tokens: list[str]) -> list[int]:
+    command_indices = [0]
+    command_indices.extend(
+        index + 1
+        for index, token in enumerate(tokens)
+        if token in {"&&", ";"} and index + 1 < len(tokens)
+    )
+    return command_indices
 
 
 def _first_unquoted_and_separator(command: str) -> int | None:
