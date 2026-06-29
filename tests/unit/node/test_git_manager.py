@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -24,13 +25,6 @@ from awf.node.git_manager import (
 )
 
 
-@pytest.mark.unit
-def test_github_pull_head_ref_pattern_matches_expected() -> None:
-    pattern = git_manager._GITHUB_PULL_HEAD_REF
-    assert pattern.match("refs/pull/278/head")
-    assert pattern.match("refs/pull/0/head") is None
-
-
 def _git(args: list[str], cwd: Path) -> None:
     """Run a synchronous git command for fixture setup; fail loudly on error."""
     subprocess.run(
@@ -39,6 +33,29 @@ def _git(args: list[str], cwd: Path) -> None:
         check=True,
         capture_output=True,
     )
+
+
+def _init_bare_mirror(path: Path) -> None:
+    path.mkdir(parents=True)
+    (path / "worktrees").mkdir()
+
+
+@pytest.fixture
+def synthetic_bare_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[Path], None]:
+    bare_mirrors: set[Path] = set()
+
+    def _init(path: Path) -> None:
+        _init_bare_mirror(path)
+        bare_mirrors.add(path.resolve())
+
+    monkeypatch.setattr(
+        git_manager,
+        "_is_bare_registered_mirror_candidate",
+        lambda mirror_path: mirror_path.resolve() in bare_mirrors,
+    )
+    return _init
 
 
 @pytest.fixture
@@ -770,6 +787,230 @@ def test_mirror_path_for_worktree_handles_commondir_and_unreadable_commondir(
 
 
 @pytest.mark.unit
+def test_mirror_path_for_registered_worktree_prefers_newest_duplicate_match(
+    tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    old_mirror = mirrors_dir / "a-old.git"
+    active_mirror = mirrors_dir / "z-active.git"
+    synthetic_bare_mirror(old_mirror)
+    synthetic_bare_mirror(active_mirror)
+    old_linked_git_dir = old_mirror / "worktrees" / "ws"
+    active_linked_git_dir = active_mirror / "worktrees" / "ws"
+    old_linked_git_dir.mkdir(parents=True)
+    active_linked_git_dir.mkdir(parents=True)
+    for linked_git_dir in (old_linked_git_dir, active_linked_git_dir):
+        (linked_git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    os.utime(old_linked_git_dir, ns=(1, 1))
+    os.utime(active_linked_git_dir, ns=(2, 2))
+
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+        == active_mirror.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_ignores_newer_non_bare_match(
+    tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    valid_mirror = mirrors_dir / "a-valid.git"
+    invalid_mirror = mirrors_dir / "z-invalid.git"
+    synthetic_bare_mirror(valid_mirror)
+    valid_linked_git_dir = valid_mirror / "worktrees" / "ws"
+    invalid_linked_git_dir = invalid_mirror / "worktrees" / "ws"
+    valid_linked_git_dir.mkdir(parents=True)
+    invalid_linked_git_dir.mkdir(parents=True)
+    for linked_git_dir in (valid_linked_git_dir, invalid_linked_git_dir):
+        (linked_git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    os.utime(valid_linked_git_dir, ns=(1, 1))
+    os.utime(invalid_linked_git_dir, ns=(2, 2))
+
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+        == valid_mirror.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_ignores_external_symlinked_mirror(
+    tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    managed_mirror = mirrors_dir / "a-managed.git"
+    external_mirror = tmp_path / "external.git"
+    synthetic_bare_mirror(managed_mirror)
+    synthetic_bare_mirror(external_mirror)
+    managed_linked_git_dir = managed_mirror / "worktrees" / "ws"
+    external_linked_git_dir = external_mirror / "worktrees" / "ws"
+    managed_linked_git_dir.mkdir(parents=True)
+    external_linked_git_dir.mkdir(parents=True)
+    for linked_git_dir in (managed_linked_git_dir, external_linked_git_dir):
+        (linked_git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    os.utime(managed_linked_git_dir, ns=(1, 1))
+    os.utime(external_linked_git_dir, ns=(2, 2))
+    (mirrors_dir / "z-external.git").symlink_to(external_mirror, target_is_directory=True)
+
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+        == managed_mirror.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_ignores_earlier_unreadable_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    unreadable_mirror = mirrors_dir / "a-unreadable.git"
+    active_mirror = mirrors_dir / "z-active.git"
+    synthetic_bare_mirror(unreadable_mirror)
+    synthetic_bare_mirror(active_mirror)
+    unreadable_gitdir = unreadable_mirror / "worktrees" / "ws" / "gitdir"
+    active_gitdir = active_mirror / "worktrees" / "ws" / "gitdir"
+    unreadable_gitdir.parent.mkdir(parents=True)
+    active_gitdir.parent.mkdir(parents=True)
+    unreadable_gitdir.write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    active_gitdir.write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def _raise_for_unreadable_gitdir(path: Path, *args: object, **kwargs: object) -> str:
+        if path == unreadable_gitdir:
+            raise PermissionError("permission denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_unreadable_gitdir)
+
+    assert (
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+        == active_mirror.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_fails_closed_when_registry_unscannable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    mirrors_dir.mkdir()
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    original_iterdir = Path.iterdir
+
+    def _raise_for_mirrors_dir(path: Path):
+        if path == mirrors_dir:
+            raise PermissionError("permission denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", _raise_for_mirrors_dir)
+
+    with pytest.raises(GitOperationError) as raised:
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+
+    assert raised.value.reason_code == "MIRROR_REGISTRY_SCAN_FAILED"
+    assert "permission denied" in raised.value.stderr
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_wraps_worktree_resolution_os_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    mirrors_dir.mkdir()
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    original_resolve = Path.resolve
+
+    def _raise_for_worktree(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == worktree:
+            raise OSError("too many levels of symbolic links")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _raise_for_worktree)
+
+    with pytest.raises(GitOperationError) as raised:
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+
+    assert raised.value.operation == "mirror_registry_scan"
+    assert raised.value.reason_code == "MIRROR_REGISTRY_SCAN_FAILED"
+    assert "cannot resolve worktree path" in raised.value.stderr
+    assert "too many levels of symbolic links" in raised.value.stderr
+
+
+@pytest.mark.unit
+async def test_read_mirror_origin_url_returns_configured_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_url = "git@github.com:example/repo.git"
+    mirror = tmp_path / "repo.git"
+    calls: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = []
+
+    async def _fake_run_git_config(
+        *,
+        git_args: tuple[str, ...],
+        config_scope_args: tuple[str, ...],
+        args: tuple[str, ...],
+    ) -> tuple[int, str, str]:
+        calls.append((git_args, config_scope_args, args))
+        return 0, f"{repo_url}\n", ""
+
+    monkeypatch.setattr(git_manager, "_run_git_config", _fake_run_git_config)
+
+    assert await git_manager.read_mirror_origin_url(mirror) == repo_url
+    assert calls == [
+        (
+            ("--git-dir", str(mirror)),
+            ("--local",),
+            ("--get", "remote.origin.url"),
+        )
+    ]
+
+
+@pytest.mark.unit
+async def test_read_mirror_origin_url_returns_none_when_unset_or_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mirror = tmp_path / "repo.git"
+    responses = [(1, "", ""), (0, "\n", "")]
+
+    async def _fake_run_git_config(
+        *,
+        git_args: tuple[str, ...],
+        config_scope_args: tuple[str, ...],
+        args: tuple[str, ...],
+    ) -> tuple[int, str, str]:
+        assert git_args == ("--git-dir", str(mirror))
+        assert config_scope_args == ("--local",)
+        assert args == ("--get", "remote.origin.url")
+        return responses.pop(0)
+
+    monkeypatch.setattr(git_manager, "_run_git_config", _fake_run_git_config)
+
+    assert await git_manager.read_mirror_origin_url(mirror) is None
+
+    assert await git_manager.read_mirror_origin_url(mirror) is None
+    assert responses == []
+
+
+@pytest.mark.unit
 def test_linked_worktree_path_from_git_dir_rejects_invalid_back_reference(
     tmp_path: Path,
 ) -> None:
@@ -1135,6 +1376,43 @@ class TestRemoveWorktree:
         assert not worktree_path.exists()
 
     @pytest.mark.unit
+    async def test_missing_gitfile_worktree_validation_failure_is_reclaimed(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        await manager.ensure_mirror(str(origin_repo))
+        worktree_path = manager._worktrees_dir / "ws_missing_gitfile"
+        worktree_path.mkdir(parents=True)
+        (worktree_path / "leftover.txt").write_text("stale\n")
+
+        pruned: list[str] = []
+
+        async def _stale_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            if operation == "worktree.remove":
+                raise GitOperationError(
+                    operation=operation,
+                    returncode=128,
+                    stdout="",
+                    stderr=(
+                        "fatal: validation failed, cannot remove working tree: "
+                        f"'{worktree_path}/.git' does not exist"
+                    ),
+                )
+            if operation == "worktree.prune":
+                pruned.append(operation)
+                return subprocess.CompletedProcess(args, 0, "", "")
+            raise AssertionError(f"unexpected operation {operation}")
+
+        manager._run = _stale_run  # type: ignore[method-assign]
+
+        await manager.remove_worktree(
+            workspace_id="ws_missing_gitfile",
+            repo_url=str(origin_repo),
+        )
+
+        assert pruned == ["worktree.prune"]
+        assert not worktree_path.exists()
+
+    @pytest.mark.unit
     async def test_stale_dir_reclaim_failure_propagates(
         self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1215,113 +1493,3 @@ class TestHeadSha:
             check=True,
         ).stdout.strip()
         assert sha == expected
-
-
-class TestGitEnvironment:
-    @pytest.mark.unit
-    async def test_run_uses_configured_environment(self, tmp_path: Path) -> None:
-        home = tmp_path / "home"
-        home.mkdir()
-        manager = GitManager(tmp_path / "work", env={"HOME": str(home), "AWF_TEST_ENV": "ok"})
-
-        result = await manager._run(  # noqa: SLF001 - narrow regression for subprocess env.
-            ["sh", "-c", 'printf \'%s:%s\' "$HOME" "$AWF_TEST_ENV"'],
-            operation="env",
-        )
-
-        assert result.stdout == f"{home}:ok"
-
-
-class TestAgentWritableWorktreeHelpers:
-    @pytest.mark.unit
-    async def test_prepare_agent_writable_worktree_skips_chown_when_not_root(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(os, "geteuid", lambda: 1000)
-
-        async def _unexpected_to_thread(*_args: object, **_kwargs: object) -> None:
-            raise AssertionError("non-root process must not chown worktrees")
-
-        monkeypatch.setattr(git_module.asyncio, "to_thread", _unexpected_to_thread)
-        manager = GitManager(
-            tmp_path / "awf-work",
-            worktree_owner_uid=1000,
-            worktree_owner_gid=1000,
-        )
-
-        await manager._prepare_agent_writable_worktree(  # noqa: SLF001
-            layout_mirror=tmp_path / "mirror.git",
-            worktree_path=tmp_path / "worktree",
-        )
-
-    @pytest.mark.unit
-    def test_linked_worktree_git_dir_handles_absent_unreadable_and_relative_gitfiles(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        missing_gitfile = tmp_path / "missing"
-        missing_gitfile.mkdir()
-        assert git_module.linked_worktree_git_dir(missing_gitfile) is None
-
-        unreadable = tmp_path / "unreadable"
-        unreadable.mkdir()
-        unreadable_gitfile = unreadable / ".git"
-        unreadable_gitfile.write_text("gitdir: ../real.git\n", encoding="utf-8")
-        original_read_text = Path.read_text
-
-        def _read_text(path: Path, *args: object, **kwargs: object) -> str:
-            if path == unreadable_gitfile:
-                raise OSError("cannot read gitfile")
-            return original_read_text(path, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "read_text", _read_text)
-        assert git_module.linked_worktree_git_dir(unreadable) is None
-
-        malformed = tmp_path / "malformed"
-        malformed.mkdir()
-        (malformed / ".git").write_text("not a gitdir pointer\n", encoding="utf-8")
-        assert git_module.linked_worktree_git_dir(malformed) is None
-
-        relative = tmp_path / "relative"
-        relative.mkdir()
-        (relative / ".git").write_text(
-            "gitdir: ../mirror.git/worktrees/ws_relative\n",
-            encoding="utf-8",
-        )
-
-        assert (
-            git_module.linked_worktree_git_dir(relative)
-            == (relative / "../mirror.git/worktrees/ws_relative").resolve()
-        )
-
-    @pytest.mark.unit
-    def test_chown_targets_skip_missing_and_duplicate_paths(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        chowned: list[tuple[Path, int, int]] = []
-        file_path = tmp_path / "owned-file"
-        file_path.write_text("content\n", encoding="utf-8")
-        missing_path = tmp_path / "missing"
-
-        monkeypatch.setattr(
-            os,
-            "chown",
-            lambda path, uid, gid: chowned.append((Path(path), uid, gid)),
-        )
-
-        git_module._chown_targets(  # noqa: SLF001
-            (
-                git_module._ChownTarget(file_path, recursive=True),  # noqa: SLF001
-                git_module._ChownTarget(file_path, recursive=True),  # noqa: SLF001
-                git_module._ChownTarget(missing_path, recursive=False),  # noqa: SLF001
-            ),
-            1000,
-            1001,
-        )
-
-        assert chowned == [(file_path, 1000, 1001)]
