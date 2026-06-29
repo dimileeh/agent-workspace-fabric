@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -574,7 +575,9 @@ def test_reaper_uses_git_aware_remover_for_worktree_missing_gitfile_with_mirror_
 
     worktree = tmp_path / "git" / "worktrees" / "ws_dead"
     worktree.mkdir(parents=True)
-    linked_git_dir = tmp_path / "git" / "mirrors" / "repo.git" / "worktrees" / "ws_dead"
+    mirror = tmp_path / "git" / "mirrors" / "repo.git"
+    subprocess.run(["git", "init", "--bare", str(mirror)], check=True, capture_output=True)
+    linked_git_dir = mirror / "worktrees" / "ws_dead"
     linked_git_dir.mkdir(parents=True)
     (linked_git_dir / "gitdir").write_text(str(worktree / ".git"), encoding="utf-8")
     summary = build_orphan_resource_summary(

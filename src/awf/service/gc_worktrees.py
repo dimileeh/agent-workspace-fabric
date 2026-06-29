@@ -558,20 +558,13 @@ def _has_stale_managed_linked_mirror(path: Path, *, work_dir: Path) -> bool:
 
 
 def is_existing_non_git_worktree(path: Path, *, work_dir: Path | None = None) -> bool:
-    from awf.node.git_manager import GitOperationError
-
     if not path.exists():
         return False
     git_entry = path / ".git"
     if work_dir is None:
         return not git_entry.exists()
-    try:
-        if git_context_mirror_path_for_worktree(path, work_dir=work_dir):
-            return False
-    except GitOperationError:
-        if not git_entry.exists():
-            return True
-        raise
+    if git_context_mirror_path_for_worktree(path, work_dir=work_dir):
+        return False
     if git_entry.is_file() and _has_stale_managed_linked_mirror(path, work_dir=work_dir):
         return True
     return not git_entry.is_file()
