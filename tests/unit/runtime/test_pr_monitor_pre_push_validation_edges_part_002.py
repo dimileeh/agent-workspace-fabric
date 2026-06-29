@@ -161,6 +161,52 @@ def test_deferred_browser_install_completed_after_later_blocking_failure(
 
 
 @pytest.mark.unit
+def test_deferred_browser_install_not_completed_for_early_duplicate_command_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate command text before the install must not appear post-install."""
+    monkeypatch.setattr(
+        pre_push_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(command="pnpm install --frozen-lockfile"),
+            ),
+            SimpleNamespace(
+                phase="setup",
+                command=SimpleNamespace(command="pnpm exec playwright install chromium"),
+            ),
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(command="pnpm test:e2e"),
+            ),
+            SimpleNamespace(
+                phase="validate",
+                command=SimpleNamespace(command="pnpm install --frozen-lockfile"),
+            ),
+        ],
+    )
+
+    assert not pre_push_validation._deferred_runtime_browser_install_completed(
+        _deferred_browser_profile(),
+        worktree_path=tmp_path,
+        result=ValidationResult(
+            commands=[
+                _command_result(
+                    tmp_path,
+                    ok=False,
+                    command="pnpm install --frozen-lockfile",
+                    reason_code="VALIDATION_COMMAND_FAILED",
+                    artifact_name="pnpm_install_failed",
+                ),
+            ],
+        ),
+    )
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_skips_deferred_browser_probe_on_infra_failure_before_install(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

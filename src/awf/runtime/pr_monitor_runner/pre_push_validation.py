@@ -376,28 +376,28 @@ def _deferred_runtime_browser_install_completed(
     install_command_indexes = tuple(
         index for index, step in enumerate(validation_command_plan) if step.phase == "setup"
     )
-    install_commands = tuple(validation_commands[index] for index in install_command_indexes)
-    if not install_commands:
+    if not install_command_indexes:
         return False
     if result.all_passed:
         return True
-    pending = list(install_commands)
+    matched_commands: list[tuple[int, ValidationCommandResult]] = []
+    next_plan_index = 0
     for command_result in result.commands:
-        if command_result.command == pending[0]:
-            pending.pop(0)
-            if not pending:
-                return True
-    last_install_index = max(install_command_indexes)
-    validation_command_indexes = {
-        command: index for index, command in enumerate(validation_commands)
+        for command_index in range(next_plan_index, len(validation_commands)):
+            if validation_commands[command_index] == command_result.command:
+                matched_commands.append((command_index, command_result))
+                next_plan_index = command_index + 1
+                break
+    matched_install_indexes = {
+        command_index
+        for command_index, _command_result in matched_commands
+        if command_index in install_command_indexes
     }
-    for command_result in result.commands:
-        command_index = validation_command_indexes.get(command_result.command)
-        if (
-            command_index is not None
-            and command_index > last_install_index
-            and command_result.blocks_validation
-        ):
+    if len(matched_install_indexes) == len(install_command_indexes):
+        return True
+    last_install_index = max(install_command_indexes)
+    for command_index, command_result in matched_commands:
+        if command_index > last_install_index and command_result.blocks_validation:
             return True
     return False
 
