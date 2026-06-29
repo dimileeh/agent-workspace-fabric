@@ -438,6 +438,8 @@ def _node_package_manager_has_scope(package_manager: str) -> bool:
 def _should_defer_browser_install_until_validate_install(
     profile: WorkspaceProfile,
     requested_phases: set[str],
+    *,
+    workspace_root: Path | None = None,
 ) -> bool:
     if _requested_pre_validate_node_dependency_install_satisfies_browser_install(
         profile,
@@ -448,7 +450,12 @@ def _should_defer_browser_install_until_validate_install(
         return True
     if _requested_pre_validate_playwright_usage_exists(profile, requested_phases):
         return False
-    return _validate_node_dependency_install_exists(profile)
+    return _validate_node_dependency_install_exists(
+        profile
+    ) or _validate_python_playwright_dependency_install_exists(
+        profile,
+        workspace_root=workspace_root,
+    )
 
 
 def runtime_browser_probe_deferred_until_validate(profile: WorkspaceProfile) -> bool:
@@ -464,6 +471,17 @@ def runtime_browser_probe_deferred_until_validate(profile: WorkspaceProfile) -> 
 def _validate_node_dependency_install_exists(profile: WorkspaceProfile) -> bool:
     return any(
         _node_dependency_install_package_manager(command.command) is not None
+        for command in profile.phases.validate_commands
+    )
+
+
+def _validate_python_playwright_dependency_install_exists(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> bool:
+    return any(
+        _command_installs_python_playwright(command.command, workspace_root=workspace_root)
         for command in profile.phases.validate_commands
     )
 

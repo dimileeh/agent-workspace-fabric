@@ -24,6 +24,9 @@ from awf.common.audit import redact_audit_text
 from awf.common.logging import get_logger
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.node_playwright_setup import (
+    _command_installs_python_playwright as _command_installs_python_playwright,
+)
+from awf.runtime.node_playwright_setup import (
     _infer_node_package_manager as _infer_node_package_manager,
 )
 from awf.runtime.node_playwright_setup import (
@@ -297,6 +300,7 @@ def profile_phase_command_plan(
                     _should_defer_browser_install_until_validate_install(
                         profile,
                         requested_phases,
+                        workspace_root=workspace_root,
                     )
                 )
             for setup_command in _phase_commands(profile, "setup"):
@@ -334,6 +338,7 @@ def profile_phase_command_plan(
                         _should_defer_browser_install_until_validate_install(
                             profile,
                             requested_phases,
+                            workspace_root=workspace_root,
                         )
                     )
                     browser_install_command = ProfileExecutionCommand(
@@ -360,6 +365,10 @@ def profile_phase_command_plan(
             for validate_command in _phase_commands(profile, "validate"):
                 command_package_manager = _node_dependency_install_package_manager(
                     validate_command.command.command
+                )
+                installs_python_playwright = _command_installs_python_playwright(
+                    validate_command.command.command,
+                    workspace_root=workspace_root,
                 )
                 if (
                     defer_browser_install_until_validate_install
@@ -392,7 +401,7 @@ def profile_phase_command_plan(
                     and deferred_browser_install is not None
                 ):
                     pending_validate_commands.append(validate_command)
-                    if command_package_manager is not None:
+                    if command_package_manager is not None or installs_python_playwright:
                         latest_pending_validate_install_index = len(pending_validate_commands) - 1
                     continue
                 commands.append(validate_command)
