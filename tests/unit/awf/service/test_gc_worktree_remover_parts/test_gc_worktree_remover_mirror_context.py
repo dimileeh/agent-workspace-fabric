@@ -30,8 +30,6 @@ async def test_default_worktree_remover_uses_registry_mirror_when_gitfile_is_mis
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    import subprocess
-
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     original_repo_url = "./relative-origin"
@@ -45,11 +43,10 @@ async def test_default_worktree_remover_uses_registry_mirror_when_gitfile_is_mis
         pr_merge_sha="p" * 40,
     )
     mirror = work_dir / "git" / "mirrors" / "relative-origin-original.git"
-    subprocess.run(["git", "init", "--bare", str(mirror)], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "--git-dir", str(mirror), "config", "remote.origin.url", rewritten_repo_url],
-        check=True,
-        capture_output=True,
+    mirror.mkdir(parents=True)
+    _write(
+        mirror / "config",
+        f'[remote "origin"]\n\turl = {rewritten_repo_url}\n',
     )
     assert rewritten_repo_url != original_repo_url
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
