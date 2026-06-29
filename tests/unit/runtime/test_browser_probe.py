@@ -390,6 +390,7 @@ class TestProbeRuntimeBrowsers:
 
         probe_command = _browser_probe_command(profile, workspace_root=workspace_root)
         assert "from playwright.sync_api import sync_playwright" in probe_command
+        assert probe_command.startswith('uv run --project apps/web python - "$@" <<')
         assert not probe_command.startswith("pnpm")
         assert browser_probe_workdir(profile, workspace_root=workspace_root) == "/workspace"
 

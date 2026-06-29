@@ -25,6 +25,8 @@ from awf.runtime.validation_setup import (
 )
 
 _BROWSER_PROBE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset({"--cwd", "--dir", "--prefix", "-C"})
+_BROWSER_PROBE_UV_RUN_OPTION_VALUE_FLAGS = frozenset({"--project", "--directory", "--package"})
+_BROWSER_PROBE_UV_RUN_VALUELESS_FLAGS = frozenset({"--no-project"})
 
 
 @dataclass(frozen=True)
@@ -162,17 +164,40 @@ def _browser_probe_python_runtime(python_runtime: str) -> str:
         python_runtime_tokens = shlex.split(python_runtime)
     except ValueError:
         return python_runtime
-    if python_runtime_tokens == ["uv", "run"]:
+    if _browser_probe_uv_run_needs_python(python_runtime_tokens):
         return shlex.join([*python_runtime_tokens, "python"])
     if "&&" in python_runtime_tokens:
         separator_index = python_runtime_tokens.index("&&")
         prefix_tokens = python_runtime_tokens[:separator_index]
         scoped_runtime_tokens = python_runtime_tokens[separator_index + 1 :]
-        if prefix_tokens and scoped_runtime_tokens == ["uv", "run"]:
+        if prefix_tokens and _browser_probe_uv_run_needs_python(scoped_runtime_tokens):
             return (
                 f"{shlex.join(prefix_tokens)} && {shlex.join([*scoped_runtime_tokens, 'python'])}"
             )
     return python_runtime
+
+
+def _browser_probe_uv_run_needs_python(tokens: list[str]) -> bool:
+    if tokens[:2] != ["uv", "run"]:
+        return False
+    index = 2
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _BROWSER_PROBE_UV_RUN_OPTION_VALUE_FLAGS:
+            if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+                return False
+            index += 2
+            continue
+        if any(
+            token.startswith(f"{option}=") for option in _BROWSER_PROBE_UV_RUN_OPTION_VALUE_FLAGS
+        ):
+            index += 1
+            continue
+        if token in _BROWSER_PROBE_UV_RUN_VALUELESS_FLAGS:
+            index += 1
+            continue
+        return False
+    return True
 
 
 def _browser_probe_node_runtime(package_manager: str) -> str:
