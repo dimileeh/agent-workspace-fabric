@@ -371,6 +371,7 @@ async def run_validation_and_fix_cycle(
                 invocation_id=exc.invocation_id,
                 reason_code=exc.reason_code,
             )
+            await _record_deferred_runtime_browser_findings()
             callback_ignored = await self._finish_validation_callback_if_terminal(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
@@ -431,6 +432,7 @@ async def run_validation_and_fix_cycle(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
             )
+            await _record_deferred_runtime_browser_findings()
             callback_ignored = await self._finish_validation_callback_if_terminal(
                 workspace_id=workspace_id,
                 validation_run_id=validation_run_id,
