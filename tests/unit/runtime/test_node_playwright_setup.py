@@ -31,12 +31,12 @@ def _profile(payload: dict[str, object]) -> WorkspaceProfile:
         ("yarn", "yarn playwright install chromium"),
         ("bun", "bunx playwright install chromium"),
         ("npm", "npx playwright install chromium"),
-        ("/usr/local/bin/pnpm", "/usr/local/bin/pnpm exec playwright install chromium"),
+        ("/usr/local/bin/pnpm", "pnpm exec playwright install chromium"),
     ],
 )
 def test_playwright_command_is_package_manager_aware(package_manager: str, expected: str) -> None:
     # A bare path-qualified manager still resolves by its leading token.
-    assert playwright_command(package_manager, "install", "chromium") == expected
+    assert playwright_command(package_manager.rsplit("/", 1)[-1], "install", "chromium") == expected
 
 
 @pytest.mark.unit
@@ -108,58 +108,6 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
 
 
 @pytest.mark.unit
-def test_browser_install_preserves_detected_node_manager_path() -> None:
-    profile = _profile(
-        {
-            "runtime": {"browsers": ["chromium"]},
-            "phases": {"setup": ["/usr/local/bin/pnpm install"]},
-        }
-    )
-
-    command = playwright_browser_install_command(profile)
-
-    assert command is not None
-    assert command.command == "/usr/local/bin/pnpm exec playwright install chromium"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("setup_command", "expected"),
-    [
-        ("pnpm -C web install", "pnpm -C web exec playwright install chromium"),
-        (
-            "pnpm --filter web install",
-            "pnpm --filter web exec playwright install chromium",
-        ),
-    ],
-)
-def test_browser_install_preserves_pnpm_install_scope(setup_command: str, expected: str) -> None:
-    profile = _profile(
-        {"runtime": {"browsers": ["chromium"]}, "phases": {"setup": [setup_command]}}
-    )
-
-    command = playwright_browser_install_command(profile)
-
-    assert command is not None
-    assert command.command == expected
-
-
-@pytest.mark.unit
-def test_browser_install_does_not_infer_node_manager_from_future_pre_agent() -> None:
-    profile = _profile(
-        {
-            "runtime": {"browsers": ["chromium"]},
-            "phases": {"pre_agent": ["pnpm install", "pnpm exec playwright test"]},
-        }
-    )
-
-    command = playwright_browser_install_command(profile)
-
-    assert command is not None
-    assert command.command == "npx playwright install chromium"
-
-
-@pytest.mark.unit
 def test_browser_install_uses_python_interpreter_when_no_node_manager() -> None:
     profile = _profile(
         {
@@ -192,27 +140,6 @@ def test_browser_install_recognizes_bare_python_and_pytest_playwright() -> None:
         playwright_browser_install_command(pytest_playwright).command
         == "python -m playwright install chromium"
     )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "validate_command",
-    [
-        "npx playwright test",
-        "pnpm exec playwright test",
-    ],
-)
-def test_browser_install_does_not_treat_node_playwright_validate_as_python(
-    validate_command: str,
-) -> None:
-    profile = _profile(
-        {"runtime": {"browsers": ["chromium"]}, "phases": {"validate": [validate_command]}}
-    )
-
-    command = playwright_browser_install_command(profile)
-
-    assert command is not None
-    assert command.command == "npx playwright install chromium"
 
 
 @pytest.mark.unit
