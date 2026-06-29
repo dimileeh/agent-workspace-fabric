@@ -8,36 +8,27 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _git(args: list[str], cwd: Path) -> None:
-    import subprocess
-
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
-
-
 def _make_mirror_with_worktree(tmp_path: Path, work_dir: Path, workspace_id: str) -> str:
-    import subprocess
-
     origin = tmp_path / "origin"
     origin.mkdir()
-    _git(["init", "-q", "-b", "main"], origin)
-    _git(["config", "user.name", "AWF Test"], origin)
-    _git(["config", "user.email", "awf@test.local"], origin)
-    (origin / "README.md").write_text("initial\n", encoding="utf-8")
-    _git(["add", "."], origin)
-    _git(["commit", "-q", "-m", "init"], origin)
     repo_url = str(origin)
     mirror = work_dir / "git" / "mirrors" / "repo.git"
-    mirror.parent.mkdir(parents=True)
-    subprocess.run(
-        ["git", "clone", "--bare", repo_url, str(mirror)],
-        check=True,
-        capture_output=True,
-    )
     worktree = work_dir / "git" / "worktrees" / workspace_id
-    worktree.parent.mkdir(parents=True)
-    subprocess.run(
-        ["git", "--git-dir", str(mirror), "worktree", "add", str(worktree), "main"],
-        check=True,
-        capture_output=True,
-    )
+    _make_synthetic_mirror_link(mirror=mirror, worktree=worktree)
     return repo_url
+
+
+def _make_synthetic_mirror_link(
+    *,
+    mirror: Path,
+    worktree: Path,
+    repo_url: str = "git@github.com:example/repo.git",
+    include_worktree_gitfile: bool = True,
+) -> None:
+    linked_git_dir = mirror / "worktrees" / worktree.name
+    linked_git_dir.mkdir(parents=True)
+    worktree.mkdir(parents=True)
+    _write(mirror / "config", f'[remote "origin"]\n\turl = {repo_url}\n')
+    if include_worktree_gitfile:
+        _write(worktree / ".git", f"gitdir: {linked_git_dir}\n")
+    (linked_git_dir / "gitdir").write_text(str(worktree / ".git"), encoding="utf-8")

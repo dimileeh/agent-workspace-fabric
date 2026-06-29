@@ -7,7 +7,11 @@ import pytest
 
 from awf.node.git_manager import GitOperationError, mirror_path_for_worktree
 from awf.service.gc_worktrees import remove_orphan_worktree
-from tests.unit.awf.service.gc_worktree_test_helpers import _make_mirror_with_worktree, _write
+from tests.unit.awf.service.gc_worktree_test_helpers import (
+    _make_mirror_with_worktree,
+    _make_synthetic_mirror_link,
+    _write,
+)
 
 
 @pytest.mark.unit
@@ -67,7 +71,7 @@ async def test_remove_orphan_worktree_skips_existing_non_git_directory(
     mock_gm_cls.assert_not_called()
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 async def test_remove_orphan_worktree_uses_companion_path_name_as_worktree_id(
     tmp_path: Path,
 ) -> None:
@@ -107,24 +111,18 @@ async def test_remove_orphan_worktree_uses_companion_path_name_as_worktree_id(
 async def test_remove_orphan_worktree_uses_mirror_registry_when_gitfile_is_missing(
     tmp_path: Path,
 ) -> None:
-    import subprocess
-
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     repo_url = "git@github.com:example/repo.git"
     mirror = work_dir / "git" / "mirrors" / "repo.git"
-    subprocess.run(["git", "init", "--bare", str(mirror)], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "--git-dir", str(mirror), "config", "remote.origin.url", repo_url],
-        check=True,
-        capture_output=True,
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    _make_synthetic_mirror_link(
+        mirror=mirror,
+        worktree=worktree_path,
+        repo_url=repo_url,
+        include_worktree_gitfile=False,
     )
     resolved_mirror = mirror.resolve()
-    worktree_path = work_dir / "git" / "worktrees" / workspace_id
-    worktree_path.mkdir(parents=True)
-    linked_git_dir = mirror / "worktrees" / workspace_id
-    linked_git_dir.mkdir(parents=True)
-    (linked_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value
@@ -148,26 +146,19 @@ async def test_remove_orphan_worktree_uses_mirror_registry_when_gitfile_is_missi
 async def test_remove_orphan_worktree_does_not_rehash_rewritten_origin_url(
     tmp_path: Path,
 ) -> None:
-    import subprocess
-
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     original_repo_url = "./relative-origin"
     rewritten_repo_url = str(tmp_path / "relative-origin")
     mirror = work_dir / "git" / "mirrors" / "relative-origin-original.git"
-    subprocess.run(["git", "init", "--bare", str(mirror)], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "--git-dir", str(mirror), "config", "remote.origin.url", rewritten_repo_url],
-        check=True,
-        capture_output=True,
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    _make_synthetic_mirror_link(
+        mirror=mirror,
+        worktree=worktree_path,
+        repo_url=rewritten_repo_url,
+        include_worktree_gitfile=False,
     )
     assert rewritten_repo_url != original_repo_url
-
-    worktree_path = work_dir / "git" / "worktrees" / workspace_id
-    worktree_path.mkdir(parents=True)
-    linked_git_dir = mirror / "worktrees" / workspace_id
-    linked_git_dir.mkdir(parents=True)
-    (linked_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value

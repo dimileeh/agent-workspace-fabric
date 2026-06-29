@@ -170,7 +170,7 @@ async def test_default_worktree_remover_preserves_mirror_git_operation_error_rea
     ]
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 async def test_remove_orphan_worktree_uses_resolved_linked_mirror(
     tmp_path: Path,
 ) -> None:
