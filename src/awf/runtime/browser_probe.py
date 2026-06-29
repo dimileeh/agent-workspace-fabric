@@ -88,25 +88,28 @@ import sys
 
 try:
     from playwright.sync_api import sync_playwright
-except Exception:
+except ModuleNotFoundError as exc:
+    if exc.name not in {"playwright", "playwright.sync_api"}:
+        raise
     for name in sys.argv[1:]:
         print(f"MISSING {name}")
     sys.exit(0)
 
-try:
-    statuses = []
-    with sync_playwright() as playwright:
-        for name in sys.argv[1:]:
-            browser_type = getattr(playwright, name, None)
-            executable_path = (
-                getattr(browser_type, "executable_path", "") if browser_type else ""
-            )
-            if executable_path and Path(executable_path).exists():
-                statuses.append(f"OK {name}")
-            else:
-                statuses.append(f"MISSING {name}")
-except Exception:
-    statuses = [f"MISSING {name}" for name in sys.argv[1:]]
+statuses = []
+with sync_playwright() as playwright:
+    for name in sys.argv[1:]:
+        try:
+            browser_type = getattr(playwright, name)
+        except AttributeError:
+            browser_type = None
+        try:
+            executable_path = getattr(browser_type, "executable_path")
+        except AttributeError:
+            executable_path = ""
+        if executable_path and Path(executable_path).exists():
+            statuses.append(f"OK {name}")
+        else:
+            statuses.append(f"MISSING {name}")
 for status in statuses:
     print(status)
 PY
