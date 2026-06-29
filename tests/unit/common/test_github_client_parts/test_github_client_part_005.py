@@ -315,6 +315,42 @@ class TestFetchFailingCheckLogsRollupFallback:
         assert _run_view_calls(fake) == []
 
     @pytest.mark.unit
+    async def test_rollup_fallback_waits_when_actions_run_status_is_unknown(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 456,
+                        "name": "lint",
+                        "conclusion": "SUCCESS",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (7)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert result.failures == ()
+        assert result.runs_in_progress is True
+        assert _run_view_calls(fake) == []
+
+    @pytest.mark.unit
     async def test_rollup_fallback_synthesizes_external_failures(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")
