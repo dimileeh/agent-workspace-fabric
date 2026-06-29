@@ -844,6 +844,21 @@ class TestPlaywrightBrowserInstallCommand:
         ]
         assert commands[1].command.required is False
 
+    def test_validate_python_browser_install_splits_direct_install_and_test_chain(self) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["python -m pip install playwright && pytest --browser chromium"],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "python -m pip install playwright"),
+            ("setup", "python -m playwright install chromium"),
+            ("validate", "pytest --browser chromium"),
+        ]
+        assert commands[1].command.required is False
+
     def test_validate_browser_install_splits_direct_install_and_test_chain(self) -> None:
         profile = _profile_with_setup_validate_and_browsers(
             setup=[],

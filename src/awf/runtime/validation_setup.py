@@ -381,14 +381,17 @@ def profile_phase_command_plan(
                 if (
                     defer_browser_install_until_validate_install
                     and deferred_browser_install is not None
-                    and _node_dependency_install_satisfies_browser_install(
+                    and _command_satisfies_deferred_browser_install(
+                        validate_command.command.command,
                         command_package_manager,
                         browser_install_package_manager,
+                        workspace_root=workspace_root,
                     )
                 ):
                     split_validate_command = _split_dependency_install_chain(
                         validate_command,
                         browser_install_package_manager,
+                        workspace_root=workspace_root,
                     )
                     commands.extend(pending_validate_commands)
                     pending_validate_commands = []
@@ -477,6 +480,8 @@ def profile_phase_command_plan(
 def _split_dependency_install_chain(
     command: ProfileExecutionCommand,
     browser_install_package_manager: str | None,
+    *,
+    workspace_root: Path | None = None,
 ) -> tuple[ProfileExecutionCommand, ProfileExecutionCommand] | None:
     for separator_index, separator in _unquoted_install_chain_separator_spans(
         command.command.command
@@ -485,19 +490,22 @@ def _split_dependency_install_chain(
         trailing_command = command.command.command[separator_index + len(separator) :].strip()
         if not install_command or not trailing_command:
             continue
-        command_package_manager = _node_dependency_install_package_manager(install_command)
-        if not _node_dependency_install_satisfies_browser_install(
-            command_package_manager,
+        if not _command_satisfies_deferred_browser_install(
+            install_command,
+            _node_dependency_install_package_manager(install_command),
             browser_install_package_manager,
+            workspace_root=workspace_root,
         ):
             continue
         trailing_scope_prefix = _dependency_install_chain_trailing_scope_prefix(
             install_command,
             browser_install_package_manager,
+            workspace_root=workspace_root,
         )
         if trailing_scope_prefix is None and _dependency_install_chain_has_unpreserved_export_scope(
             install_command,
             browser_install_package_manager,
+            workspace_root=workspace_root,
         ):
             return None
         if trailing_scope_prefix is not None:
@@ -515,9 +523,29 @@ def _split_dependency_install_chain(
     return None
 
 
+def _command_satisfies_deferred_browser_install(
+    command: str,
+    command_package_manager: str | None,
+    browser_install_package_manager: str | None,
+    *,
+    workspace_root: Path | None = None,
+) -> bool:
+    if _node_dependency_install_satisfies_browser_install(
+        command_package_manager,
+        browser_install_package_manager,
+    ):
+        return True
+    return browser_install_package_manager is None and _command_installs_python_playwright(
+        command,
+        workspace_root=workspace_root,
+    )
+
+
 def _dependency_install_chain_trailing_scope_prefix(
     install_command: str,
     browser_install_package_manager: str | None,
+    *,
+    workspace_root: Path | None = None,
 ) -> str | None:
     for separator_index, separator in reversed(
         _unquoted_install_chain_separator_spans(install_command)
@@ -527,10 +555,11 @@ def _dependency_install_chain_trailing_scope_prefix(
         trailing_scope_prefix = _command_install_trailing_scope_prefix(scope_prefix)
         if trailing_scope_prefix is None or not scoped_install_command:
             continue
-        command_package_manager = _node_dependency_install_package_manager(scoped_install_command)
-        if _node_dependency_install_satisfies_browser_install(
-            command_package_manager,
+        if _command_satisfies_deferred_browser_install(
+            scoped_install_command,
+            _node_dependency_install_package_manager(scoped_install_command),
             browser_install_package_manager,
+            workspace_root=workspace_root,
         ):
             return trailing_scope_prefix
     return None
@@ -539,6 +568,8 @@ def _dependency_install_chain_trailing_scope_prefix(
 def _dependency_install_chain_has_unpreserved_export_scope(
     install_command: str,
     browser_install_package_manager: str | None,
+    *,
+    workspace_root: Path | None = None,
 ) -> bool:
     for separator_index, separator in reversed(
         _unquoted_install_chain_separator_spans(install_command)
@@ -547,10 +578,11 @@ def _dependency_install_chain_has_unpreserved_export_scope(
         scoped_install_command = install_command[separator_index + len(separator) :].strip()
         if not scoped_install_command:
             continue
-        command_package_manager = _node_dependency_install_package_manager(scoped_install_command)
-        if _node_dependency_install_satisfies_browser_install(
-            command_package_manager,
+        if _command_satisfies_deferred_browser_install(
+            scoped_install_command,
+            _node_dependency_install_package_manager(scoped_install_command),
             browser_install_package_manager,
+            workspace_root=workspace_root,
         ):
             return _command_has_unpreserved_export_scope(scope_prefix)
     return False
