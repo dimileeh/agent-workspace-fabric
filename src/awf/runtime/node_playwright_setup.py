@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Callable
 
 from awf.profiles.models import ProfileCommand, WorkspaceProfile
 from awf.runtime.validation_command_probe import (
@@ -16,6 +17,10 @@ _NODE_PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun"})
 _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS = frozenset({"ci", "i", "install"})
 _NPM_SCRIPT_VALIDATION_SUBCOMMANDS = frozenset({"run", "run-script"})
 _NPM_DIRECT_SCRIPT_VALIDATION_SUBCOMMANDS = frozenset({"test", "t"})
+_BROWSER_VALIDATION_SCRIPT_NAMES = frozenset(
+    {"browser", "e2e", "playwright", "test:browser", "test:e2e"}
+)
+_BROWSER_VALIDATION_SCRIPT_PREFIXES = ("browser:", "e2e:", "playwright:", "test:browser:")
 _COREPACK_PREAMBLE_SUBCOMMANDS = frozenset({"enable", "install", "prepare", "use"})
 _NODE_PM_OPTION_VALUE_FLAGS = frozenset(
     {
@@ -144,6 +149,10 @@ def _infer_node_package_manager(profile: WorkspaceProfile) -> str:
                 dependency_install_package_manager = package_manager
     for command in profile.phases.validate_commands:
         package_manager = _node_scoped_playwright_validation_package_manager(command.command)
+        if package_manager is not None:
+            return package_manager
+    for command in profile.phases.validate_commands:
+        package_manager = _node_scoped_browser_script_validation_package_manager(command.command)
         if package_manager is not None:
             return package_manager
     for command in profile.phases.validate_commands:
@@ -327,6 +336,16 @@ def _node_scoped_validation_package_manager(command: str) -> str | None:
 
 
 def _node_scoped_playwright_validation_package_manager(command: str) -> str | None:
+    return _node_scoped_matching_validation_package_manager(
+        command,
+        _node_scoped_playwright_package_manager_from_tokens,
+    )
+
+
+def _node_scoped_matching_validation_package_manager(
+    command: str,
+    package_manager_from_tokens: Callable[[list[str], int, list[str]], str | None],
+) -> str | None:
     tokens = _shell_tokens(command, comments=True)
     if tokens is None:
         return None
@@ -336,7 +355,7 @@ def _node_scoped_playwright_validation_package_manager(command: str) -> str | No
             index += 1
         if index >= len(tokens):
             return None
-        package_manager = _node_scoped_playwright_package_manager_from_tokens(tokens, index, [])
+        package_manager = package_manager_from_tokens(tokens, index, [])
         if package_manager is not None:
             return package_manager
         scoped_command = _leading_cd_package_scope(tokens, index)
@@ -349,7 +368,7 @@ def _node_scoped_playwright_validation_package_manager(command: str) -> str | No
                     command_index += 1
                 if command_index >= len(tokens):
                     return None
-                package_manager = _node_scoped_playwright_package_manager_from_tokens(
+                package_manager = package_manager_from_tokens(
                     tokens,
                     command_index,
                     _node_package_manager_cd_location_tokens(tokens[command_index], package_dir),
@@ -394,6 +413,115 @@ def _command_segment_invokes_playwright(tokens: list[str], index: int) -> bool:
             return True
         index += 1
     return False
+
+
+def _node_scoped_browser_script_validation_package_manager(command: str) -> str | None:
+    return _node_scoped_matching_validation_package_manager(
+        command,
+        _node_scoped_browser_script_package_manager_from_tokens,
+    )
+
+
+def _node_scoped_browser_script_package_manager_from_tokens(
+    tokens: list[str],
+    index: int,
+    location_tokens: list[str],
+) -> str | None:
+    if not _command_segment_invokes_browser_script(tokens, index):
+        return None
+    return _node_scoped_package_manager_from_tokens(tokens, index, location_tokens)
+
+
+def _command_segment_invokes_browser_script(tokens: list[str], index: int) -> bool:
+    if index >= len(tokens):
+        return False
+    executable = tokens[index]
+    if executable not in _NODE_PACKAGE_MANAGERS:
+        return False
+    subcommand_index = _node_package_manager_subcommand_index(tokens, index)
+    if subcommand_index is None:
+        return False
+    return _node_package_manager_subcommand_invokes_browser_script(
+        executable,
+        tokens,
+        subcommand_index,
+    )
+
+
+def _node_package_manager_subcommand_index(tokens: list[str], index: int) -> int | None:
+    executable = tokens[index]
+    command_index = index + 1
+    while command_index < len(tokens):
+        token = tokens[command_index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return None
+        if _node_pm_option_takes_value(executable, token):
+            command_index += 2
+            continue
+        if token.startswith("-C") and len(token) > 2:
+            command_index += 1
+            continue
+        if token.startswith("--") and "=" in token:
+            command_index += 1
+            continue
+        if token.startswith("-"):
+            command_index += 1
+            continue
+        return command_index
+    return None
+
+
+def _node_package_manager_subcommand_invokes_browser_script(
+    executable: str,
+    tokens: list[str],
+    subcommand_index: int,
+) -> bool:
+    subcommand = tokens[subcommand_index]
+    if executable == "yarn" and subcommand == "workspace":
+        workspace_name_index = subcommand_index + 1
+        if workspace_name_index >= len(tokens):
+            return False
+        workspace_name = tokens[workspace_name_index]
+        if workspace_name in _SHELL_COMPOUND_CONTROL_TOKENS or workspace_name.startswith("-"):
+            return False
+        script_index = _script_name_index(tokens, workspace_name_index + 1, executable)
+        return script_index is not None and _is_browser_validation_script_name(
+            tokens[script_index],
+        )
+    if subcommand in _NPM_SCRIPT_VALIDATION_SUBCOMMANDS or subcommand == "run":
+        script_index = _script_name_index(tokens, subcommand_index + 1, executable)
+        return script_index is not None and _is_browser_validation_script_name(
+            tokens[script_index],
+        )
+    return _is_browser_validation_script_name(subcommand)
+
+
+def _script_name_index(tokens: list[str], index: int, executable: str) -> int | None:
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS or token == "--":
+            return None
+        if _node_pm_option_takes_value(executable, token):
+            index += 2
+            continue
+        if token.startswith("-C") and len(token) > 2:
+            index += 1
+            continue
+        if token.startswith("--") and "=" in token:
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return index
+    return None
+
+
+def _is_browser_validation_script_name(script_name: str) -> bool:
+    normalized = script_name.lower()
+    return normalized in _BROWSER_VALIDATION_SCRIPT_NAMES or normalized.startswith(
+        _BROWSER_VALIDATION_SCRIPT_PREFIXES
+    )
 
 
 def _node_validation_package_manager(command: str) -> str | None:
