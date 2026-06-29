@@ -723,7 +723,28 @@ def _command_has_unpreserved_shell_state_scope(command: str) -> bool:
             continue
         if command_tokens[command_index] in {"eval", "export", "source", "."}:
             return True
+        if command_tokens[command_index] == "cd" and not _command_is_safe_cd_scope(
+            command_tokens,
+            command_index,
+        ):
+            return True
     return False
+
+
+def _command_is_safe_cd_scope(command_tokens: list[str], command_index: int) -> bool:
+    package_dir_index = command_index + 1
+    if package_dir_index < len(command_tokens) and command_tokens[package_dir_index] == "--":
+        package_dir_index += 1
+    if package_dir_index >= len(command_tokens):
+        return False
+    package_dir = command_tokens[package_dir_index]
+    return (
+        package_dir_index + 1 == len(command_tokens)
+        and package_dir not in {"&&", "||", ";", "|", "|&", "&"}
+        and not package_dir.startswith("-")
+        and "$" not in package_dir
+        and "`" not in package_dir
+    )
 
 
 def _command_install_trailing_scope_prefix(command: str) -> str | None:
@@ -742,7 +763,12 @@ def _command_install_trailing_scope_prefix(command: str) -> str | None:
                 safe_commands.append(command_text)
             continue
         token = command_tokens[command_index]
-        if token == "cd" or token in _VALIDATE_PROBE_LEADING_GUARDS:
+        if token == "cd":
+            if not _command_is_safe_cd_scope(command_tokens, command_index):
+                return None
+            safe_commands.append(shlex.join(command_tokens))
+            continue
+        if token in _VALIDATE_PROBE_LEADING_GUARDS:
             safe_commands.append(shlex.join(command_tokens))
             continue
         if token != "export":
