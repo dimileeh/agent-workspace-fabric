@@ -211,10 +211,11 @@ class TestRecordRuntimeBrowserFindings:
         class _Executor:
             _session_factory = factory
             _validation = _ExplodingValidation()
+            _record_runtime_browser_findings = _record_runtime_browser_findings
 
         with structlog.testing.capture_logs() as captured:
             async with session_scope(factory) as session:
-                await _record_runtime_browser_findings(
+                recorded = await _record_runtime_browser_findings(
                     _Executor(),
                     workspace_id=ws_id,
                     compose_project="awf_x",
@@ -223,6 +224,7 @@ class TestRecordRuntimeBrowserFindings:
                     session=session,
                 )
 
+        assert recorded is False
         entry = next(e for e in captured if e["event"] == "executor.runtime_browser_probe_failed")
         assert entry["log_level"] == "warning"
         assert entry["reason_code"] == "RUNTIME_BROWSER_PROBE_BROKE"
@@ -236,6 +238,19 @@ class TestRecordRuntimeBrowserFindings:
             assert [
                 e for e in ws.events if e.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
             ] == []
+
+        with structlog.testing.capture_logs() as captured:
+            safe_recorded = await _record_runtime_browser_findings_safe(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+            )
+
+        assert safe_recorded is False
+        entry = next(e for e in captured if e["event"] == "executor.runtime_browser_probe_failed")
+        assert entry["reason_code"] == "RUNTIME_BROWSER_PROBE_BROKE"
 
     @pytest.mark.unit
     async def test_unexpected_probe_exception_propagates_to_safe_wrapper(

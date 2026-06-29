@@ -11,6 +11,7 @@ import pytest
 import awf.runtime.validation_runner as validation_runner_module
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.profiles.models import RUNTIME_BROWSER_UNAVAILABLE, WorkspaceProfile
+from awf.runtime.browser_probe import RuntimeBrowserProbeError
 from awf.runtime.validation_runner import ValidationRunner
 
 
@@ -139,21 +140,22 @@ class TestProbeRuntimeBrowserFindings:
         assert findings == ()
         assert fake.calls == []
 
-    async def test_probe_silent_on_runner_nonzero(self, tmp_path: Path) -> None:
+    async def test_probe_raises_on_runner_nonzero(self, tmp_path: Path) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=1, stderr="exec failed")
         runner = _runner(fake, tmp_path)
 
-        findings = await runner.probe_runtime_browser_findings(
-            workspace_id="ws-1",
-            compose_project="awf_ws1",
-            compose_file=tmp_path / "compose.yml",
-            profile=_profile_with_browsers(["chromium"]),
-        )
+        with pytest.raises(RuntimeBrowserProbeError) as exc_info:
+            await runner.probe_runtime_browser_findings(
+                workspace_id="ws-1",
+                compose_project="awf_ws1",
+                compose_file=tmp_path / "compose.yml",
+                profile=_profile_with_browsers(["chromium"]),
+            )
 
-        assert findings == ()
+        assert exc_info.value.reason_code == "RUNTIME_BROWSER_PROBE_FAILED"
 
-    async def test_probe_timeout_cleans_up_and_returns_unknown_availability(
+    async def test_probe_timeout_cleans_up_and_raises_probe_failure(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
@@ -167,14 +169,14 @@ class TestProbeRuntimeBrowserFindings:
             0.001,
         )
 
-        findings = await runner.probe_runtime_browser_findings(
-            workspace_id="ws-1",
-            compose_project="awf_ws1",
-            compose_file=tmp_path / "compose.yml",
-            profile=_profile_with_browsers(["chromium"]),
-        )
+        with pytest.raises(RuntimeBrowserProbeError):
+            await runner.probe_runtime_browser_findings(
+                workspace_id="ws-1",
+                compose_project="awf_ws1",
+                compose_file=tmp_path / "compose.yml",
+                profile=_profile_with_browsers(["chromium"]),
+            )
 
-        assert findings == ()
         invocation_id = fake.calls[0][fake.calls[0].index("awf-exec") + 1]
         assert len(fake.calls) == 2
         assert fake.calls[1][-2:] == ["awf-cleanup", invocation_id]

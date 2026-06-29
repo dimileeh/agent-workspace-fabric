@@ -18,6 +18,7 @@ from awf.runtime.browser_probe import (
     _BROWSER_PROBE_PYTHON_SCRIPT,
     _BROWSER_PROBE_SCRIPT,
     ProbeExecResult,
+    RuntimeBrowserProbeError,
     _browser_probe_node_runtime,
     browser_probe_workdir,
     probe_runtime_browsers,
@@ -238,6 +239,21 @@ class TestProbeRuntimeBrowsers:
         assert findings == ()
         assert len(spy.calls) == 1
 
+    async def test_probe_exec_oserror_raises_when_requested(self) -> None:
+        profile = _profile_with_browsers(["chromium"])
+        spy = _SpyExec()
+        spy.raise_exc = OSError("cannot exec into container")
+
+        with pytest.raises(RuntimeBrowserProbeError) as exc_info:
+            await probe_runtime_browsers(
+                profile=profile,
+                exec_in_container=spy,
+                raise_on_probe_failure=True,
+            )
+
+        assert exc_info.value.reason_code == "RUNTIME_BROWSER_PROBE_FAILED"
+        assert len(spy.calls) == 1
+
     async def test_probe_exec_unexpected_exception_propagates(self) -> None:
         profile = _profile_with_browsers(["chromium"])
         spy = _SpyExec()
@@ -253,6 +269,17 @@ class TestProbeRuntimeBrowsers:
         findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
 
         assert findings == ()
+
+    async def test_probe_returncode_nonzero_raises_when_requested(self) -> None:
+        profile = _profile_with_browsers(["chromium"])
+        spy = _SpyExec([ProbeExecResult(returncode=1, stdout="", stderr="exec failed")])
+
+        with pytest.raises(RuntimeBrowserProbeError):
+            await probe_runtime_browsers(
+                profile=profile,
+                exec_in_container=spy,
+                raise_on_probe_failure=True,
+            )
 
     async def test_reachable_probe_without_parseable_status_is_silent(self) -> None:
         profile = _profile_with_browsers(["chromium"])

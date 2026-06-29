@@ -290,11 +290,11 @@ async def _record_runtime_browser_findings(
     profile: Any,
     worktree_path: Path | None = None,
     session: AsyncSession,
-) -> None:
+) -> bool:
     """Probe the container for declared Playwright browsers; record warnings."""
     probe = getattr(self._validation, "probe_runtime_browser_findings", None)
     if not callable(probe):
-        return
+        return True
     try:
         findings = await probe(
             workspace_id=workspace_id,
@@ -310,14 +310,14 @@ async def _record_runtime_browser_findings(
             reason_code=getattr(exc, "reason_code", None),
             error=redact_secrets(str(exc))[:1000],
         )
-        return
+        return False
     if not findings:
-        return
+        return True
 
     repo = WorkspaceRepository(session)
     workspace = await repo.get(workspace_id)
     if workspace is None:  # pragma: no cover - destroyed mid-flight
-        return
+        return True
     recorded_browsers = {
         browser.lower()
         for event in workspace.events
@@ -346,6 +346,7 @@ async def _record_runtime_browser_findings(
         if browser_key is not None:
             recorded_browsers.add(browser_key)
     await session.flush()
+    return True
 
 
 async def _record_runtime_browser_findings_safe(
@@ -362,7 +363,7 @@ async def _record_runtime_browser_findings_safe(
     try:
         if session is None:
             async with session_scope(self._session_factory) as owned_session:
-                await self._record_runtime_browser_findings(
+                recorded = await self._record_runtime_browser_findings(
                     workspace_id=workspace_id,
                     compose_project=compose_project,
                     compose_file=compose_file,
@@ -371,7 +372,7 @@ async def _record_runtime_browser_findings_safe(
                     session=owned_session,
                 )
         else:
-            await self._record_runtime_browser_findings(
+            recorded = await self._record_runtime_browser_findings(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
@@ -379,7 +380,7 @@ async def _record_runtime_browser_findings_safe(
                 worktree_path=worktree_path,
                 session=session,
             )
-        return True
+        return recorded is not False
     except Exception as exc:
         _log.warning(
             "executor.runtime_browser_probe_record_failed",

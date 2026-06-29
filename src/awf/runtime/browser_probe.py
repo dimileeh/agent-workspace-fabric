@@ -39,6 +39,12 @@ class ProbeExecResult:
 ExecInContainer = Callable[[list[str]], Awaitable[ProbeExecResult]]
 
 
+class RuntimeBrowserProbeError(OSError):
+    """Raised when browser availability could not be discovered."""
+
+    reason_code = "RUNTIME_BROWSER_PROBE_FAILED"
+
+
 _BROWSER_PROBE_SCRIPT_TEMPLATE = r"""
 __NODE_RUNTIME__ - "$@" <<'NODE' || true
 const fs = require("fs");
@@ -226,6 +232,7 @@ async def probe_runtime_browsers(
     profile: WorkspaceProfile,
     exec_in_container: ExecInContainer,
     workspace_root: Path | None = None,
+    raise_on_probe_failure: bool = False,
 ) -> tuple[ProfileLintFinding, ...]:
     """Discover declared Playwright browsers and return availability findings."""
     if not profile.runtime.browsers:
@@ -240,18 +247,26 @@ async def probe_runtime_browsers(
                 *profile.runtime.browsers,
             ]
         )
-    except OSError:
+    except OSError as exc:
+        if raise_on_probe_failure:
+            raise RuntimeBrowserProbeError("runtime browser probe exec failed") from exc
         return runtime_browser_findings(profile, None)
     if result.returncode != 0:
+        if raise_on_probe_failure:
+            raise RuntimeBrowserProbeError("runtime browser probe command failed")
         return runtime_browser_findings(profile, None)
 
     available: dict[str, bool] = {}
     for match in _BROWSER_STATUS_RE.finditer(result.stdout):
         available[match.group("browser")] = match.group("status") == "OK"
     if not available:
+        if raise_on_probe_failure:
+            raise RuntimeBrowserProbeError("runtime browser probe reported no browsers")
         return runtime_browser_findings(profile, None)
     declared_browsers = {browser.lower() for browser in profile.runtime.browsers}
     reported_browsers = {browser.lower() for browser in available}
     if not declared_browsers.issubset(reported_browsers):
+        if raise_on_probe_failure:
+            raise RuntimeBrowserProbeError("runtime browser probe omitted declared browsers")
         return runtime_browser_findings(profile, None)
     return runtime_browser_findings(profile, available)

@@ -489,6 +489,7 @@ class ValidationRunner:
             profile=profile,
             exec_in_container=_exec,
             workspace_root=worktree_path,
+            raise_on_probe_failure=True,
         )
 
     async def probe_validate_command_tools(
