@@ -1259,3 +1259,25 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_ruff_diagnostics_with_transient_text_dispatch_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "src/awf/runtime/pr_monitor.py:877:12: F401 `json` imported but unused\n"
+                "tests/unit/runtime/test_pr_monitor.py:42:5: B018 useless expression\n"
+                "Failed to download formatter cache after lint diagnostics"
+            ),
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
