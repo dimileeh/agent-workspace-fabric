@@ -648,7 +648,11 @@ def _uv_workspace_package_base_dir(
         workspace_document = tomllib.loads(workspace_pyproject_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
         return None
-    if _pyproject_project_name(workspace_document) == package_name:
+    normalized_package_name = _normalize_uv_package_name(package_name)
+    if (
+        _normalize_uv_package_name(_pyproject_project_name(workspace_document))
+        == normalized_package_name
+    ):
         return workspace_pyproject_path.parent
     tool = workspace_document.get("tool")
     uv = tool.get("uv") if isinstance(tool, dict) else None
@@ -674,9 +678,18 @@ def _uv_workspace_package_base_dir(
                 member_document = tomllib.loads(member_pyproject_path.read_text(encoding="utf-8"))
             except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
                 continue
-            if _pyproject_project_name(member_document) == package_name:
+            if (
+                _normalize_uv_package_name(_pyproject_project_name(member_document))
+                == normalized_package_name
+            ):
                 return member_pyproject_path.parent
     return None
+
+
+def _normalize_uv_package_name(name: str | None) -> str | None:
+    if name is None:
+        return None
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def _pyproject_project_name(document: dict[str, object]) -> str | None:

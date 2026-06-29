@@ -546,15 +546,25 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == expected_install
 
     @pytest.mark.parametrize(
-        ("setup_command", "expected_install"),
+        ("setup_command", "project_name", "validate_selector", "expected_install"),
         [
             (
                 "uv sync --package web --group e2e",
+                "web",
+                "web",
                 "uv run --package web --group e2e -m playwright install chromium",
             ),
             (
                 "uv sync --package=web --extra=e2e",
+                "web",
+                "web",
                 "uv run --package web --extra e2e -m playwright install chromium",
+            ),
+            (
+                "uv sync --package web-pkg --group e2e",
+                "web_pkg",
+                "web-pkg",
+                "uv run --package web-pkg --group e2e -m playwright install chromium",
             ),
         ],
     )
@@ -562,6 +572,8 @@ class TestPlaywrightBrowserInstallCommand:
         self,
         tmp_path: Path,
         setup_command: str,
+        project_name: str,
+        validate_selector: str,
         expected_install: str,
     ) -> None:
         workspace_root = tmp_path / "workspace"
@@ -584,7 +596,7 @@ class TestPlaywrightBrowserInstallCommand:
             "\n".join(
                 [
                     "[project]",
-                    'name = "web"',
+                    f'name = "{project_name}"',
                     'version = "0.1.0"',
                     "[project.optional-dependencies]",
                     'e2e = ["pytest-playwright"]',
@@ -597,7 +609,7 @@ class TestPlaywrightBrowserInstallCommand:
         )
         profile = _profile_with_setup_validate_and_browsers(
             setup=[setup_command],
-            validate=["uv run --package web pytest --browser chromium"],
+            validate=[f"uv run --package {validate_selector} pytest --browser chromium"],
         )
 
         command = playwright_browser_install_command(profile, workspace_root=workspace_root)
