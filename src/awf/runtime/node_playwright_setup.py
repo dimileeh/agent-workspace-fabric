@@ -1481,16 +1481,23 @@ def _node_scoped_package_manager_from_tokens(
             if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
                 if command_index + 1 >= len(tokens):
                     return None
-                location_tokens.extend((token, tokens[command_index + 1]))
+                option_value = tokens[command_index + 1]
+                if _node_pm_location_value_uses_shell_expansion(token, option_value):
+                    return None
+                location_tokens.extend((token, option_value))
             command_index += 2
             continue
         if token.startswith("-C") and len(token) > 2:
+            if _package_scope_uses_shell_expansion(token[2:]):
+                return None
             location_tokens.append(token)
             command_index += 1
             continue
         if token.startswith("--") and "=" in token:
-            option_name, _, _ = token.partition("=")
+            option_name, _, option_value = token.partition("=")
             if option_name in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
+                if _node_pm_location_value_uses_shell_expansion(option_name, option_value):
+                    return None
                 location_tokens.append(token)
             command_index += 1
             continue
@@ -1546,12 +1553,17 @@ def _node_npm_validation_workspace_package_manager(
             if option_index + 1 >= len(tokens):
                 return None
             if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
-                inferred_location_tokens.extend((token, tokens[option_index + 1]))
+                option_value = tokens[option_index + 1]
+                if _node_pm_location_value_uses_shell_expansion(token, option_value):
+                    return None
+                inferred_location_tokens.extend((token, option_value))
             option_index += 2
             continue
         if token.startswith("--") and "=" in token:
-            option_name, _, _ = token.partition("=")
+            option_name, _, option_value = token.partition("=")
             if option_name in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
+                if _node_pm_location_value_uses_shell_expansion(option_name, option_value):
+                    return None
                 inferred_location_tokens.append(token)
             option_index += 1
             continue
@@ -1718,17 +1730,22 @@ def _node_dependency_install_package_manager_from_tokens(
             if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS and subcommand_index + 1 < len(
                 tokens
             ):
-                inferred_location_tokens.extend((token, tokens[subcommand_index + 1]))
+                option_value = tokens[subcommand_index + 1]
+                if _node_pm_location_value_uses_shell_expansion(token, option_value):
+                    return None
+                inferred_location_tokens.extend((token, option_value))
             elif executable == "yarn":
                 yarn_location_only_arguments = False
             subcommand_index += 2
             continue
         if token.startswith("-C") and len(token) > 2:
+            if _package_scope_uses_shell_expansion(token[2:]):
+                return None
             inferred_location_tokens.append(token)
             subcommand_index += 1
             continue
         if token.startswith("--") and "=" in token:
-            option_name, _, _ = token.partition("=")
+            option_name, _, option_value = token.partition("=")
             if executable == "yarn":
                 if option_name in _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS:
                     return None
@@ -1737,6 +1754,8 @@ def _node_dependency_install_package_manager_from_tokens(
                 elif option_name not in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
                     yarn_location_only_arguments = False
             if option_name in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
+                if _node_pm_location_value_uses_shell_expansion(option_name, option_value):
+                    return None
                 inferred_location_tokens.append(token)
             subcommand_index += 1
             continue
@@ -1852,7 +1871,7 @@ def _leading_cd_package_scope(tokens: list[str], index: int) -> tuple[str, int] 
     if (
         package_dir in _SHELL_COMPOUND_CONTROL_TOKENS
         or package_dir.startswith("-")
-        or _cd_package_scope_uses_shell_expansion(package_dir)
+        or _package_scope_uses_shell_expansion(package_dir)
     ):
         return None
     separator_index = package_dir_index + 1
@@ -1865,7 +1884,14 @@ def _leading_cd_package_scope(tokens: list[str], index: int) -> tuple[str, int] 
     return package_dir, install_index
 
 
-def _cd_package_scope_uses_shell_expansion(package_dir: str) -> bool:
+def _node_pm_location_value_uses_shell_expansion(option_name: str, option_value: str) -> bool:
+    return (
+        option_name in _NODE_PM_LOCATION_OPTION_VALUE_FLAGS
+        and _package_scope_uses_shell_expansion(option_value)
+    )
+
+
+def _package_scope_uses_shell_expansion(package_dir: str) -> bool:
     return "$" in package_dir or "`" in package_dir
 
 
@@ -1886,12 +1912,20 @@ def _node_package_manager_package_dir(package_manager: str) -> str | None:
         if token in _NODE_PM_LOCATION_OPTION_VALUE_FLAGS:
             if index + 1 >= len(tokens):
                 return None
-            return tokens[index + 1]
+            option_value = tokens[index + 1]
+            if _package_scope_uses_shell_expansion(option_value):
+                return None
+            return option_value
         if token.startswith("-C") and len(token) > 2:
-            return token[2:]
+            option_value = token[2:]
+            if _package_scope_uses_shell_expansion(option_value):
+                return None
+            return option_value
         if token.startswith("--") and "=" in token:
             option_name, _, option_value = token.partition("=")
             if option_name in _NODE_PM_LOCATION_OPTION_VALUE_FLAGS:
+                if _package_scope_uses_shell_expansion(option_value):
+                    return None
                 return option_value or None
         index += 1
     return None

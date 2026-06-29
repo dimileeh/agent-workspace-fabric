@@ -794,6 +794,20 @@ class TestPlaywrightBrowserInstallCommand:
     def test_package_manager_location_skips_incomplete_location_flag(self) -> None:
         assert _node_package_manager_package_dir("npm --prefix") is None
 
+    @pytest.mark.parametrize(
+        "package_manager",
+        [
+            'pnpm -C "$APP_DIR"',
+            'npm --prefix "$APP_DIR"',
+            "yarn --cwd=`$PROJECT_DIR`",
+        ],
+    )
+    def test_package_manager_location_rejects_expanding_directory_scope(
+        self,
+        package_manager: str,
+    ) -> None:
+        assert _node_package_manager_package_dir(package_manager) is None
+
     def test_package_manager_location_ignores_non_location_equals_option(self) -> None:
         assert _node_package_manager_package_dir("npm --cache=.npm-cache") is None
 
@@ -802,6 +816,39 @@ class TestPlaywrightBrowserInstallCommand:
 
     def test_dependency_install_parser_ignores_unpreserved_equals_option(self) -> None:
         assert _node_dependency_install_package_manager("npm --userconfig=.npmrc ci") == "npm"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'pnpm -C "$APP_DIR" install',
+            'npm --prefix "$APP_DIR" install',
+            "yarn --cwd `$PROJECT_DIR` install",
+        ],
+    )
+    def test_dependency_install_parser_rejects_expanding_directory_scope(
+        self,
+        command: str,
+    ) -> None:
+        assert _node_dependency_install_package_manager(command) is None
+
+    @pytest.mark.parametrize(
+        ("setup_command", "expected"),
+        [
+            ('pnpm -C "$APP_DIR" install', "pnpm exec playwright install chromium"),
+            ('npm --prefix "$APP_DIR" install', "npx playwright install chromium"),
+        ],
+    )
+    def test_browser_install_does_not_preserve_expanding_directory_scope(
+        self,
+        setup_command: str,
+        expected: str,
+    ) -> None:
+        command = playwright_browser_install_command(
+            _profile_with_setup_and_browsers([setup_command])
+        )
+
+        assert command is not None
+        assert command.command == expected
 
     @pytest.mark.parametrize(
         ("command", "expected"),
