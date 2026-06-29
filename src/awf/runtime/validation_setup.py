@@ -502,10 +502,13 @@ def _split_dependency_install_chain(
             browser_install_package_manager,
             workspace_root=workspace_root,
         )
-        if trailing_scope_prefix is None and _dependency_install_chain_has_unpreserved_export_scope(
-            install_command,
-            browser_install_package_manager,
-            workspace_root=workspace_root,
+        if (
+            trailing_scope_prefix is None
+            and _dependency_install_chain_has_unpreserved_shell_state_scope(
+                install_command,
+                browser_install_package_manager,
+                workspace_root=workspace_root,
+            )
         ):
             return None
         if trailing_scope_prefix is not None:
@@ -565,7 +568,7 @@ def _dependency_install_chain_trailing_scope_prefix(
     return None
 
 
-def _dependency_install_chain_has_unpreserved_export_scope(
+def _dependency_install_chain_has_unpreserved_shell_state_scope(
     install_command: str,
     browser_install_package_manager: str | None,
     *,
@@ -584,11 +587,11 @@ def _dependency_install_chain_has_unpreserved_export_scope(
             browser_install_package_manager,
             workspace_root=workspace_root,
         ):
-            return _command_has_unpreserved_export_scope(scope_prefix)
+            return _command_has_unpreserved_shell_state_scope(scope_prefix)
     return False
 
 
-def _command_has_unpreserved_export_scope(command: str) -> bool:
+def _command_has_unpreserved_shell_state_scope(command: str) -> bool:
     tokens = _shell_tokens(command)
     if tokens is None or _command_is_safe_export_scope(command):
         return False
@@ -596,7 +599,7 @@ def _command_has_unpreserved_export_scope(command: str) -> bool:
         command_index = command_start + _first_non_assignment_token_index(
             tokens[command_start:command_end]
         )
-        if command_index < command_end and tokens[command_index] == "export":
+        if command_index < command_end and tokens[command_index] in {"export", "source", "."}:
             return True
     return False
 
