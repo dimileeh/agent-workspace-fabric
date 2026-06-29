@@ -554,6 +554,29 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "python -m playwright install chromium"
         assert command.required is False
 
+    def test_python_playwright_profile_maps_container_workspace_cd_scope(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        project_root = workspace_root / "apps" / "web"
+        host_root = tmp_path / "host"
+        project_root.mkdir(parents=True)
+        host_root.mkdir()
+        monkeypatch.chdir(host_root)
+        (project_root / "requirements.txt").write_text("playwright\n", encoding="utf-8")
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["cd /workspace/apps/web && python -m pip install -r requirements.txt"],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile, workspace_root=workspace_root)
+
+        assert command is not None
+        assert command.command == "cd /workspace/apps/web && python -m playwright install chromium"
+        assert command.required is False
+
     def test_browser_probe_deferral_resolves_validate_requirements_from_workspace_root(
         self,
         tmp_path: Path,

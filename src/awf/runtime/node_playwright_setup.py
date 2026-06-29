@@ -1324,6 +1324,9 @@ def _requirement_base_dir_for_scope(
 ) -> Path:
     path = Path(package_dir)
     if path.is_absolute():
+        if workspace_root is not None:
+            with suppress(ValueError):
+                return workspace_root.resolve() / path.relative_to(_CONTAINER_WORKSPACE_ROOT)
         return path
     return (workspace_root or Path.cwd()) / path
 
