@@ -912,7 +912,7 @@ def test_existing_directory_without_git_context_is_non_git_worktree(tmp_path: Pa
 
 
 @pytest.mark.unit
-def test_existing_directory_without_git_context_surfaces_malformed_registry(
+def test_existing_directory_without_git_entry_ignores_malformed_registry(
     tmp_path: Path,
 ) -> None:
     work_dir = tmp_path / "service"
@@ -923,10 +923,7 @@ def test_existing_directory_without_git_context_surfaces_malformed_registry(
     malformed_git_dir.mkdir(parents=True)
     (malformed_git_dir / "gitdir").write_text("", encoding="utf-8")
 
-    with pytest.raises(GitOperationError) as raised:
-        is_existing_non_git_worktree(worktree_path, work_dir=work_dir)
-
-    assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    assert is_existing_non_git_worktree(worktree_path, work_dir=work_dir) is True
 
 
 @pytest.mark.unit
