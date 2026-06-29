@@ -11,6 +11,63 @@ from tests.unit.awf.service.gc_worktree_test_helpers import _make_mirror_with_wo
 
 
 @pytest.mark.unit
+async def test_remove_orphan_worktree_reports_already_removed_path(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_removed"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "skipped"
+    assert result.reason_code == "PATH_ALREADY_REMOVED"
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": workspace_id,
+            "status": "skipped",
+            "reason_code": "PATH_ALREADY_REMOVED",
+        }
+    ]
+    mock_gm_cls.assert_not_called()
+
+
+@pytest.mark.unit
+async def test_remove_orphan_worktree_skips_existing_non_git_directory(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_non_git"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    (worktree_path / "artifact.txt").write_text("salvage evidence\n", encoding="utf-8")
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "skipped"
+    assert result.reason_code == "WORKTREE_NOT_GIT_MANAGED"
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": workspace_id,
+            "status": "skipped",
+            "reason_code": "WORKTREE_NOT_GIT_MANAGED",
+        }
+    ]
+    assert worktree_path.exists()
+    mock_gm_cls.assert_not_called()
+
+
+@pytest.mark.unit
 async def test_remove_orphan_worktree_uses_companion_path_name_as_worktree_id(
     tmp_path: Path,
 ) -> None:
@@ -217,6 +274,45 @@ async def test_remove_orphan_worktree_reports_metadata_probe_failure(
         }
     ]
     mock_gm.remove_worktree_from_mirror.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_remove_orphan_worktree_reports_unexpected_remove_failure(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    mirror = work_dir / "git" / "mirrors" / "repo.git"
+    worktree_path.mkdir(parents=True)
+    remove_error = RuntimeError("filesystem refused worktree metadata cleanup")
+
+    with (
+        patch(
+            "awf.service.gc_worktrees.git_context_mirror_path_for_worktree",
+            return_value=mirror,
+        ),
+        patch("awf.node.git_manager.GitManager") as mock_gm_cls,
+    ):
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock(side_effect=remove_error)
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "failed"
+    assert result.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
+    assert result.error == "filesystem refused worktree metadata cleanup"
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": workspace_id,
+            "status": "failed",
+            "reason_code": "GIT_WORKTREE_REMOVE_FAILED",
+            "error": "filesystem refused worktree metadata cleanup",
+        }
+    ]
 
 
 @pytest.mark.unit
