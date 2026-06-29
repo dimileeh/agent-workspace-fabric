@@ -9,6 +9,8 @@ the downstream probe never false-positives.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from awf.profiles.models import WorkspaceProfile
@@ -264,6 +266,33 @@ class TestPlaywrightBrowserInstallCommand:
 
         assert command is not None
         assert command.command == "python -m playwright install chromium"
+
+    def test_python_playwright_profile_resolves_requirements_from_workspace_root(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_root = tmp_path / "project"
+        host_root = tmp_path / "host"
+        project_root.mkdir()
+        host_root.mkdir()
+        monkeypatch.chdir(host_root)
+        (project_root / "requirements.txt").write_text("playwright\n", encoding="utf-8")
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["pip install -r requirements.txt"],
+            validate=["pytest --browser chromium"],
+        )
+
+        commands = profile_phase_command_plan(
+            profile,
+            ["validate"],
+            workspace_root=project_root,
+        )
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "python -m playwright install chromium"),
+            ("validate", "pytest --browser chromium"),
+        ]
 
     @pytest.mark.parametrize(
         "setup_command",

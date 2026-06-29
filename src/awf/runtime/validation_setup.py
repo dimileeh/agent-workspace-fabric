@@ -17,6 +17,7 @@ import asyncio
 import re
 import shlex
 from dataclasses import replace
+from pathlib import Path
 from urllib.parse import urlparse
 
 from awf.common.audit import redact_audit_text
@@ -224,6 +225,8 @@ _HTTP_HEALTHCHECK_SCRIPT = (
 def profile_phase_command_plan(
     profile: WorkspaceProfile,
     phase_names: list[str] | tuple[str, ...],
+    *,
+    workspace_root: Path | None = None,
 ) -> list[ProfileExecutionCommand]:
     """Return normal phase commands plus DB hooks in runtime execution order."""
     commands: list[ProfileExecutionCommand] = []
@@ -280,7 +283,10 @@ def profile_phase_command_plan(
         ),
     ):
         if phase == "setup":
-            browser_install = playwright_browser_install_command(profile)
+            browser_install = playwright_browser_install_command(
+                profile,
+                workspace_root=workspace_root,
+            )
             if browser_install is not None:
                 browser_install_package_manager = _infer_node_package_manager(profile)
                 deferred_browser_install = ProfileExecutionCommand(
@@ -319,7 +325,10 @@ def profile_phase_command_plan(
                 and not browser_install_added
                 and not _pre_validate_node_dependency_install_satisfies_browser_install(profile)
             ):
-                browser_install = playwright_browser_install_command(profile)
+                browser_install = playwright_browser_install_command(
+                    profile,
+                    workspace_root=workspace_root,
+                )
                 if browser_install is not None:
                     defer_browser_install_until_validate_install = (
                         _should_defer_browser_install_until_validate_install(
@@ -422,7 +431,10 @@ def profile_phase_command_plan(
                 and not browser_install_added
                 and _post_agent_node_dependency_install_exists(profile)
             ):
-                browser_install = playwright_browser_install_command(profile)
+                browser_install = playwright_browser_install_command(
+                    profile,
+                    workspace_root=workspace_root,
+                )
                 if browser_install is not None:
                     browser_install_package_manager = _infer_node_package_manager(profile)
                     deferred_browser_install = ProfileExecutionCommand(

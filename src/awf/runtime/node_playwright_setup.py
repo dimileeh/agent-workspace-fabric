@@ -107,14 +107,18 @@ def playwright_command(package_manager: str, *args: str) -> str:
     return f"npx playwright {escaped_args}"
 
 
-def playwright_browser_install_command(profile: WorkspaceProfile) -> ProfileCommand | None:
+def playwright_browser_install_command(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> ProfileCommand | None:
     """Return the generated setup command for declared Playwright browsers."""
     if not profile.runtime.browsers:
         return None
     package_manager = _detected_node_package_manager(profile)
     if package_manager is not None:
         command = playwright_command(package_manager, "install", *profile.runtime.browsers)
-    elif _uses_python_playwright(profile):
+    elif _uses_python_playwright(profile, workspace_root=workspace_root):
         command = shlex.join(["python", "-m", "playwright", "install", *profile.runtime.browsers])
     else:
         command = playwright_command("npm", "install", *profile.runtime.browsers)
@@ -198,9 +202,13 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> str | None:
     )
 
 
-def _uses_python_playwright(profile: WorkspaceProfile) -> bool:
+def _uses_python_playwright(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> bool:
     return any(
-        _command_installs_python_playwright(command.command)
+        _command_installs_python_playwright(command.command, workspace_root=workspace_root)
         or _command_invokes_python_playwright(command.command)
         for command in (
             *profile.phases.setup,
@@ -212,7 +220,11 @@ def _uses_python_playwright(profile: WorkspaceProfile) -> bool:
     )
 
 
-def _command_installs_python_playwright(command: str) -> bool:
+def _command_installs_python_playwright(
+    command: str,
+    *,
+    workspace_root: Path | None = None,
+) -> bool:
     tokens = _shell_tokens(command, comments=True)
     if tokens is None:
         return False
@@ -222,7 +234,11 @@ def _command_installs_python_playwright(command: str) -> bool:
             index += 1
         if index >= len(tokens):
             return False
-        if _command_segment_installs_python_playwright(tokens, index):
+        if _command_segment_installs_python_playwright(
+            tokens,
+            index,
+            workspace_root=workspace_root,
+        ):
             return True
         next_command_index = _sequential_command_next_index(tokens, index)
         if next_command_index is None:
@@ -231,32 +247,57 @@ def _command_installs_python_playwright(command: str) -> bool:
     return False
 
 
-def _command_segment_installs_python_playwright(tokens: list[str], index: int) -> bool:
+def _command_segment_installs_python_playwright(
+    tokens: list[str],
+    index: int,
+    *,
+    workspace_root: Path | None = None,
+) -> bool:
     executable = tokens[index]
     if executable in _PIP_EXECUTABLES:
-        return _pip_segment_installs_playwright(tokens, index + 1)
+        return _pip_segment_installs_playwright(tokens, index + 1, workspace_root=workspace_root)
     if executable in _PYTHON_EXECUTABLES and tokens[index + 1 : index + 3] == ["-m", "pip"]:
-        return _pip_segment_installs_playwright(tokens, index + 3)
+        return _pip_segment_installs_playwright(tokens, index + 3, workspace_root=workspace_root)
     if executable == "uv" and index + 1 < len(tokens):
         if tokens[index + 1] == "pip":
-            return _pip_segment_installs_playwright(tokens, index + 2)
+            return _pip_segment_installs_playwright(
+                tokens, index + 2, workspace_root=workspace_root
+            )
         if tokens[index + 1] == "add":
-            return _python_requirements_include_playwright(tokens, index + 2)
+            return _python_requirements_include_playwright(
+                tokens,
+                index + 2,
+                workspace_root=workspace_root,
+            )
     return False
 
 
-def _pip_segment_installs_playwright(tokens: list[str], index: int) -> bool:
+def _pip_segment_installs_playwright(
+    tokens: list[str],
+    index: int,
+    *,
+    workspace_root: Path | None = None,
+) -> bool:
     while index < len(tokens):
         token = tokens[index]
         if token in _SHELL_COMPOUND_CONTROL_TOKENS:
             return False
         if token == "install":
-            return _python_requirements_include_playwright(tokens, index + 1)
+            return _python_requirements_include_playwright(
+                tokens,
+                index + 1,
+                workspace_root=workspace_root,
+            )
         index += 1
     return False
 
 
-def _python_requirements_include_playwright(tokens: list[str], index: int) -> bool:
+def _python_requirements_include_playwright(
+    tokens: list[str],
+    index: int,
+    *,
+    workspace_root: Path | None = None,
+) -> bool:
     seen_requirement_files: set[Path] = set()
     while index < len(tokens):
         token = tokens[index]
@@ -266,6 +307,7 @@ def _python_requirements_include_playwright(tokens: list[str], index: int) -> bo
         if requirement_file is not None and _python_requirement_file_includes_playwright(
             requirement_file,
             seen_requirement_files,
+            workspace_root=workspace_root,
         ):
             return True
         if _PYTHON_PLAYWRIGHT_REQUIREMENT_RE.fullmatch(token):
@@ -290,8 +332,10 @@ def _pip_requirement_file_argument(tokens: list[str], index: int) -> tuple[str |
 def _python_requirement_file_includes_playwright(
     requirement_file: str,
     seen_requirement_files: set[Path],
+    *,
+    workspace_root: Path | None = None,
 ) -> bool:
-    path = _safe_local_requirement_file_path(requirement_file)
+    path = _safe_local_requirement_file_path(requirement_file, workspace_root=workspace_root)
     if path is None or path in seen_requirement_files:
         return False
     seen_requirement_files.add(path)
@@ -300,21 +344,30 @@ def _python_requirement_file_includes_playwright(
     except OSError:
         return False
     return any(
-        _python_requirement_line_includes_playwright(line, path.parent, seen_requirement_files)
+        _python_requirement_line_includes_playwright(
+            line,
+            path.parent,
+            seen_requirement_files,
+            workspace_root=workspace_root,
+        )
         for line in lines
     )
 
 
-def _safe_local_requirement_file_path(requirement_file: str) -> Path | None:
+def _safe_local_requirement_file_path(
+    requirement_file: str,
+    *,
+    workspace_root: Path | None = None,
+) -> Path | None:
     if not requirement_file or requirement_file.startswith("-"):
         return None
-    workspace_root = Path.cwd().resolve()
+    resolved_workspace_root = (workspace_root or Path.cwd()).resolve()
     path = Path(requirement_file)
     if not path.is_absolute():
-        path = workspace_root / path
+        path = resolved_workspace_root / path
     try:
         resolved = path.resolve(strict=True)
-        resolved.relative_to(workspace_root)
+        resolved.relative_to(resolved_workspace_root)
     except (OSError, ValueError):
         return None
     if not resolved.is_file():
@@ -326,6 +379,8 @@ def _python_requirement_line_includes_playwright(
     line: str,
     parent: Path,
     seen_requirement_files: set[Path],
+    *,
+    workspace_root: Path | None = None,
 ) -> bool:
     requirement = line.split("#", 1)[0].strip()
     if not requirement:
@@ -347,6 +402,7 @@ def _python_requirement_line_includes_playwright(
     return _python_requirement_file_includes_playwright(
         str(nested_path),
         seen_requirement_files,
+        workspace_root=workspace_root,
     )
 
 

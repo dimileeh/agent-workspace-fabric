@@ -626,7 +626,11 @@ async def _pre_push_validation_commands(
         profile = _profile_for_workspace(ws, worktree_path=worktree_path)
     return tuple(
         step.command.command
-        for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
+        for step in profile_phase_command_plan(
+            profile,
+            ("post_agent", "validate"),
+            workspace_root=worktree_path,
+        )
     )
 
 
@@ -851,7 +855,11 @@ async def _run_pre_push_validation(
             )
         command_evidence = tuple(
             step.command.command
-            for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
+            for step in profile_phase_command_plan(
+                profile,
+                ("post_agent", "validate"),
+                workspace_root=worktree_path,
+            )
         )
         try:
             recovered = await _recover_missing_head_object_from_filesystem(

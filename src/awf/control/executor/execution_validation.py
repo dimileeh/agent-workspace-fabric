@@ -241,7 +241,11 @@ async def run_validation_and_fix_cycle(
 
     validation_commands = [
         step.command.command
-        for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
+        for step in profile_phase_command_plan(
+            profile,
+            ("post_agent", "validate"),
+            workspace_root=worktree_path,
+        )
     ]
     test_commands_tuple = tuple(validation_commands)
     validation_tier = _validation_tier_for_workspace(ws, profile)

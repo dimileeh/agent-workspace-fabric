@@ -602,7 +602,11 @@ class ValidationRunner:
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
-            commands=profile_phase_command_plan(profile, phase_names),
+            commands=profile_phase_command_plan(
+                profile,
+                phase_names,
+                workspace_root=worktree_path,
+            ),
             healthchecks=list(healthchecks),
             legacy_command_labels=False,
             retry_budget=profile.validation.retry_budget,
