@@ -422,7 +422,7 @@ def _mirror_registry_points_to_worktree(mirror_path: Path, worktree_path: Path) 
 
     try:
         resolved_worktree = worktree_path.resolve()
-    except RuntimeError:
+    except (OSError, RuntimeError):
         resolved_worktree = worktree_path.absolute()
     linked_git_dir = mirror_path / "worktrees" / worktree_path.name
     if not linked_git_dir.is_dir():
@@ -439,7 +439,7 @@ def _managed_mirror_path(path: Path | None, mirrors_root: Path) -> Path | None:
     try:
         resolved_path = path.resolve()
         resolved_root = mirrors_root.resolve()
-    except RuntimeError:
+    except (OSError, RuntimeError):
         resolved_path = path.absolute()
         resolved_root = mirrors_root.absolute()
     try:

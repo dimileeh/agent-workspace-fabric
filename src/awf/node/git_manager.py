@@ -1020,6 +1020,14 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
     worktree_name = worktree_path.name
     try:
         resolved_worktree = worktree_path.resolve()
+    except OSError as exc:
+        raise GitOperationError(
+            operation="mirror_registry_scan",
+            returncode=1,
+            stdout="",
+            stderr=f"cannot resolve worktree path {worktree_path}: {exc}",
+            reason_code="MIRROR_REGISTRY_SCAN_FAILED",
+        ) from exc
     except RuntimeError:
         resolved_worktree = worktree_path.absolute()
     best_match: tuple[int, Path] | None = None

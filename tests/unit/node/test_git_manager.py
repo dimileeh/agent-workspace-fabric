@@ -868,6 +868,33 @@ def test_mirror_path_for_registered_worktree_fails_closed_when_registry_unscanna
 
 
 @pytest.mark.unit
+def test_mirror_path_for_registered_worktree_wraps_worktree_resolution_os_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    mirrors_dir.mkdir()
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    original_resolve = Path.resolve
+
+    def _raise_for_worktree(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == worktree:
+            raise OSError("too many levels of symbolic links")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _raise_for_worktree)
+
+    with pytest.raises(GitOperationError) as raised:
+        git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir)
+
+    assert raised.value.operation == "mirror_registry_scan"
+    assert raised.value.reason_code == "MIRROR_REGISTRY_SCAN_FAILED"
+    assert "cannot resolve worktree path" in raised.value.stderr
+    assert "too many levels of symbolic links" in raised.value.stderr
+
+
+@pytest.mark.unit
 async def test_read_mirror_origin_url_returns_configured_origin(tmp_path: Path) -> None:
     repo_url = "git@github.com:example/repo.git"
     mirror = tmp_path / "repo.git"
