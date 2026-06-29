@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.audit import redact_audit_value
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import (
@@ -336,12 +337,17 @@ async def _record_runtime_browser_findings(
             workspace,
             event_type=RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE,
             reason_code=RUNTIME_BROWSER_UNAVAILABLE,
-            payload={
-                "browser": browser,
-                "available_browsers": details.get("available_browsers"),
-                "path": finding.path,
-                "message": finding.message,
-            },
+            payload=cast(
+                "dict[str, Any]",
+                redact_audit_value(
+                    {
+                        "browser": browser,
+                        "available_browsers": details.get("available_browsers"),
+                        "path": finding.path,
+                        "message": finding.message,
+                    }
+                ),
+            ),
         )
         if browser_key is not None:
             recorded_browsers.add(browser_key)

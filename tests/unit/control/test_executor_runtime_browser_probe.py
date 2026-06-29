@@ -9,6 +9,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import REDACTION_MARKER
 from awf.control.executor.constants import RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
 from awf.control.executor.monitor_handoff_audit import (
     _record_runtime_browser_findings,
@@ -120,6 +121,56 @@ class TestRecordRuntimeBrowserFindings:
                 "available_browsers": ["firefox"],
                 "path": "runtime.browsers",
                 "message": "runtime does not provide Playwright browser chromium",
+            }
+
+    @pytest.mark.unit
+    async def test_event_payload_redacts_probe_finding_diagnostics(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        raw_token = "ghp_should_not_persist"
+        validation = _FindingsValidation(
+            (
+                ProfileLintFinding(
+                    reason_code=RUNTIME_BROWSER_UNAVAILABLE,
+                    message=f"docker compose stderr: Authorization: Bearer {raw_token}",
+                    path=f"runtime.browsers?GITHUB_TOKEN={raw_token}",
+                    severity=ProfileLintSeverity.warning,
+                    details={
+                        "browser": "chromium",
+                        "available_browsers": [f"firefox:{raw_token}"],
+                    },
+                ),
+            )
+        )
+
+        class _Executor:
+            _session_factory = factory
+            _validation = validation
+
+        async with session_scope(factory) as session:
+            await _record_runtime_browser_findings(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+                session=session,
+            )
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            event = next(
+                e for e in ws.events if e.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
+            )
+            assert raw_token not in repr(event.payload)
+            assert event.payload == {
+                "browser": "chromium",
+                "available_browsers": [f"firefox:{REDACTION_MARKER}"],
+                "path": f"runtime.browsers?GITHUB_TOKEN={REDACTION_MARKER}",
+                "message": f"docker compose stderr: Authorization: Bearer {REDACTION_MARKER}",
             }
 
     @pytest.mark.unit
