@@ -27,9 +27,6 @@ from awf.runtime.node_playwright_setup import (
     _command_installs_python_playwright as _command_installs_python_playwright,
 )
 from awf.runtime.node_playwright_setup import (
-    _infer_node_package_manager as _infer_node_package_manager,
-)
-from awf.runtime.node_playwright_setup import (
     _node_command_uses_playwright as _node_command_uses_playwright,
 )
 from awf.runtime.node_playwright_setup import (
@@ -40,6 +37,9 @@ from awf.runtime.node_playwright_setup import (
 )
 from awf.runtime.node_playwright_setup import (
     _node_package_manager_package_dir as _node_package_manager_package_dir,
+)
+from awf.runtime.node_playwright_setup import (
+    _playwright_browser_install_node_package_manager as _playwright_browser_install_node_package_manager,
 )
 from awf.runtime.node_playwright_setup import (
     _post_agent_node_dependency_install_exists as _post_agent_node_dependency_install_exists,
@@ -291,7 +291,10 @@ def profile_phase_command_plan(
                 workspace_root=workspace_root,
             )
             if browser_install is not None:
-                browser_install_package_manager = _infer_node_package_manager(profile)
+                browser_install_package_manager = _playwright_browser_install_node_package_manager(
+                    profile,
+                    workspace_root=workspace_root,
+                )
                 deferred_browser_install = ProfileExecutionCommand(
                     phase="setup",
                     command=browser_install,
@@ -346,7 +349,12 @@ def profile_phase_command_plan(
                         command=browser_install,
                     )
                     if defer_browser_install_until_validate_install:
-                        browser_install_package_manager = _infer_node_package_manager(profile)
+                        browser_install_package_manager = (
+                            _playwright_browser_install_node_package_manager(
+                                profile,
+                                workspace_root=workspace_root,
+                            )
+                        )
                         deferred_browser_install = browser_install_command
                     else:
                         commands.append(browser_install_command)
@@ -445,7 +453,12 @@ def profile_phase_command_plan(
                     workspace_root=workspace_root,
                 )
                 if browser_install is not None:
-                    browser_install_package_manager = _infer_node_package_manager(profile)
+                    browser_install_package_manager = (
+                        _playwright_browser_install_node_package_manager(
+                            profile,
+                            workspace_root=workspace_root,
+                        )
+                    )
                     deferred_browser_install = ProfileExecutionCommand(
                         phase="setup",
                         command=browser_install,

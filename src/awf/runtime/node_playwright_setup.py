@@ -63,6 +63,7 @@ _PYTHON_PLAYWRIGHT_REQUIREMENT_RE = re.compile(
 )
 _PIP_REQUIREMENT_FILE_FLAGS = frozenset({"-r", "--requirement"})
 _PIP_REQUIREMENT_FILE_EQUALS_PREFIX = "--requirement="
+_NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
 
 
 def _shell_tokens(command: str, *, comments: bool = False) -> list[str] | None:
@@ -115,11 +116,15 @@ def playwright_browser_install_command(
     """Return the generated setup command for declared Playwright browsers."""
     if not profile.runtime.browsers:
         return None
-    package_manager = _detected_node_package_manager(profile)
-    if package_manager is not None:
-        command = playwright_command(package_manager, "install", *profile.runtime.browsers)
-    elif _uses_python_playwright(profile, workspace_root=workspace_root):
+    uses_python_playwright = _uses_python_playwright(profile, workspace_root=workspace_root)
+    package_manager = _playwright_browser_install_node_package_manager(
+        profile,
+        workspace_root=workspace_root,
+    )
+    if package_manager is None and uses_python_playwright:
         command = shlex.join(["python", "-m", "playwright", "install", *profile.runtime.browsers])
+    elif package_manager is not None:
+        command = playwright_command(package_manager, "install", *profile.runtime.browsers)
     else:
         command = playwright_command("npm", "install", *profile.runtime.browsers)
     return ProfileCommand(
@@ -218,6 +223,40 @@ def _uses_python_playwright(
             *profile.phases.validate_commands,
         )
     )
+
+
+def _uses_node_playwright(profile: WorkspaceProfile) -> bool:
+    return any(
+        _node_command_uses_playwright(command.command)
+        for command in (
+            *profile.phases.setup,
+            *profile.database.generated_setup,
+            *profile.phases.pre_agent,
+            *profile.phases.post_agent,
+            *profile.phases.validate_commands,
+        )
+    )
+
+
+def _command_segment_invokes_node_playwright(tokens: list[str], index: int) -> bool:
+    if index >= len(tokens):
+        return False
+    executable = tokens[index]
+    return (
+        executable in _NODE_PACKAGE_MANAGERS or executable in _NODE_PLAYWRIGHT_EXECUTABLES
+    ) and _command_segment_invokes_playwright(tokens, index)
+
+
+def _playwright_browser_install_node_package_manager(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> str | None:
+    if _uses_python_playwright(
+        profile, workspace_root=workspace_root
+    ) and not _uses_node_playwright(profile):
+        return None
+    return _infer_node_package_manager(profile)
 
 
 def _command_installs_python_playwright(
@@ -444,6 +483,7 @@ def _should_defer_browser_install_until_validate_install(
     if _requested_pre_validate_node_dependency_install_satisfies_browser_install(
         profile,
         requested_phases,
+        workspace_root=workspace_root,
     ):
         return False
     if _post_agent_node_dependency_install_exists(profile):
@@ -502,10 +542,13 @@ def _pre_validate_node_dependency_install_exists(profile: WorkspaceProfile) -> b
 
 def _pre_validate_node_dependency_install_satisfies_browser_install(
     profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
 ) -> bool:
     return _requested_pre_validate_node_dependency_install_satisfies_browser_install(
         profile,
         {"setup", "pre_agent"},
+        workspace_root=workspace_root,
     )
 
 
@@ -525,8 +568,13 @@ def _requested_pre_validate_node_dependency_install_exists(
 def _requested_pre_validate_node_dependency_install_satisfies_browser_install(
     profile: WorkspaceProfile,
     requested_phases: set[str],
+    *,
+    workspace_root: Path | None = None,
 ) -> bool:
-    browser_install_package_manager = _infer_node_package_manager(profile)
+    browser_install_package_manager = _playwright_browser_install_node_package_manager(
+        profile,
+        workspace_root=workspace_root,
+    )
     return any(
         _node_dependency_install_satisfies_browser_install(
             _node_dependency_install_package_manager(command.command),
@@ -575,7 +623,7 @@ def _node_command_uses_playwright(command: str) -> bool:
             index += 1
         if index >= len(tokens):
             return False
-        if _command_segment_invokes_playwright(
+        if _command_segment_invokes_node_playwright(
             tokens,
             index,
         ) or _command_segment_invokes_browser_script(tokens, index):

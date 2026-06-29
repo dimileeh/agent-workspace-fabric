@@ -321,12 +321,34 @@ class TestPlaywrightBrowserInstallCommand:
         assert command is not None
         assert command.command == "npx playwright install chromium"
 
-    def test_node_package_manager_takes_precedence_over_python_playwright_install(
+    def test_python_playwright_profile_ignores_unrelated_node_install(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["npm install", "python -m pip install playwright"],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "python -m playwright install chromium"
+
+        commands = profile_phase_command_plan(profile, ["setup", "validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "npm install"),
+            ("setup", "python -m pip install playwright"),
+            ("setup", "python -m playwright install chromium"),
+            ("validate", "pytest --browser chromium"),
+        ]
+
+    def test_node_playwright_consumer_takes_precedence_over_python_playwright_install(
         self,
     ) -> None:
         profile = _profile_with_setup_validate_and_browsers(
             setup=["python -m pip install playwright", "pnpm install --frozen-lockfile"],
-            validate=["pytest --browser chromium"],
+            validate=["pnpm exec playwright test"],
         )
 
         command = playwright_browser_install_command(profile)
