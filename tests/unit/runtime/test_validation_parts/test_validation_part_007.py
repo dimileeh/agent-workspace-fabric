@@ -176,6 +176,31 @@ class TestBrowserPhaseCommandPlan:
         assert commands[2].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_does_not_replay_mixed_cd_prep_install_prefix(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-mixed-prefix-chain-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": [
+                        "cd apps/web; node scripts/gen.js; pnpm install; pnpm test:e2e",
+                    ],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup",))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "cd apps/web; node scripts/gen.js; pnpm install"),
+            ("setup", "pnpm -C apps/web exec playwright install chromium"),
+            ("setup", "cd apps/web && pnpm test:e2e"),
+        ]
+        assert commands[1].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_uses_pre_agent_dependency_install_for_browser_install(
         self,
     ) -> None:

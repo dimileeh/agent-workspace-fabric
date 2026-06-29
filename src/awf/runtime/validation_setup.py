@@ -478,17 +478,15 @@ def _dependency_install_chain_trailing_scope_prefix(
     ):
         scope_prefix = install_command[:separator_index].strip()
         scoped_install_command = install_command[separator_index + len(separator) :].strip()
-        if (
-            not _command_preserves_install_trailing_scope(scope_prefix)
-            or not scoped_install_command
-        ):
+        trailing_scope_prefix = _command_install_trailing_scope_prefix(scope_prefix)
+        if trailing_scope_prefix is None or not scoped_install_command:
             continue
         command_package_manager = _node_dependency_install_package_manager(scoped_install_command)
         if _node_dependency_install_satisfies_browser_install(
             command_package_manager,
             browser_install_package_manager,
         ):
-            return scope_prefix
+            return trailing_scope_prefix
     return None
 
 
@@ -525,42 +523,36 @@ def _command_has_unpreserved_export_scope(command: str) -> bool:
     return False
 
 
-def _command_preserves_install_trailing_scope(command: str) -> bool:
-    return (
-        _command_starts_with_cd_scope(command)
-        or _command_is_shell_guard_scope(command)
-        or _command_is_safe_export_scope(command)
-    )
-
-
-def _command_starts_with_cd_scope(command: str) -> bool:
+def _command_install_trailing_scope_prefix(command: str) -> str | None:
     tokens = _shell_tokens(command)
     if tokens is None:
-        return False
+        return None
     if any(token in {"||", "|", "|&", "&"} for token in tokens):
-        return False
-    for command_index in _sequential_shell_command_indices(tokens):
-        command_index += _first_non_assignment_token_index(tokens[command_index:])
-        if command_index < len(tokens) and tokens[command_index] == "cd":
-            return True
-    return False
-
-
-def _command_is_shell_guard_scope(command: str) -> bool:
-    tokens = _shell_tokens(command)
-    if tokens is None:
-        return False
-    if any(token in {"||", "|", "|&", "&"} for token in tokens):
-        return False
-    saw_guard = False
-    for command_index in _sequential_shell_command_indices(tokens):
-        command_index += _first_non_assignment_token_index(tokens[command_index:])
-        if command_index >= len(tokens):
+        return None
+    safe_commands: list[str] = []
+    for command_start, command_end in _sequential_shell_command_ranges(tokens):
+        command_index = command_start + _first_non_assignment_token_index(
+            tokens[command_start:command_end]
+        )
+        if command_index >= command_end:
             continue
-        if tokens[command_index] not in _VALIDATE_PROBE_LEADING_GUARDS:
-            return False
-        saw_guard = True
-    return saw_guard
+        command_tokens = tokens[command_start:command_end]
+        token = tokens[command_index]
+        if token == "cd" or token in _VALIDATE_PROBE_LEADING_GUARDS:
+            safe_commands.append(shlex.join(command_tokens))
+            continue
+        if token != "export":
+            continue
+        exports = tokens[command_index + 1 : command_end]
+        if (
+            exports
+            and all(_ENV_ASSIGNMENT_RE.fullmatch(export) for export in exports)
+            and not any("$(" in export or "`" in export for export in exports)
+        ):
+            safe_commands.append(shlex.join(command_tokens))
+    if not safe_commands:
+        return None
+    return "; ".join(safe_commands)
 
 
 def _command_is_safe_export_scope(command: str) -> bool:
