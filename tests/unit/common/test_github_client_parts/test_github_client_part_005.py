@@ -253,6 +253,7 @@ class TestFetchFailingCheckLogsRollupFallback:
                         "databaseId": 123,
                         "name": "python-coverage-shards (7)",
                         "conclusion": "FAILURE",
+                        "status": "completed",
                     }
                 ]
             ),
@@ -278,7 +279,138 @@ class TestFetchFailingCheckLogsRollupFallback:
         assert len(_run_view_calls(fake)) == 1
 
     @pytest.mark.unit
-    async def test_rollup_fallback_ignores_non_actions_evidence(self) -> None:
+    async def test_rollup_fallback_waits_when_matching_actions_run_not_completed(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 123,
+                        "name": "python-coverage-shards (7)",
+                        "conclusion": "FAILURE",
+                        "status": "queued",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (7)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert result.failures == ()
+        assert result.runs_in_progress is True
+        assert _run_view_calls(fake) == []
+
+    @pytest.mark.unit
+    async def test_rollup_fallback_waits_when_run_in_progress_not_in_failed_list(self) -> None:
+        # The run is listed by ``gh run list`` but still in progress (no failed
+        # conclusion), so loop 1 skips it on the conclusion check. The rollup
+        # fallback then maps the failed rollup check to that run, sees its
+        # non-completed status, and WAITS (runs_in_progress) instead of fetching
+        # an empty in-progress ``--log-failed`` archive. Covers the rollup-loop
+        # run-completion gate.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 123,
+                        "name": "python-coverage-shards (7)",
+                        "conclusion": None,
+                        "status": "in_progress",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (7)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert result.failures == ()
+        assert result.runs_in_progress is True
+        assert _run_view_calls(fake) == []
+
+    @pytest.mark.unit
+    async def test_fetch_repo_merge_methods_raises_when_response_not_object(self) -> None:
+        # gh api repos/<slug> must return a JSON object; a non-object response
+        # (e.g. a list when the API is degraded) raises rather than silently
+        # returning no merge methods.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=json.dumps([1, 2, 3]))
+        client = GitHubClient(fake)
+        with pytest.raises(GitHubClientError):
+            await client.fetch_repo_merge_methods(repo=RepoRef(owner="o", name="r"))
+
+    @pytest.mark.unit
+    async def test_rollup_fallback_fetches_logs_when_actions_run_absent_from_list(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 456,
+                        "name": "lint",
+                        "conclusion": "SUCCESS",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="pytest failed in tests/unit/test_widget.py")
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="python-coverage-shards (7)",
+                    conclusion="FAILURE",
+                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    app_slug="github-actions",
+                ),
+            ),
+        )
+
+        assert len(result.failures) == 1
+        assert result.failures[0].name == "python-coverage-shards (7)"
+        assert result.failures[0].run_id == "123"
+        assert "pytest failed" in result.failures[0].log_excerpt
+        assert result.runs_in_progress is False
+        assert _run_view_calls(fake) == [
+            ["gh", "run", "view", "123", "--repo", "o/r", "--log-failed"]
+        ]
+
+    @pytest.mark.unit
+    async def test_rollup_fallback_synthesizes_external_failures(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")
         client = GitHubClient(fake)
@@ -289,21 +421,15 @@ class TestFetchFailingCheckLogsRollupFallback:
             head_sha="abc",
             rollup_checks=(
                 CheckTiming(
-                    name="status-context",
+                    name="circleci/status-context",
                     status="FAILURE",
-                    details_url="https://github.com/o/r/actions/runs/123/job/456",
+                    details_url="https://circleci.example.test/build/123",
                 ),
                 CheckTiming(
-                    name="third-party",
+                    name="third-party/check-run",
                     conclusion="FAILURE",
-                    details_url="https://github.com/o/r/actions/runs/124/job/456",
+                    details_url="https://ci.example.test/build/124",
                     app_slug="codecov",
-                ),
-                CheckTiming(
-                    name="external",
-                    conclusion="FAILURE",
-                    details_url="https://ci.example.test/build/1",
-                    app_slug="github-actions",
                 ),
                 CheckTiming(
                     name="green-actions",
@@ -326,7 +452,17 @@ class TestFetchFailingCheckLogsRollupFallback:
             ),
         )
 
-        assert failures == ()
+        assert [
+            (failure.name, failure.conclusion, failure.log_excerpt) for failure in failures
+        ] == [
+            ("circleci/status-context", "FAILURE", ""),
+            ("third-party/check-run", "FAILURE", ""),
+        ]
+        assert all(failure.run_id is None for failure in failures)
+        assert [failure.evidence_warnings for failure in failures] == [
+            ("External check details URL: https://circleci.example.test/build/123",),
+            ("External check details URL: https://ci.example.test/build/124",),
+        ]
         assert _run_view_calls(fake) == []
 
     @pytest.mark.unit
