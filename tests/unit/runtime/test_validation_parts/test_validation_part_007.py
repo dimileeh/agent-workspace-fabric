@@ -318,6 +318,39 @@ class TestBrowserPhaseCommandPlan:
         assert validate_commands[2].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_defers_browser_install_past_unrelated_split_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-split-unrelated-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["npm install"],
+                    "pre_agent": ["node scripts/pre.js"],
+                    "validate": [
+                        "pnpm -C web install --frozen-lockfile",
+                        "pnpm -C web test:e2e",
+                    ],
+                },
+            }
+        )
+
+        setup_commands = profile_phase_command_plan(profile, ("setup", "pre_agent"))
+        validate_commands = profile_phase_command_plan(profile, ("validate",))
+
+        assert [(command.phase, command.command.command) for command in setup_commands] == [
+            ("setup", "npm install"),
+            ("pre_agent", "node scripts/pre.js"),
+        ]
+        assert [(command.phase, command.command.command) for command in validate_commands] == [
+            ("validate", "pnpm -C web install --frozen-lockfile"),
+            ("setup", "pnpm -C web exec playwright install chromium"),
+            ("validate", "pnpm -C web test:e2e"),
+        ]
+        assert validate_commands[1].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_installs_browsers_after_post_agent_install(
         self,
     ) -> None:

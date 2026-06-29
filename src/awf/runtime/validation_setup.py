@@ -29,16 +29,16 @@ from awf.runtime.node_playwright_setup import (
     _node_dependency_install_package_manager as _node_dependency_install_package_manager,
 )
 from awf.runtime.node_playwright_setup import (
+    _node_dependency_install_satisfies_browser_install as _node_dependency_install_satisfies_browser_install,
+)
+from awf.runtime.node_playwright_setup import (
     _node_package_manager_package_dir as _node_package_manager_package_dir,
 )
 from awf.runtime.node_playwright_setup import (
     _post_agent_node_dependency_install_exists as _post_agent_node_dependency_install_exists,
 )
 from awf.runtime.node_playwright_setup import (
-    _pre_validate_node_dependency_install_exists as _pre_validate_node_dependency_install_exists,
-)
-from awf.runtime.node_playwright_setup import (
-    _requested_pre_validate_node_dependency_install_exists as _requested_pre_validate_node_dependency_install_exists,
+    _pre_validate_node_dependency_install_satisfies_browser_install as _pre_validate_node_dependency_install_satisfies_browser_install,
 )
 from awf.runtime.node_playwright_setup import (
     _should_defer_browser_install_until_validate_install as _should_defer_browser_install_until_validate_install,
@@ -304,7 +304,7 @@ def profile_phase_command_plan(
             if (
                 deferred_browser_install is None
                 and not browser_install_added
-                and not _pre_validate_node_dependency_install_exists(profile)
+                and not _pre_validate_node_dependency_install_satisfies_browser_install(profile)
             ):
                 browser_install = playwright_browser_install_command(profile)
                 if browser_install is not None:
@@ -425,24 +425,6 @@ def profile_phase_command_plan(
             continue
         commands.extend(_phase_commands(profile, phase))
     return commands
-
-
-def _node_dependency_install_satisfies_browser_install(
-    command_package_manager: str | None,
-    browser_install_package_manager: str | None,
-) -> bool:
-    if command_package_manager is None or browser_install_package_manager is None:
-        return False
-    if command_package_manager == browser_install_package_manager:
-        return True
-    try:
-        command_tokens = shlex.split(command_package_manager)
-        browser_tokens = shlex.split(browser_install_package_manager)
-    except ValueError:
-        return False
-    return (
-        len(command_tokens) == 1 and bool(browser_tokens) and command_tokens[0] == browser_tokens[0]
-    )
 
 
 def _split_dependency_install_chain(

@@ -176,7 +176,10 @@ def _should_defer_browser_install_until_validate_install(
     profile: WorkspaceProfile,
     requested_phases: set[str],
 ) -> bool:
-    if _requested_pre_validate_node_dependency_install_exists(profile, requested_phases):
+    if _requested_pre_validate_node_dependency_install_satisfies_browser_install(
+        profile,
+        requested_phases,
+    ):
         return False
     return _post_agent_node_dependency_install_exists(
         profile
@@ -214,19 +217,73 @@ def _pre_validate_node_dependency_install_exists(profile: WorkspaceProfile) -> b
     )
 
 
+def _pre_validate_node_dependency_install_satisfies_browser_install(
+    profile: WorkspaceProfile,
+) -> bool:
+    return _requested_pre_validate_node_dependency_install_satisfies_browser_install(
+        profile,
+        {"setup", "pre_agent"},
+    )
+
+
 def _requested_pre_validate_node_dependency_install_exists(
     profile: WorkspaceProfile,
     requested_phases: set[str],
 ) -> bool:
+    return any(
+        _node_dependency_install_package_manager(command.command) is not None
+        for command in _requested_pre_validate_node_dependency_install_commands(
+            profile,
+            requested_phases,
+        )
+    )
+
+
+def _requested_pre_validate_node_dependency_install_satisfies_browser_install(
+    profile: WorkspaceProfile,
+    requested_phases: set[str],
+) -> bool:
+    browser_install_package_manager = _infer_node_package_manager(profile)
+    return any(
+        _node_dependency_install_satisfies_browser_install(
+            _node_dependency_install_package_manager(command.command),
+            browser_install_package_manager,
+        )
+        for command in _requested_pre_validate_node_dependency_install_commands(
+            profile,
+            requested_phases,
+        )
+    )
+
+
+def _requested_pre_validate_node_dependency_install_commands(
+    profile: WorkspaceProfile,
+    requested_phases: set[str],
+) -> list[ProfileCommand]:
     commands: list[ProfileCommand] = []
     if "setup" in requested_phases:
         commands.extend(profile.phases.setup)
         commands.extend(profile.database.generated_setup)
     if "pre_agent" in requested_phases:
         commands.extend(profile.phases.pre_agent)
-    return any(
-        _node_dependency_install_package_manager(command.command) is not None
-        for command in commands
+    return commands
+
+
+def _node_dependency_install_satisfies_browser_install(
+    command_package_manager: str | None,
+    browser_install_package_manager: str | None,
+) -> bool:
+    if command_package_manager is None or browser_install_package_manager is None:
+        return False
+    if command_package_manager == browser_install_package_manager:
+        return True
+    try:
+        command_tokens = shlex.split(command_package_manager)
+        browser_tokens = shlex.split(browser_install_package_manager)
+    except ValueError:
+        return False
+    return (
+        len(command_tokens) == 1 and bool(browser_tokens) and command_tokens[0] == browser_tokens[0]
     )
 
 
