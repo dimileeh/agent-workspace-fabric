@@ -298,6 +298,7 @@ def profile_phase_command_plan(
                         requested_phases,
                     )
                 ):
+                    browser_install_package_manager = _infer_node_package_manager(profile)
                     deferred_browser_install = ProfileExecutionCommand(
                         phase="setup",
                         command=browser_install,
@@ -314,11 +315,16 @@ def profile_phase_command_plan(
             )
             pending_validate_commands: list[ProfileExecutionCommand] = []
             for validate_command in _phase_commands(profile, "validate"):
+                command_package_manager = _node_dependency_install_package_manager(
+                    validate_command.command.command
+                )
                 if (
                     defer_browser_install_until_validate_install
                     and deferred_browser_install is not None
-                    and _node_dependency_install_package_manager(validate_command.command.command)
-                    is not None
+                    and _node_dependency_install_satisfies_browser_install(
+                        command_package_manager,
+                        browser_install_package_manager,
+                    )
                 ):
                     commands.extend(pending_validate_commands)
                     pending_validate_commands = []

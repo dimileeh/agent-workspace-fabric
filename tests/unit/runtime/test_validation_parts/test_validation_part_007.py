@@ -134,6 +134,34 @@ class TestBrowserPhaseCommandPlan:
         assert commands[2].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_defers_browser_install_until_matching_validate_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-mixed-validate-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "validate": [
+                        "npm install",
+                        "pnpm -C web install --frozen-lockfile",
+                        "pnpm -C web test:e2e",
+                    ],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("validate",))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", "npm install"),
+            ("validate", "pnpm -C web install --frozen-lockfile"),
+            ("setup", "pnpm -C web exec playwright install chromium"),
+            ("validate", "pnpm -C web test:e2e"),
+        ]
+        assert commands[2].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_defers_browser_install_across_production_batches(
         self,
     ) -> None:
