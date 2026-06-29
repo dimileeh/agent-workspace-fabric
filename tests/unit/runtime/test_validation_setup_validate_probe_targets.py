@@ -26,6 +26,7 @@ from awf.runtime.validation_setup import (
     playwright_browser_install_command,
     playwright_command,
     profile_phase_command_plan,
+    runtime_browser_probe_deferred_until_validate,
 )
 
 
@@ -293,6 +294,27 @@ class TestPlaywrightBrowserInstallCommand:
             ("setup", "python -m playwright install chromium"),
             ("validate", "pytest --browser chromium"),
         ]
+
+    def test_browser_probe_deferral_resolves_validate_requirements_from_workspace_root(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_root = tmp_path / "project"
+        host_root = tmp_path / "host"
+        project_root.mkdir()
+        host_root.mkdir()
+        monkeypatch.chdir(host_root)
+        (project_root / "requirements.txt").write_text("playwright\n", encoding="utf-8")
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=["node scripts/generate-config.js"],
+            validate=["pip install -r requirements.txt", "pytest --browser chromium"],
+        )
+
+        assert runtime_browser_probe_deferred_until_validate(
+            profile,
+            workspace_root=project_root,
+        )
 
     @pytest.mark.parametrize(
         "setup_command",

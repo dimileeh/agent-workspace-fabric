@@ -182,7 +182,8 @@ async def run_validation_and_fix_cycle(
             None,
         )
         if callable(record_browser_findings) and runtime_browser_probe_deferred_until_validate(
-            profile
+            profile,
+            workspace_root=worktree_path,
         ):
             deferred_runtime_browser_findings_recorded = True
             await record_browser_findings(

@@ -498,13 +498,18 @@ def _should_defer_browser_install_until_validate_install(
     )
 
 
-def runtime_browser_probe_deferred_until_validate(profile: WorkspaceProfile) -> bool:
+def runtime_browser_probe_deferred_until_validate(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> bool:
     """Return whether setup-time browser probes would run before browser provisioning."""
-    if playwright_browser_install_command(profile) is None:
+    if playwright_browser_install_command(profile, workspace_root=workspace_root) is None:
         return False
     return _should_defer_browser_install_until_validate_install(
         profile,
         {"setup", "pre_agent"},
+        workspace_root=workspace_root,
     )
 
 

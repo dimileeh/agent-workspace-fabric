@@ -459,7 +459,8 @@ async def execute(
         )
         record_browser_findings = getattr(self, "_record_runtime_browser_findings_safe", None)
         if callable(record_browser_findings) and not runtime_browser_probe_deferred_until_validate(
-            profile
+            profile,
+            workspace_root=worktree_path,
         ):
             await record_browser_findings(
                 workspace_id=workspace_id,

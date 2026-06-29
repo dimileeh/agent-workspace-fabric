@@ -192,6 +192,9 @@ async def test_validation_records_deferred_browser_findings_after_validate_insta
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    (worktree_path / "requirements.txt").write_text("playwright\n", encoding="utf-8")
     profile = WorkspaceProfile.model_validate(
         {
             "name": "browser-validate-install-test",
@@ -199,7 +202,7 @@ async def test_validation_records_deferred_browser_findings_after_validate_insta
             "phases": {
                 "setup": ["node scripts/generate-config.js"],
                 "validate": [
-                    "pnpm install --frozen-lockfile",
+                    "pip install -r requirements.txt",
                     "pnpm test",
                 ],
             },
@@ -293,7 +296,7 @@ async def test_validation_records_deferred_browser_findings_after_validate_insta
         executor,
         workspace_id=workspace.id,
         ws=workspace,
-        worktree_path=tmp_path / "worktree",
+        worktree_path=worktree_path,
         compose_project=f"awf_{workspace.id}",
         compose_file=tmp_path / "compose.yml",
         base_commit="b" * 40,

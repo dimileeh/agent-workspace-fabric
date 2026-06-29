@@ -330,7 +330,10 @@ def profile_phase_command_plan(
             if (
                 deferred_browser_install is None
                 and not browser_install_added
-                and not _pre_validate_node_dependency_install_satisfies_browser_install(profile)
+                and not _pre_validate_node_dependency_install_satisfies_browser_install(
+                    profile,
+                    workspace_root=workspace_root,
+                )
             ):
                 browser_install = playwright_browser_install_command(
                     profile,

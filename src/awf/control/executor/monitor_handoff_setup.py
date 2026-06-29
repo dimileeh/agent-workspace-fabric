@@ -396,7 +396,10 @@ async def _run_monitor_handoff_profile_setup(
         browser_probe_deferred = isinstance(
             profile,
             WorkspaceProfile,
-        ) and runtime_browser_probe_deferred_until_validate(profile)
+        ) and runtime_browser_probe_deferred_until_validate(
+            profile,
+            workspace_root=worktree_path,
+        )
         if callable(record_browser_findings) and not browser_probe_deferred:
             try:
                 async with session_scope(self._session_factory) as session:

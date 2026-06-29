@@ -244,6 +244,7 @@ async def _record_deferred_runtime_browser_findings_safe(
     compose_project: str,
     compose_file: Path,
     profile: Any,
+    worktree_path: Path,
 ) -> None:
     """Record deferred browser probe warnings after monitor pre-push validation."""
     try:
@@ -253,6 +254,7 @@ async def _record_deferred_runtime_browser_findings_safe(
             compose_project=compose_project,
             compose_file=compose_file,
             profile=profile,
+            worktree_path=worktree_path,
         )
     except Exception as exc:
         _log.warning(
@@ -270,8 +272,12 @@ async def _record_deferred_runtime_browser_findings(
     compose_project: str,
     compose_file: Path,
     profile: Any,
+    worktree_path: Path,
 ) -> None:
-    if not runtime_browser_probe_deferred_until_validate(profile):
+    if not runtime_browser_probe_deferred_until_validate(
+        profile,
+        workspace_root=worktree_path,
+    ):
         return
     validation = self._deps.validation
     probe = getattr(validation, "probe_runtime_browser_findings", None)
@@ -1245,6 +1251,7 @@ async def _run_pre_push_validation(
         compose_project=compose_project,
         compose_file=compose_file,
         profile=profile,
+        worktree_path=worktree_path,
     )
     cleanup_result = await _pre_push_validation_cleanup(
         self,
