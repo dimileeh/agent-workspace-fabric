@@ -465,6 +465,38 @@ class TestBrowserPhaseCommandPlan:
         assert validate_commands[2].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_can_disable_unrequested_validate_browser_deferral(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-handoff-setup-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["node scripts/generate-config.js"],
+                    "pre_agent": ["node scripts/pre.js"],
+                    "validate": [
+                        "pnpm install --frozen-lockfile",
+                        "pnpm test",
+                    ],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(
+            profile,
+            ("setup", "pre_agent"),
+            allow_browser_install_defer_to_unrequested_phase=False,
+        )
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "node scripts/generate-config.js"),
+            ("pre_agent", "node scripts/pre.js"),
+            ("setup", "pnpm exec playwright install chromium"),
+        ]
+        assert commands[2].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_validate_batch_ignores_unrequested_setup_install(
         self,
     ) -> None:

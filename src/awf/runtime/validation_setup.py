@@ -239,6 +239,7 @@ def profile_phase_command_plan(
     phase_names: list[str] | tuple[str, ...],
     *,
     workspace_root: Path | None = None,
+    allow_browser_install_defer_to_unrequested_phase: bool = True,
 ) -> list[ProfileExecutionCommand]:
     """Return normal phase commands plus DB hooks in runtime execution order."""
     commands: list[ProfileExecutionCommand] = []
@@ -325,6 +326,9 @@ def profile_phase_command_plan(
                         profile,
                         requested_phases,
                         workspace_root=workspace_root,
+                        allow_browser_install_defer_to_unrequested_phase=(
+                            allow_browser_install_defer_to_unrequested_phase
+                        ),
                     )
                 )
             for setup_command in _phase_commands(profile, "setup"):
@@ -367,6 +371,9 @@ def profile_phase_command_plan(
                             profile,
                             requested_phases,
                             workspace_root=workspace_root,
+                            allow_browser_install_defer_to_unrequested_phase=(
+                                allow_browser_install_defer_to_unrequested_phase
+                            ),
                         )
                     )
                     browser_install_command = ProfileExecutionCommand(

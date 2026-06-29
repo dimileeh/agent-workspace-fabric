@@ -35,6 +35,26 @@ class _BrowserProbeSession:
         pass
 
 
+class _CapturingSetupValidation(_OkSetupValidation):
+    """Validation runner that records handoff-specific planner options."""
+
+    def __init__(self, trace: list[str] | None = None) -> None:
+        super().__init__(trace=trace)
+        self.allow_browser_install_defer_flags: list[bool] = []
+
+    async def run_profile_phases(
+        self,
+        *,
+        phase_names: tuple[str, ...],
+        allow_browser_install_defer_to_unrequested_phase: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        self.allow_browser_install_defer_flags.append(
+            allow_browser_install_defer_to_unrequested_phase
+        )
+        return await super().run_profile_phases(phase_names=phase_names, **kwargs)
+
+
 def _browser_probe_profile(*, validate_install: bool = False) -> WorkspaceProfile:
     phases: dict[str, list[str]] = {"setup": ["npm install"]}
     if validate_install:
@@ -107,13 +127,15 @@ class TestHandoffSetupRunsBrowserProbe:
         ]
 
     @pytest.mark.unit
-    async def test_setup_skips_browser_findings_when_install_is_deferred_to_validate(
+    async def test_setup_records_browser_findings_when_validate_install_is_unrequested(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _patch_browser_probe_session_scope(monkeypatch)
         browser_calls: list[str] = []
         trace: list[str] = []
-        validation = _OkSetupValidation(trace=trace)
+        validation = _CapturingSetupValidation(trace=trace)
         profile = _browser_probe_profile(validate_install=True)
 
         class _Executor:
@@ -141,11 +163,13 @@ class TestHandoffSetupRunsBrowserProbe:
 
         assert ok is True
         assert validation.calls == [("setup", "pre_agent")]
-        assert browser_calls == []
+        assert validation.allow_browser_install_defer_flags == [False]
+        assert browser_calls == ["called"]
         assert trace == [
             "run_profile_phases",
             "record_setup_dependency_network_events",
             "record_runtime_toolchain_findings",
+            "record_runtime_browser_findings",
         ]
 
     @pytest.mark.unit

@@ -596,6 +596,7 @@ class ValidationRunner:
         run_healthchecks: bool = False,
         worktree_path: Path | None = None,
         include_coverage: bool = True,
+        allow_browser_install_defer_to_unrequested_phase: bool = True,
     ) -> ValidationResult:
         """Run the selected profile phases in order."""
         requested_phases = set(phase_names)
@@ -619,6 +620,9 @@ class ValidationRunner:
                 profile,
                 phase_names,
                 workspace_root=worktree_path,
+                allow_browser_install_defer_to_unrequested_phase=(
+                    allow_browser_install_defer_to_unrequested_phase
+                ),
             ),
             healthchecks=list(healthchecks),
             legacy_command_labels=False,

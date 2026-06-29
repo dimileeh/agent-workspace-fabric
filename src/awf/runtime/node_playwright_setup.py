@@ -933,6 +933,7 @@ def _should_defer_browser_install_until_validate_install(
     requested_phases: set[str],
     *,
     workspace_root: Path | None = None,
+    allow_browser_install_defer_to_unrequested_phase: bool = True,
 ) -> bool:
     if _requested_pre_validate_node_dependency_install_satisfies_browser_install(
         profile,
@@ -946,7 +947,9 @@ def _should_defer_browser_install_until_validate_install(
         workspace_root=workspace_root,
     ):
         return False
-    if "post_agent" in requested_phases or "validate" not in requested_phases:
+    if "post_agent" in requested_phases or (
+        "validate" not in requested_phases and allow_browser_install_defer_to_unrequested_phase
+    ):
         if _post_agent_node_dependency_install_exists(profile):
             return True
         if _post_agent_python_playwright_dependency_install_exists(
@@ -962,6 +965,8 @@ def _should_defer_browser_install_until_validate_install(
             profile,
             workspace_root=workspace_root,
         )
+    if "validate" not in requested_phases and not allow_browser_install_defer_to_unrequested_phase:
+        return False
     return _validate_node_dependency_install_exists(
         profile
     ) or _validate_python_playwright_dependency_install_exists(
@@ -974,6 +979,7 @@ def runtime_browser_probe_deferred_until_validate(
     profile: WorkspaceProfile,
     *,
     workspace_root: Path | None = None,
+    allow_browser_install_defer_to_unrequested_phase: bool = True,
 ) -> bool:
     """Return whether setup-time browser probes would run before browser provisioning."""
     if playwright_browser_install_command(profile, workspace_root=workspace_root) is None:
@@ -982,6 +988,9 @@ def runtime_browser_probe_deferred_until_validate(
         profile,
         {"setup", "pre_agent"},
         workspace_root=workspace_root,
+        allow_browser_install_defer_to_unrequested_phase=(
+            allow_browser_install_defer_to_unrequested_phase
+        ),
     )
 
 
