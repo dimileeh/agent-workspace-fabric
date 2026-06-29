@@ -257,6 +257,64 @@ def test_reaper_reports_git_aware_skipped_worktree_without_direct_fallback(
 
 
 @pytest.mark.unit
+def test_reaper_uses_direct_delete_for_unmanaged_standalone_git_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    (worktree / ".git").mkdir(parents=True)
+    (worktree / ".git" / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n",
+        encoding="utf-8",
+    )
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+    direct_delete_calls: list[tuple[str, Path, Path]] = []
+
+    async def _git_aware_remover(
+        *, workspace_id: str, path: Path, work_dir: Path
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        raise AssertionError(f"git-aware remover used for unmanaged worktree {workspace_id}")
+
+    def _direct_delete(
+        kind: str, path: Path, *, work_dir: Path
+    ) -> tuple[bool, str | None, str | None]:
+        direct_delete_calls.append((kind, path, work_dir))
+        return True, None, "PATH_DELETED"
+
+    monkeypatch.setattr("awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete)
+
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            min_age_hours=0,
+            worktree_remover=_git_aware_remover,
+        )
+    )
+
+    assert result.status == "ok"
+    assert result.errors == ()
+    assert direct_delete_calls == [("worktree", worktree, tmp_path.resolve())]
+    assert [outcome.to_dict() for outcome in result.reaped] == [
+        {
+            "kind": "worktree",
+            "workspace_id": "ws_dead",
+            "status": "reaped",
+            "reason_code": "PATH_DELETED",
+        }
+    ]
+
+
+@pytest.mark.unit
 def test_reaper_uses_scanned_companion_worktree_id_for_git_aware_remover(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
