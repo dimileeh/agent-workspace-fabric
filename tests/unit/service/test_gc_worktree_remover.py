@@ -1277,6 +1277,46 @@ async def test_remove_orphan_worktree_reports_unexpected_metadata_probe_failure(
 
 
 @pytest.mark.unit
+async def test_remove_orphan_worktree_wraps_linked_git_resolution_failure(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+
+    with (
+        patch(
+            "awf.node.git_manager.mirror_path_for_worktree",
+            side_effect=RuntimeError("symlink loop from linked worktree gitdir"),
+        ),
+        patch("awf.node.git_manager.GitManager") as mock_gm_cls,
+    ):
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "failed"
+    assert result.reason_code == "WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED"
+    assert result.error is not None
+    assert "could not resolve linked git context" in result.error
+    assert "symlink loop from linked worktree gitdir" in result.error
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": workspace_id,
+            "status": "failed",
+            "reason_code": "WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
+            "error": result.error,
+        }
+    ]
+    mock_gm.remove_worktree_from_mirror.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_remove_orphan_worktree_fails_loudly_when_mirror_context_unresolved(
     tmp_path: Path,
 ) -> None:

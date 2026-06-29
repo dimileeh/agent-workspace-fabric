@@ -401,10 +401,23 @@ async def remove_orphan_worktree(
 
 
 def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path | None:
-    from awf.node.git_manager import mirror_path_for_registered_worktree, mirror_path_for_worktree
+    from awf.node.git_manager import (
+        GitOperationError,
+        mirror_path_for_registered_worktree,
+        mirror_path_for_worktree,
+    )
 
     mirrors_root = work_dir / "git" / "mirrors"
-    linked_mirror_path = _managed_mirror_path(mirror_path_for_worktree(path), mirrors_root)
+    try:
+        linked_mirror_path = _managed_mirror_path(mirror_path_for_worktree(path), mirrors_root)
+    except (OSError, RuntimeError) as exc:
+        raise GitOperationError(
+            operation="worktree.git_context_probe",
+            returncode=1,
+            stdout="",
+            stderr=f"could not resolve linked git context for worktree {path}: {exc}",
+            reason_code="WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
+        ) from exc
     registered_mirror_path = mirror_path_for_registered_worktree(path, mirrors_root)
     if linked_mirror_path is None:
         return registered_mirror_path
