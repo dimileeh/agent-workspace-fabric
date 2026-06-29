@@ -289,6 +289,7 @@ async def _record_deferred_runtime_browser_findings(
             compose_project=compose_project,
             compose_file=compose_file,
             profile=profile,
+            worktree_path=worktree_path,
         )
     except OSError as exc:
         _log.warning(

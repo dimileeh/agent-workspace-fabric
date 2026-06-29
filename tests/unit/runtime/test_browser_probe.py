@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -136,6 +137,31 @@ class TestProbeRuntimeBrowsers:
         spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
 
         findings = await probe_runtime_browsers(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+        assert len(spy.calls) == 1
+        assert spy.calls[0][2].startswith('python - "$@" <<')
+        assert spy.calls[0][-1] == "chromium"
+
+    async def test_python_playwright_requirement_probe_uses_workspace_root(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_root = tmp_path / "project"
+        host_root = tmp_path / "host"
+        project_root.mkdir()
+        host_root.mkdir()
+        monkeypatch.chdir(host_root)
+        (project_root / "requirements.txt").write_text("playwright\n", encoding="utf-8")
+        profile = _profile_with_setup_and_browsers(["python -m pip install -r requirements.txt"])
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
+
+        findings = await probe_runtime_browsers(
+            profile=profile,
+            exec_in_container=spy,
+            workspace_root=project_root,
+        )
 
         assert findings == ()
         assert len(spy.calls) == 1

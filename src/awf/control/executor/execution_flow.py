@@ -467,6 +467,7 @@ async def execute(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
+                worktree_path=worktree_path,
             )
         profile_preflight = getattr(self._validation, "run_profile_tool_preflight", None)
         profile_preflight_result = (

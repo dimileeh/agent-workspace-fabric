@@ -7,6 +7,7 @@ import re
 import shlex
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.profiles.models import (
@@ -171,19 +172,33 @@ _BROWSER_PROBE_PYTHON_SCRIPT = _browser_probe_python_script("python")
 _BROWSER_STATUS_RE = re.compile(r"^(?P<status>OK|MISSING) (?P<browser>\S+)$", re.MULTILINE)
 
 
-def _browser_probe_command(profile: WorkspaceProfile) -> str:
-    python_runtime = _python_browser_probe_runtime(profile)
+def _browser_probe_command(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> str:
+    python_runtime = _python_browser_probe_runtime(profile, workspace_root=workspace_root)
     if python_runtime is not None:
         return _browser_probe_python_script(python_runtime)
     node_runtime = _browser_probe_node_runtime(node_package_manager_command(profile))
     return _browser_probe_script(node_runtime)
 
 
-def _python_browser_probe_runtime(profile: WorkspaceProfile) -> str | None:
-    python_runtime = _python_playwright_executable(profile)
+def _python_browser_probe_runtime(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> str | None:
+    python_runtime = _python_playwright_executable(profile, workspace_root=workspace_root)
     if python_runtime is None:
         return None
-    if _playwright_browser_install_node_package_manager(profile) is not None:
+    if (
+        _playwright_browser_install_node_package_manager(
+            profile,
+            workspace_root=workspace_root,
+        )
+        is not None
+    ):
         return None
     return python_runtime
 
@@ -202,6 +217,7 @@ async def probe_runtime_browsers(
     *,
     profile: WorkspaceProfile,
     exec_in_container: ExecInContainer,
+    workspace_root: Path | None = None,
 ) -> tuple[ProfileLintFinding, ...]:
     """Discover declared Playwright browsers and return availability findings."""
     if not profile.runtime.browsers:
@@ -211,7 +227,7 @@ async def probe_runtime_browsers(
             [
                 "sh",
                 "-lc",
-                _browser_probe_command(profile),
+                _browser_probe_command(profile, workspace_root=workspace_root),
                 "browser_probe",
                 *profile.runtime.browsers,
             ]

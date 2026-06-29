@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -287,6 +288,7 @@ async def _record_runtime_browser_findings(
     compose_project: str,
     compose_file: Any,
     profile: Any,
+    worktree_path: Path | None = None,
     session: AsyncSession,
 ) -> None:
     """Probe the container for declared Playwright browsers; record warnings."""
@@ -299,6 +301,7 @@ async def _record_runtime_browser_findings(
             compose_project=compose_project,
             compose_file=compose_file,
             profile=profile,
+            worktree_path=worktree_path,
         )
     except OSError as exc:
         _log.warning(
@@ -352,6 +355,7 @@ async def _record_runtime_browser_findings_safe(
     compose_project: str,
     compose_file: Any,
     profile: Any,
+    worktree_path: Path | None = None,
     session: AsyncSession | None = None,
 ) -> None:
     """Double-guarded call-site wrapper for the runtime browser probe."""
@@ -363,6 +367,7 @@ async def _record_runtime_browser_findings_safe(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     profile=profile,
+                    worktree_path=worktree_path,
                     session=owned_session,
                 )
         else:
@@ -371,6 +376,7 @@ async def _record_runtime_browser_findings_safe(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
+                worktree_path=worktree_path,
                 session=session,
             )
     except Exception as exc:

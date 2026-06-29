@@ -255,6 +255,7 @@ async def test_pre_push_validation_records_deferred_browser_findings_after_valid
             "compose_project": "proj",
             "compose_file": tmp_path / "compose.yml",
             "profile": profile,
+            "worktree_path": worktree,
         }
     ]
     assert order == ["browser_probe", "cleanup"]

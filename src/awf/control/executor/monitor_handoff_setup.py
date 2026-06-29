@@ -408,6 +408,7 @@ async def _run_monitor_handoff_profile_setup(
                         compose_project=compose_project,
                         compose_file=compose_file,
                         profile=profile,
+                        worktree_path=worktree_path,
                         session=session,
                     )
             except Exception as exc:

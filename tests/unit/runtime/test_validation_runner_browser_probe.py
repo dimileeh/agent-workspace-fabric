@@ -93,6 +93,38 @@ class TestProbeRuntimeBrowserFindings:
         argv = fake.calls[0].args
         assert argv[argv.index("-w") + 1] == "/workspace/apps/web"
 
+    async def test_probe_passes_worktree_path_for_python_requirements(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="OK chromium\n")
+        runner = _runner(fake, tmp_path)
+        project_root = tmp_path / "project"
+        host_root = tmp_path / "host"
+        project_root.mkdir()
+        host_root.mkdir()
+        monkeypatch.chdir(host_root)
+        (project_root / "requirements.txt").write_text("playwright\n", encoding="utf-8")
+
+        findings = await runner.probe_runtime_browser_findings(
+            workspace_id="ws-1",
+            compose_project="awf_ws1",
+            compose_file=tmp_path / "compose.yml",
+            profile=_profile_with_browsers(
+                ["chromium"],
+                setup=["python -m pip install -r requirements.txt"],
+            ),
+            worktree_path=project_root,
+        )
+
+        assert findings == ()
+        argv = fake.calls[0].args
+        shell_command_indexes = [index for index, token in enumerate(argv) if token == "-lc"]
+        probe_command = argv[shell_command_indexes[-1] + 1]
+        assert probe_command.startswith('python - "$@" <<')
+
     async def test_probe_skips_without_browsers(self, tmp_path: Path) -> None:
         fake = FakeCommandRunner()
         runner = _runner(fake, tmp_path)

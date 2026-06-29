@@ -191,6 +191,7 @@ async def run_validation_and_fix_cycle(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
+                worktree_path=worktree_path,
             )
 
     if not await self._transition_if_current(

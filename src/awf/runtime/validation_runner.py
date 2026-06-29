@@ -437,6 +437,7 @@ class ValidationRunner:
         compose_project: str,
         compose_file: Path,
         profile: WorkspaceProfile,
+        worktree_path: Path | None = None,
     ) -> tuple[ProfileLintFinding, ...]:
         """Discover declared Playwright browsers in the container; return findings."""
         if not profile.runtime.browsers:
@@ -484,7 +485,11 @@ class ValidationRunner:
                 stderr=result.stderr,
             )
 
-        return await probe_runtime_browsers(profile=profile, exec_in_container=_exec)
+        return await probe_runtime_browsers(
+            profile=profile,
+            exec_in_container=_exec,
+            workspace_root=worktree_path,
+        )
 
     async def probe_validate_command_tools(
         self,
