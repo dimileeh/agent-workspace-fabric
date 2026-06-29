@@ -268,12 +268,18 @@ def profile_phase_command_plan(
                 browser_install_package_manager,
                 workspace_root=workspace_root,
             )
+            browser_install_scope_prefix = None
             if split_command is None:
                 commands.append(command)
             else:
-                command, trailing_command = split_command
+                command, browser_install_scope_prefix, trailing_command = split_command
                 commands.append(command)
-            commands.append(deferred_browser_install)
+            commands.append(
+                _profile_command_with_scope_prefix(
+                    deferred_browser_install,
+                    browser_install_scope_prefix,
+                )
+            )
             if split_command is not None:
                 commands.append(trailing_command)
             deferred_browser_install = None
@@ -413,12 +419,22 @@ def profile_phase_command_plan(
                     )
                     commands.extend(pending_validate_commands)
                     pending_validate_commands = []
+                    browser_install_scope_prefix = None
                     if split_validate_command is None:
                         commands.append(validate_command)
                     else:
-                        validate_command, trailing_validate_command = split_validate_command
+                        (
+                            validate_command,
+                            browser_install_scope_prefix,
+                            trailing_validate_command,
+                        ) = split_validate_command
                         commands.append(validate_command)
-                    commands.append(deferred_browser_install)
+                    commands.append(
+                        _profile_command_with_scope_prefix(
+                            deferred_browser_install,
+                            browser_install_scope_prefix,
+                        )
+                    )
                     if split_validate_command is not None:
                         commands.append(trailing_validate_command)
                     deferred_browser_install = None
@@ -517,7 +533,7 @@ def _split_dependency_install_chain(
     browser_install_package_manager: str | None,
     *,
     workspace_root: Path | None = None,
-) -> tuple[ProfileExecutionCommand, ProfileExecutionCommand] | None:
+) -> tuple[ProfileExecutionCommand, str | None, ProfileExecutionCommand] | None:
     for separator_index, separator in _unquoted_install_chain_separator_spans(
         command.command.command
     ):
@@ -532,33 +548,47 @@ def _split_dependency_install_chain(
             workspace_root=workspace_root,
         ):
             continue
-        trailing_scope_prefix = _dependency_install_chain_trailing_scope_prefix(
+        scope_prefixes = _dependency_install_chain_scope_prefixes(
             install_command,
             browser_install_package_manager,
             workspace_root=workspace_root,
         )
-        if (
-            trailing_scope_prefix is None
-            and _dependency_install_chain_has_unpreserved_shell_state_scope(
-                install_command,
-                browser_install_package_manager,
-                workspace_root=workspace_root,
-            )
+        if scope_prefixes is None and _dependency_install_chain_has_unpreserved_shell_state_scope(
+            install_command,
+            browser_install_package_manager,
+            workspace_root=workspace_root,
         ):
             return None
-        if trailing_scope_prefix is not None:
+        browser_install_scope_prefix = None
+        if scope_prefixes is not None:
+            trailing_scope_prefix, browser_install_scope_prefix = scope_prefixes
             trailing_command = f"{trailing_scope_prefix} && {trailing_command}"
         return (
             replace(
                 command,
                 command=command.command.model_copy(update={"command": install_command}),
             ),
+            browser_install_scope_prefix,
             replace(
                 command,
                 command=command.command.model_copy(update={"command": trailing_command}),
             ),
         )
     return None
+
+
+def _profile_command_with_scope_prefix(
+    command: ProfileExecutionCommand,
+    scope_prefix: str | None,
+) -> ProfileExecutionCommand:
+    if scope_prefix is None:
+        return command
+    return replace(
+        command,
+        command=command.command.model_copy(
+            update={"command": f"{scope_prefix} && {command.command.command}"}
+        ),
+    )
 
 
 def _command_satisfies_deferred_browser_install(
@@ -579,12 +609,12 @@ def _command_satisfies_deferred_browser_install(
     )
 
 
-def _dependency_install_chain_trailing_scope_prefix(
+def _dependency_install_chain_scope_prefixes(
     install_command: str,
     browser_install_package_manager: str | None,
     *,
     workspace_root: Path | None = None,
-) -> str | None:
+) -> tuple[str, str | None] | None:
     for separator_index, separator in reversed(
         _unquoted_install_chain_separator_spans(install_command)
     ):
@@ -600,7 +630,10 @@ def _dependency_install_chain_trailing_scope_prefix(
             browser_install_package_manager,
             workspace_root=workspace_root,
         ):
-            return trailing_scope_prefix
+            return (
+                trailing_scope_prefix,
+                _command_install_assignment_only_scope_prefix(scope_prefix),
+            )
     return None
 
 
@@ -631,11 +664,15 @@ def _command_has_unpreserved_shell_state_scope(command: str) -> bool:
     tokens = _shell_tokens(command)
     if tokens is None or _command_is_safe_export_scope(command):
         return False
-    for command_start, command_end in _sequential_shell_command_ranges(tokens):
-        command_index = command_start + _first_non_assignment_token_index(
-            tokens[command_start:command_end]
-        )
-        if command_index < command_end and tokens[command_index] in {"export", "source", "."}:
+    for command_tokens in _sequential_shell_command_token_ranges(command):
+        command_index = _first_non_assignment_token_index(command_tokens)
+        if command_index >= len(command_tokens):
+            if any(
+                not _replay_safe_assignment_only_state(assignment) for assignment in command_tokens
+            ):
+                return True
+            continue
+        if command_tokens[command_index] in {"export", "source", "."}:
             return True
     return False
 
@@ -647,21 +684,22 @@ def _command_install_trailing_scope_prefix(command: str) -> str | None:
     if any(token in {"||", "|", "|&", "&"} for token in tokens):
         return None
     safe_commands: list[str] = []
-    for command_start, command_end in _sequential_shell_command_ranges(tokens):
-        command_index = command_start + _first_non_assignment_token_index(
-            tokens[command_start:command_end]
-        )
-        if command_index >= command_end:
+    for command_text, command_tokens in _sequential_shell_command_text_ranges(command):
+        command_index = _first_non_assignment_token_index(command_tokens)
+        if command_index >= len(command_tokens):
+            if command_tokens and all(
+                _replay_safe_assignment_only_state(assignment) for assignment in command_tokens
+            ):
+                safe_commands.append(command_text)
             continue
-        command_tokens = tokens[command_start:command_end]
-        token = tokens[command_index]
+        token = command_tokens[command_index]
         if token == "cd" or token in _VALIDATE_PROBE_LEADING_GUARDS:
             safe_commands.append(shlex.join(command_tokens))
             continue
         if token != "export":
             continue
-        leading_assignments = tokens[command_start:command_index]
-        exports = tokens[command_index + 1 : command_end]
+        leading_assignments = command_tokens[:command_index]
+        exports = command_tokens[command_index + 1 :]
         if (
             exports
             and all(_replay_safe_env_assignment(assignment) for assignment in leading_assignments)
@@ -673,6 +711,30 @@ def _command_install_trailing_scope_prefix(command: str) -> str | None:
     if not safe_commands:
         return None
     return "; ".join(safe_commands)
+
+
+def _command_install_assignment_only_scope_prefix(command: str) -> str | None:
+    tokens = _shell_tokens(command)
+    if tokens is None or any(token in {"||", "|", "|&", "&"} for token in tokens):
+        return None
+    safe_commands = [
+        command_text
+        for command_text, command_tokens in _sequential_shell_command_text_ranges(command)
+        if command_tokens
+        and _first_non_assignment_token_index(command_tokens) >= len(command_tokens)
+        and all(_replay_safe_assignment_only_state(assignment) for assignment in command_tokens)
+    ]
+    if not safe_commands:
+        return None
+    return "; ".join(safe_commands)
+
+
+def _replay_safe_assignment_only_state(assignment: str) -> bool:
+    return (
+        _ENV_ASSIGNMENT_RE.fullmatch(assignment) is not None
+        and "$(" not in assignment
+        and "`" not in assignment
+    )
 
 
 def _replay_safe_env_assignment(assignment: str) -> bool:
@@ -733,6 +795,26 @@ def _sequential_shell_command_ranges(tokens: list[str]) -> list[tuple[int, int]]
         else (command_start, len(tokens))
         for index, command_start in enumerate(command_starts)
     ]
+
+
+def _sequential_shell_command_token_ranges(command: str) -> list[list[str]]:
+    return [tokens for _, tokens in _sequential_shell_command_text_ranges(command)]
+
+
+def _sequential_shell_command_text_ranges(command: str) -> list[tuple[str, list[str]]]:
+    command_ranges: list[tuple[str, list[str]]] = []
+    command_start = 0
+    for separator_index, separator in _unquoted_install_chain_separator_spans(command):
+        command_text = command[command_start:separator_index].strip()
+        command_tokens = _shell_tokens(command_text)
+        if command_tokens is not None:
+            command_ranges.append((command_text, command_tokens))
+        command_start = separator_index + len(separator)
+    command_text = command[command_start:].strip()
+    command_tokens = _shell_tokens(command_text)
+    if command_tokens is not None:
+        command_ranges.append((command_text, command_tokens))
+    return command_ranges
 
 
 def _unquoted_install_chain_separator_spans(command: str) -> list[tuple[int, str]]:

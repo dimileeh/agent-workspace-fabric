@@ -21,6 +21,7 @@ from awf.runtime.validation import (
     validate_command_probe_targets,
 )
 from awf.runtime.validation_setup import (
+    _command_install_trailing_scope_prefix,
     _node_dependency_install_package_manager,
     _node_package_manager_package_dir,
     playwright_browser_install_command,
@@ -1020,8 +1021,8 @@ class TestPlaywrightBrowserInstallCommand:
 
         assert [(command.phase, command.command.command) for command in commands] == [
             (phase, "PATH=/opt/node/bin:$PATH; pnpm install"),
-            ("setup", "pnpm exec playwright install chromium"),
-            (phase, "pnpm exec playwright test"),
+            ("setup", "PATH=/opt/node/bin:$PATH && pnpm exec playwright install chromium"),
+            (phase, "PATH=/opt/node/bin:$PATH && pnpm exec playwright test"),
         ]
         assert commands[1].command.required is False
 
@@ -1092,6 +1093,28 @@ class TestPlaywrightBrowserInstallCommand:
             ("setup", "pnpm exec playwright install chromium"),
         ]
         assert commands[1].command.required is False
+
+    def test_validate_browser_install_does_not_split_unsafe_assignment_only_state(
+        self,
+    ) -> None:
+        validate_command = "PATH=`node-bin`; pnpm install; pnpm test:e2e"
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=[validate_command],
+        )
+
+        commands = profile_phase_command_plan(profile, ["validate"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("validate", validate_command),
+            ("setup", "pnpm exec playwright install chromium"),
+        ]
+        assert commands[1].command.required is False
+
+    def test_browser_install_split_does_not_replay_command_substitution_assignment(
+        self,
+    ) -> None:
+        assert _command_install_trailing_scope_prefix("PATH=$(node-bin)") is None
 
     @pytest.mark.parametrize("source_prefix", ["source .env", ". .env"])
     def test_validate_browser_install_does_not_split_sourced_shell_state(
