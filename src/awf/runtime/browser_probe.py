@@ -19,6 +19,7 @@ from awf.runtime.node_playwright_setup import (
     _UV_SYNC_RUN_SELECTOR_VALUE_FLAGS,
     _UV_SYNC_RUN_SELECTOR_VALUELESS_FLAGS,
     _node_package_manager_package_dir,
+    _node_package_manager_tokens_use_dlx_runner,
     _playwright_browser_install_node_package_manager,
     _python_playwright_executable,
 )
@@ -219,6 +220,8 @@ def _browser_probe_node_runtime(package_manager: str) -> str:
         return "bun"
     if executable == "yarn":
         return shlex.join([*package_manager_tokens, "node"])
+    if executable == "pnpm" and _node_package_manager_tokens_use_dlx_runner(package_manager_tokens):
+        return shlex.join([*package_manager_tokens, "--package", "playwright", "node"])
     if executable == "pnpm" and len(package_manager_tokens) > 1:
         return shlex.join([*package_manager_tokens, "exec", "node"])
     if executable == "npm" and len(package_manager_tokens) > 1:

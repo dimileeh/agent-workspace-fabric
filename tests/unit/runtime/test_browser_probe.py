@@ -413,6 +413,15 @@ class TestProbeRuntimeBrowsers:
         assert probe_command.startswith('node - "$@" <<')
         assert browser_probe_workdir(profile) == "/workspace"
 
+    def test_browser_probe_uses_pnpm_dlx_runtime_for_dlx_playwright_validate(
+        self,
+    ) -> None:
+        profile = _profile_with_validate_and_browsers(["pnpm dlx playwright test"])
+
+        probe_command = _browser_probe_command(profile)
+
+        assert probe_command.startswith('pnpm dlx --package playwright node - "$@" <<')
+
     def test_python_browser_probe_ignores_unrelated_node_package_workdir(
         self,
         tmp_path: Path,
@@ -789,6 +798,11 @@ def sync_playwright():
             ("npm --prefix apps/web", "node"),
             ("pnpm --filter @repo/web", "pnpm --filter @repo/web exec node"),
             ("pnpm -F @repo/web", "pnpm -F @repo/web exec node"),
+            ("pnpm dlx", "pnpm dlx --package playwright node"),
+            (
+                "pnpm --filter @repo/web dlx",
+                "pnpm --filter @repo/web dlx --package playwright node",
+            ),
             ("npm --workspace @repo/web", "npm --workspace @repo/web exec -- node"),
             ('npm "unterminated', "node"),
         ],
