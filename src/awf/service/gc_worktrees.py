@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -518,8 +519,9 @@ def _managed_mirror_path(
         resolved_path = path.resolve()
         resolved_root = mirrors_root.resolve()
     except (OSError, RuntimeError):
-        resolved_path = path.absolute()
-        resolved_root = mirrors_root.absolute()
+        # ``resolve()`` already failed; ``abspath()`` still collapses ``..``.
+        resolved_path = Path(os.path.abspath(path))  # noqa: PTH100
+        resolved_root = Path(os.path.abspath(mirrors_root))  # noqa: PTH100
     try:
         resolved_path.relative_to(resolved_root)
     except ValueError:

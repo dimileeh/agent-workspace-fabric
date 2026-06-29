@@ -526,6 +526,25 @@ def test_managed_mirror_path_uses_absolute_paths_when_resolve_fails(
 
 
 @pytest.mark.unit
+def test_managed_mirror_path_normalizes_fallback_before_root_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mirrors_root = tmp_path / "service" / "git" / "mirrors"
+    mirror_path = mirrors_root / ".." / "outside.git"
+    original_resolve = Path.resolve
+
+    def resolve_or_fail(path: Path, *args: object, **kwargs: object) -> Path:
+        if path in {mirror_path, mirrors_root}:
+            raise OSError("synthetic resolve failure")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_or_fail)
+
+    assert _managed_mirror_path(mirror_path, mirrors_root) is None
+
+
+@pytest.mark.unit
 def test_missing_path_is_not_existing_non_git_worktree(tmp_path: Path) -> None:
     assert (
         is_existing_non_git_worktree(tmp_path / "service" / "git" / "worktrees" / "ws_missing")
