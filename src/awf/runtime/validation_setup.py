@@ -237,7 +237,10 @@ def profile_phase_command_plan(
         if (
             deferred_browser_install is not None
             and not defer_browser_install_until_validate_install
-            and command_package_manager == browser_install_package_manager
+            and _node_dependency_install_satisfies_browser_install(
+                command_package_manager,
+                browser_install_package_manager,
+            )
         ):
             commands.append(deferred_browser_install)
             deferred_browser_install = None
@@ -364,6 +367,24 @@ def profile_phase_command_plan(
             continue
         commands.extend(_phase_commands(profile, phase))
     return commands
+
+
+def _node_dependency_install_satisfies_browser_install(
+    command_package_manager: str | None,
+    browser_install_package_manager: str | None,
+) -> bool:
+    if command_package_manager is None or browser_install_package_manager is None:
+        return False
+    if command_package_manager == browser_install_package_manager:
+        return True
+    try:
+        command_tokens = shlex.split(command_package_manager)
+        browser_tokens = shlex.split(browser_install_package_manager)
+    except ValueError:
+        return False
+    return (
+        len(command_tokens) == 1 and bool(browser_tokens) and command_tokens[0] == browser_tokens[0]
+    )
 
 
 def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecutionCommand]:

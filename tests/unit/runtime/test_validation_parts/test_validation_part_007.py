@@ -53,6 +53,35 @@ class TestBrowserPhaseCommandPlan:
         assert commands[1].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_root_install_satisfies_scoped_browser_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-scoped-validation-root-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": [
+                        "pnpm install --frozen-lockfile",
+                        "pnpm --filter web exec playwright test --project=setup",
+                    ],
+                    "pre_agent": ["node scripts/pre.js"],
+                    "validate": ["pnpm --filter web test:e2e"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup", "pre_agent"))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "pnpm install --frozen-lockfile"),
+            ("setup", "pnpm --filter web exec playwright install chromium"),
+            ("setup", "pnpm --filter web exec playwright test --project=setup"),
+            ("pre_agent", "node scripts/pre.js"),
+        ]
+        assert commands[1].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_uses_pre_agent_dependency_install_for_browser_install(
         self,
     ) -> None:
