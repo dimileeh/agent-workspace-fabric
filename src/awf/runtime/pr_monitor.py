@@ -1163,7 +1163,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
 
     # 5. CI failures.
     if status.check_state == CheckState.FAILURE:
-        if status.ci_runs_in_progress:
+        if status.ci_runs_in_progress and not status.ci_failures:
             return WaitForCI(reason="ci_run_in_progress")
         return _ci_failure_action(status, state, config)
 

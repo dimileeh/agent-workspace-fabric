@@ -21,6 +21,7 @@ from awf.runtime.pr_monitor import (
     RerunTransientCI,
     ReviewComment,
     ReviewThread,
+    WaitForCI,
     _log_shows_docker_registry_timeout,
     decide,
 )
@@ -73,6 +74,7 @@ def _status(
     base_behind: int = 0,
     merge_state_status: MergeStateStatus = MergeStateStatus.CLEAN,
     ci_failures: tuple[CheckFailure, ...] = (),
+    ci_runs_in_progress: bool = False,
     closed: bool = False,
     merged: bool = False,
 ) -> PRStatus:
@@ -91,6 +93,7 @@ def _status(
         base_behind_count=base_behind,
         merge_state_status=merge_state_status,
         ci_failures=ci_failures,
+        ci_runs_in_progress=ci_runs_in_progress,
         closed=closed,
         merged=merged,
     )
@@ -235,6 +238,43 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_completed_ci_failure_reports_while_other_runs_are_in_progress(self) -> None:
+        failure = CheckFailure(
+            name="go-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "=== RUN   TestWidgetLifecycle\n"
+                "widget_test.go:42: expected active widget, got archived\n"
+                "--- FAIL: TestWidgetLifecycle (0.03s)"
+            ),
+            run_id="25897584272",
+        )
+
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(failure,),
+                ci_runs_in_progress=True,
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_failed_ci_without_failure_evidence_waits_for_in_progress_runs(self) -> None:
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_runs_in_progress=True),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, WaitForCI)
+        assert action.reason == "ci_run_in_progress"
 
     @pytest.mark.unit
     def test_generic_transient_text_inside_pytest_failure_reports_failure(self) -> None:
