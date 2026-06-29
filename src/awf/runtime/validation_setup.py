@@ -630,18 +630,6 @@ def _sequential_shell_command_ranges(tokens: list[str]) -> list[tuple[int, int]]
     ]
 
 
-def _first_unquoted_and_separator(command: str) -> int | None:
-    return next(iter(_unquoted_and_separator_indices(command)), None)
-
-
-def _unquoted_and_separator_indices(command: str) -> list[int]:
-    return [
-        index
-        for index, separator in _unquoted_install_chain_separator_spans(command)
-        if separator == "&&"
-    ]
-
-
 def _unquoted_install_chain_separator_spans(command: str) -> list[tuple[int, str]]:
     separator_indices: list[tuple[int, str]] = []
     in_single_quote = False
