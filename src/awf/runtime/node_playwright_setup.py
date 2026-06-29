@@ -152,6 +152,7 @@ _UV_RUN_OPTION_VALUE_EQUALS_PREFIXES = tuple(
 )
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
 _NODE_PLAYWRIGHT_INSTALL_RUNNERS = frozenset({"pnpx", "bunx"})
+_NODE_PLAYWRIGHT_DLX_RUNNER_SUBCOMMANDS = frozenset({"dlx"})
 
 
 def _executable_name(executable: str) -> str:
@@ -229,6 +230,8 @@ def playwright_command(package_manager: str, *args: str) -> str:
     except ValueError:
         package_manager_tokens = [package_manager]
     executable = package_manager_tokens[0] if package_manager_tokens else "npm"
+    if _node_package_manager_tokens_use_dlx_runner(package_manager_tokens):
+        return shlex.join([*package_manager_tokens, "playwright", *args])
     if executable == "pnpm":
         package_manager_tokens = _pnpm_playwright_package_manager_tokens(package_manager_tokens)
         if len(package_manager_tokens) > 1:
@@ -253,6 +256,31 @@ def playwright_command(package_manager: str, *args: str) -> str:
     if executable == "npm" and len(package_manager_tokens) > 1:
         return shlex.join([*package_manager_tokens, "exec", "--", "playwright", *args])
     return f"npx playwright {escaped_args}"
+
+
+def _node_package_manager_tokens_use_dlx_runner(package_manager_tokens: list[str]) -> bool:
+    if not package_manager_tokens:
+        return False
+    executable = package_manager_tokens[0]
+    if executable not in {"pnpm", "yarn"}:
+        return False
+    token_index = 1
+    while token_index < len(package_manager_tokens):
+        token = package_manager_tokens[token_index]
+        if _node_pm_option_takes_value(executable, token):
+            token_index += 2
+            continue
+        if token.startswith("-C") and len(token) > 2:
+            token_index += 1
+            continue
+        if token.startswith("--") and "=" in token:
+            token_index += 1
+            continue
+        if token.startswith("-"):
+            token_index += 1
+            continue
+        return token in _NODE_PLAYWRIGHT_DLX_RUNNER_SUBCOMMANDS
+    return False
 
 
 def _pnpm_playwright_package_manager_tokens(package_manager_tokens: list[str]) -> list[str]:

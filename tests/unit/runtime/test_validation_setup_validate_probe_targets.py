@@ -997,6 +997,8 @@ class TestPlaywrightBrowserInstallCommand:
         ("validate_command", "expected"),
         [
             ("pnpx playwright test", "pnpx playwright install chromium"),
+            ("pnpm dlx playwright test", "pnpm dlx playwright install chromium"),
+            ("yarn dlx playwright test", "yarn dlx playwright install chromium"),
             ("bunx playwright test", "bunx playwright install chromium"),
         ],
     )

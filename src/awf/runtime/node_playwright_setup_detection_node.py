@@ -14,6 +14,7 @@ from awf.runtime.node_playwright_setup import (
     _ENV_ASSIGNMENT_RE,
     _NODE_DEPENDENCY_INSTALL_SUBCOMMANDS,
     _NODE_PACKAGE_MANAGERS,
+    _NODE_PLAYWRIGHT_DLX_RUNNER_SUBCOMMANDS,
     _NODE_PLAYWRIGHT_INSTALL_RUNNERS,
     _NODE_PM_LOCATION_OPTION_VALUE_FLAGS,
     _NODE_PM_OPTION_VALUE_FLAGS,
@@ -454,7 +455,70 @@ def _node_scoped_playwright_package_manager_from_tokens(
 ) -> str | None:
     if not _command_segment_invokes_playwright(tokens, index):
         return None
+    dlx_package_manager = _node_playwright_dlx_runner_package_manager_from_tokens(
+        tokens,
+        index,
+        location_tokens,
+    )
+    if dlx_package_manager is not None:
+        return dlx_package_manager
     return _node_scoped_package_manager_from_tokens(tokens, index, location_tokens)
+
+
+def _node_playwright_dlx_runner_package_manager_from_tokens(
+    tokens: list[str],
+    index: int,
+    location_tokens: list[str],
+) -> str | None:
+    if index >= len(tokens):
+        return None
+    executable = tokens[index]
+    if executable not in {"pnpm", "yarn"}:
+        return None
+    runner_tokens = list(location_tokens)
+    subcommand_index = index + 1
+    while subcommand_index < len(tokens):
+        token = tokens[subcommand_index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return None
+        if _node_pm_option_takes_value(executable, token):
+            if token in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
+                if subcommand_index + 1 >= len(tokens):
+                    return None
+                option_value = tokens[subcommand_index + 1]
+                if _node_pm_location_value_uses_shell_expansion(token, option_value):
+                    return None
+                runner_tokens.extend((token, option_value))
+            subcommand_index += 2
+            continue
+        if token.startswith("-C") and len(token) > 2:
+            if _package_scope_uses_shell_expansion(token[2:]):
+                return None
+            runner_tokens.append(token)
+            subcommand_index += 1
+            continue
+        if token.startswith("--") and "=" in token:
+            option_name, _, option_value = token.partition("=")
+            if option_name in _NODE_PM_PRESERVED_OPTION_VALUE_FLAGS:
+                if _node_pm_location_value_uses_shell_expansion(option_name, option_value):
+                    return None
+                runner_tokens.append(token)
+            subcommand_index += 1
+            continue
+        if executable == "pnpm" and token in _PNPM_PRESERVED_VALUELESS_SCOPE_FLAGS:
+            runner_tokens.append(token)
+            subcommand_index += 1
+            continue
+        if token.startswith("-"):
+            subcommand_index += 1
+            continue
+        if token not in _NODE_PLAYWRIGHT_DLX_RUNNER_SUBCOMMANDS:
+            return None
+        package_index = _script_name_index(tokens, subcommand_index + 1, executable)
+        if package_index is None or tokens[package_index] != "playwright":
+            return None
+        return _node_package_manager_command(executable, [*runner_tokens, token])
+    return None
 
 
 def _command_segment_invokes_playwright(tokens: list[str], index: int) -> bool:
