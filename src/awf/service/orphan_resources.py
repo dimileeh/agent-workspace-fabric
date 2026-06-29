@@ -27,6 +27,7 @@ from awf.node.git_manager import GitOperationError
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.gc_classify import (
     PATH_ALREADY_REMOVED,
+    PATH_DELETE_FAILED,
     PATH_DELETED,
 )
 from awf.service.gc_reconcile import ComposeTeardownOutcome, build_and_delete_gc_path
@@ -966,6 +967,17 @@ async def reap_classified_orphans(
         if not path_text:  # pragma: no cover - worktree records always carry a path.
             continue
         worktree_path = Path(path_text)
+        if worktree_path.is_symlink():
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="failed",
+                reason_code=PATH_DELETE_FAILED,
+                error="refusing to remove symlinked worktree",
+            )
+            errors.append(outcome)
+            _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+            continue
         try:
             use_git_aware_remover = worktree_path.exists() and not is_existing_non_git_worktree(
                 worktree_path, work_dir=resolved_work_dir

@@ -336,6 +336,64 @@ def test_reaper_uses_scanned_companion_worktree_id_for_git_aware_remover(
 
 
 @pytest.mark.unit
+def test_reaper_refuses_symlinked_worktree_before_git_remover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.gc_classify import PATH_DELETE_FAILED
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    target = tmp_path / "outside-checkout"
+    target.mkdir()
+    (target / ".git").write_text("gitdir: ../mirrors/repo.git/worktrees/ws_dead\n")
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.parent.mkdir(parents=True)
+    worktree.symlink_to(target, target_is_directory=True)
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+
+    async def _git_aware_remover(
+        *, workspace_id: str, path: Path, work_dir: Path
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        raise AssertionError(f"git-aware removal used for symlinked worktree: {path}")
+
+    def _direct_delete_forbidden(
+        kind: str, path: Path, *, work_dir: Path
+    ) -> tuple[bool, str | None, str | None]:
+        raise AssertionError(f"direct filesystem delete used for symlinked {kind}: {path}")
+
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
+    )
+
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            min_age_hours=0,
+            worktree_remover=_git_aware_remover,
+        )
+    )
+
+    assert result.status == "partial"
+    assert result.reason_code == "ORPHAN_REAP_PARTIAL"
+    assert result.reaped == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].kind == "worktree"
+    assert result.errors[0].workspace_id == "ws_dead"
+    assert result.errors[0].reason_code == PATH_DELETE_FAILED
+    assert result.errors[0].error == "refusing to remove symlinked worktree"
+    assert worktree.is_symlink()
+    assert target.exists()
+
+
+@pytest.mark.unit
 def test_reaper_reports_git_aware_worktree_remover_failure_without_direct_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
