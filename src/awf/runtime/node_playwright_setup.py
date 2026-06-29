@@ -73,6 +73,10 @@ _UV_SYNC_EXTRA_FLAGS = frozenset({"--extra"})
 _UV_SYNC_EXTRA_EQUALS_PREFIX = "--extra="
 _UV_SYNC_GROUP_FLAGS = frozenset({"--group"})
 _UV_SYNC_GROUP_EQUALS_PREFIX = "--group="
+_UV_SYNC_ONLY_GROUP_FLAGS = frozenset({"--only-group"})
+_UV_SYNC_ONLY_GROUP_EQUALS_PREFIX = "--only-group="
+_UV_SYNC_NO_GROUP_FLAGS = frozenset({"--no-group"})
+_UV_SYNC_NO_GROUP_EQUALS_PREFIX = "--no-group="
 _UV_SYNC_SCOPE_FLAGS = frozenset({"--project", "--directory"})
 _UV_SYNC_SCOPE_EQUALS_PREFIXES = (("--project=", "--project"), ("--directory=", "--directory"))
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
@@ -608,8 +612,12 @@ def _uv_sync_segment_installs_playwright(
 ) -> bool:
     extras: set[str] = set()
     groups: set[str] = set()
+    only_groups: set[str] = set()
+    excluded_groups: set[str] = set()
     include_all_extras = False
     include_all_groups = False
+    include_default_groups = True
+    include_project_dependencies = True
     scope = _uv_sync_scope(
         tokens,
         index,
@@ -647,8 +655,36 @@ def _uv_sync_segment_installs_playwright(
             continue
         elif token.startswith(_UV_SYNC_GROUP_EQUALS_PREFIX):
             groups.add(token.removeprefix(_UV_SYNC_GROUP_EQUALS_PREFIX))
+        elif token in _UV_SYNC_ONLY_GROUP_FLAGS:
+            if index + 1 >= len(tokens) or tokens[index + 1] in _SHELL_COMPOUND_CONTROL_TOKENS:
+                break
+            only_groups.add(tokens[index + 1])
+            include_default_groups = False
+            include_project_dependencies = False
+            index += 2
+            continue
+        elif token.startswith(_UV_SYNC_ONLY_GROUP_EQUALS_PREFIX):
+            only_groups.add(token.removeprefix(_UV_SYNC_ONLY_GROUP_EQUALS_PREFIX))
+            include_default_groups = False
+            include_project_dependencies = False
+        elif token in _UV_SYNC_NO_GROUP_FLAGS:
+            if index + 1 >= len(tokens) or tokens[index + 1] in _SHELL_COMPOUND_CONTROL_TOKENS:
+                break
+            excluded_groups.add(tokens[index + 1])
+            index += 2
+            continue
+        elif token.startswith(_UV_SYNC_NO_GROUP_EQUALS_PREFIX):
+            excluded_groups.add(token.removeprefix(_UV_SYNC_NO_GROUP_EQUALS_PREFIX))
         elif token == "--all-groups":
             include_all_groups = True
+        elif token == "--no-default-groups":
+            include_default_groups = False
+        elif token == "--no-dev":
+            excluded_groups.add("dev")
+        elif token == "--only-dev":
+            only_groups.add("dev")
+            include_default_groups = False
+            include_project_dependencies = False
         index += 1
     return _pyproject_includes_python_playwright(
         workspace_root=workspace_root,
@@ -656,7 +692,11 @@ def _uv_sync_segment_installs_playwright(
         extras=extras,
         include_all_extras=include_all_extras,
         groups=groups,
+        only_groups=only_groups,
+        excluded_groups=excluded_groups,
         include_all_groups=include_all_groups,
+        include_default_groups=include_default_groups,
+        include_project_dependencies=include_project_dependencies,
     )
 
 
@@ -734,7 +774,11 @@ def _pyproject_includes_python_playwright(
     extras: set[str],
     include_all_extras: bool,
     groups: set[str],
+    only_groups: set[str],
+    excluded_groups: set[str],
     include_all_groups: bool,
+    include_default_groups: bool,
+    include_project_dependencies: bool,
 ) -> bool:
     project_path = _safe_local_pyproject_path(
         workspace_root=workspace_root,
@@ -747,7 +791,7 @@ def _pyproject_includes_python_playwright(
     except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
         return False
     project = document.get("project")
-    if isinstance(project, dict):
+    if include_project_dependencies and isinstance(project, dict):
         dependencies = project.get("dependencies")
         if _pyproject_requirement_list_includes_playwright(dependencies):
             return True
@@ -766,15 +810,58 @@ def _pyproject_includes_python_playwright(
     dependency_groups = document.get("dependency-groups")
     if not isinstance(dependency_groups, dict):
         return False
-    selected_groups = (
-        dependency_groups.values()
-        if include_all_groups
-        else (dependency_groups.get(group) for group in groups)
+    selected_group_names = _pyproject_selected_dependency_group_names(
+        document,
+        dependency_groups,
+        groups=groups,
+        only_groups=only_groups,
+        excluded_groups=excluded_groups,
+        include_all_groups=include_all_groups,
+        include_default_groups=include_default_groups,
     )
+    selected_groups = (dependency_groups.get(group) for group in selected_group_names)
     return any(
         _pyproject_requirement_list_includes_playwright(group_dependencies)
         for group_dependencies in selected_groups
     )
+
+
+def _pyproject_selected_dependency_group_names(
+    document: dict[str, object],
+    dependency_groups: dict[str, object],
+    *,
+    groups: set[str],
+    only_groups: set[str],
+    excluded_groups: set[str],
+    include_all_groups: bool,
+    include_default_groups: bool,
+) -> set[str]:
+    if only_groups:
+        selected_group_names = set(only_groups)
+    elif include_all_groups:
+        selected_group_names = set(dependency_groups)
+    else:
+        selected_group_names = set(groups)
+        if include_default_groups:
+            selected_group_names.update(
+                _pyproject_default_dependency_group_names(document, dependency_groups)
+            )
+    selected_group_names.difference_update(excluded_groups)
+    return selected_group_names
+
+
+def _pyproject_default_dependency_group_names(
+    document: dict[str, object],
+    dependency_groups: dict[str, object],
+) -> set[str]:
+    tool = document.get("tool")
+    uv = tool.get("uv") if isinstance(tool, dict) else None
+    default_groups = uv.get("default-groups") if isinstance(uv, dict) else None
+    if default_groups == "all":
+        return set(dependency_groups)
+    if isinstance(default_groups, list):
+        return {group for group in default_groups if isinstance(group, str)}
+    return {"dev"}
 
 
 def _safe_local_pyproject_path(
