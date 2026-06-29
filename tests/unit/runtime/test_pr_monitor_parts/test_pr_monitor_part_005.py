@@ -144,6 +144,29 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_parsed_ruff_evidence_prevents_transient_rerun(self) -> None:
+        """A full-log Ruff diagnostic retained in parsed evidence beats transient tail text.
+
+        Regression for PRRT_kwDOSJAM6s6M3RSi.
+        """
+        failure = CheckFailure(
+            name="python-lint",
+            conclusion="FAILURE",
+            log_excerpt="failed to download cleanup artifact: connection reset\n",
+            run_id="27091023777",
+            error_summaries=("src/awf/runtime/example.py:1:1: F401 `os` imported but unused",),
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrelated_permanent_daemon_error_after_transient_pull_dispatches_rerun(
         self,
     ) -> None:
