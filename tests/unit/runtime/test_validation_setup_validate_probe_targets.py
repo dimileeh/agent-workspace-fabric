@@ -1160,9 +1160,29 @@ class TestPlaywrightBrowserInstallCommand:
                 "apps/web",
                 "cd apps/web && uv run -m playwright install chromium",
             ),
+            (
+                "uv sync --project apps/web --group e2e",
+                "apps/web",
+                "uv run --project apps/web -m playwright install chromium",
+            ),
+            (
+                "uv sync --project=apps/web --extra=e2e",
+                "apps/web",
+                "uv run --project apps/web -m playwright install chromium",
+            ),
+            (
+                "uv sync --directory apps/web --group e2e",
+                "apps/web",
+                "uv run --directory apps/web -m playwright install chromium",
+            ),
+            (
+                "uv sync --directory=apps/web --extra=e2e",
+                "apps/web",
+                "uv run --directory apps/web -m playwright install chromium",
+            ),
         ],
     )
-    def test_uv_sync_extra_pyproject_dependency_uses_python_playwright(
+    def test_uv_sync_pyproject_scope_uses_python_playwright(
         self,
         tmp_path: Path,
         setup_command: str,
@@ -1179,6 +1199,8 @@ class TestPlaywrightBrowserInstallCommand:
                     'name = "browser-profile"',
                     'version = "0.1.0"',
                     "[project.optional-dependencies]",
+                    'e2e = ["pytest-playwright"]',
+                    "[dependency-groups]",
                     'e2e = ["pytest-playwright"]',
                     "",
                 ]

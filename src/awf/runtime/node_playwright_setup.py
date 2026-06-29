@@ -73,6 +73,8 @@ _UV_SYNC_EXTRA_FLAGS = frozenset({"--extra"})
 _UV_SYNC_EXTRA_EQUALS_PREFIX = "--extra="
 _UV_SYNC_GROUP_FLAGS = frozenset({"--group"})
 _UV_SYNC_GROUP_EQUALS_PREFIX = "--group="
+_UV_SYNC_SCOPE_FLAGS = frozenset({"--project", "--directory"})
+_UV_SYNC_SCOPE_EQUALS_PREFIXES = (("--project=", "--project"), ("--directory=", "--directory"))
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
 
 
@@ -562,8 +564,14 @@ def _command_segment_python_playwright_executable(
 def _uv_python_playwright_install_executable(tokens: list[str], index: int) -> str | None:
     if index + 1 >= len(tokens):
         return None
-    if tokens[index + 1] in {"add", "sync"}:
+    if tokens[index + 1] == "add":
         return "uv run"
+    if tokens[index + 1] == "sync":
+        scope = _uv_sync_scope(tokens, index + 2)
+        if scope is None:
+            return None
+        _, run_scope_tokens = scope
+        return shlex.join(["uv", "run", *run_scope_tokens])
     if tokens[index + 1] != "pip":
         return None
     return _uv_pip_python_target_executable(tokens, index + 2) or "python"
@@ -602,10 +610,25 @@ def _uv_sync_segment_installs_playwright(
     groups: set[str] = set()
     include_all_extras = False
     include_all_groups = False
+    scope = _uv_sync_scope(
+        tokens,
+        index,
+        workspace_root=workspace_root,
+        requirement_base_dir=requirement_base_dir,
+    )
+    if scope is None:
+        return False
+    scoped_requirement_base_dir, _ = scope
     while index < len(tokens):
         token = tokens[index]
         if token in _SHELL_COMPOUND_CONTROL_TOKENS:
             break
+        if token in _UV_SYNC_SCOPE_FLAGS:
+            index += 2
+            continue
+        if _uv_sync_scope_equals_option(token) is not None:
+            index += 1
+            continue
         if token in _UV_SYNC_EXTRA_FLAGS:
             if index + 1 >= len(tokens) or tokens[index + 1] in _SHELL_COMPOUND_CONTROL_TOKENS:
                 break
@@ -629,12 +652,79 @@ def _uv_sync_segment_installs_playwright(
         index += 1
     return _pyproject_includes_python_playwright(
         workspace_root=workspace_root,
-        requirement_base_dir=requirement_base_dir,
+        requirement_base_dir=scoped_requirement_base_dir,
         extras=extras,
         include_all_extras=include_all_extras,
         groups=groups,
         include_all_groups=include_all_groups,
     )
+
+
+def _uv_sync_scope(
+    tokens: list[str],
+    index: int,
+    *,
+    workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
+) -> tuple[Path | None, list[str]] | None:
+    scoped_requirement_base_dir = requirement_base_dir
+    run_scope_tokens: list[str] = []
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            break
+        if token in _UV_SYNC_SCOPE_FLAGS:
+            if (
+                index + 1 >= len(tokens)
+                or tokens[index + 1] in _SHELL_COMPOUND_CONTROL_TOKENS
+                or tokens[index + 1].startswith("-")
+            ):
+                return None
+            scope_value = tokens[index + 1]
+            scoped_requirement_base_dir = _uv_sync_scope_base_dir(
+                scope_value,
+                workspace_root=workspace_root,
+                requirement_base_dir=requirement_base_dir,
+            )
+            if scoped_requirement_base_dir is None:
+                return None
+            run_scope_tokens.extend((token, scope_value))
+            index += 2
+            continue
+        scope_option = _uv_sync_scope_equals_option(token)
+        if scope_option is not None:
+            scope_value = token.removeprefix(f"{scope_option}=")
+            scoped_requirement_base_dir = _uv_sync_scope_base_dir(
+                scope_value,
+                workspace_root=workspace_root,
+                requirement_base_dir=requirement_base_dir,
+            )
+            if scoped_requirement_base_dir is None:
+                return None
+            run_scope_tokens.extend((scope_option, scope_value))
+        index += 1
+    return scoped_requirement_base_dir, run_scope_tokens
+
+
+def _uv_sync_scope_equals_option(token: str) -> str | None:
+    for prefix, option in _UV_SYNC_SCOPE_EQUALS_PREFIXES:
+        if token.startswith(prefix):
+            return option
+    return None
+
+
+def _uv_sync_scope_base_dir(
+    scope_value: str,
+    *,
+    workspace_root: Path | None = None,
+    requirement_base_dir: Path | None = None,
+) -> Path | None:
+    if not scope_value or _package_scope_uses_shell_expansion(scope_value):
+        return None
+    scope_path = Path(scope_value)
+    if scope_path.is_absolute():
+        return scope_path
+    return (requirement_base_dir or workspace_root or Path.cwd()) / scope_path
 
 
 def _pyproject_includes_python_playwright(
