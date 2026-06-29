@@ -285,7 +285,7 @@ async def run_validation_and_fix_cycle(
     for pass_number in range(max_validation_attempts):  # pragma: no branch
         # Initial validation plus validation/conformance fix prompts.
         deferred_runtime_browser_findings_recorded = False
-        deferred_runtime_browser_probe_ready = bool(validation_runtime_browser_install_commands)
+        deferred_runtime_browser_probe_ready = False
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.validating,

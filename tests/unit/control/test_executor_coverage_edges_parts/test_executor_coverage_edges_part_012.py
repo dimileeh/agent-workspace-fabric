@@ -325,6 +325,135 @@ async def test_validation_records_deferred_browser_findings_after_validate_insta
 
 
 @pytest.mark.unit
+async def test_validation_skips_deferred_browser_findings_when_validate_raises_before_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    (worktree_path / "requirements.txt").write_text("playwright\n", encoding="utf-8")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "browser-validate-install-exception-test",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["node scripts/generate-config.js"],
+                "validate": [
+                    "pip install -r requirements.txt",
+                    "pnpm test",
+                ],
+            },
+        }
+    )
+    workspace = SimpleNamespace(
+        resolved_profile=profile.model_dump(mode="json"),
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="Browser task",
+        agent="codex",
+        owned_paths=(),
+        id="ws_browser_validate_exception",
+        pr_url=None,
+        task_tag=None,
+    )
+
+    from awf.control.executor import execution_validation as executor_execution_validation
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(executor_execution_validation, "_sync_resolved_profile", _sync_profile)
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    order: list[str] = []
+
+    async def _cleanup_validation_worktree_side_effects(
+        **_kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        order.append("cleanup")
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref="c" * 40,
+        )
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        _cleanup_validation_worktree_side_effects,
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            raise RuntimeError("validation runner failed before deferred install completed")
+
+    browser_calls: list[dict[str, object]] = []
+
+    async def _record_runtime_browser_findings_safe(**kwargs: object) -> None:
+        order.append("browser_probe")
+        browser_calls.append(kwargs)
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-browser-validate-exception"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _record_runtime_browser_findings_safe=_record_runtime_browser_findings_safe,
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,
+        worktree_path=worktree_path,
+        compose_project=f"awf_{workspace.id}",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch=f"awf/{workspace.id}",
+        adapter=SimpleNamespace(run=AsyncMock()),
+        run_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert result.stop
+    assert browser_calls == []
+    assert order == ["cleanup"]
+    executor._finish_validation_run.assert_awaited_once()
+
+
+@pytest.mark.unit
 async def test_validation_records_browser_findings_for_validation_only_injected_install(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1261,7 +1390,7 @@ async def test_validation_records_deferred_browser_findings_before_terminal_fail
 
 
 @pytest.mark.unit
-async def test_validation_records_deferred_browser_findings_before_infrastructure_failure(
+async def test_validation_skips_deferred_browser_findings_before_infrastructure_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1374,12 +1503,4 @@ async def test_validation_records_deferred_browser_findings_before_infrastructur
     )
 
     assert result.stop
-    assert browser_calls == [
-        {
-            "workspace_id": workspace.id,
-            "compose_project": f"awf_{workspace.id}",
-            "compose_file": tmp_path / "compose.yml",
-            "profile": profile,
-            "worktree_path": tmp_path / "worktree",
-        }
-    ]
+    assert browser_calls == []
