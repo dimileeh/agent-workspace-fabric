@@ -35,12 +35,6 @@ from awf.runtime.node_playwright_setup import (
     _node_package_manager_package_dir as _node_package_manager_package_dir,
 )
 from awf.runtime.node_playwright_setup import (
-    _node_package_manager_subcommand_index as _node_package_manager_subcommand_index,
-)
-from awf.runtime.node_playwright_setup import (
-    _node_package_manager_subcommand_invokes_browser_script as _node_package_manager_subcommand_invokes_browser_script,
-)
-from awf.runtime.node_playwright_setup import (
     _post_agent_node_dependency_install_exists as _post_agent_node_dependency_install_exists,
 )
 from awf.runtime.node_playwright_setup import (
@@ -203,8 +197,6 @@ _PROFILE_PHASE_EXECUTION_ORDER = {
     "validate": 3,
     "cleanup": 4,
 }
-_NODE_PLAYWRIGHT_DIRECT_RUNNERS = frozenset({"npx", "pnpx", "bunx"})
-_NODE_PLAYWRIGHT_EXEC_SUBCOMMANDS = frozenset({"exec", "x", "dlx"})
 _FULL_GATE_SEMAPHORES: dict[int, asyncio.Semaphore] = {}
 
 _HTTP_HEALTHCHECK_SCRIPT = (
@@ -403,15 +395,6 @@ def profile_phase_command_plan(
             continue
         if phase == "pre_agent":
             for pre_agent_command in _phase_commands(profile, phase):
-                if (
-                    deferred_browser_install is not None
-                    and defer_browser_install_until_validate_install
-                    and _pre_agent_command_uses_node_browser(pre_agent_command.command.command)
-                ):
-                    commands.append(deferred_browser_install)
-                    deferred_browser_install = None
-                    browser_install_added = True
-                    defer_browser_install_until_validate_install = False
                 append_command_with_deferred_browser_install(pre_agent_command)
             if (
                 deferred_browser_install is not None
@@ -443,67 +426,6 @@ def profile_phase_command_plan(
             continue
         commands.extend(_phase_commands(profile, phase))
     return commands
-
-
-def _pre_agent_command_uses_node_browser(command: str) -> bool:
-    tokens = _shell_tokens(command, comments=True)
-    if tokens is None:
-        return False
-    index = _first_non_assignment_token_index(tokens)
-    while index < len(tokens):
-        if tokens[index] in _SHELL_COMPOUND_CONTROL_TOKENS:
-            index += 1
-            continue
-        if _command_segment_uses_node_browser(tokens, index):
-            return True
-        next_index = _next_command_segment_index(tokens, index)
-        if next_index is None:
-            return False
-        index = next_index
-    return False
-
-
-def _command_segment_uses_node_browser(tokens: list[str], index: int) -> bool:
-    executable = tokens[index]
-    if executable in _NODE_PLAYWRIGHT_DIRECT_RUNNERS:
-        return _command_segment_has_playwright_token(tokens, index + 1)
-    if executable not in {"npm", "pnpm", "yarn", "bun"}:
-        return False
-    subcommand_index = _node_package_manager_subcommand_index(tokens, index)
-    if subcommand_index is None:
-        return False
-    if _node_package_manager_subcommand_invokes_browser_script(
-        executable,
-        tokens,
-        subcommand_index,
-    ):
-        return True
-    subcommand = tokens[subcommand_index]
-    if executable == "yarn" and subcommand == "playwright":
-        return True
-    return subcommand in _NODE_PLAYWRIGHT_EXEC_SUBCOMMANDS and (
-        _command_segment_has_playwright_token(tokens, subcommand_index + 1)
-    )
-
-
-def _command_segment_has_playwright_token(tokens: list[str], index: int) -> bool:
-    while index < len(tokens) and tokens[index] not in _SHELL_COMPOUND_CONTROL_TOKENS:
-        if tokens[index] == "playwright":
-            return True
-        index += 1
-    return False
-
-
-def _next_command_segment_index(tokens: list[str], index: int) -> int | None:
-    while index < len(tokens) and tokens[index] not in _SHELL_COMPOUND_CONTROL_TOKENS:
-        index += 1
-    while index < len(tokens) and tokens[index] in _SHELL_COMPOUND_CONTROL_TOKENS:
-        index += 1
-    while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
-        index += 1
-    if index >= len(tokens):
-        return None
-    return index
 
 
 def _split_dependency_install_chain(
