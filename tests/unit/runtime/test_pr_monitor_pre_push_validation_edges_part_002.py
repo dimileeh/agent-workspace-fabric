@@ -54,12 +54,12 @@ async def _existing_mirror_commit(
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_records_deferred_browser_findings_before_infra_failure(
+async def test_pre_push_validation_skips_deferred_browser_probe_on_infra_failure_before_install(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Deferred browser probes should run before pre-push infrastructure returns."""
+    """Infrastructure failures must not report browser gaps before install evidence."""
     workspace_id = await seed_monitoring_workspace(factory)
     profile = WorkspaceProfile.model_validate(
         {
@@ -135,15 +135,7 @@ async def test_pre_push_validation_records_deferred_browser_findings_before_infr
 
     assert result.failed is True
     assert result.reason_code == "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED"
-    assert validation.probe_calls == [
-        {
-            "workspace_id": workspace_id,
-            "compose_project": "proj",
-            "compose_file": tmp_path / "compose.yml",
-            "profile": profile,
-            "worktree_path": worktree,
-        }
-    ]
+    assert validation.probe_calls == []
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
@@ -153,8 +145,7 @@ async def test_pre_push_validation_records_deferred_browser_findings_before_infr
             for event in ws.events
             if event.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
         ]
-    assert len(browser_events) == 1
-    assert browser_events[0].reason_code == RUNTIME_BROWSER_UNAVAILABLE
+    assert browser_events == []
 
 
 @pytest.mark.unit

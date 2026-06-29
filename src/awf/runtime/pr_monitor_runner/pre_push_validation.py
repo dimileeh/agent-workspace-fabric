@@ -1170,14 +1170,6 @@ async def _run_pre_push_validation(
             compose_exec_invocation_id=exc.invocation_id,
             compose_exec_message=message,
         )
-        await _record_deferred_runtime_browser_findings_safe(
-            self,
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-            worktree_path=worktree_path,
-        )
         cleanup_result = await _pre_push_validation_cleanup(
             self,
             worktree_path=worktree_path,
@@ -1236,14 +1228,6 @@ async def _run_pre_push_validation(
             workspace_id=workspace_id,
             error_type=exc.__class__.__name__,
             error_message=message,
-        )
-        await _record_deferred_runtime_browser_findings_safe(
-            self,
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-            worktree_path=worktree_path,
         )
         cleanup_result = await _pre_push_validation_cleanup(
             self,
