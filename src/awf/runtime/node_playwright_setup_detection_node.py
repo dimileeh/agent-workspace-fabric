@@ -71,6 +71,8 @@ def _should_defer_browser_install_until_validate_install(
         workspace_root=workspace_root,
     ):
         return False
+    if "validate" not in requested_phases and not allow_browser_install_defer_to_unrequested_phase:
+        return False
     if _requested_pre_validate_playwright_usage_exists(profile, requested_phases):
         return (
             _requested_pre_validate_node_playwright_usage_exists(profile, requested_phases)
@@ -95,8 +97,6 @@ def _should_defer_browser_install_until_validate_install(
             workspace_root=workspace_root,
         ):
             return True
-    if "validate" not in requested_phases and not allow_browser_install_defer_to_unrequested_phase:
-        return False
     return _validate_node_dependency_install_exists(
         profile
     ) or _validate_python_playwright_dependency_install_exists(

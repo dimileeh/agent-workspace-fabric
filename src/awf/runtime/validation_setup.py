@@ -319,6 +319,7 @@ def profile_phase_command_plan(
         command: ProfileExecutionCommand,
     ) -> None:
         nonlocal browser_install_added, deferred_browser_install
+        nonlocal defer_browser_install_until_validate_install
         command_package_manager = _node_dependency_install_package_manager(command.command.command)
         if (
             deferred_browser_install is not None
@@ -354,7 +355,6 @@ def profile_phase_command_plan(
             return
         if (
             deferred_browser_install is not None
-            and not defer_browser_install_until_validate_install
             and command.phase in {"setup", DB_GENERATED_SETUP_PHASE, "pre_agent"}
             and (
                 _node_command_uses_playwright(command.command.command)
@@ -364,6 +364,7 @@ def profile_phase_command_plan(
             commands.append(deferred_browser_install)
             deferred_browser_install = None
             browser_install_added = True
+            defer_browser_install_until_validate_install = False
         commands.append(command)
 
     for phase in sorted(
