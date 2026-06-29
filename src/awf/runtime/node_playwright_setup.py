@@ -56,14 +56,31 @@ _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS: dict[str, frozenset[str]] = {
 _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS = frozenset({"--help", "--version", "-h", "-v"})
 _SHELL_COMPOUND_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "|&", "&"})
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
-_PYTHON_EXECUTABLES = frozenset({"python", "python3"})
-_PIP_EXECUTABLES = frozenset({"pip", "pip3"})
+_PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?\Z")
+_PIP_EXECUTABLE_RE = re.compile(r"pip(?:\d+(?:\.\d+)*)?\Z")
 _PYTHON_PLAYWRIGHT_REQUIREMENT_RE = re.compile(
     r"(?i)^(?:playwright|pytest-playwright)(?:\[.*\])?(?:[<>=!~]=?.*)?$"
 )
 _PIP_REQUIREMENT_FILE_FLAGS = frozenset({"-r", "--requirement"})
 _PIP_REQUIREMENT_FILE_EQUALS_PREFIX = "--requirement="
 _NODE_PLAYWRIGHT_EXECUTABLES = frozenset({"npx", "pnpx", "bunx"})
+
+
+def _is_python_executable(executable: str) -> bool:
+    return _PYTHON_EXECUTABLE_RE.fullmatch(executable) is not None
+
+
+def _is_pip_executable(executable: str) -> bool:
+    return _PIP_EXECUTABLE_RE.fullmatch(executable) is not None
+
+
+def _python_executable_for_install_executable(executable: str) -> str | None:
+    if _is_python_executable(executable):
+        return executable
+    if _is_pip_executable(executable):
+        suffix = executable.removeprefix("pip")
+        return f"python{suffix}"
+    return None
 
 
 def _shell_tokens(command: str, *, comments: bool = False) -> list[str] | None:
@@ -339,14 +356,14 @@ def _command_segment_installs_python_playwright(
     requirement_base_dir: Path | None = None,
 ) -> bool:
     executable = tokens[index]
-    if executable in _PIP_EXECUTABLES:
+    if _is_pip_executable(executable):
         return _pip_segment_installs_playwright(
             tokens,
             index + 1,
             workspace_root=workspace_root,
             requirement_base_dir=requirement_base_dir,
         )
-    if executable in _PYTHON_EXECUTABLES and tokens[index + 1 : index + 3] == ["-m", "pip"]:
+    if _is_python_executable(executable) and tokens[index + 1 : index + 3] == ["-m", "pip"]:
         return _pip_segment_installs_playwright(
             tokens,
             index + 3,
@@ -440,7 +457,7 @@ def _command_segment_python_playwright_executable(
     requirement_base_dir: Path | None = None,
 ) -> str | None:
     executable = tokens[index]
-    if executable in _PYTHON_EXECUTABLES and tokens[index + 1 : index + 3] == [
+    if _is_python_executable(executable) and tokens[index + 1 : index + 3] == [
         "-m",
         "playwright",
     ]:
@@ -451,11 +468,9 @@ def _command_segment_python_playwright_executable(
         workspace_root=workspace_root,
         requirement_base_dir=requirement_base_dir,
     ):
-        if executable in {"python3", "pip3"}:
-            return "python3"
         if executable == "uv":
             return "uv run"
-        return "python"
+        return _python_executable_for_install_executable(executable) or "python"
     return None
 
 
@@ -629,7 +644,7 @@ def _command_invokes_python_playwright(command: str) -> bool:
             index += 1
         if index >= len(tokens):
             return False
-        if tokens[index] in _PYTHON_EXECUTABLES and tokens[index + 1 : index + 3] == [
+        if _is_python_executable(tokens[index]) and tokens[index + 1 : index + 3] == [
             "-m",
             "playwright",
         ]:

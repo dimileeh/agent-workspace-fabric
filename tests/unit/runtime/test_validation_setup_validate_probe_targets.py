@@ -233,6 +233,29 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "python3 -m playwright install chromium"
         assert command.required is False
 
+    @pytest.mark.parametrize(
+        ("setup_command", "expected_command"),
+        [
+            ("python3.12 -m pip install playwright", "python3.12 -m playwright install chromium"),
+            ("pip3.12 install playwright", "python3.12 -m playwright install chromium"),
+        ],
+    )
+    def test_python_playwright_profile_preserves_versioned_python_or_pip_executable(
+        self,
+        setup_command: str,
+        expected_command: str,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[setup_command],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == expected_command
+        assert command.required is False
+
     def test_python_playwright_profile_preserves_uv_project_environment(self) -> None:
         profile = _profile_with_setup_validate_and_browsers(
             setup=["uv add playwright"],
