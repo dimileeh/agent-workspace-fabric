@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any, cast
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
+from awf.control.executor.constants import RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
 from awf.control.executor.helpers import (
     _profile_for_workspace,
     _should_run_local_coverage,
@@ -30,6 +32,7 @@ from awf.node.git_manager import (
     repair_mirror_hooks_path,
     verify_head_object_exists,
 )
+from awf.profiles.models import RUNTIME_BROWSER_UNAVAILABLE
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -95,6 +98,7 @@ from awf.runtime.validation_identity import (
     environment_identity_inputs,
     resolved_profile_digest,
 )
+from awf.runtime.validation_setup import runtime_browser_probe_deferred_until_validate
 from awf.runtime.validation_types import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -231,6 +235,98 @@ class _PrePushValidationResult:
             )
             details["failing_returncode"] = first_failure.returncode
         return details
+
+
+async def _record_deferred_runtime_browser_findings_safe(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    profile: Any,
+) -> None:
+    """Record deferred browser probe warnings after monitor pre-push validation."""
+    try:
+        await _record_deferred_runtime_browser_findings(
+            self,
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+        )
+    except Exception as exc:
+        _log.warning(
+            "pre_push_validation.runtime_browser_probe_record_failed",
+            workspace_id=workspace_id,
+            reason_code=getattr(exc, "reason_code", None),
+            error=redact_secrets(str(exc))[:1000],
+        )
+
+
+async def _record_deferred_runtime_browser_findings(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    profile: Any,
+) -> None:
+    if not runtime_browser_probe_deferred_until_validate(profile):
+        return
+    validation = self._deps.validation
+    probe = getattr(validation, "probe_runtime_browser_findings", None)
+    if not callable(probe):
+        return
+    try:
+        findings = await probe(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+        )
+    except OSError as exc:
+        _log.warning(
+            "pre_push_validation.runtime_browser_probe_failed",
+            workspace_id=workspace_id,
+            reason_code=getattr(exc, "reason_code", None),
+            error=redact_secrets(str(exc))[:1000],
+        )
+        return
+    if not findings:
+        return
+    async with self._deps.session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        if workspace is None:  # pragma: no cover - destroyed mid-flight
+            return
+        recorded_browsers = {
+            browser.lower()
+            for event in workspace.events
+            if event.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
+            and event.reason_code == RUNTIME_BROWSER_UNAVAILABLE
+            and isinstance(event.payload, Mapping)
+            and isinstance(browser := event.payload.get("browser"), str)
+        }
+        for finding in findings:
+            details = dict(finding.details)
+            browser = details.get("browser")
+            browser_key = browser.lower() if isinstance(browser, str) else None
+            if browser_key is not None and browser_key in recorded_browsers:
+                continue
+            await repo.add_event(
+                workspace,
+                event_type=RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE,
+                reason_code=RUNTIME_BROWSER_UNAVAILABLE,
+                payload={
+                    "browser": browser,
+                    "available_browsers": details.get("available_browsers"),
+                    "path": finding.path,
+                    "message": finding.message,
+                },
+            )
+            if browser_key is not None:
+                recorded_browsers.add(browser_key)
+        await session.commit()
 
 
 async def _validated_git_push_result(
@@ -1134,6 +1230,13 @@ async def _run_pre_push_validation(
         self,
         worktree_path=worktree_path,
         restore_ref=workspace_head_sha,
+    )
+    await _record_deferred_runtime_browser_findings_safe(
+        self,
+        workspace_id=workspace_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        profile=profile,
     )
     if not cleanup_result.ok:
         await _finish_pre_push_validation_run(

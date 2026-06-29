@@ -13,7 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
+from awf.control.executor.constants import RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.profiles.models import (
+    RUNTIME_BROWSER_UNAVAILABLE,
+    ProfileLintFinding,
+    ProfileLintSeverity,
+    WorkspaceProfile,
+)
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
 from awf.runtime.pr_monitor_runner import pre_push_validation_failures
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -145,6 +153,96 @@ async def test_pre_push_validation_records_target_head_before_push(
     assert pre_push_run.target_head_sha == local_head
     assert pre_push_run.target_branch == f"awf/{workspace_id}"
     assert pre_push_run.status == "succeeded"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_records_deferred_browser_findings_after_validate(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Deferred browser installs should still be probed in monitor pre-push validation."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "browser-pre-push-profile",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["node scripts/generate-config.js"],
+                "validate": ["pnpm install --frozen-lockfile", "pnpm test:e2e"],
+            },
+        }
+    )
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.resolved_profile = profile.model_dump(mode="json", by_alias=True)
+        await session.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "e" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    cmd.queue_result(returncode=0, stdout="", stderr="")
+
+    class _BrowserValidation(_FakeValidation):
+        def __init__(self) -> None:
+            super().__init__(_validation_result(tmp_path, ok=True))
+            self.probe_calls: list[dict[str, object]] = []
+
+        async def probe_runtime_browser_findings(
+            self, **kwargs: object
+        ) -> tuple[ProfileLintFinding, ...]:
+            assert self.calls, "browser probe must run after pre-push validation"
+            assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+            self.probe_calls.append(dict(kwargs))
+            return (
+                ProfileLintFinding(
+                    reason_code=RUNTIME_BROWSER_UNAVAILABLE,
+                    message="runtime does not provide Playwright browser chromium",
+                    path="runtime.browsers",
+                    severity=ProfileLintSeverity.warning,
+                    details={"browser": "chromium", "available_browsers": []},
+                ),
+            )
+
+    validation = _BrowserValidation()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert validation.probe_calls == [
+        {
+            "workspace_id": workspace_id,
+            "compose_project": "proj",
+            "compose_file": tmp_path / "compose.yml",
+            "profile": profile,
+        }
+    ]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        browser_events = [
+            event
+            for event in ws.events
+            if event.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
+        ]
+    assert len(browser_events) == 1
+    assert browser_events[0].reason_code == RUNTIME_BROWSER_UNAVAILABLE
+    assert browser_events[0].payload["browser"] == "chromium"
 
 
 @pytest.mark.unit
