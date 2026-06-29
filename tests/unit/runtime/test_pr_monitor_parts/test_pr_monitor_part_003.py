@@ -21,6 +21,7 @@ from awf.runtime.pr_monitor import (
     RerunTransientCI,
     ReviewComment,
     ReviewThread,
+    WaitForCI,
     _log_shows_docker_registry_timeout,
     decide,
 )
@@ -73,6 +74,7 @@ def _status(
     base_behind: int = 0,
     merge_state_status: MergeStateStatus = MergeStateStatus.CLEAN,
     ci_failures: tuple[CheckFailure, ...] = (),
+    ci_runs_in_progress: bool = False,
     closed: bool = False,
     merged: bool = False,
 ) -> PRStatus:
@@ -91,6 +93,7 @@ def _status(
         base_behind_count=base_behind,
         merge_state_status=merge_state_status,
         ci_failures=ci_failures,
+        ci_runs_in_progress=ci_runs_in_progress,
         closed=closed,
         merged=merged,
     )
@@ -120,7 +123,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_transient_failure_with_required_rollup_dispatches_rerun_for_underlying_job(
+    def test_transient_failure_with_required_rollup_reports_completed_failure_set(
         self,
     ) -> None:
         transient_failure = CheckFailure(
@@ -154,8 +157,8 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (transient_failure,)
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (transient_failure, rollup_failure)
 
     @pytest.mark.unit
     def test_mixed_run_with_rollup_marker_and_transient_evidence_dispatches_rerun(
@@ -191,7 +194,7 @@ class TestCiFailure:
         assert action.failures == (mixed_failure,)
 
     @pytest.mark.unit
-    def test_required_rollup_without_underlying_transient_job_notifies_human(
+    def test_required_rollup_without_underlying_transient_job_reports_failure(
         self,
     ) -> None:
         rollup_failure = CheckFailure(
@@ -211,9 +214,121 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, NotifyHuman)
-        assert action.message is not None
-        assert "without actionable code-failure evidence" in action.message
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (rollup_failure,)
+
+    @pytest.mark.unit
+    def test_arbitrary_completed_ci_failure_reports_failure(self) -> None:
+        failure = CheckFailure(
+            name="go-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "=== RUN   TestWidgetLifecycle\n"
+                "widget_test.go:42: expected active widget, got archived\n"
+                "--- FAIL: TestWidgetLifecycle (0.03s)"
+            ),
+            run_id="25897584272",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_completed_ci_failure_reports_while_other_runs_are_in_progress(self) -> None:
+        failure = CheckFailure(
+            name="go-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "=== RUN   TestWidgetLifecycle\n"
+                "widget_test.go:42: expected active widget, got archived\n"
+                "--- FAIL: TestWidgetLifecycle (0.03s)"
+            ),
+            run_id="25897584272",
+        )
+
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(failure,),
+                ci_runs_in_progress=True,
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_failed_ci_without_failure_evidence_waits_for_in_progress_runs(self) -> None:
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_runs_in_progress=True),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, WaitForCI)
+        assert action.reason == "ci_run_in_progress"
+
+    @pytest.mark.unit
+    def test_generic_transient_text_inside_pytest_failure_reports_failure(self) -> None:
+        """Transient marker substrings inside real test failure output must not
+        turn the entire check into a rerunnable CI flake."""
+        failure = CheckFailure(
+            name="integration-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "tests/integration/test_fetch.py::test_download_prompt FAILED\n"
+                "E   AssertionError: failed to download prompt fixture\n"
+                "E   assert 'try again later' == 'ready'\n"
+                "=== short test summary info ===\n"
+                "FAILED tests/integration/test_fetch.py::test_download_prompt"
+            ),
+            run_id="25897584272",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_docker_pull_registry_timeout_with_code_failure_reports_failure(self) -> None:
+        """Combined logs with code failures and Docker timeouts must be repaired."""
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "tests/integration/test_fetch.py::test_download_prompt FAILED\n"
+                "E   AssertionError: expected 'ready'\n"
+                "=== short test summary info ===\n"
+                "FAILED tests/integration/test_fetch.py::test_download_prompt\n"
+                "/usr/bin/docker pull postgres:16\n"
+                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
+                "context deadline exceeded (Client.Timeout exceeded while awaiting headers)\n"
+                "Docker pull failed with exit code 1"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
 
     @pytest.mark.unit
     def test_mixed_run_with_rollup_marker_and_code_evidence_reports_failure(
@@ -770,9 +885,7 @@ class TestCiFailure:
         echo, daemon error, or registry/``/v2/`` context — is a real image/deploy
         bug, not flaky registry infra. ``failed to pull image`` wording is shared
         with containerd/k8s, so without corroborating Docker pull context it must
-        reach the repair agent rather than be silently rerun. (``--- FAIL`` Go
-        output is not caught by ``_looks_like_code_failure_text``, so this would
-        otherwise be misrouted to ``RerunTransientCI``.)"""
+        reach the repair agent rather than be silently rerun."""
         failure = CheckFailure(
             name="e2e-tests",
             conclusion="FAILURE",
@@ -1126,7 +1239,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_timed_out_failure_without_logs_or_run_id_notifies_human(self) -> None:
+    def test_timed_out_failure_without_logs_or_run_id_reports_failure(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="TIMED_OUT",
@@ -1140,9 +1253,8 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, NotifyHuman)
-        assert action.message is not None
-        assert "without actionable code-failure evidence" in action.message
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
 
     @pytest.mark.unit
     @pytest.mark.parametrize("conclusion", ["CANCELLED", "ACTION_REQUIRED"])
@@ -1175,6 +1287,28 @@ class TestCiFailure:
             log_excerpt=(
                 "Would reformat: src/awf/runtime/pr_monitor_runner.py\n"
                 "src/awf/runtime/pr_monitor.py:12: error: Incompatible types [assignment]"
+            ),
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_ruff_diagnostics_with_transient_text_dispatch_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "src/awf/runtime/pr_monitor.py:877:12: F401 `json` imported but unused\n"
+                "tests/unit/runtime/test_pr_monitor.py:42:5: B018 useless expression\n"
+                "Failed to download formatter cache after lint diagnostics"
             ),
             run_id="25655330295",
         )

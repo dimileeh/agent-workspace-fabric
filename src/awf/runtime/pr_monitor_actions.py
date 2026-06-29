@@ -97,6 +97,7 @@ class WaitForCI:
         "pending_checks",
         "unknown_mergeable_state",
         "awaiting_required_checks",
+        "ci_run_in_progress",
     ] = "pending_checks"
 
 

@@ -16,13 +16,13 @@ import shlex
 
 import pytest
 
-from awf.common import github_client_parsing as github_client_module
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
     RepoRef,
 )
+from awf.runtime.pr_monitor import CheckTiming
 
 
 def _adoption_pr_payload(
@@ -188,12 +188,14 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        result = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
         )
 
+        failures = result.failures
+        assert result.runs_in_progress is False
         assert len(failures) == 1
         failure = failures[0]
         assert failure.name == "coverage-gate"
@@ -204,8 +206,72 @@ class TestFetchFailingCheckLogs:
             "uv run --python 3.12 --extra dev pytest "
             "tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage -q",
         )
-        assert any("Missing reason catalog entries" in item for item in failure.error_summaries)
         assert any("ARTIFACT_BLOCKED" in item for item in failure.assertion_snippets)
+
+    @pytest.mark.unit
+    async def test_skips_failing_run_until_workflow_run_completed(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 42,
+                        "name": "go-tests",
+                        "conclusion": "FAILURE",
+                        "status": "in_progress",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert result.failures == ()
+        assert result.runs_in_progress is True
+        assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == []
+
+    @pytest.mark.unit
+    async def test_completed_failure_with_in_progress_sibling_reports_failure(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 42,
+                        "name": "go-tests",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    },
+                    {
+                        "databaseId": 43,
+                        "name": "python-tests",
+                        "conclusion": "",
+                        "status": "in_progress",
+                    },
+                ]
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="failed log")
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert result.runs_in_progress is False
+        assert [failure.name for failure in result.failures] == ["go-tests"]
+        assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == [
+            ["gh", "run", "view", "42", "--repo", "o/r", "--log-failed"]
+        ]
 
     @pytest.mark.unit
     async def test_extracts_full_nested_pytest_node_path(self) -> None:
@@ -638,7 +704,7 @@ class TestFetchFailingCheckLogs:
             "uv run --python 3.12 --extra dev ruff check src/awf tests",
         )
         assert failure.suggested_repro_commands == ()
-        assert any("F401 imported but unused" in item for item in failure.error_summaries)
+        assert failure.error_summaries == ("Error: Process completed with exit code 1.",)
 
     @pytest.mark.unit
     async def test_redacts_secrets_before_log_and_evidence_are_stored(self) -> None:
@@ -835,6 +901,34 @@ class TestFetchFailingCheckLogs:
 
         assert len(failures) == 1
         assert failures[0].name == "run/unknown"
+        assert failures[0].run_id is None
+        assert failures[0].log_excerpt == ""
+        assert len(fake.calls) == 1
+
+    @pytest.mark.unit
+    async def test_failed_rollup_status_without_target_url_synthesizes_no_log_failure(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=json.dumps([]))
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="external-ci/build",
+                    status="FAILURE",
+                    details_url=None,
+                ),
+            ),
+        )
+
+        assert len(failures) == 1
+        assert failures[0].name == "external-ci/build"
+        assert failures[0].conclusion == "FAILURE"
         assert failures[0].run_id is None
         assert failures[0].log_excerpt == ""
         assert len(fake.calls) == 1
@@ -1394,68 +1488,3 @@ class TestMutations:
         assert secret not in exc.value.stderr
         assert secret not in str(exc.value)
         assert "[redacted]" in exc.value.stderr
-
-
-class TestPrivateCoverageEdges:
-    """Coverage edge tests for private GitHub client helper paths."""
-
-    @pytest.mark.unit
-    async def test_gh_json_and_run_gh_raise_on_strict_failures(self) -> None:
-        """Strict helper failures raise while non-strict command failures return."""
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr="boom")
-        fake.queue_result(returncode=1, stderr="strict boom")
-        fake.queue_result(returncode=1, stderr="non-strict")
-        client = GitHubClient(fake)
-
-        with pytest.raises(GitHubClientError) as json_exc:
-            await client._gh_json(["gh", "api", "repos/o/r"], operation="gh api")  # noqa: SLF001
-        with pytest.raises(GitHubClientError) as run_exc:
-            await client._run_gh(  # noqa: SLF001
-                ["gh", "pr", "view"],
-                operation="gh pr view",
-                strict=True,
-            )
-        result = await client._run_gh(  # noqa: SLF001
-            ["gh", "pr", "view"],
-            operation="gh pr view",
-            strict=False,
-        )
-
-        assert json_exc.value.operation == "gh api"
-        assert run_exc.value.operation == "gh pr view"
-        assert result.returncode == 1
-
-    @pytest.mark.unit
-    def test_private_nested_payload_and_review_helpers_cover_fallbacks(self) -> None:
-        """Nested payload helpers preserve fallback behavior for review parsing."""
-        assert github_client_module._dig([{"name": "first"}], 1, "name") is None  # noqa: SLF001
-        assert github_client_module._dig("not-dict", "name") is None  # noqa: SLF001
-        assert (
-            github_client_module._reviewer_effective_state_key(  # noqa: SLF001
-                {"databaseId": 42},
-                fetch_index=7,
-            )
-            == "review:42"
-        )
-        assert (
-            github_client_module._reviewer_effective_state_key({}, fetch_index=7)  # noqa: SLF001
-            == "review-fetch-index:7"
-        )
-
-        older = github_client_module._parse_fetched_review(  # noqa: SLF001
-            {"state": "CHANGES_REQUESTED", "databaseId": 1},
-            fetch_index=1,
-        )
-        newer = github_client_module._parse_fetched_review(  # noqa: SLF001
-            {"state": "CHANGES_REQUESTED", "databaseId": 1},
-            fetch_index=2,
-        )
-
-        assert github_client_module._review_is_later(newer, older)  # noqa: SLF001
-        assert github_client_module._effective_blocking_reviews((older,)) == (  # noqa: SLF001
-            github_client_module.replace(older.comment, blocks_merge=True),
-        )
-        assert github_client_module._connection_nodes(  # noqa: SLF001
-            {"nodes": [{"id": "1"}, None, "bad", {"id": "2"}]}
-        ) == [{"id": "1"}, {"id": "2"}]

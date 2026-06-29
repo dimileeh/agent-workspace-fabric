@@ -121,6 +121,25 @@ def test_ci_failure_evidence_preserves_prefixed_github_error_annotations() -> No
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_preserves_ruff_diagnostics_as_error_summaries() -> None:
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                "src/awf/runtime/example.py:1:1: F401 `os` imported but unused",
+                "Found 1 error.",
+                "failed to download cleanup artifact: connection reset",
+                "Error: Process completed with exit code 1.",
+            ]
+        ),
+        check_name="python-lint",
+    )
+
+    assert (
+        "src/awf/runtime/example.py:1:1: F401 `os` imported but unused" in evidence.error_summaries
+    )
+
+
+@pytest.mark.unit
 def test_ci_failure_evidence_rejects_glued_prefix_before_pytest_node() -> None:
     valid_node_id = "tests/unit/test_example.py::test_valid_failure"
 

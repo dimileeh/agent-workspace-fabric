@@ -52,7 +52,7 @@ from typing import Protocol, cast, runtime_checkable
 from awf.common.commands import AsyncCommandRunner
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.enums import ForgeKind
-from awf.runtime.pr_monitor import CheckFailure, CheckTiming, PRStatus
+from awf.runtime.pr_monitor import CheckFailureLogResult, CheckTiming, PRStatus
 
 FORGE_NOT_SUPPORTED_REASON_CODE = "FORGE_NOT_SUPPORTED"
 
@@ -127,7 +127,7 @@ class ForgeClient(Protocol):
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
         rollup_checks: Sequence[CheckTiming] = (),
-    ) -> tuple[CheckFailure, ...]:
+    ) -> CheckFailureLogResult:
         """Return logs for failing/timed-out checks at ``head_sha``."""
         ...
 

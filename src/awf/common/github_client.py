@@ -48,6 +48,7 @@ from awf.db.enums import ForgeKind
 from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
 from awf.runtime.pr_monitor import (
     CheckFailure,
+    CheckFailureLogResult,
     CheckTiming,
     PRStatus,
     ReviewComment,
@@ -900,7 +901,7 @@ class GitHubClient:
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
         rollup_checks: Sequence[CheckTiming] = (),
-    ) -> tuple[CheckFailure, ...]:
+    ) -> CheckFailureLogResult:
         """Fetch logs for failing/timed-out checks via ``gh run view``.
 
         The GraphQL PR query only surfaces an aggregate ``statusCheckRollup``
@@ -909,7 +910,9 @@ class GitHubClient:
         workflow runs for the head SHA, find the failing ones, and grab their
         failed-step logs. If ``gh run list --commit`` misses a failed Actions
         run that the PR rollup already exposed, fall back to the check's
-        ``detailsUrl`` run id instead of returning an empty failure snapshot.
+        ``detailsUrl`` run id. If a failed non-Actions rollup check cannot be
+        mapped to an Actions run, report its context name without log text
+        instead of returning an empty failure snapshot.
         """
         runs_raw = await self._gh_json(
             [
@@ -929,6 +932,13 @@ class GitHubClient:
         )
         failures: list[CheckFailure] = []
         seen_run_ids: set[str] = set()
+        runs_in_progress = False
+        status_by_run: dict[str, str] = {}
+        for run in runs_raw or []:
+            database_id = run.get("databaseId")
+            if database_id is not None:
+                status = str(run.get("status") or "").lower()
+                status_by_run[str(database_id)] = status
 
         async def _append_failure(
             *,
@@ -975,6 +985,24 @@ class GitHubClient:
                 )
             )
 
+        def _append_rollup_failure_without_log(
+            *, run_name: str, conclusion: str, details_url: str | None
+        ) -> None:
+            evidence_warnings = (
+                (f"External check details URL: {redact_ci_log(details_url)}",)
+                if details_url
+                else ()
+            )
+            failures.append(
+                CheckFailure(
+                    name=run_name,
+                    conclusion=conclusion,
+                    log_excerpt="",
+                    run_id=None,
+                    evidence_warnings=evidence_warnings,
+                )
+            )
+
         for run in runs_raw or []:
             conclusion = run.get("conclusion") or ""
             conclusion_upper = conclusion.upper()
@@ -984,23 +1012,47 @@ class GitHubClient:
             run_id = str(database_id) if database_id is not None else None
             if run_id is not None:
                 seen_run_ids.add(run_id)
+                if status_by_run.get(run_id) != "completed":
+                    runs_in_progress = True
+                    continue
             run_name = run.get("name") or (f"run/{run_id}" if run_id is not None else "run/unknown")
             await _append_failure(
                 run_id=run_id,
                 run_name=run_name,
                 conclusion=conclusion_upper,
             )
-        for check in _rollup_action_run_failures(rollup_checks):
+        for check in rollup_checks:
+            conclusion = _rollup_check_failure_conclusion(check)
+            if conclusion is None:
+                continue
             run_id = _actions_run_id_from_details_url(check.details_url)
-            if run_id is None or run_id in seen_run_ids:
+            if run_id is None:
+                if _rollup_check_has_external_details_url(
+                    check
+                ) or not _rollup_check_is_explicit_github_actions(check):
+                    _append_rollup_failure_without_log(
+                        run_name=check.name,
+                        conclusion=conclusion,
+                        details_url=check.details_url,
+                    )
+                continue
+            if not _rollup_check_is_github_actions(check) or run_id in seen_run_ids:
+                continue
+            run_status = status_by_run.get(run_id)
+            if run_status is not None and run_status != "completed":
+                runs_in_progress = True
+                seen_run_ids.add(run_id)
                 continue
             seen_run_ids.add(run_id)
             await _append_failure(
                 run_id=run_id,
                 run_name=check.name,
-                conclusion=(check.conclusion or "FAILURE").upper(),
+                conclusion=conclusion,
             )
-        return tuple(failures)
+        return CheckFailureLogResult(
+            failures=tuple(failures),
+            runs_in_progress=runs_in_progress,
+        )
 
     async def rerun_failed_workflow_jobs(self, *, repo: RepoRef, run_id: str) -> None:
         """Rerun only failed jobs for a workflow run.
@@ -1358,25 +1410,32 @@ def _flatten_branch_rules_pages(payload: list[Any]) -> list[Any]:
     return [rule for page in payload for rule in page]
 
 
-def _rollup_action_run_failures(checks: Sequence[CheckTiming]) -> tuple[CheckTiming, ...]:
-    """Return failed GitHub Actions rollup checks with parseable run details URLs."""
-    failures: list[CheckTiming] = []
-    for check in checks:
-        conclusion = (check.conclusion or "").upper()
-        if conclusion not in _FAILED_CHECK_CONCLUSIONS:
-            continue
-        if not _rollup_check_is_github_actions(check):
-            continue
-        if _actions_run_id_from_details_url(check.details_url) is None:
-            continue
-        failures.append(check)
-    return tuple(failures)
+def _rollup_check_failure_conclusion(check: CheckTiming) -> str | None:
+    """Return the terminal failure value carried by a rollup check/status."""
+    for value in (check.conclusion, check.status):
+        conclusion = (value or "").upper()
+        if conclusion in _FAILED_CHECK_CONCLUSIONS or conclusion == "ERROR":
+            return conclusion
+    return None
 
 
 def _rollup_check_is_github_actions(check: CheckTiming) -> bool:
     app_slug = (check.app_slug or "").lower()
     app_name = (check.app_name or "").lower()
     return app_slug in {"", "github-actions"} or app_name == "github actions"
+
+
+def _rollup_check_is_explicit_github_actions(check: CheckTiming) -> bool:
+    app_slug = (check.app_slug or "").lower()
+    app_name = (check.app_name or "").lower()
+    return app_slug == "github-actions" or app_name == "github actions"
+
+
+def _rollup_check_has_external_details_url(check: CheckTiming) -> bool:
+    details_url = check.details_url
+    if not details_url:
+        return False
+    return urlsplit(details_url).netloc.lower() != "github.com"
 
 
 def _actions_run_id_from_details_url(details_url: str | None) -> str | None:
