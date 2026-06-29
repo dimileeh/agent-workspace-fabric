@@ -58,6 +58,7 @@ async def _start_validation_run(
     target_branch: str | None,
     target_head_sha: str | None,
     tier: int,
+    worktree_path: Path | None = None,
     coverage_evidence_status: str | None = None,
     coverage_evidence_reason_code: str | None = None,
 ) -> str:
@@ -70,6 +71,7 @@ async def _start_validation_run(
         profile=profile,
         phase_names=("post_agent", "validate"),
         run_healthchecks=True,
+        workspace_root=worktree_path,
         coverage_evidence_status=coverage_evidence_status,
         coverage_evidence_reason_code=coverage_evidence_reason_code,
     )

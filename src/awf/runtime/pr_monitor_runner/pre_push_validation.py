@@ -1089,6 +1089,7 @@ async def _run_pre_push_validation(
         workspace_head_sha=workspace_head_sha,
         target_branch=remote_branch,
         tier=validation_tier,
+        worktree_path=worktree_path,
     )
     if validation_run_id is None:
         return _PrePushValidationResult(
@@ -1362,12 +1363,14 @@ async def _start_pre_push_validation_run(
     workspace_head_sha: str,
     target_branch: str,
     tier: int,
+    worktree_path: Path | None = None,
 ) -> str | None:
     """Create and start a pre-push validation run record."""
     command_records = _validation_run_command_records(
         profile=profile,
         phase_names=("post_agent", "validate"),
         run_healthchecks=True,
+        workspace_root=worktree_path,
     )
     async with self._deps.session_factory() as session:
         attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)

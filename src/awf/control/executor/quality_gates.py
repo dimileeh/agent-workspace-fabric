@@ -412,6 +412,7 @@ async def _run_final_coverage_gate(
     profile: WorkspaceProfile,
     validation_tier: int,
     workspace_head_sha: str | None,
+    worktree_path: Path | None = None,
 ) -> _CoverageEvidenceResult:
     """Run the final coverage quality gate after validation.
 
@@ -438,6 +439,7 @@ async def _run_final_coverage_gate(
         profile=profile,
         phase_names=("post_agent", "validate"),
         run_healthchecks=True,
+        workspace_root=worktree_path,
     )
     strategy = profile.validation.strategy
     if strategy.reuse_evidence:

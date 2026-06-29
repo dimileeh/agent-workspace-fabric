@@ -653,6 +653,7 @@ def _validation_run_command_records(
     profile: WorkspaceProfile,
     phase_names: tuple[str, ...],
     run_healthchecks: bool,
+    workspace_root: Path | None = None,
     coverage_evidence_status: str | None = None,
     coverage_evidence_reason_code: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -668,7 +669,11 @@ def _validation_run_command_records(
                 "command": ALEMBIC_MIGRATION_POLICY_COMMAND,
             }
         )
-    command_plan = profile_phase_command_plan(profile, phase_names)
+    command_plan = profile_phase_command_plan(
+        profile,
+        phase_names,
+        workspace_root=workspace_root,
+    )
     healthcheck_before_phase = (
         "validate"
         if profile.database.pre_validation_refresh and "validate" in set(phase_names)

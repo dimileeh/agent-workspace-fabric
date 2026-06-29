@@ -304,6 +304,7 @@ async def run_validation_and_fix_cycle(
             target_branch=expected_branch,
             target_head_sha=None,
             tier=validation_tier,
+            worktree_path=worktree_path,
         )
         if not pre_validation_check.clean:
             reason_code = pre_validation_check.reason_code or VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
@@ -355,6 +356,7 @@ async def run_validation_and_fix_cycle(
                     profile=profile,
                     validation_tier=validation_tier,
                     workspace_head_sha=validation_workspace_head_sha,
+                    worktree_path=worktree_path,
                 )
                 val_result = replace(val_result, coverage=coverage_evidence.coverage)
         except ComposeExecCleanupError as exc:
