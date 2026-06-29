@@ -480,26 +480,33 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
         else _registered_mirror_path_from_metadata(path, mirrors_root)
     )
     if linked_mirror_path is None:
+        managed_registered_mirror_path = _managed_bare_mirror_path(
+            registered_mirror_path, mirrors_root
+        )
+        if managed_registered_mirror_path is not None:
+            return managed_registered_mirror_path
         return _managed_bare_mirror_path(
-            registered_mirror_path or mirror_path_for_registered_worktree(path, mirrors_root),
-            mirrors_root,
+            mirror_path_for_registered_worktree(path, mirrors_root), mirrors_root
         )
     try:
-        registered_mirror_path = registered_mirror_path or mirror_path_for_registered_worktree(
-            path, mirrors_root
+        managed_registered_mirror_path = _managed_bare_mirror_path(
+            registered_mirror_path, mirrors_root
         )
+        if managed_registered_mirror_path is None:
+            managed_registered_mirror_path = _managed_bare_mirror_path(
+                mirror_path_for_registered_worktree(path, mirrors_root), mirrors_root
+            )
     except GitOperationError:
         if linked_registry_matches:
             return linked_mirror_path
         raise
-    registered_mirror_path = _managed_bare_mirror_path(registered_mirror_path, mirrors_root)
-    if registered_mirror_path is None:
+    if managed_registered_mirror_path is None:
         return linked_mirror_path
-    if linked_mirror_path == registered_mirror_path:
+    if linked_mirror_path == managed_registered_mirror_path:
         return linked_mirror_path
     if linked_registry_matches:
         return linked_mirror_path
-    return registered_mirror_path
+    return managed_registered_mirror_path
 
 
 def _registered_mirror_path_from_metadata(worktree_path: Path, mirrors_root: Path) -> Path | None:

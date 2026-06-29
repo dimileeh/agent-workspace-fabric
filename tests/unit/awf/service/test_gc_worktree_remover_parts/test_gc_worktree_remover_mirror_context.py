@@ -330,6 +330,32 @@ def test_git_context_mirror_path_fails_closed_when_bare_probe_fails(
 
 
 @pytest.mark.unit
+def test_git_context_mirror_path_uses_registry_fallback_when_metadata_match_is_not_bare(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    valid_mirror = work_dir / "git" / "mirrors" / "valid.git"
+    non_bare_mirror = work_dir / "git" / "mirrors" / "non-bare"
+    valid_git_dir = valid_mirror / "worktrees" / workspace_id
+    non_bare_git_dir = non_bare_mirror / "worktrees" / workspace_id
+    _make_synthetic_mirror_link(
+        mirror=valid_mirror,
+        worktree=worktree_path,
+        include_worktree_gitfile=False,
+    )
+    non_bare_git_dir.mkdir(parents=True)
+    (non_bare_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
+    os.utime(valid_git_dir, ns=(1, 1))
+    os.utime(non_bare_git_dir, ns=(2, 2))
+
+    assert git_context_mirror_path_for_worktree(worktree_path, work_dir=work_dir) == (
+        valid_mirror.resolve()
+    )
+
+
+@pytest.mark.unit
 async def test_remove_orphan_worktree_uses_managed_linked_mirror_without_registry(
     tmp_path: Path,
 ) -> None:
