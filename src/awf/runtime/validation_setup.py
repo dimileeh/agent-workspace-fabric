@@ -449,9 +449,11 @@ def _split_dependency_install_chain(
     command: ProfileExecutionCommand,
     browser_install_package_manager: str | None,
 ) -> tuple[ProfileExecutionCommand, ProfileExecutionCommand] | None:
-    for separator_index in _unquoted_and_separator_indices(command.command.command):
+    for separator_index, separator in _unquoted_install_chain_separator_spans(
+        command.command.command
+    ):
         install_command = command.command.command[:separator_index].strip()
-        trailing_command = command.command.command[separator_index + 2 :].strip()
+        trailing_command = command.command.command[separator_index + len(separator) :].strip()
         if not install_command or not trailing_command:
             continue
         command_package_manager = _node_dependency_install_package_manager(install_command)
@@ -483,9 +485,11 @@ def _dependency_install_chain_trailing_scope_prefix(
     install_command: str,
     browser_install_package_manager: str | None,
 ) -> str | None:
-    for separator_index in reversed(_unquoted_and_separator_indices(install_command)):
+    for separator_index, separator in reversed(
+        _unquoted_install_chain_separator_spans(install_command)
+    ):
         scope_prefix = install_command[:separator_index].strip()
-        scoped_install_command = install_command[separator_index + 2 :].strip()
+        scoped_install_command = install_command[separator_index + len(separator) :].strip()
         if not _command_starts_with_cd_scope(scope_prefix) or not scoped_install_command:
             continue
         command_package_manager = _node_dependency_install_package_manager(scoped_install_command)
@@ -512,12 +516,20 @@ def _first_unquoted_and_separator(command: str) -> int | None:
 
 
 def _unquoted_and_separator_indices(command: str) -> list[int]:
-    separator_indices: list[int] = []
+    return [
+        index
+        for index, separator in _unquoted_install_chain_separator_spans(command)
+        if separator == "&&"
+    ]
+
+
+def _unquoted_install_chain_separator_spans(command: str) -> list[tuple[int, str]]:
+    separator_indices: list[tuple[int, str]] = []
     in_single_quote = False
     in_double_quote = False
     escaped = False
     index = 0
-    while index < len(command) - 1:
+    while index < len(command):
         char = command[index]
         if escaped:
             escaped = False
@@ -542,9 +554,11 @@ def _unquoted_and_separator_indices(command: str) -> list[int]:
         elif char == '"':
             in_double_quote = True
         elif command[index : index + 2] == "&&":
-            separator_indices.append(index)
+            separator_indices.append((index, "&&"))
             index += 2
             continue
+        elif char == ";":
+            separator_indices.append((index, ";"))
         index += 1
     return separator_indices
 
