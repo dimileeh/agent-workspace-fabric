@@ -181,6 +181,39 @@ class TestProbeRuntimeBrowsers:
         assert spy.calls[0][2].startswith('uv run python - "$@" <<')
         assert spy.calls[0][-1] == "chromium"
 
+    async def test_uv_sync_group_playwright_profile_runs_probe_through_uv_python(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        (workspace_root / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "browser-profile"',
+                    'version = "0.1.0"',
+                    "[dependency-groups]",
+                    'e2e = ["playwright"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        profile = _profile_with_setup_and_browsers(["uv sync --group e2e"])
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
+
+        findings = await probe_runtime_browsers(
+            profile=profile,
+            exec_in_container=spy,
+            workspace_root=workspace_root,
+        )
+
+        assert findings == ()
+        assert len(spy.calls) == 1
+        assert spy.calls[0][2].startswith('uv run --group e2e python - "$@" <<')
+        assert spy.calls[0][-1] == "chromium"
+
     async def test_scoped_uv_python_playwright_probe_uses_uv_python(self) -> None:
         profile = _profile_with_setup_and_browsers(["cd apps/web && uv add playwright"])
         spy = _SpyExec([ProbeExecResult(returncode=0, stdout="OK chromium\n", stderr="")])
@@ -414,7 +447,7 @@ class TestProbeRuntimeBrowsers:
 
         probe_command = _browser_probe_command(profile, workspace_root=workspace_root)
         assert "from playwright.sync_api import sync_playwright" in probe_command
-        assert probe_command.startswith('uv run --project apps/web python - "$@" <<')
+        assert probe_command.startswith('uv run --project apps/web --group e2e python - "$@" <<')
         assert not probe_command.startswith("pnpm")
         assert browser_probe_workdir(profile, workspace_root=workspace_root) == "/workspace"
 

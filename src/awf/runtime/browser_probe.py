@@ -16,6 +16,8 @@ from awf.profiles.models import (
     runtime_browser_findings,
 )
 from awf.runtime.node_playwright_setup import (
+    _UV_SYNC_RUN_SELECTOR_VALUE_FLAGS,
+    _UV_SYNC_RUN_SELECTOR_VALUELESS_FLAGS,
     _node_package_manager_package_dir,
     _playwright_browser_install_node_package_manager,
     _python_playwright_executable,
@@ -25,8 +27,12 @@ from awf.runtime.validation_setup import (
 )
 
 _BROWSER_PROBE_PM_LOCATION_OPTION_VALUE_FLAGS = frozenset({"--cwd", "--dir", "--prefix", "-C"})
-_BROWSER_PROBE_UV_RUN_OPTION_VALUE_FLAGS = frozenset({"--project", "--directory", "--package"})
-_BROWSER_PROBE_UV_RUN_VALUELESS_FLAGS = frozenset({"--no-project"})
+_BROWSER_PROBE_UV_RUN_OPTION_VALUE_FLAGS = frozenset(
+    {"--project", "--directory", "--package"} | _UV_SYNC_RUN_SELECTOR_VALUE_FLAGS
+)
+_BROWSER_PROBE_UV_RUN_VALUELESS_FLAGS = frozenset(
+    {"--no-project"} | _UV_SYNC_RUN_SELECTOR_VALUELESS_FLAGS
+)
 
 
 @dataclass(frozen=True)
