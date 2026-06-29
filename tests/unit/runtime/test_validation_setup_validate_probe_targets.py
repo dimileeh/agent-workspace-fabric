@@ -1724,6 +1724,36 @@ class TestPlaywrightBrowserInstallCommand:
         assert command is not None
         assert command.command == "cd apps/web && python -m playwright install chromium"
 
+    def test_validate_python_editable_requirement_file_uses_python_playwright(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        (workspace_root / "requirements.txt").write_text("-e .[e2e]\n", encoding="utf-8")
+        (workspace_root / "pyproject.toml").write_text(
+            "\n".join(
+                [
+                    "[project]",
+                    'name = "browser-profile"',
+                    'version = "0.1.0"',
+                    "[project.optional-dependencies]",
+                    'e2e = ["pytest-playwright"]',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["python -m pip install -r requirements.txt"],
+        )
+
+        command = playwright_browser_install_command(profile, workspace_root=workspace_root)
+
+        assert command is not None
+        assert command.command == "python -m playwright install chromium"
+
     def test_validate_python_browser_install_splits_direct_install_and_test_chain(self) -> None:
         profile = _profile_with_setup_validate_and_browsers(
             setup=[],

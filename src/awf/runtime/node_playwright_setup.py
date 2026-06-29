@@ -1303,15 +1303,20 @@ def _python_requirement_line_includes_playwright(
     if _python_requirement_token_includes_playwright(tokens[0]):
         return True
     nested_requirement_file, _ = _pip_requirement_file_argument(tokens, 0)
-    if nested_requirement_file is None:
-        return False
-    nested_path = Path(nested_requirement_file)
-    if not nested_path.is_absolute():
-        nested_path = parent / nested_path
-    return _python_requirement_file_includes_playwright(
-        str(nested_path),
-        seen_requirement_files,
+    if nested_requirement_file is not None:
+        nested_path = Path(nested_requirement_file)
+        if not nested_path.is_absolute():
+            nested_path = parent / nested_path
+        return _python_requirement_file_includes_playwright(
+            str(nested_path),
+            seen_requirement_files,
+            workspace_root=workspace_root,
+        )
+    local_project, _ = _pip_local_project_argument(tokens, 0)
+    return local_project is not None and _python_local_project_includes_playwright(
+        local_project,
         workspace_root=workspace_root,
+        requirement_base_dir=parent,
     )
 
 
