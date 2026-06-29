@@ -674,10 +674,13 @@ def sync_playwright():
         [
             ("npm", "node"),
             ("pnpm", "node"),
+            ("bun", "bun"),
+            ("bunx", "bun"),
             ("yarn", "yarn node"),
             ("pnpm -C apps/web", "node"),
             ("pnpm -Capps/web", "node"),
             ("pnpm --dir apps/web", "node"),
+            ("bun --cwd apps/web", "bun"),
             ("npm --prefix apps/web", "node"),
             ("pnpm --filter @repo/web", "pnpm --filter @repo/web exec node"),
             ("pnpm -F @repo/web", "pnpm -F @repo/web exec node"),

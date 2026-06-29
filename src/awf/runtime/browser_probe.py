@@ -207,6 +207,8 @@ def _browser_probe_node_runtime(package_manager: str) -> str:
         return "node"
     package_manager_tokens = _browser_probe_without_directory_scope(package_manager_tokens)
     executable = package_manager_tokens[0] if package_manager_tokens else "npm"
+    if executable in {"bun", "bunx"}:
+        return "bun"
     if executable == "yarn":
         return shlex.join([*package_manager_tokens, "node"])
     if executable == "pnpm" and len(package_manager_tokens) > 1:
