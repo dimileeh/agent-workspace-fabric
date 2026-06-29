@@ -116,13 +116,24 @@ def playwright_browser_install_command(
     """Return the generated setup command for declared Playwright browsers."""
     if not profile.runtime.browsers:
         return None
-    uses_python_playwright = _uses_python_playwright(profile, workspace_root=workspace_root)
+    python_playwright_executable = _python_playwright_executable(
+        profile,
+        workspace_root=workspace_root,
+    )
     package_manager = _playwright_browser_install_node_package_manager(
         profile,
         workspace_root=workspace_root,
     )
-    if package_manager is None and uses_python_playwright:
-        command = shlex.join(["python", "-m", "playwright", "install", *profile.runtime.browsers])
+    if package_manager is None and python_playwright_executable is not None:
+        command = shlex.join(
+            [
+                python_playwright_executable,
+                "-m",
+                "playwright",
+                "install",
+                *profile.runtime.browsers,
+            ]
+        )
     elif package_manager is not None:
         command = playwright_command(package_manager, "install", *profile.runtime.browsers)
     else:
@@ -225,6 +236,27 @@ def _uses_python_playwright(
     )
 
 
+def _python_playwright_executable(
+    profile: WorkspaceProfile,
+    *,
+    workspace_root: Path | None = None,
+) -> str | None:
+    for command in (
+        *profile.phases.setup,
+        *profile.database.generated_setup,
+        *profile.phases.pre_agent,
+        *profile.phases.post_agent,
+        *profile.phases.validate_commands,
+    ):
+        executable = _command_python_playwright_executable(
+            command.command,
+            workspace_root=workspace_root,
+        )
+        if executable is not None:
+            return executable
+    return None
+
+
 def _uses_node_playwright(profile: WorkspaceProfile) -> bool:
     return any(
         _node_command_uses_playwright(command.command)
@@ -309,6 +341,57 @@ def _command_segment_installs_python_playwright(
                 workspace_root=workspace_root,
             )
     return False
+
+
+def _command_python_playwright_executable(
+    command: str,
+    *,
+    workspace_root: Path | None = None,
+) -> str | None:
+    tokens = _shell_tokens(command, comments=True)
+    if tokens is None:
+        return None
+    index = _first_non_assignment_token_index(tokens)
+    while index < len(tokens):
+        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+            index += 1
+        if index >= len(tokens):
+            return None
+        executable = _command_segment_python_playwright_executable(
+            tokens,
+            index,
+            workspace_root=workspace_root,
+        )
+        if executable is not None:
+            return executable
+        next_command_index = _sequential_command_next_index(tokens, index)
+        if next_command_index is None:
+            return None
+        index = next_command_index
+    return None
+
+
+def _command_segment_python_playwright_executable(
+    tokens: list[str],
+    index: int,
+    *,
+    workspace_root: Path | None = None,
+) -> str | None:
+    executable = tokens[index]
+    if executable in _PYTHON_EXECUTABLES and tokens[index + 1 : index + 3] == [
+        "-m",
+        "playwright",
+    ]:
+        return executable
+    if _command_segment_installs_python_playwright(
+        tokens,
+        index,
+        workspace_root=workspace_root,
+    ):
+        if executable in {"python3", "pip3"}:
+            return "python3"
+        return "python"
+    return None
 
 
 def _pip_segment_installs_playwright(
