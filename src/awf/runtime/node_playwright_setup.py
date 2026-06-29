@@ -336,7 +336,37 @@ def _playwright_browser_install_node_package_manager(
         profile, workspace_root=workspace_root
     ) and not _uses_node_playwright(profile):
         return None
+    pre_validate_package_manager = _pre_validate_node_playwright_package_manager(profile)
+    if pre_validate_package_manager is not None:
+        return pre_validate_package_manager
     return _infer_node_package_manager(profile)
+
+
+def _pre_validate_node_playwright_package_manager(profile: WorkspaceProfile) -> str | None:
+    commands = _requested_pre_validate_node_dependency_install_commands(
+        profile,
+        {"setup", "pre_agent"},
+    )
+    if not any(_node_command_uses_playwright(command.command) for command in commands):
+        return None
+    for command in commands:
+        package_manager = _node_scoped_playwright_validation_package_manager(command.command)
+        if package_manager is not None:
+            return package_manager
+    for command in commands:
+        package_manager = _node_scoped_browser_script_validation_package_manager(command.command)
+        if package_manager is not None:
+            return package_manager
+    for command in commands:
+        if _node_command_uses_playwright(command.command):
+            package_manager = _node_validation_package_manager(command.command)
+            if package_manager is not None:
+                return package_manager
+    for command in commands:
+        package_manager = _node_dependency_install_package_manager(command.command)
+        if package_manager is not None:
+            return package_manager
+    return None
 
 
 def _command_installs_python_playwright(

@@ -225,6 +225,31 @@ class TestBrowserPhaseCommandPlan:
         assert commands[2].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_uses_pre_agent_playwright_manager_before_later_scoped_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-pre-agent-playwright-later-scoped-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["pnpm install"],
+                    "pre_agent": ["pnpm exec playwright test"],
+                    "post_agent": ["pnpm -C docs install"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup", "pre_agent"))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("pre_agent", "pnpm exec playwright test"),
+        ]
+        assert commands[1].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_uses_python_setup_install_before_pre_agent_browser_use(
         self,
     ) -> None:
