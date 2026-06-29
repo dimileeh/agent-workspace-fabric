@@ -1354,6 +1354,16 @@ class TestPlaywrightBrowserInstallCommand:
                 "uv run --project apps/web -m playwright install chromium",
             ),
             (
+                "uv sync --project /workspace/apps/web --group e2e",
+                "apps/web",
+                "uv run --project /workspace/apps/web -m playwright install chromium",
+            ),
+            (
+                "uv sync --project=/workspace/apps/web --extra=e2e",
+                "apps/web",
+                "uv run --project /workspace/apps/web -m playwright install chromium",
+            ),
+            (
                 "uv sync --directory apps/web --group e2e",
                 "apps/web",
                 "uv run --directory apps/web -m playwright install chromium",
@@ -1362,6 +1372,16 @@ class TestPlaywrightBrowserInstallCommand:
                 "uv sync --directory=apps/web --extra=e2e",
                 "apps/web",
                 "uv run --directory apps/web -m playwright install chromium",
+            ),
+            (
+                "uv sync --directory /workspace/apps/web --group e2e",
+                "apps/web",
+                "uv run --directory /workspace/apps/web -m playwright install chromium",
+            ),
+            (
+                "uv sync --directory=/workspace/apps/web --extra=e2e",
+                "apps/web",
+                "uv run --directory /workspace/apps/web -m playwright install chromium",
             ),
         ],
     )

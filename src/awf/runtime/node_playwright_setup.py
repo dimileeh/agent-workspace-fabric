@@ -862,6 +862,9 @@ def _uv_sync_scope_base_dir(
         )
     scope_path = Path(scope_value)
     if scope_path.is_absolute():
+        if workspace_root is not None:
+            with suppress(ValueError):
+                return workspace_root.resolve() / scope_path.relative_to(_CONTAINER_WORKSPACE_ROOT)
         return scope_path
     return (requirement_base_dir or workspace_root or Path.cwd()) / scope_path
 
