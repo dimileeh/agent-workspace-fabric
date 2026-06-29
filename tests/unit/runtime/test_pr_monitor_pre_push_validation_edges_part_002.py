@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.control.executor.constants import RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.repositories import WorkspaceRepository
@@ -22,7 +23,7 @@ from awf.profiles.models import (
 )
 from awf.runtime.pr_monitor_runner import pre_push_validation
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
-from awf.runtime.validation_types import ValidationResult
+from awf.runtime.validation_types import ValidationCoverageResult, ValidationResult
 from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -37,6 +38,7 @@ from tests.unit.runtime._pre_push_validation_helpers import (
     _mark_git_worktree,
     _set_resolved_profile,
     _validation_result,
+    _validation_runs,
 )
 
 
@@ -251,6 +253,187 @@ async def test_pre_push_validation_skips_deferred_browser_probe_on_infra_failure
             if event.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
         ]
     assert browser_events == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("coverage_error", "expected_run_reason"),
+    [
+        (
+            ComposeExecCleanupError(
+                invocation_id="awf_pre_push_coverage_cleanup",
+                source="validation",
+                label="coverage",
+                message="coverage process still running",
+            ),
+            EXEC_PROCESS_CLEANUP_FAILED,
+        ),
+        (
+            RuntimeError("coverage provider crashed"),
+            "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED",
+        ),
+    ],
+)
+async def test_pre_push_validation_records_deferred_browser_findings_after_coverage_exception(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    coverage_error: Exception,
+    expected_run_reason: str,
+) -> None:
+    """Coverage infrastructure failures must not drop completed browser probe warnings."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "browser-pre-push-profile",
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["node scripts/generate-config.js"],
+                "validate": ["pnpm install --frozen-lockfile", "pnpm test:e2e"],
+            },
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99.0,
+                    "command": "coverage run -m pytest && coverage report",
+                },
+                "strategy": {"final_gate": "coverage"},
+            },
+        }
+    )
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.resolved_profile = profile.model_dump(mode="json", by_alias=True)
+        await session.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "d" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    order: list[str] = []
+
+    async def _cleanup(
+        _self: object,
+        *,
+        worktree_path: Path,
+        restore_ref: str,
+    ) -> ValidationWorktreeCleanup:
+        del _self, worktree_path
+        order.append("cleanup")
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=restore_ref,
+        )
+
+    class _CoverageExceptionBrowserValidation(_FakeValidation):
+        def __init__(self, exc: Exception) -> None:
+            super().__init__(
+                ValidationResult(
+                    commands=[
+                        _command_result(
+                            tmp_path,
+                            ok=True,
+                            command="pnpm install --frozen-lockfile",
+                            artifact_name="pnpm_install",
+                        ),
+                        _command_result(
+                            tmp_path,
+                            ok=True,
+                            command="pnpm exec playwright install chromium",
+                            artifact_name="playwright_install",
+                        ),
+                        _command_result(
+                            tmp_path,
+                            ok=True,
+                            command="pnpm test:e2e",
+                            artifact_name="pnpm_test_e2e",
+                        ),
+                    ]
+                )
+            )
+            self.exc = exc
+            self.probe_calls: list[dict[str, object]] = []
+
+        async def run_profile_coverage(self, **kwargs: object) -> ValidationCoverageResult | None:
+            self.coverage_calls.append(dict(kwargs))
+            raise self.exc
+
+        async def probe_runtime_browser_findings(
+            self, **kwargs: object
+        ) -> tuple[ProfileLintFinding, ...]:
+            order.append("browser_probe")
+            self.probe_calls.append(dict(kwargs))
+            return (
+                ProfileLintFinding(
+                    reason_code=RUNTIME_BROWSER_UNAVAILABLE,
+                    message="runtime does not provide Playwright browser chromium",
+                    path="runtime.browsers",
+                    severity=ProfileLintSeverity.warning,
+                    details={"browser": "chromium", "available_browsers": ["firefox"]},
+                ),
+            )
+
+    validation = _CoverageExceptionBrowserValidation(coverage_error)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    monkeypatch.setattr(pre_push_validation, "_pre_push_validation_cleanup", _cleanup)
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED"
+    assert validation.coverage_calls == [
+        {
+            "workspace_id": workspace_id,
+            "compose_project": "proj",
+            "compose_file": tmp_path / "compose.yml",
+            "profile": profile,
+            "phase": "coverage",
+        }
+    ]
+    assert validation.probe_calls == [
+        {
+            "workspace_id": workspace_id,
+            "compose_project": "proj",
+            "compose_file": tmp_path / "compose.yml",
+            "profile": profile,
+            "worktree_path": worktree,
+        }
+    ]
+    assert order == ["browser_probe", "cleanup"]
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        browser_events = [
+            event
+            for event in ws.events
+            if event.event_type == RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
+        ]
+    assert len(browser_events) == 1
+    assert browser_events[0].reason_code == RUNTIME_BROWSER_UNAVAILABLE
+    assert browser_events[0].payload == {
+        "browser": "chromium",
+        "available_browsers": ["firefox"],
+        "path": "runtime.browsers",
+        "message": "runtime does not provide Playwright browser chromium",
+    }
+    runs = await _validation_runs(factory, workspace_id)
+    assert runs[-1].status == "failed"
+    assert runs[-1].reason_code == expected_run_reason
 
 
 @pytest.mark.unit

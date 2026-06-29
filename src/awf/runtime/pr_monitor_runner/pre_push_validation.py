@@ -265,6 +265,21 @@ async def _record_deferred_runtime_browser_findings_safe(
         )
 
 
+async def _record_deferred_runtime_browser_findings_if_install_completed(
+    self: Any, **kwargs: Any
+) -> None:
+    """Record deferred browser findings when completed validation proves install ran."""
+    result = cast("ValidationResult | None", kwargs.pop("result"))
+    if result is None:
+        return
+    worktree_path = cast("Path", kwargs["worktree_path"])
+    if not _deferred_runtime_browser_install_completed(
+        kwargs["profile"], worktree_path=worktree_path, result=result
+    ):
+        return
+    await _record_deferred_runtime_browser_findings_safe(self, **kwargs)
+
+
 async def _record_deferred_runtime_browser_findings(
     self: Any,
     *,
@@ -1145,6 +1160,14 @@ async def _run_pre_push_validation(
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
             message="workspace has no task attempt before PR monitor pre-push validation",
         )
+    runtime_browser_probe_kwargs = {
+        "workspace_id": workspace_id,
+        "compose_project": compose_project,
+        "compose_file": compose_file,
+        "profile": profile,
+        "worktree_path": worktree_path,
+    }
+    result: ValidationResult | None = None
     coverage_result: ValidationCoverageResult | None = None
     try:
         assert self._deps.validation is not None
@@ -1185,6 +1208,11 @@ async def _run_pre_push_validation(
             compose_exec_label=exc.label,
             compose_exec_invocation_id=exc.invocation_id,
             compose_exec_message=message,
+        )
+        await _record_deferred_runtime_browser_findings_if_install_completed(
+            self,
+            **runtime_browser_probe_kwargs,
+            result=result,
         )
         cleanup_result = await _pre_push_validation_cleanup(
             self,
@@ -1245,6 +1273,11 @@ async def _run_pre_push_validation(
             error_type=exc.__class__.__name__,
             error_message=message,
         )
+        await _record_deferred_runtime_browser_findings_if_install_completed(
+            self,
+            **runtime_browser_probe_kwargs,
+            result=result,
+        )
         cleanup_result = await _pre_push_validation_cleanup(
             self,
             worktree_path=worktree_path,
@@ -1293,19 +1326,12 @@ async def _run_pre_push_validation(
             message=message,
         )
 
-    if _deferred_runtime_browser_install_completed(
-        profile,
-        worktree_path=worktree_path,
+    await _record_deferred_runtime_browser_findings_if_install_completed(
+        self,
+        **runtime_browser_probe_kwargs,
         result=result,
-    ):
-        await _record_deferred_runtime_browser_findings_safe(
-            self,
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-            worktree_path=worktree_path,
-        )
+    )
+    assert result is not None
     cleanup_result = await _pre_push_validation_cleanup(
         self,
         worktree_path=worktree_path,
