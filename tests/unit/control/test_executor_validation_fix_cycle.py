@@ -412,11 +412,13 @@ class _DeferredBrowserValidationRunner:
         artifacts_dir: Path,
         install_completed: bool,
         browser_install_returncode: int = 0,
+        failed_command: str = "python -m pip install playwright",
     ) -> None:
         """Capture artifacts and probe calls for the deferred-browser regression."""
         self._artifacts_dir = artifacts_dir
         self._install_completed = install_completed
         self._browser_install_returncode = browser_install_returncode
+        self._failed_command = failed_command
         self.probe_calls: list[dict[str, object]] = []
 
     async def run_profile_coverage(self, **_kwargs: object) -> None:
@@ -448,7 +450,11 @@ class _DeferredBrowserValidationRunner:
         )
         commands = [
             ValidationCommandResult(
-                command="python -m pip install playwright",
+                command=(
+                    "python -m pip install playwright"
+                    if self._install_completed
+                    else self._failed_command
+                ),
                 returncode=0 if self._install_completed else 1,
                 duration_seconds=0.1,
                 stdout_path=stdout,
@@ -810,6 +816,72 @@ class TestDeferredRuntimeBrowserProbe:
                     ],
                 },
             },
+        )
+        _queue_initial_pass(fake)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "validation_failure"
+
+        assert validation.probe_calls == []
+
+    @pytest.mark.unit
+    async def test_duplicate_command_before_deferred_install_does_not_probe_browsers(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A repeated command before install should not inherit the later position."""
+        validation = _DeferredBrowserValidationRunner(
+            artifacts_dir=tmp_path / "artifacts",
+            install_completed=False,
+            failed_command="pytest --browser chromium",
+        )
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=0,
+            validation=validation,
+        )
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "deferred-browser-profile",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "post_agent": [],
+                    "validate": [
+                        "pytest --browser chromium",
+                        "python -m pip install playwright",
+                        "pytest --browser chromium",
+                    ],
+                },
+            },
+        )
+        monkeypatch.setattr(
+            execution_validation_mod,
+            "profile_phase_command_plan",
+            lambda *_args, **_kwargs: [
+                SimpleNamespace(
+                    phase="validate",
+                    command=SimpleNamespace(command="pytest --browser chromium"),
+                ),
+                SimpleNamespace(
+                    phase="setup",
+                    command=SimpleNamespace(command="python -m playwright install chromium"),
+                ),
+                SimpleNamespace(
+                    phase="validate",
+                    command=SimpleNamespace(command="pytest --browser chromium"),
+                ),
+            ],
         )
         _queue_initial_pass(fake)
 

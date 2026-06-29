@@ -234,9 +234,6 @@ async def run_validation_and_fix_cycle(
     validation_runtime_browser_install_commands = tuple(
         validation_commands[index] for index in validation_runtime_browser_install_command_indexes
     )
-    validation_command_indexes = {
-        command: index for index, command in enumerate(validation_commands)
-    }
 
     def _validation_runtime_browser_install_completed(
         val_result: ValidationResult,
@@ -252,8 +249,14 @@ async def run_validation_and_fix_cycle(
                 if not pending:
                     return True
         last_install_index = max(validation_runtime_browser_install_command_indexes)
+        next_command_index = 0
         for command_result in val_result.commands:
-            command_index = validation_command_indexes.get(command_result.command)
+            command_index = None
+            for candidate_index in range(next_command_index, len(validation_commands)):
+                if validation_commands[candidate_index] == command_result.command:
+                    command_index = candidate_index
+                    next_command_index = candidate_index + 1
+                    break
             if (
                 command_index is not None
                 and command_index > last_install_index
