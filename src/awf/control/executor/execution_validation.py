@@ -277,6 +277,7 @@ async def run_validation_and_fix_cycle(
         # This loop covers the initial validation plus any validation or
         # post-validation conformance fix prompts. The per-category
         # counters below enforce their separate budgets.
+        deferred_runtime_browser_findings_recorded = False
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.validating,

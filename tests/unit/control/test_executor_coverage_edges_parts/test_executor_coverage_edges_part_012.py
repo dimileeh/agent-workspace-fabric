@@ -609,7 +609,7 @@ async def test_validation_records_deferred_browser_findings_before_fix_pass(
 
 
 @pytest.mark.unit
-async def test_validation_records_deferred_browser_findings_once_across_retry_passes(
+async def test_validation_reprobes_deferred_browser_findings_after_fix_pass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -774,7 +774,14 @@ async def test_validation_records_deferred_browser_findings_once_across_retry_pa
             "compose_file": tmp_path / "compose.yml",
             "profile": profile,
             "worktree_path": tmp_path / "worktree",
-        }
+        },
+        {
+            "workspace_id": workspace.id,
+            "compose_project": f"awf_{workspace.id}",
+            "compose_file": tmp_path / "compose.yml",
+            "profile": profile,
+            "worktree_path": tmp_path / "worktree",
+        },
     ]
 
 
