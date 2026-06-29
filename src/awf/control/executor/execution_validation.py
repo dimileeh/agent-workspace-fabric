@@ -474,6 +474,7 @@ async def run_validation_and_fix_cycle(
             worktree_path=worktree_path,
             restore_ref=validation_workspace_head_sha,
         )
+        await _record_deferred_runtime_browser_findings()
         if not cleanup_result.ok:
             callback_ignored = await self._finish_validation_callback_if_terminal(
                 workspace_id=workspace_id,
@@ -543,7 +544,6 @@ async def run_validation_and_fix_cycle(
             coverage_evidence_reason_code=coverage_evidence.reason_code,
             coverage_evidence_source_run_id=coverage_evidence.source_run_id,
         )
-        await _record_deferred_runtime_browser_findings()
         if val_result.all_passed:
             conformance_failure: _PlanningRunFailure | None = None
             if planning_validation_handoff is not None:
