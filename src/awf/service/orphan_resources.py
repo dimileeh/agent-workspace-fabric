@@ -854,8 +854,13 @@ async def reap_classified_orphans(
             _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
             continue
         try:
-            use_git_aware_remover = worktree_path.exists() and not is_existing_non_git_worktree(
+            worktree_exists = worktree_path.exists()
+            has_linked_git_file = worktree_exists and (worktree_path / ".git").is_file()
+            is_non_git_worktree = worktree_exists and is_existing_non_git_worktree(
                 worktree_path, work_dir=resolved_work_dir
+            )
+            use_git_aware_remover = worktree_exists and (
+                has_linked_git_file or not is_non_git_worktree
             )
         except GitOperationError as exc:
             outcome = OrphanReapOutcome(
