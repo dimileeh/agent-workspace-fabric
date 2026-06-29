@@ -556,6 +556,7 @@ def _registered_mirror_path_from_metadata(worktree_path: Path, mirrors_root: Pat
             reason_code="MIRROR_REGISTRY_SCAN_FAILED",
         ) from exc
     best_match: tuple[int, Path] | None = None
+    first_metadata_error: GitOperationError | None = None
     for mirror_path in mirror_paths:
         linked_git_dir = mirror_path / "worktrees" / worktree_path.name
         if not linked_git_dir.is_dir():
@@ -565,7 +566,9 @@ def _registered_mirror_path_from_metadata(worktree_path: Path, mirrors_root: Pat
         except GitOperationError as exc:
             if exc.stderr.startswith("cannot read linked-worktree gitdir back-reference at "):
                 continue
-            raise
+            if first_metadata_error is None:
+                first_metadata_error = exc
+            continue
         if registered_worktree == resolved_worktree:
             try:
                 registered_mtime_ns = linked_git_dir.stat().st_mtime_ns
@@ -574,6 +577,8 @@ def _registered_mirror_path_from_metadata(worktree_path: Path, mirrors_root: Pat
             if best_match is None or registered_mtime_ns >= best_match[0]:
                 best_match = (registered_mtime_ns, mirror_path)
     if best_match is None:
+        if first_metadata_error is not None:
+            raise first_metadata_error
         return None
     return best_match[1]
 

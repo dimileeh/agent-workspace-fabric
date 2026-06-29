@@ -275,6 +275,41 @@ async def test_remove_orphan_worktree_ignores_malformed_duplicate_registry_for_l
 
 
 @pytest.mark.unit
+async def test_remove_orphan_worktree_ignores_malformed_duplicate_registry_before_valid_match(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    malformed_mirror = work_dir / "git" / "mirrors" / "a-malformed.git"
+    valid_mirror = work_dir / "git" / "mirrors" / "z-valid.git"
+    malformed_git_dir = malformed_mirror / "worktrees" / workspace_id
+    _make_synthetic_mirror_link(
+        mirror=valid_mirror,
+        worktree=worktree_path,
+        include_worktree_gitfile=False,
+    )
+    malformed_git_dir.mkdir(parents=True)
+    (malformed_git_dir / "gitdir").write_text("", encoding="utf-8")
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    mock_gm.remove_worktree_from_mirror.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        mirror_path=valid_mirror.resolve(),
+    )
+
+
+@pytest.mark.unit
 def test_git_context_mirror_path_fails_closed_when_registry_fails_before_linked_validation(
     tmp_path: Path,
 ) -> None:
