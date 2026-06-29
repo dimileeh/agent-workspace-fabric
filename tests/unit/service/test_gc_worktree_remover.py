@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -942,6 +943,42 @@ async def test_remove_orphan_worktree_uses_resolved_linked_mirror(
     mock_gm.remove_worktree_from_mirror.assert_awaited_once_with(
         workspace_id=workspace_id,
         mirror_path=mirror_path,
+    )
+
+
+@pytest.mark.unit
+async def test_remove_orphan_worktree_prefers_valid_linked_mirror_over_duplicate_registry(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    linked_mirror = work_dir / "git" / "mirrors" / "linked.git"
+    duplicate_mirror = work_dir / "git" / "mirrors" / "duplicate.git"
+    linked_git_dir = linked_mirror / "worktrees" / workspace_id
+    duplicate_git_dir = duplicate_mirror / "worktrees" / workspace_id
+    linked_git_dir.mkdir(parents=True)
+    duplicate_git_dir.mkdir(parents=True)
+    _write(worktree_path / ".git", f"gitdir: {linked_git_dir}\n")
+    for git_dir in (linked_git_dir, duplicate_git_dir):
+        (git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
+    os.utime(linked_git_dir, ns=(1, 1))
+    os.utime(duplicate_git_dir, ns=(2, 2))
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    mock_gm.remove_worktree_from_mirror.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        mirror_path=linked_mirror.resolve(),
     )
 
 

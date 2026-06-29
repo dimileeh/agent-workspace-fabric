@@ -412,7 +412,25 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
         return linked_mirror_path
     if linked_mirror_path == registered_mirror_path:
         return linked_mirror_path
+    if _mirror_registry_points_to_worktree(linked_mirror_path, path):
+        return linked_mirror_path
     return registered_mirror_path
+
+
+def _mirror_registry_points_to_worktree(mirror_path: Path, worktree_path: Path) -> bool:
+    from awf.node.git_manager import GitOperationError, _linked_worktree_path_from_git_dir
+
+    try:
+        resolved_worktree = worktree_path.resolve()
+    except RuntimeError:
+        resolved_worktree = worktree_path.absolute()
+    linked_git_dir = mirror_path / "worktrees" / worktree_path.name
+    if not linked_git_dir.is_dir():
+        return False
+    try:
+        return _linked_worktree_path_from_git_dir(linked_git_dir) == resolved_worktree
+    except GitOperationError:
+        return False
 
 
 def _managed_mirror_path(path: Path | None, mirrors_root: Path) -> Path | None:
