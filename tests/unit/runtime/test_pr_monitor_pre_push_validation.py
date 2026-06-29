@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import REDACTION_MARKER
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.control.executor.constants import RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE
@@ -215,10 +216,16 @@ async def test_pre_push_validation_records_deferred_browser_findings_after_valid
             return (
                 ProfileLintFinding(
                     reason_code=RUNTIME_BROWSER_UNAVAILABLE,
-                    message="runtime does not provide Playwright browser chromium",
-                    path="runtime.browsers",
+                    message=(
+                        "runtime does not provide Playwright browser chromium "
+                        "with token=ghp_FAKESECRET0000000"
+                    ),
+                    path="runtime.browsers.Authorization: Bearer ghp_FAKEPATH0000000",
                     severity=ProfileLintSeverity.warning,
-                    details={"browser": "chromium", "available_browsers": []},
+                    details={
+                        "browser": "chromium",
+                        "available_browsers": ["firefox", "ghp_FAKEDETAIL0000000"],
+                    },
                 ),
             )
 
@@ -261,7 +268,15 @@ async def test_pre_push_validation_records_deferred_browser_findings_after_valid
         ]
     assert len(browser_events) == 1
     assert browser_events[0].reason_code == RUNTIME_BROWSER_UNAVAILABLE
-    assert browser_events[0].payload["browser"] == "chromium"
+    assert browser_events[0].payload == {
+        "browser": "chromium",
+        "available_browsers": ["firefox", REDACTION_MARKER],
+        "path": f"runtime.browsers.Authorization: Bearer {REDACTION_MARKER}",
+        "message": (
+            f"runtime does not provide Playwright browser chromium with token={REDACTION_MARKER}"
+        ),
+    }
+    assert "ghp_FAKE" not in str(browser_events[0].payload)
 
 
 @pytest.mark.unit

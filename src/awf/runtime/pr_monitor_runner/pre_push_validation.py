@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
@@ -317,12 +317,17 @@ async def _record_deferred_runtime_browser_findings(
                 workspace,
                 event_type=RUNTIME_BROWSER_UNAVAILABLE_EVENT_TYPE,
                 reason_code=RUNTIME_BROWSER_UNAVAILABLE,
-                payload={
-                    "browser": browser,
-                    "available_browsers": details.get("available_browsers"),
-                    "path": finding.path,
-                    "message": finding.message,
-                },
+                payload=cast(
+                    "dict[str, Any]",
+                    redact_audit_value(
+                        {
+                            "browser": browser,
+                            "available_browsers": details.get("available_browsers"),
+                            "path": finding.path,
+                            "message": finding.message,
+                        }
+                    ),
+                ),
             )
             if browser_key is not None:
                 recorded_browsers.add(browser_key)
