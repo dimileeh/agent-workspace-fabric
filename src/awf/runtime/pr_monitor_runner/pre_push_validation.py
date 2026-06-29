@@ -376,7 +376,7 @@ def _deferred_runtime_browser_install_completed(
     install_command_indexes = tuple(
         index
         for index, step in enumerate(validation_command_plan)
-        if step.phase == "setup" or getattr(step.command, "runtime_browser_install", False)
+        if step.phase == "setup" or getattr(step, "runtime_browser_install", False)
     )
     if not install_command_indexes:
         return False

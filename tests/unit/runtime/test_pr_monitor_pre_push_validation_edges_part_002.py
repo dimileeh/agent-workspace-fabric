@@ -130,10 +130,8 @@ def test_deferred_browser_install_completed_for_validate_runtime_browser_install
         lambda *_args, **_kwargs: [
             SimpleNamespace(
                 phase="validate",
-                command=SimpleNamespace(
-                    command="source .env && pnpm install",
-                    runtime_browser_install=True,
-                ),
+                command=SimpleNamespace(command="source .env && pnpm install"),
+                runtime_browser_install=True,
             ),
             SimpleNamespace(
                 phase="validate",
