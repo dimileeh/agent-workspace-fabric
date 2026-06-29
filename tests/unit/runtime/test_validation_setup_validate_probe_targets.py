@@ -869,6 +869,21 @@ class TestPlaywrightBrowserInstallCommand:
             ("setup", "pnpm exec playwright install chromium"),
         ]
 
+    def test_browser_install_ignores_global_package_manager_bootstrap(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_and_browsers(
+            ["npm install -g pnpm && pnpm install && pnpm exec playwright test"]
+        )
+
+        commands = profile_phase_command_plan(profile, ["setup"])
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "npm install -g pnpm && pnpm install"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("setup", "pnpm exec playwright test"),
+        ]
+
     @pytest.mark.parametrize(
         ("setup_command", "expected"),
         [
@@ -927,6 +942,19 @@ class TestPlaywrightBrowserInstallCommand:
 
     def test_dependency_install_parser_ignores_unpreserved_equals_option(self) -> None:
         assert _node_dependency_install_package_manager("npm --userconfig=.npmrc ci") == "npm"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "npm install -g pnpm",
+            "npm install --global pnpm",
+        ],
+    )
+    def test_dependency_install_parser_rejects_global_package_manager_bootstrap(
+        self,
+        command: str,
+    ) -> None:
+        assert _node_dependency_install_package_manager(command) is None
 
     @pytest.mark.parametrize(
         "command",

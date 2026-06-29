@@ -57,6 +57,7 @@ _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS: dict[str, frozenset[str]] = {
     "yarn": frozenset({"--frozen-lockfile", "--immutable", "--immutable-cache"})
 }
 _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS = frozenset({"--help", "--version", "-h", "-v"})
+_SETUP_DEPENDENCY_GLOBAL_INSTALL_FLAGS = frozenset({"--global", "-g"})
 _SHELL_COMPOUND_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "|&", "&"})
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?\Z")
@@ -1939,9 +1940,28 @@ def _is_browser_validation_script_name(script_name: str) -> bool:
 
 
 def _node_validation_package_manager(command: str) -> str | None:
-    executable = _leading_executable(command)
-    if executable in _NODE_PACKAGE_MANAGERS:
-        return executable
+    tokens = _shell_tokens(command, comments=True)
+    if tokens is None:
+        return None
+    index = _first_non_assignment_token_index(tokens)
+    while index < len(tokens):
+        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+            index += 1
+        if index >= len(tokens):
+            return None
+        executable = tokens[index]
+        if executable == "cd":
+            return None
+        if _command_segment_invokes_node_playwright(tokens, index):
+            if executable in _NODE_PACKAGE_MANAGERS:
+                return executable
+            return None
+        next_command_index = _corepack_preamble_next_command_index(tokens, index)
+        if next_command_index is None:
+            next_command_index = _sequential_command_next_index(tokens, index)
+        if next_command_index is None:
+            return None
+        index = next_command_index
     return None
 
 
@@ -2230,6 +2250,8 @@ def _node_dependency_install_package_manager_from_tokens(
             continue
         if token.startswith("--") and "=" in token:
             option_name, _, option_value = token.partition("=")
+            if option_name in _SETUP_DEPENDENCY_GLOBAL_INSTALL_FLAGS:
+                return None
             if executable == "yarn":
                 if option_name in _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS:
                     return None
@@ -2244,8 +2266,10 @@ def _node_dependency_install_package_manager_from_tokens(
             subcommand_index += 1
             continue
         if token.startswith("-"):
+            option_name = token.split("=", 1)[0]
+            if option_name in _SETUP_DEPENDENCY_GLOBAL_INSTALL_FLAGS:
+                return None
             if executable == "yarn":
-                option_name = token.split("=", 1)[0]
                 if option_name in _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS:
                     return None
                 if option_name in _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS["yarn"]:
