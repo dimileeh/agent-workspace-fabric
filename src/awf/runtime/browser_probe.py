@@ -127,6 +127,14 @@ def _browser_probe_python_runtime(python_runtime: str) -> str:
         return python_runtime
     if python_runtime_tokens == ["uv", "run"]:
         return shlex.join([*python_runtime_tokens, "python"])
+    if "&&" in python_runtime_tokens:
+        separator_index = python_runtime_tokens.index("&&")
+        prefix_tokens = python_runtime_tokens[:separator_index]
+        scoped_runtime_tokens = python_runtime_tokens[separator_index + 1 :]
+        if prefix_tokens and scoped_runtime_tokens == ["uv", "run"]:
+            return (
+                f"{shlex.join(prefix_tokens)} && {shlex.join([*scoped_runtime_tokens, 'python'])}"
+            )
     return python_runtime
 
 
