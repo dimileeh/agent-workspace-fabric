@@ -415,6 +415,32 @@ class TestBrowserPhaseCommandPlan:
         assert validate_commands[2].command.required is False
 
     @pytest.mark.unit
+    def test_profile_phase_command_plan_validate_batch_ignores_unrequested_setup_install(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "browser-recovery-validate-install-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "setup": ["pnpm install --frozen-lockfile"],
+                    "pre_agent": ["node scripts/pre.js"],
+                    "post_agent": ["ruff format --check"],
+                    "validate": ["pnpm test:e2e"],
+                },
+            }
+        )
+
+        validate_commands = profile_phase_command_plan(profile, ("post_agent", "validate"))
+
+        assert [(command.phase, command.command.command) for command in validate_commands] == [
+            ("post_agent", "ruff format --check"),
+            ("setup", "pnpm exec playwright install chromium"),
+            ("validate", "pnpm test:e2e"),
+        ]
+        assert validate_commands[1].command.required is False
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_installs_browser_before_pre_agent_browser_use(
         self,
     ) -> None:
