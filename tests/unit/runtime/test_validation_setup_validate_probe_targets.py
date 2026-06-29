@@ -222,6 +222,20 @@ class TestPlaywrightBrowserInstallCommand:
         assert command.command == "python -m playwright install chromium"
         assert command.required is False
 
+    def test_pytest_only_python_playwright_profile_uses_python_browser_install(
+        self,
+    ) -> None:
+        profile = _profile_with_setup_validate_and_browsers(
+            setup=[],
+            validate=["pytest --browser chromium"],
+        )
+
+        command = playwright_browser_install_command(profile)
+
+        assert command is not None
+        assert command.command == "python -m playwright install chromium"
+        assert command.required is False
+
     def test_python_playwright_profile_preserves_detected_python_executable(self) -> None:
         profile = _profile_with_setup_validate_and_browsers(
             setup=["python3 -m pip install playwright"],

@@ -324,9 +324,20 @@ def _python_playwright_executable(
         *profile.phases.post_agent,
         *profile.phases.validate_commands,
     )
-    infer_from_pytest_selector = any(
+    installs_python_playwright = any(
         _command_installs_python_playwright(command.command, workspace_root=workspace_root)
         for command in commands
+    )
+    may_install_python_dependencies = any(
+        _command_may_install_python_dependencies(command.command) for command in commands
+    )
+    invokes_python_playwright = any(
+        _command_invokes_python_playwright(command.command) for command in commands
+    )
+    infer_from_pytest_selector = installs_python_playwright or (
+        invokes_python_playwright
+        and not may_install_python_dependencies
+        and not _uses_node_playwright(profile)
     )
     for command in commands:
         executable = _command_python_playwright_executable(
@@ -503,6 +514,52 @@ def _command_segment_installs_python_playwright(
                 workspace_root=workspace_root,
                 requirement_base_dir=requirement_base_dir,
             )
+    return False
+
+
+def _command_may_install_python_dependencies(command: str) -> bool:
+    tokens = _shell_tokens(command, comments=True)
+    if tokens is None:
+        return False
+    index = _first_non_assignment_token_index(tokens)
+    while index < len(tokens):
+        while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+            index += 1
+        if index >= len(tokens):
+            return False
+        scoped_command = _leading_cd_package_scope(tokens, index)
+        if scoped_command is not None:
+            _, index = scoped_command
+        if _command_segment_may_install_python_dependencies(tokens, index):
+            return True
+        next_command_index = _sequential_command_next_index(tokens, index)
+        if next_command_index is None:
+            return False
+        index = next_command_index
+    return False
+
+
+def _command_segment_may_install_python_dependencies(tokens: list[str], index: int) -> bool:
+    executable = tokens[index]
+    if _is_pip_executable(executable):
+        return _pip_segment_has_install_subcommand(tokens, index + 1)
+    if _is_python_executable(executable) and tokens[index + 1 : index + 3] == ["-m", "pip"]:
+        return _pip_segment_has_install_subcommand(tokens, index + 3)
+    if executable == "uv" and index + 1 < len(tokens):
+        if tokens[index + 1] == "pip":
+            return _pip_segment_has_install_subcommand(tokens, index + 2)
+        return tokens[index + 1] in {"add", "sync"}
+    return False
+
+
+def _pip_segment_has_install_subcommand(tokens: list[str], index: int) -> bool:
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return False
+        if token == "install":
+            return True
+        index += 1
     return False
 
 
