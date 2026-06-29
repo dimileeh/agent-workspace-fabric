@@ -15,3 +15,15 @@ def test_check_failure_log_result_empty_tuple_compatibility_is_hash_consistent()
     assert empty_result_with_running_check != ()
     assert result != (failure,)
     assert (failure,) != result
+
+
+def test_check_failure_log_result_preserves_tuple_like_access() -> None:
+    first = CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="ruff failed")
+    second = CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="pytest failed")
+    result = CheckFailureLogResult(failures=(first, second), runs_in_progress=True)
+
+    assert bool(result)
+    assert len(result) == 2
+    assert tuple(result) == (first, second)
+    assert result[0] == first
+    assert result[1:] == (second,)

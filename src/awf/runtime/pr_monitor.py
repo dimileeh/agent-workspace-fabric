@@ -931,8 +931,6 @@ def _should_rerun_transient_ci(
     if not status.ci_failures:
         return False
     candidate_failures = _ci_candidate_failures(status)
-    if not candidate_failures:
-        return False
     if any(not failure.run_id for failure in candidate_failures):
         return False
     if any(not _supports_failed_job_rerun(failure) for failure in candidate_failures):

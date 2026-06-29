@@ -372,6 +372,24 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_failed_test_node_line_without_assertion_marker_reports_failure(self) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt="FAILED tests/unit/test_thing.py::test_case - setup failed",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_failure_with_per_check_details(self) -> None:
         failure = CheckFailure(
             name="playwright", conclusion="FAILURE", log_excerpt="Error: timeout"
