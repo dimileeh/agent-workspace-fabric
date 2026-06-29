@@ -587,7 +587,10 @@ async def test_validation_cycle_syncs_profile_before_command_planning(
     def fake_profile_phase_command_plan(
         profile: WorkspaceProfile,
         phase_names: tuple[str, ...],
+        *,
+        workspace_root: Path | None = None,
     ) -> list[object]:
+        assert workspace_root == tmp_path
         events.append(("plan", profile.name))
         assert phase_names == ("post_agent", "validate")
         return []
