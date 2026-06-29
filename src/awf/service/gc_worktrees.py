@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from inspect import isawaitable
@@ -454,10 +455,9 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
 
     mirrors_root = work_dir / "git" / "mirrors"
     try:
-        linked_mirror_path = _managed_mirror_path(
+        linked_mirror_path = _managed_bare_mirror_path(
             mirror_path_for_worktree(path),
             mirrors_root,
-            require_existing_dir=True,
         )
     except (OSError, RuntimeError) as exc:
         raise GitOperationError(
@@ -468,13 +468,17 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
             reason_code="WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
         ) from exc
     if linked_mirror_path is None:
-        return mirror_path_for_registered_worktree(path, mirrors_root)
+        return _managed_bare_mirror_path(
+            mirror_path_for_registered_worktree(path, mirrors_root),
+            mirrors_root,
+        )
     try:
         registered_mirror_path = mirror_path_for_registered_worktree(path, mirrors_root)
     except GitOperationError:
         if _mirror_registry_points_to_worktree(linked_mirror_path, path):
             return linked_mirror_path
         raise
+    registered_mirror_path = _managed_bare_mirror_path(registered_mirror_path, mirrors_root)
     if registered_mirror_path is None:
         return linked_mirror_path
     if linked_mirror_path == registered_mirror_path:
@@ -523,6 +527,25 @@ def _managed_mirror_path(
     return resolved_path
 
 
+def _managed_bare_mirror_path(path: Path | None, mirrors_root: Path) -> Path | None:
+    mirror_path = _managed_mirror_path(path, mirrors_root, require_existing_dir=True)
+    if mirror_path is None:
+        return None
+    if not _is_bare_git_repository(mirror_path):
+        return None
+    return mirror_path
+
+
+def _is_bare_git_repository(path: Path) -> bool:
+    probe = subprocess.run(
+        ["git", "--bare", "--git-dir", str(path), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    return probe.returncode == 0 and probe.stdout.strip() == "true"
+
+
 def _has_stale_managed_linked_mirror(path: Path, *, work_dir: Path) -> bool:
     from awf.node.git_manager import mirror_path_for_worktree
 
@@ -531,7 +554,7 @@ def _has_stale_managed_linked_mirror(path: Path, *, work_dir: Path) -> bool:
         linked_mirror_path = _managed_mirror_path(mirror_path_for_worktree(path), mirrors_root)
     except (OSError, RuntimeError):
         return False
-    return linked_mirror_path is not None and not linked_mirror_path.is_dir()
+    return linked_mirror_path is not None and not _is_bare_git_repository(linked_mirror_path)
 
 
 def is_existing_non_git_worktree(path: Path, *, work_dir: Path | None = None) -> bool:

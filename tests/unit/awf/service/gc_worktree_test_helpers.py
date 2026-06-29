@@ -27,8 +27,14 @@ def _make_synthetic_mirror_link(
 ) -> None:
     linked_git_dir = mirror / "worktrees" / worktree.name
     linked_git_dir.mkdir(parents=True)
-    worktree.mkdir(parents=True)
-    _write(mirror / "config", f'[remote "origin"]\n\turl = {repo_url}\n')
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write(
+        mirror / "config",
+        f'[core]\n\tbare = true\n[remote "origin"]\n\turl = {repo_url}\n',
+    )
+    _write(mirror / "HEAD", "ref: refs/heads/main\n")
+    (mirror / "objects").mkdir(exist_ok=True)
+    (mirror / "refs").mkdir(exist_ok=True)
     if include_worktree_gitfile:
         _write(worktree / ".git", f"gitdir: {linked_git_dir}\n")
     (linked_git_dir / "gitdir").write_text(str(worktree / ".git"), encoding="utf-8")

@@ -20,7 +20,11 @@ from awf.service.gc_worktrees import (
     is_existing_non_git_worktree,
     remove_orphan_worktree,
 )
-from tests.unit.awf.service.gc_worktree_test_helpers import _make_mirror_with_worktree, _write
+from tests.unit.awf.service.gc_worktree_test_helpers import (
+    _make_mirror_with_worktree,
+    _make_synthetic_mirror_link,
+    _write,
+)
 from tests.unit.service.test_gc_worktree_remover import _workspace
 
 
@@ -49,17 +53,14 @@ async def test_default_worktree_remover_uses_registry_mirror_when_gitfile_is_mis
         pr_merge_sha="p" * 40,
     )
     mirror = work_dir / "git" / "mirrors" / "relative-origin-original.git"
-    mirror.mkdir(parents=True)
-    _write(
-        mirror / "config",
-        f'[remote "origin"]\n\turl = {rewritten_repo_url}\n',
-    )
     assert rewritten_repo_url != original_repo_url
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
-    worktree_path.mkdir(parents=True)
-    linked_git_dir = mirror / "worktrees" / workspace_id
-    linked_git_dir.mkdir(parents=True)
-    (linked_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
+    _make_synthetic_mirror_link(
+        mirror=mirror,
+        worktree=worktree_path,
+        repo_url=rewritten_repo_url,
+        include_worktree_gitfile=False,
+    )
     candidate = WorkspaceGCCandidate(
         workspace_id=workspace_id,
         status=WorkspaceStatus.completed.value,
@@ -215,11 +216,12 @@ async def test_remove_orphan_worktree_prefers_valid_linked_mirror_over_duplicate
     duplicate_mirror = work_dir / "git" / "mirrors" / "duplicate.git"
     linked_git_dir = linked_mirror / "worktrees" / workspace_id
     duplicate_git_dir = duplicate_mirror / "worktrees" / workspace_id
-    linked_git_dir.mkdir(parents=True)
-    duplicate_git_dir.mkdir(parents=True)
-    _write(worktree_path / ".git", f"gitdir: {linked_git_dir}\n")
-    for git_dir in (linked_git_dir, duplicate_git_dir):
-        (git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
+    _make_synthetic_mirror_link(mirror=linked_mirror, worktree=worktree_path)
+    _make_synthetic_mirror_link(
+        mirror=duplicate_mirror,
+        worktree=worktree_path,
+        include_worktree_gitfile=False,
+    )
     os.utime(linked_git_dir, ns=(1, 1))
     os.utime(duplicate_git_dir, ns=(2, 2))
 
@@ -249,12 +251,9 @@ async def test_remove_orphan_worktree_ignores_malformed_duplicate_registry_for_l
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
     linked_mirror = work_dir / "git" / "mirrors" / "linked.git"
     duplicate_mirror = work_dir / "git" / "mirrors" / "duplicate.git"
-    linked_git_dir = linked_mirror / "worktrees" / workspace_id
     duplicate_git_dir = duplicate_mirror / "worktrees" / workspace_id
-    linked_git_dir.mkdir(parents=True)
+    _make_synthetic_mirror_link(mirror=linked_mirror, worktree=worktree_path)
     duplicate_git_dir.mkdir(parents=True)
-    _write(worktree_path / ".git", f"gitdir: {linked_git_dir}\n")
-    (linked_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
     (duplicate_git_dir / "gitdir").write_text("", encoding="utf-8")
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
@@ -305,9 +304,7 @@ async def test_remove_orphan_worktree_uses_managed_linked_mirror_without_registr
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
     mirror_path = work_dir / "git" / "mirrors" / "repo.git"
-    linked_git_dir = mirror_path / "worktrees" / workspace_id
-    mirror_path.mkdir(parents=True)
-    _write(worktree_path / ".git", f"gitdir: {linked_git_dir}\n")
+    _make_synthetic_mirror_link(mirror=mirror_path, worktree=worktree_path)
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value
@@ -324,6 +321,33 @@ async def test_remove_orphan_worktree_uses_managed_linked_mirror_without_registr
         workspace_id=workspace_id,
         mirror_path=mirror_path.resolve(),
     )
+
+
+@pytest.mark.unit
+async def test_remove_orphan_worktree_skips_existing_non_git_linked_mirror_directory(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    workspace_id = "ws_rowless"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    recreated_mirror = work_dir / "git" / "mirrors" / "recreated.git"
+    recreated_linked_git_dir = recreated_mirror / "worktrees" / workspace_id
+    recreated_mirror.mkdir(parents=True)
+    _write(worktree_path / ".git", f"gitdir: {recreated_linked_git_dir}\n")
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        result = await remove_orphan_worktree(
+            workspace_id=workspace_id,
+            path=worktree_path,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "skipped"
+    assert result.reason_code == "WORKTREE_NOT_GIT_MANAGED"
+    assert is_existing_non_git_worktree(worktree_path, work_dir=work_dir) is True
+    mock_gm.remove_worktree_from_mirror.assert_not_awaited()
 
 
 @pytest.mark.unit
@@ -365,10 +389,14 @@ async def test_remove_orphan_worktree_falls_back_when_linked_mirror_registry_mis
     wrong_mirror = work_dir / "git" / "mirrors" / "wrong.git"
     wrong_linked_git_dir = wrong_mirror / "worktrees" / workspace_id
     correct_linked_git_dir = correct_mirror / "worktrees" / workspace_id
+    _make_synthetic_mirror_link(
+        mirror=correct_mirror,
+        worktree=worktree_path,
+        include_worktree_gitfile=False,
+    )
     wrong_linked_git_dir.mkdir(parents=True)
-    correct_linked_git_dir.mkdir(parents=True)
     _write(worktree_path / ".git", f"gitdir: {wrong_linked_git_dir}\n")
-    (correct_linked_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
+    assert correct_linked_git_dir.is_dir()
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value
@@ -398,9 +426,13 @@ async def test_remove_orphan_worktree_falls_back_when_linked_metadata_dir_is_mis
     correct_mirror = work_dir / "git" / "mirrors" / "correct.git"
     stale_linked_git_dir = stale_mirror / "worktrees" / workspace_id
     correct_linked_git_dir = correct_mirror / "worktrees" / workspace_id
-    correct_linked_git_dir.mkdir(parents=True)
+    _make_synthetic_mirror_link(
+        mirror=correct_mirror,
+        worktree=worktree_path,
+        include_worktree_gitfile=False,
+    )
     _write(worktree_path / ".git", f"gitdir: {stale_linked_git_dir}\n")
-    (correct_linked_git_dir / "gitdir").write_text(str(worktree_path / ".git"), encoding="utf-8")
+    assert correct_linked_git_dir.is_dir()
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value
