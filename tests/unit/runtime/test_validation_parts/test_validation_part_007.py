@@ -487,6 +487,59 @@ class TestBrowserPhaseCommandPlan:
         assert commands[0].command.required is False
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "pre_agent_command",
+        [
+            "pytest --browser chromium",
+            "pytest --browser=chromium",
+            "python -m pytest --browser chromium",
+        ],
+    )
+    def test_profile_phase_command_plan_installs_python_browser_before_pytest_playwright_use(
+        self,
+        pre_agent_command: str,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "pytest-playwright-pre-agent-preinstalled-deps-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "pre_agent": [pre_agent_command],
+                    "validate": ["python -m pip install pytest-playwright", "pytest"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup", "pre_agent"))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "python -m playwright install chromium"),
+            ("pre_agent", pre_agent_command),
+        ]
+        assert commands[0].command.required is False
+
+    @pytest.mark.unit
+    def test_profile_phase_command_plan_ignores_unrelated_browser_flag(
+        self,
+    ) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "unrelated-browser-flag-test",
+                "runtime": {"browsers": ["chromium"]},
+                "phases": {
+                    "pre_agent": ["python scripts/tool.py --browser chromium"],
+                    "validate": ["python -m pip install pytest-playwright", "pytest"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(profile, ("setup", "pre_agent"))
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("pre_agent", "python scripts/tool.py --browser chromium"),
+        ]
+
+    @pytest.mark.unit
     def test_profile_phase_command_plan_defers_browser_install_past_unrelated_split_install(
         self,
     ) -> None:

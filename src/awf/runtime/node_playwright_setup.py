@@ -58,6 +58,7 @@ _SHELL_COMPOUND_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "|&", "&"})
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?\Z")
 _PIP_EXECUTABLE_RE = re.compile(r"pip(?:\d+(?:\.\d+)*)?\Z")
+_PYTEST_EXECUTABLE_RE = re.compile(r"pytest(?:\d+(?:\.\d+)*)?\Z")
 _PYTHON_PLAYWRIGHT_REQUIREMENT_RE = re.compile(
     r"(?i)^(?:playwright|pytest-playwright)(?:\[.*\])?(?:[<>=!~]=?.*)?$"
 )
@@ -74,6 +75,10 @@ def _is_python_executable(executable: str) -> bool:
 
 def _is_pip_executable(executable: str) -> bool:
     return _PIP_EXECUTABLE_RE.fullmatch(executable) is not None
+
+
+def _is_pytest_executable(executable: str) -> bool:
+    return _PYTEST_EXECUTABLE_RE.fullmatch(executable) is not None
 
 
 def _python_executable_for_install_executable(executable: str) -> str | None:
@@ -464,6 +469,10 @@ def _command_segment_python_playwright_executable(
         "playwright",
     ]:
         return executable
+    if _command_segment_invokes_pytest_playwright(tokens, index):
+        if _is_python_executable(executable):
+            return executable
+        return "python"
     if _command_segment_installs_python_playwright(
         tokens,
         index,
@@ -688,10 +697,44 @@ def _command_invokes_python_playwright(command: str) -> bool:
             "playwright",
         ]:
             return True
+        if _command_segment_invokes_pytest_playwright(tokens, index):
+            return True
         next_command_index = _sequential_command_next_index(tokens, index)
         if next_command_index is None:
             return False
         index = next_command_index
+    return False
+
+
+def _command_segment_invokes_pytest_playwright(tokens: list[str], index: int) -> bool:
+    if index >= len(tokens):
+        return False
+    executable = tokens[index]
+    if _is_pytest_executable(executable):
+        return _pytest_segment_has_browser_selector(tokens, index + 1)
+    if _is_python_executable(executable) and tokens[index + 1 : index + 3] == [
+        "-m",
+        "pytest",
+    ]:
+        return _pytest_segment_has_browser_selector(tokens, index + 3)
+    return False
+
+
+def _pytest_segment_has_browser_selector(tokens: list[str], index: int) -> bool:
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_COMPOUND_CONTROL_TOKENS:
+            return False
+        if token.startswith("--browser="):
+            return token != "--browser="
+        if token == "--browser":
+            value_index = index + 1
+            return (
+                value_index < len(tokens)
+                and tokens[value_index] not in _SHELL_COMPOUND_CONTROL_TOKENS
+                and not tokens[value_index].startswith("-")
+            )
+        index += 1
     return False
 
 
