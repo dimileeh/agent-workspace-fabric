@@ -653,6 +653,8 @@ _CI_TRANSIENT_FAILURE_MARKERS = (
 )
 
 _CI_CODE_FAILURE_MARKERS = (
+    "would reformat:",
+    "would be reformatted",
     "traceback (most recent call last):",
     "assertionerror",
     "assertionfailederror",

@@ -167,6 +167,29 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_parsed_ruff_format_evidence_prevents_transient_rerun(self) -> None:
+        """Ruff format --check output in parsed evidence beats transient tail text.
+
+        Regression for PRRT_kwDOSJAM6s6NZ7sV.
+        """
+        failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt="failed to download cleanup artifact: connection reset\n",
+            run_id="27091023777",
+            error_summaries=("Would reformat: src/awf/runtime/example.py",),
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrelated_permanent_daemon_error_after_transient_pull_dispatches_rerun(
         self,
     ) -> None:
