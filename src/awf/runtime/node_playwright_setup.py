@@ -192,6 +192,45 @@ def _collect_uv_pip_scope_tokens(tokens: list[str], pip_subcommand_index: int) -
     return scope_tokens
 
 
+def _uv_pip_system_python_executable(tokens: list[str], pip_subcommand_index: int) -> str | None:
+    """Return the system ``python`` executable when ``uv pip install|sync`` uses ``--system``."""
+    uses_system = False
+    python_version: str | None = None
+    index = pip_subcommand_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            break
+        if not token.startswith("-"):
+            break
+        option_name = token.split("=", 1)[0]
+        if option_name == "--system":
+            uses_system = True
+            index += 1
+            continue
+        if option_name in {"--python", "-p"}:
+            if "=" in token:
+                python_version = token.split("=", 1)[1]
+            elif index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
+                python_version = tokens[index + 1]
+                index += 1
+            index += 1
+            continue
+        if "=" in token:
+            index += 1
+            continue
+        if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+            index += 1
+            continue
+        index += 2
+    if not uses_system:
+        return None
+    if python_version is None:
+        return "python"
+    version = python_version.removeprefix("python")
+    return f"python{version}" if version else "python"
+
+
 def _uv_setup_python_prefix(tokens: list[str], uv_index: int) -> str | None:
     """Build ``uv [global opts] run [scope opts] python`` from ``uv sync`` or ``uv pip install``."""
     collected = _collect_uv_global_scope_tokens(tokens, uv_index)
@@ -211,6 +250,9 @@ def _uv_setup_python_prefix(tokens: list[str], uv_index: int) -> str | None:
         pip_subcommand = tokens[index + 1]
         if pip_subcommand not in {"install", "sync"}:
             return None
+        system_python = _uv_pip_system_python_executable(tokens, index + 1)
+        if system_python is not None:
+            return system_python
         run_scope = _collect_uv_pip_scope_tokens(tokens, index + 1)
     else:
         return None

@@ -275,6 +275,39 @@ def test_browser_install_preserves_uv_setup_project_scope(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("setup_command", "expected_executable"),
+    [
+        ("uv pip install --system playwright", "python"),
+        ("uv pip install --system -e .", "python"),
+        ("uv pip install --python 3.12 --system httpx", "python3.12"),
+        ("uv pip install --system --python 3.12 httpx", "python3.12"),
+        ("cd apps/api && uv pip install --system -e .", "python"),
+    ],
+)
+def test_browser_install_uses_system_python_for_uv_pip_system(
+    setup_command: str, expected_executable: str
+) -> None:
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": [setup_command], "validate": ["pytest -q"]},
+        }
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    if "cd " in setup_command:
+        assert (
+            command.command
+            == f"cd apps/api && {expected_executable} -m playwright install chromium"
+        )
+    else:
+        assert command.command == f"{expected_executable} -m playwright install chromium"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("profile_command", "phase", "expected_install_command"),
     [
         (
