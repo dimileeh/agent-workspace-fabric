@@ -140,6 +140,26 @@ def test_ci_failure_evidence_preserves_ruff_diagnostics_as_error_summaries() -> 
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_preserves_tab_prefixed_ruff_diagnostics() -> None:
+    """gh run view --log-failed lines prefix diagnostics with job/step columns."""
+    ruff_diagnostic = "src/awf/runtime/example.py:1:1: F401 `os` imported but unused"
+    prefixed_line = f"lint-and-type\tRun ruff check\t{ruff_diagnostic}"
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                prefixed_line,
+                "failed to download cleanup artifact: connection reset",
+                "Error: Process completed with exit code 1.",
+            ]
+        ),
+        check_name="lint-and-type",
+    )
+
+    assert any(ruff_diagnostic in summary for summary in evidence.error_summaries)
+
+
+@pytest.mark.unit
 def test_ci_failure_evidence_preserves_ruff_diagnostics_with_failing_command() -> None:
     """Mixed logs keep path.py diagnostics even when the failing command is known."""
     ruff_diagnostic = "src/awf/runtime/example.py:1:1: F401 `os` imported but unused"

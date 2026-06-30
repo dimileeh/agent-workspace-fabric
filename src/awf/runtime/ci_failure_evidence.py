@@ -31,7 +31,7 @@ _MAX_SUMMARIES = 8
 _MAX_LINE_CHARS = 500
 _DEFAULT_PYTEST_REPRO_COMMAND = "uv run --python 3.12 --extra dev pytest"
 _PYTHON_CODE_DIAGNOSTIC_RE = re.compile(
-    r"^\S+\.py(?::\d+){1,2}:\s+(?:[A-Z]{1,4}\d{3,4}\b|error:)",
+    r"\S+\.py(?::\d+){1,2}:\s+(?:[A-Z]{1,4}\d{3,4}\b|error:)",
     re.IGNORECASE,
 )
 
@@ -251,7 +251,7 @@ def _extract_error_summaries(
             or "::error" in line
             or "Process completed with exit code" in line
             or line.lower().startswith(("error ", "error:", "fatal:"))
-            or (include_code_diagnostics and _PYTHON_CODE_DIAGNOSTIC_RE.match(line))
+            or (include_code_diagnostics and _PYTHON_CODE_DIAGNOSTIC_RE.search(line))
         ):
             summaries.append(line)
     return summaries
