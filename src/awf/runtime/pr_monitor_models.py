@@ -6,6 +6,18 @@ enums describing forge merge/check state. They depend on nothing else in
 in :mod:`awf.runtime.pr_monitor` imports and re-exports them to keep the
 historical ``from awf.runtime.pr_monitor import PRStatus`` call sites working
 while the core file stays under the maintainability line budget.
+
+``CheckFailureLogResult`` empty-tuple equality
+----------------------------------------------
+``CheckFailureLogResult`` deliberately equates only the *empty* snapshot to
+``()`` (and aligns ``__hash__``) so legacy call sites that still compare forge
+fetch results to an empty tuple keep working. The match is asymmetric:
+``empty_result == ()`` is ``True`` because ``CheckFailureLogResult.__eq__``
+handles the empty tuple, but ``(failure,) == CheckFailureLogResult(...)`` is
+``False`` — CPython's ``tuple.__eq__`` returns ``NotImplemented`` for unknown
+types and does not reflect into custom classes for non-empty tuples. Compare
+``CheckFailureLogResult`` instances directly, or use ``.failures`` / indexing,
+rather than expecting general tuple interchangeability.
 """
 
 from __future__ import annotations
@@ -147,7 +159,11 @@ class CheckFailure:
 
 @dataclass(frozen=True)
 class CheckFailureLogResult:
-    """Failing-check log snapshot plus whether any failing run is still active."""
+    """Failing-check log snapshot plus whether any failing run is still active.
+
+    Empty snapshots compare equal to ``()`` for backward compatibility; see the
+    module docstring for the asymmetric equality contract.
+    """
 
     failures: tuple[CheckFailure, ...] = ()
     runs_in_progress: bool = False
