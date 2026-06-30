@@ -372,6 +372,7 @@ def _probe_agent_runtime_cli(
     run_subprocess: SubprocessRun,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
+    """Verify a provider CLI exists inside the configured agent runtime image."""
     reason_prefix = _agent_runtime_cli_reason_prefix(provider)
     args = [
         "docker",

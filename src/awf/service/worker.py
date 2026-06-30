@@ -82,6 +82,8 @@ _log = get_logger(__name__)
 
 @dataclass(frozen=True)
 class WorkerRuntime:
+    """Wired control-worker dependencies returned by ``build_worker_runtime``."""
+
     engine: AsyncEngine
     worker: ControlWorker
     runtime_driver: WorkspaceRuntimeDriver

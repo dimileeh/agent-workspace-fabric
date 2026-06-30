@@ -186,6 +186,12 @@ async def default_worktree_remover(
     session_factory: async_sessionmaker[AsyncSession],
     work_dir: Path,
 ) -> WorkspaceGCWorktreeRemoveResult:
+    """Remove primary and companion worktrees for a GC candidate via Git metadata.
+
+    Loads ``repo_url`` from the workspace row, resolves each worktree's linked bare
+    mirror, and delegates to ``GitManager.remove_worktree_from_mirror``. Non-Git
+    worktrees are skipped; partial failures aggregate per-target results.
+    """
     from awf.node.git_manager import GitManager, GitOperationError
 
     async with session_factory() as session:

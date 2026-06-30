@@ -119,6 +119,8 @@ ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
 # reaped while it silently remained (PRRT_kwDOSJAM6s6LCiLk). It is keyword-only
 # with a default so non-volume teardowns and other callers stay unaffected.
 class OrphanResourceComposeTeardown(Protocol):
+    """Callable contract for tearing down row-less orphan compose stacks."""
+
     async def __call__(  # pragma: no cover - Protocol method declaration only.
         self,
         project_name: str,
@@ -196,6 +198,8 @@ class CompletedProcessLike(Protocol):
 
 
 class SubprocessRun(Protocol):
+    """Callable contract for synchronous subprocess execution in orphan scans."""
+
     def __call__(  # pragma: no cover - Protocol method declaration only.
         self,
         args: list[str],

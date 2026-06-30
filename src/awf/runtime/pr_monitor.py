@@ -902,6 +902,7 @@ _CI_TRANSIENT_HUMAN_MESSAGE = (
 def _ci_failure_action(
     status: PRStatus, state: MonitorState, config: MonitorConfig
 ) -> MonitorAction:
+    """Choose rerun, wait, report, or human escalation for observed CI failures."""
     if not status.ci_failures:
         return NotifyHuman(message=_CI_MISSING_LOGS_HUMAN_MESSAGE)
     candidate_failures = _ci_candidate_failures(status)
@@ -945,6 +946,7 @@ def _should_rerun_transient_ci(
     state: MonitorState,
     config: MonitorConfig,
 ) -> bool:
+    """Return whether transient CI failures are eligible for an immediate rerun."""
     if config.ci_transient_rerun_max_attempts <= 0:
         return False
     if not status.ci_failures:

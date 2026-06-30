@@ -1214,6 +1214,7 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
 
 
 async def _repair_mirror_hooks_path_once(mirror_path: Path) -> tuple[bool, bool]:
+    """Repair mirror hooks config once and detect stale linked-worktree metadata."""
     repaired = await _repair_hooks_path_config(
         git_args=("--git-dir", str(mirror_path)),
         config_scope_args=("--local",),
