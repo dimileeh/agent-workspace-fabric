@@ -38,6 +38,24 @@ _log = get_logger(__name__)
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 _GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+_GIT_BARE_REPOSITORY_PROBE_ENV_KEYS = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+)
 _POISONED_MIRROR_HOOKS_PATH_PATTERNS = {
     "/dev/null": "^/dev/null$",
     "/tmp/awf-poisoned-hooks": "^/tmp/awf-poisoned-hooks$",
@@ -1073,7 +1091,7 @@ def _is_bare_registered_mirror_candidate(mirror_path: Path) -> bool:
             ],
             capture_output=True,
             check=False,
-            env=git_env_without_object_lookup_overrides(),
+            env=git_env_for_bare_repository_probe(),
             text=True,
             timeout=_GIT_BARE_PROBE_TIMEOUT_SECONDS,
         )
@@ -1361,6 +1379,13 @@ def _repository_alternates_path_for_worktree(worktree_path: Path) -> Path | None
 def git_env_without_object_lookup_overrides() -> dict[str, str]:
     env = dict(os.environ)
     for key in _GIT_OBJECT_LOOKUP_ENV_KEYS:
+        env.pop(key, None)
+    return env
+
+
+def git_env_for_bare_repository_probe() -> dict[str, str]:
+    env = git_env_without_object_lookup_overrides()
+    for key in _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS:
         env.pop(key, None)
     return env
 
