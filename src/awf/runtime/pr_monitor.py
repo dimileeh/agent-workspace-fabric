@@ -886,9 +886,21 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     return not shows_code_failure and _log_shows_docker_registry_timeout(log_text)
 
 
+def _ci_failure_is_rerun_candidate(failure: CheckFailure) -> bool:
+    """Return whether a failure can participate in transient CI rerun/wait logic."""
+    return bool(failure.run_id)
+
+
 def _ci_candidate_failures(status: PRStatus) -> tuple[CheckFailure, ...]:
-    """Return all CI failures as rerun candidates; callers gate on transient checks."""
-    return status.ci_failures
+    """Return CI failures eligible for transient rerun/wait.
+
+    Synthesized rollup/status rows (no ``run_id``) are kept on ``status.ci_failures``
+    for reporting but excluded here so they do not block rerunning retryable Actions
+    failures on the same PR head.
+    """
+    return tuple(
+        failure for failure in status.ci_failures if _ci_failure_is_rerun_candidate(failure)
+    )
 
 
 _CI_MISSING_LOGS_HUMAN_MESSAGE = (
@@ -911,8 +923,6 @@ def _ci_failure_action(
     if candidate_failures and all(_looks_like_transient_ci_failure(f) for f in candidate_failures):
         if config.ci_transient_rerun_max_attempts <= 0:
             return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
-        if any(not failure.run_id for failure in candidate_failures):
-            return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
         if any(not _supports_failed_job_rerun(failure) for failure in candidate_failures):
             return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
         if _ci_transient_infra_wait_exhausted(status, state, config, candidate_failures):
@@ -934,6 +944,12 @@ def _ci_failure_action(
                 + 1
             ),
         )
+    if (
+        not candidate_failures
+        and status.ci_failures
+        and all(_looks_like_transient_ci_failure(failure) for failure in status.ci_failures)
+    ):
+        return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
     return ReportCiFailure(failures=status.ci_failures)
 
 
@@ -952,7 +968,7 @@ def _should_rerun_transient_ci(
     if not status.ci_failures:
         return False
     candidate_failures = _ci_candidate_failures(status)
-    if any(not failure.run_id for failure in candidate_failures):
+    if not candidate_failures:
         return False
     if any(not _supports_failed_job_rerun(failure) for failure in candidate_failures):
         return False

@@ -161,6 +161,41 @@ class TestCiFailure:
         assert action.failures == (transient_failure, rollup_failure)
 
     @pytest.mark.unit
+    def test_transient_failure_with_synthesized_rollup_reruns_transient_job(
+        self,
+    ) -> None:
+        """A no-log/no-run-id required-rollup sibling must not block transient rerun.
+
+        Regression for PRRT_kwDOSJAM6s6Nad-D."""
+        transient_failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "error: Failed to install cpython-3.12.9-linux-x86_64-gnu\n"
+                "Caused by: HTTP status server error (503 Service Unavailable)"
+            ),
+            run_id="25897584271",
+        )
+        rollup_failure = CheckFailure(
+            name="ci-required",
+            conclusion="FAILURE",
+            log_excerpt="",
+            run_id=None,
+        )
+
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(transient_failure, rollup_failure),
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (transient_failure,)
+
+    @pytest.mark.unit
     def test_mixed_run_with_rollup_marker_and_transient_evidence_dispatches_rerun(
         self,
     ) -> None:
