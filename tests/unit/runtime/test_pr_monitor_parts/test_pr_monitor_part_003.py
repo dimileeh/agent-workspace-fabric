@@ -1319,7 +1319,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_timed_out_failure_without_logs_or_run_id_reports_failure(self) -> None:
+    def test_timed_out_failure_without_logs_or_run_id_escalates_to_human(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="TIMED_OUT",
@@ -1333,8 +1333,34 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "could not retrieve actionable logs" in action.message
+
+    @pytest.mark.unit
+    def test_logless_synthesized_rollup_without_code_evidence_escalates_to_human(
+        self,
+    ) -> None:
+        """A required rollup with no run_id or log text must not dispatch an empty
+        ``ReportCiFailure`` the repair agent cannot act on.
+
+        Regression for PRRT_kwDOSJAM6s6NbIWH."""
+        rollup_failure = CheckFailure(
+            name="ci-required",
+            conclusion="FAILURE",
+            log_excerpt="",
+            run_id=None,
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(rollup_failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "could not retrieve actionable logs" in action.message
 
     @pytest.mark.unit
     @pytest.mark.parametrize("conclusion", ["CANCELLED", "ACTION_REQUIRED"])

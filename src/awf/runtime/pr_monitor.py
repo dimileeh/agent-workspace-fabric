@@ -973,6 +973,10 @@ def _ci_failure_action(
         and all(_looks_like_transient_ci_failure(failure) for failure in status.ci_failures)
     ):
         return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
+    if not candidate_failures and all(
+        not failure.log_excerpt.strip() for failure in status.ci_failures
+    ):
+        return NotifyHuman(message=_CI_MISSING_LOGS_HUMAN_MESSAGE)
     return ReportCiFailure(failures=status.ci_failures)
 
 
