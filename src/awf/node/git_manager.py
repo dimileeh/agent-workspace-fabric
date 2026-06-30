@@ -1052,7 +1052,6 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
     except RuntimeError:
         resolved_worktree = worktree_path.absolute()
     best_match: tuple[int, Path] | None = None
-    first_probe_error: GitOperationError | None = None
     for mirror_path in mirror_paths:
         linked_git_dir = mirror_path / "worktrees" / worktree_name
         if not linked_git_dir.is_dir():
@@ -1061,9 +1060,7 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
             continue
         try:
             registered_worktree = linked_worktree_path_from_git_dir(linked_git_dir)
-        except GitOperationError as exc:
-            if first_probe_error is None:
-                first_probe_error = exc
+        except GitOperationError:
             continue
         if registered_worktree == resolved_worktree:
             try:
@@ -1074,8 +1071,6 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
                 best_match = (registered_mtime_ns, mirror_path)
     if best_match is not None:
         return best_match[1]
-    if first_probe_error is not None:
-        raise first_probe_error
     return None
 
 

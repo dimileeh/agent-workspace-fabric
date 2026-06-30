@@ -582,16 +582,20 @@ def test_reaper_reports_worktree_probe_os_error_as_partial_failure(
 
 
 @pytest.mark.unit
-def test_reaper_fails_closed_for_plain_worktree_with_malformed_mirror_registry(
+def test_reaper_uses_direct_delete_for_plain_worktree_with_malformed_mirror_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from awf.service.orphan_resources import reap_classified_orphans
 
     workspace_id = "ws_dead"
     worktree = tmp_path / "git" / "worktrees" / workspace_id
-    malformed_git_dir = tmp_path / "git" / "mirrors" / "malformed.git" / "worktrees" / workspace_id
+    malformed_mirror = tmp_path / "git" / "mirrors" / "malformed.git"
+    malformed_git_dir = malformed_mirror / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     malformed_git_dir.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "--bare", str(malformed_mirror)], check=True, capture_output=True
+    )
     (malformed_git_dir / "gitdir").write_text("", encoding="utf-8")
     summary = build_orphan_resource_summary(
         docker_scan=empty_docker_scan(),
@@ -600,20 +604,20 @@ def test_reaper_fails_closed_for_plain_worktree_with_malformed_mirror_registry(
         auto_cleanup_orphans=True,
         reaper_available=True,
     )
+    direct_delete_calls: list[tuple[str, Path, Path]] = []
 
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
-        raise AssertionError(f"git-aware removal used after metadata probe failure: {path}")
+        raise AssertionError(f"git-aware removal used for unresolved mirror registry: {path}")
 
-    def _direct_delete_forbidden(
+    def _direct_delete(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
-        raise AssertionError(f"direct filesystem delete used after metadata probe failure: {path}")
+        direct_delete_calls.append((kind, path, work_dir))
+        return True, None, "PATH_DELETED"
 
-    monkeypatch.setattr(
-        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
-    )
+    monkeypatch.setattr("awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete)
 
     result = asyncio.run(
         reap_classified_orphans(
@@ -626,15 +630,74 @@ def test_reaper_fails_closed_for_plain_worktree_with_malformed_mirror_registry(
         )
     )
 
-    assert result.status == "partial"
-    assert result.reason_code == "ORPHAN_REAP_PARTIAL"
-    assert result.reaped == ()
-    assert len(result.errors) == 1
-    assert result.errors[0].kind == "worktree"
-    assert result.errors[0].workspace_id == workspace_id
-    assert result.errors[0].status == "failed"
-    assert result.errors[0].reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
-    assert worktree.exists()
+    assert result.status == "ok"
+    assert result.errors == ()
+    assert direct_delete_calls == [("worktree", worktree, tmp_path.resolve())]
+    assert [outcome.to_dict() for outcome in result.reaped] == [
+        {
+            "kind": "worktree",
+            "workspace_id": workspace_id,
+            "status": "reaped",
+            "reason_code": "PATH_DELETED",
+        }
+    ]
+
+
+@pytest.mark.unit
+def test_reaper_uses_direct_delete_for_plain_worktree_with_damaged_mirror_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    workspace_id = "ws_dead"
+    worktree = tmp_path / "git" / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    linked_git_dir = tmp_path / "git" / "mirrors" / "repo.git" / "worktrees" / workspace_id
+    linked_git_dir.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "--bare", str(linked_git_dir.parent.parent)],
+        check=True,
+        capture_output=True,
+    )
+    (linked_git_dir / "gitdir").write_text("\n", encoding="utf-8")
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+    direct_delete_calls: list[tuple[str, Path, Path]] = []
+
+    def _direct_delete(
+        kind: str, path: Path, *, work_dir: Path
+    ) -> tuple[bool, str | None, str | None]:
+        direct_delete_calls.append((kind, path, work_dir))
+        return True, None, "PATH_DELETED"
+
+    monkeypatch.setattr("awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete)
+
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            min_age_hours=0,
+        )
+    )
+
+    assert result.status == "ok"
+    assert result.errors == ()
+    assert direct_delete_calls == [("worktree", worktree, tmp_path.resolve())]
+    assert [outcome.to_dict() for outcome in result.reaped] == [
+        {
+            "kind": "worktree",
+            "workspace_id": workspace_id,
+            "status": "reaped",
+            "reason_code": "PATH_DELETED",
+        }
+    ]
 
 
 @pytest.mark.unit
@@ -765,54 +828,6 @@ def test_reaper_uses_git_aware_remover_for_worktree_missing_gitfile_with_mirror_
     assert result.status == "partial"
     assert calls == [("ws_dead", worktree)]
     assert result.errors[0].reason_code == "ORPHAN_WORKTREE_REPO_URL_UNRESOLVED"
-    assert worktree.exists()
-
-
-@pytest.mark.unit
-def test_reaper_fails_closed_for_plain_worktree_with_damaged_mirror_registry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from awf.service.orphan_resources import reap_classified_orphans
-
-    workspace_id = "ws_dead"
-    worktree = tmp_path / "git" / "worktrees" / workspace_id
-    worktree.mkdir(parents=True)
-    linked_git_dir = tmp_path / "git" / "mirrors" / "repo.git" / "worktrees" / workspace_id
-    linked_git_dir.mkdir(parents=True)
-    (linked_git_dir / "gitdir").write_text("\n", encoding="utf-8")
-    summary = build_orphan_resource_summary(
-        docker_scan=empty_docker_scan(),
-        worktree_scan=scan_managed_worktrees(tmp_path),
-        workspace_view=_ok_view(),
-        auto_cleanup_orphans=True,
-        reaper_available=True,
-    )
-
-    def _direct_delete_forbidden(
-        kind: str, path: Path, *, work_dir: Path
-    ) -> tuple[bool, str | None, str | None]:
-        raise AssertionError(f"direct filesystem delete used after metadata probe failure: {path}")
-
-    monkeypatch.setattr(
-        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
-    )
-
-    result = asyncio.run(
-        reap_classified_orphans(
-            summary,
-            work_dir=tmp_path,
-            compose_teardown=_RecordingComposeTeardown(),
-            enabled=True,
-            min_age_hours=0,
-        )
-    )
-
-    assert result.status == "partial"
-    assert result.reason_code == "ORPHAN_REAP_PARTIAL"
-    assert result.reaped == ()
-    assert len(result.errors) == 1
-    assert result.errors[0].workspace_id == workspace_id
-    assert result.errors[0].reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
     assert worktree.exists()
 
 

@@ -902,6 +902,49 @@ def test_mirror_path_for_registered_worktree_ignores_earlier_unreadable_match(
 
 
 @pytest.mark.unit
+def test_mirror_path_for_registered_worktree_returns_none_when_only_match_is_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    unreadable_mirror = mirrors_dir / "repo.git"
+    synthetic_bare_mirror(unreadable_mirror)
+    unreadable_gitdir = unreadable_mirror / "worktrees" / "ws" / "gitdir"
+    unreadable_gitdir.parent.mkdir(parents=True)
+    unreadable_gitdir.write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def _raise_for_unreadable_gitdir(path: Path, *args: object, **kwargs: object) -> str:
+        if path == unreadable_gitdir:
+            raise PermissionError("permission denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_unreadable_gitdir)
+
+    assert git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir) is None
+
+
+@pytest.mark.unit
+def test_mirror_path_for_registered_worktree_returns_none_for_corrupt_gitdir_without_match(
+    tmp_path: Path,
+    synthetic_bare_mirror: Callable[[Path], None],
+) -> None:
+    mirrors_dir = tmp_path / "mirrors"
+    worktree = tmp_path / "worktrees" / "ws"
+    worktree.mkdir(parents=True)
+    mirror = mirrors_dir / "repo.git"
+    synthetic_bare_mirror(mirror)
+    linked_git_dir = mirror / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    (linked_git_dir / "gitdir").write_text("", encoding="utf-8")
+
+    assert git_manager.mirror_path_for_registered_worktree(worktree, mirrors_dir) is None
+
+
+@pytest.mark.unit
 def test_mirror_path_for_registered_worktree_fails_closed_when_registry_unscannable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
