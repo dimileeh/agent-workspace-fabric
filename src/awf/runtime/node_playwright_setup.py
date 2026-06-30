@@ -17,7 +17,46 @@ from awf.profiles.models import ProfileCommand, WorkspaceProfile
 _PLAYWRIGHT_BROWSER_INSTALL_TIMEOUT_SECONDS = 900
 _NODE_PACKAGE_MANAGERS = ("pnpm", "yarn", "bun", "npm")
 _NODE_INSTALL_SUBCOMMANDS = frozenset({"add", "ci", "i", "install"})
+_NODE_PACKAGE_MANAGER_SCOPE_FLAGS = frozenset(
+    {
+        "--cwd",
+        "--dir",
+        "--directory",
+        "--filter",
+        "--prefix",
+        "--project-dir",
+        "--project-directory",
+        "--workspace",
+        "-c",
+        "-w",
+    }
+)
 _PYTHON_EXECUTABLE_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
+
+
+def _collect_pm_scope_tokens(tokens: list[str], pm_index: int) -> list[str]:
+    """Collect package-manager scope flags following the executable token."""
+    scope_tokens: list[str] = []
+    index = pm_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            break
+        option_name = token.split("=", 1)[0]
+        if option_name not in _NODE_PACKAGE_MANAGER_SCOPE_FLAGS:
+            break
+        scope_tokens.append(token)
+        if "=" not in token:
+            if index + 1 >= len(tokens):
+                break
+            next_token = tokens[index + 1]
+            if next_token.startswith("-"):
+                index += 1
+                continue
+            index += 1
+            scope_tokens.append(next_token)
+        index += 1
+    return scope_tokens
 
 
 def playwright_command(package_manager: str, *args: str) -> str:
@@ -27,13 +66,24 @@ def playwright_command(package_manager: str, *args: str) -> str:
         package_manager_tokens = shlex.split(package_manager)
     except ValueError:
         package_manager_tokens = [package_manager]
-    executable = package_manager_tokens[0] if package_manager_tokens else "npm"
+    if not package_manager_tokens:
+        return f"npx playwright {escaped_args}"
+
+    executable_path = package_manager_tokens[0]
+    executable = executable_path.rsplit("/", 1)[-1]
+    scope_tokens = _collect_pm_scope_tokens(package_manager_tokens, 0)
+    scope_prefix = shlex.join([executable_path, *scope_tokens]) if scope_tokens else executable
+
     if executable == "pnpm":
-        return f"pnpm exec playwright {escaped_args}"
+        return f"{scope_prefix} exec playwright {escaped_args}"
     if executable == "yarn":
-        return f"yarn playwright {escaped_args}"
+        return f"{scope_prefix} playwright {escaped_args}"
     if executable == "bun":
+        if scope_tokens:
+            return f"{scope_prefix} x playwright {escaped_args}"
         return f"bunx playwright {escaped_args}"
+    if scope_tokens:
+        return f"{scope_prefix} exec playwright {escaped_args}"
     return f"npx playwright {escaped_args}"
 
 
@@ -56,6 +106,9 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> str | None:
             if base in _NODE_PACKAGE_MANAGERS:
                 rest = tokens[index + 1 :]
                 if not rest or any(sub in _NODE_INSTALL_SUBCOMMANDS for sub in rest):
+                    scope_tokens = _collect_pm_scope_tokens(tokens, index)
+                    if scope_tokens:
+                        return shlex.join([token, *scope_tokens])
                     return base
     return None
 

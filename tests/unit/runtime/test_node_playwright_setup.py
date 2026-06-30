@@ -108,6 +108,33 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("setup_command", "expected_install_command"),
+    [
+        (
+            "npm --prefix apps/console ci",
+            "npm --prefix apps/console exec playwright install chromium",
+        ),
+        (
+            "pnpm --dir apps/console install",
+            "pnpm --dir apps/console exec playwright install chromium",
+        ),
+    ],
+)
+def test_browser_install_preserves_package_manager_scope(
+    setup_command: str, expected_install_command: str
+) -> None:
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"setup": [setup_command]}}
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == expected_install_command
+
+
+@pytest.mark.unit
 def test_browser_install_uses_python_interpreter_when_no_node_manager() -> None:
     profile = _profile(
         {
