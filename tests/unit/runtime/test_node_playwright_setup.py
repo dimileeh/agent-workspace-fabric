@@ -143,6 +143,41 @@ def test_browser_install_preserves_package_manager_scope(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("validate_command", "expected_executable_prefix"),
+    [
+        (
+            "uv run --project apps/api pytest",
+            "uv run --project apps/api python",
+        ),
+        (
+            "uv run --directory apps/api pytest",
+            "uv run --directory apps/api python",
+        ),
+        (
+            "uv run --python 3.12 --extra dev pytest",
+            "uv run --python 3.12 --extra dev python",
+        ),
+        (
+            "uv run --project=apps/api pytest",
+            "uv run --project=apps/api python",
+        ),
+    ],
+)
+def test_browser_install_preserves_uv_run_project_scope(
+    validate_command: str, expected_executable_prefix: str
+) -> None:
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"validate": [validate_command]}}
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == f"{expected_executable_prefix} -m playwright install chromium"
+
+
+@pytest.mark.unit
 def test_browser_install_uses_python_interpreter_when_no_node_manager() -> None:
     profile = _profile(
         {

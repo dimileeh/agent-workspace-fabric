@@ -32,6 +32,22 @@ _NODE_PACKAGE_MANAGER_SCOPE_FLAGS = frozenset(
     }
 )
 _PYTHON_EXECUTABLE_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
+_UV_RUN_SCOPE_VALUE_FLAGS = frozenset(
+    {
+        "--directory",
+        "--env-file",
+        "--extra",
+        "--group",
+        "--no-extra",
+        "--no-group",
+        "--only-group",
+        "--package",
+        "--project",
+        "--python",
+        "--python-platform",
+        "-p",
+    }
+)
 
 
 def _collect_pm_scope_tokens(
@@ -52,6 +68,31 @@ def _collect_pm_scope_tokens(
             continue
         scope_tokens.append(token)
         if "=" not in token:
+            if index + 1 >= len(tokens):
+                break
+            next_token = tokens[index + 1]
+            if next_token.startswith("-"):
+                index += 1
+                continue
+            index += 1
+            scope_tokens.append(next_token)
+        index += 1
+    return scope_tokens
+
+
+def _collect_uv_run_scope_tokens(tokens: list[str], run_index: int) -> list[str]:
+    """Collect ``uv run`` scope flags before the script/command token."""
+    scope_tokens: list[str] = []
+    index = run_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            break
+        if not token.startswith("-"):
+            break
+        scope_tokens.append(token)
+        option_name = token.split("=", 1)[0]
+        if "=" not in token and option_name in _UV_RUN_SCOPE_VALUE_FLAGS:
             if index + 1 >= len(tokens):
                 break
             next_token = tokens[index + 1]
@@ -134,7 +175,8 @@ def _python_playwright_executable(profile: WorkspaceProfile) -> str | None:
             if _PYTHON_EXECUTABLE_RE.match(base):
                 return token
             if base == "uv" and index + 1 < len(tokens) and tokens[index + 1] == "run":
-                return "uv run python"
+                scope_tokens = _collect_uv_run_scope_tokens(tokens, index + 1)
+                return shlex.join(["uv", "run", *scope_tokens, "python"])
             if base == "pytest" and "playwright" in command:
                 return "python"
     return None
