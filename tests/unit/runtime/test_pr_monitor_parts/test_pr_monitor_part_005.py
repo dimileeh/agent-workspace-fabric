@@ -167,6 +167,33 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_prefixed_ruff_evidence_prevents_transient_rerun(self) -> None:
+        """Tab-prefixed gh run view diagnostics beat transient tail text.
+
+        Regression for PRRT_kwDOSJAM6s6NbQ76.
+        """
+        ruff_diagnostic = "src/awf/runtime/example.py:1:1: F401 `os` imported but unused"
+        prefixed_line = f"lint-and-type\tRun ruff check\t{ruff_diagnostic}"
+        failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt=(
+                f"{prefixed_line}\nfailed to download cleanup artifact: connection reset\n"
+            ),
+            run_id="27091023777",
+            error_summaries=(prefixed_line,),
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_parsed_ruff_format_evidence_prevents_transient_rerun(self) -> None:
         """Ruff format --check output in parsed evidence beats transient tail text.
 

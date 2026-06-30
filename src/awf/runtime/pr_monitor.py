@@ -671,7 +671,7 @@ _CI_CODE_FAILURE_MARKERS = (
     "panic:",
 )
 
-_RUFF_DIAGNOSTIC_RE = re.compile(r"^\S+\.py:\d+:\d+:\s+[a-z]{1,4}\d{3,4}\b", re.IGNORECASE)
+_RUFF_DIAGNOSTIC_RE = re.compile(r"\S+\.py:\d+:\d+:\s+[a-z]{1,4}\d{3,4}\b", re.IGNORECASE)
 
 
 def _log_shows_code_failure(log_text: str) -> bool:
@@ -684,7 +684,7 @@ def _log_shows_code_failure(log_text: str) -> bool:
             return True
         if ".py:" in stripped and ": error:" in stripped:
             return True
-        if _RUFF_DIAGNOSTIC_RE.match(stripped):
+        if _RUFF_DIAGNOSTIC_RE.search(stripped):
             return True
     return False
 
