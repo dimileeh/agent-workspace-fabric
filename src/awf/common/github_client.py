@@ -1414,7 +1414,9 @@ def _rollup_check_failure_conclusion(check: CheckTiming) -> str | None:
     """Return the terminal failure value carried by a rollup check/status."""
     for value in (check.conclusion, check.status):
         conclusion = (value or "").upper()
-        if conclusion in _FAILED_CHECK_CONCLUSIONS or conclusion == "ERROR":
+        if conclusion == "ERROR":
+            return "FAILURE"
+        if conclusion in _FAILED_CHECK_CONCLUSIONS:
             return conclusion
     return None
 

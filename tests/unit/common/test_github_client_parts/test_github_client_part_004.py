@@ -934,6 +934,33 @@ class TestFetchFailingCheckLogs:
         assert len(fake.calls) == 1
 
     @pytest.mark.unit
+    async def test_failed_rollup_error_status_normalizes_to_failure_conclusion(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=json.dumps([]))
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="ci-required",
+                    status="ERROR",
+                    details_url=None,
+                ),
+            ),
+        )
+
+        assert len(failures) == 1
+        assert failures[0].name == "ci-required"
+        assert failures[0].conclusion == "FAILURE"
+        assert failures[0].run_id is None
+        assert failures[0].log_excerpt == ""
+
+    @pytest.mark.unit
     async def test_ignores_non_failure_runs(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
