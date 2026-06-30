@@ -655,6 +655,10 @@ _CI_TRANSIENT_FAILURE_MARKERS = (
 _CI_CODE_FAILURE_MARKERS = (
     "would reformat:",
     "would be reformatted",
+    "fail-under",
+    "coverage failure",
+    "required test coverage",
+    "coverage below required threshold",
     "traceback (most recent call last):",
     "assertionerror",
     "assertionfailederror",

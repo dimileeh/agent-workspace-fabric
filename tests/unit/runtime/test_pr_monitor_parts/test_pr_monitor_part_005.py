@@ -190,6 +190,58 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_coverage_fail_under_log_prevents_transient_rerun(self) -> None:
+        """Coverage gate fail-under output in logs beats transient tail text.
+
+        Regression for PRRT_kwDOSJAM6s6Na_eC.
+        """
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "TOTAL                                     27093    140    99%\n"
+                "FAIL Required test coverage of 99.0% not reached. Total coverage: 98.84%\n"
+                "failed to download cleanup artifact: connection reset\n"
+            ),
+            run_id="27091023778",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_parsed_coverage_threshold_evidence_prevents_transient_rerun(self) -> None:
+        """Coverage threshold annotations in parsed evidence beat transient tail text.
+
+        Regression for PRRT_kwDOSJAM6s6Na_eC.
+        """
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt="failed to download cleanup artifact: connection reset\n",
+            run_id="27091023779",
+            error_summaries=(
+                "::error title=Coverage below required threshold::"
+                "Combined line+branch coverage 98.87% is below required 99.00%.",
+            ),
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrelated_permanent_daemon_error_after_transient_pull_dispatches_rerun(
         self,
     ) -> None:
