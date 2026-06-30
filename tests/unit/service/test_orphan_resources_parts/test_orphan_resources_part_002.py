@@ -125,6 +125,7 @@ def _orphan_summary_with_compose_and_worktree(tmp_path: Path, *, auto_cleanup_or
     )
 
 
+@pytest.mark.unit
 def test_reaper_uses_git_aware_remover_for_git_managed_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -191,6 +192,7 @@ def test_reaper_uses_git_aware_remover_for_git_managed_worktree(
     ]
 
 
+@pytest.mark.unit
 def test_reaper_falls_back_to_direct_delete_when_git_remover_skips_not_git_managed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
