@@ -34,7 +34,9 @@ _NODE_PACKAGE_MANAGER_SCOPE_FLAGS = frozenset(
 _PYTHON_EXECUTABLE_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
 
 
-def _collect_pm_scope_tokens(tokens: list[str], pm_index: int) -> list[str]:
+def _collect_pm_scope_tokens(
+    tokens: list[str], pm_index: int, *, require_consecutive: bool = True
+) -> list[str]:
     """Collect package-manager scope flags following the executable token."""
     scope_tokens: list[str] = []
     index = pm_index + 1
@@ -44,7 +46,10 @@ def _collect_pm_scope_tokens(tokens: list[str], pm_index: int) -> list[str]:
             break
         option_name = token.split("=", 1)[0]
         if option_name not in _NODE_PACKAGE_MANAGER_SCOPE_FLAGS:
-            break
+            if require_consecutive:
+                break
+            index += 1
+            continue
         scope_tokens.append(token)
         if "=" not in token:
             if index + 1 >= len(tokens):
@@ -106,7 +111,9 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> str | None:
             if base in _NODE_PACKAGE_MANAGERS:
                 rest = tokens[index + 1 :]
                 if not rest or any(sub in _NODE_INSTALL_SUBCOMMANDS for sub in rest):
-                    scope_tokens = _collect_pm_scope_tokens(tokens, index)
+                    scope_tokens = _collect_pm_scope_tokens(
+                        tokens, index, require_consecutive=False
+                    )
                     if scope_tokens:
                         return shlex.join([token, *scope_tokens])
                     return base

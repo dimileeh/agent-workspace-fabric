@@ -119,6 +119,14 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
             "pnpm --dir apps/console install",
             "pnpm --dir apps/console exec playwright install chromium",
         ),
+        (
+            "npm ci --prefix=apps/console",
+            "npm --prefix=apps/console exec playwright install chromium",
+        ),
+        (
+            "pnpm install --dir apps/console",
+            "pnpm --dir apps/console exec playwright install chromium",
+        ),
     ],
 )
 def test_browser_install_preserves_package_manager_scope(
