@@ -94,6 +94,32 @@ def test_browser_install_is_none_without_declared_browsers() -> None:
 
 
 @pytest.mark.unit
+def test_browser_install_does_not_infer_package_manager_from_pre_agent() -> None:
+    # Browser install is appended to setup before pre_agent runs; only setup hooks
+    # may influence package-manager detection.
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"pre_agent": ["pnpm install"]}}
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == "npx playwright install chromium"
+
+
+@pytest.mark.unit
+def test_setup_plan_runs_npx_browser_install_before_pre_agent_install() -> None:
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"pre_agent": ["pnpm install"]}}
+    )
+
+    plan = profile_phase_command_plan(profile, ["setup", "pre_agent"])
+    commands = [step.command.command for step in plan]
+
+    assert commands == ["npx playwright install chromium", "pnpm install"]
+
+
+@pytest.mark.unit
 def test_browser_install_prefers_detected_node_package_manager() -> None:
     profile = _profile(
         {"runtime": {"browsers": ["chromium", "firefox"]}, "phases": {"setup": ["pnpm install"]}}

@@ -137,7 +137,6 @@ def _profile_install_commands(profile: WorkspaceProfile) -> list[str]:
     """Collect setup-phase commands that may reveal the package manager or interpreter."""
     commands = [c.command for c in profile.phases.setup if c.command]
     commands += [c.command for c in profile.database.generated_setup if c.command]
-    commands += [c.command for c in profile.phases.pre_agent if c.command]
     return commands
 
 
