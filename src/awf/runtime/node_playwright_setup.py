@@ -326,8 +326,12 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
     return None, None
 
 
-def _python_playwright_executable(profile: WorkspaceProfile) -> str | None:
-    """Infer the Python interpreter to run ``playwright install`` for a Python project."""
+def _python_playwright_executable(profile: WorkspaceProfile) -> tuple[str | None, str | None]:
+    """Infer the Python interpreter to run ``playwright install`` for a Python project.
+
+    Returns ``(executable, cd_prefix)`` where ``cd_prefix`` is like
+    ``cd apps/api && `` for shell-scoped commands without uv/PM scope flags.
+    """
     commands = _profile_install_commands(profile)
     commands += [c.command for c in profile.phases.validate_commands if c.command]
     for command in commands:
@@ -338,17 +342,17 @@ def _python_playwright_executable(profile: WorkspaceProfile) -> str | None:
         for index, token in enumerate(tokens):
             base = token.rsplit("/", 1)[-1]
             if _PYTHON_EXECUTABLE_RE.match(base):
-                return token
+                return token, _extract_cd_scope_prefix(tokens, index)
             if base == "uv":
                 uv_prefix = _uv_run_python_prefix(tokens, index)
                 if uv_prefix is not None:
-                    return uv_prefix
+                    return uv_prefix, _extract_cd_scope_prefix(tokens, index)
                 uv_prefix = _uv_setup_python_prefix(tokens, index)
                 if uv_prefix is not None:
-                    return uv_prefix
+                    return uv_prefix, _extract_cd_scope_prefix(tokens, index)
             if base == "pytest" and "playwright" in command:
-                return "python"
-    return None
+                return "python", _extract_cd_scope_prefix(tokens, index)
+    return None, None
 
 
 def _python_playwright_install_command(executable: str, *browsers: str) -> str:
@@ -372,11 +376,12 @@ def playwright_browser_install_command(
         playwright_cmd = playwright_command(package_manager, "install", *profile.runtime.browsers)
         command = f"{cd_prefix}{playwright_cmd}" if cd_prefix else playwright_cmd
     else:
-        python_executable = _python_playwright_executable(profile)
+        python_executable, python_cd_prefix = _python_playwright_executable(profile)
         if python_executable is not None:
-            command = _python_playwright_install_command(
+            playwright_cmd = _python_playwright_install_command(
                 python_executable, *profile.runtime.browsers
             )
+            command = f"{python_cd_prefix}{playwright_cmd}" if python_cd_prefix else playwright_cmd
         else:
             command = playwright_command("npm", "install", *profile.runtime.browsers)
     return ProfileCommand(
