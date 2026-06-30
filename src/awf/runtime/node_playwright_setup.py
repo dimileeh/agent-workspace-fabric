@@ -33,6 +33,13 @@ _NODE_PACKAGE_MANAGER_SCOPE_FLAGS = frozenset(
 )
 _PYTHON_EXECUTABLE_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
 _SHELL_CHAIN_SEPARATORS = frozenset({"&&", ";", "||"})
+_UV_GLOBAL_SCOPE_VALUE_FLAGS = frozenset(
+    {
+        "--config-file",
+        "--directory",
+        "--project",
+    }
+)
 _UV_RUN_SCOPE_VALUE_FLAGS = frozenset(
     {
         "--directory",
@@ -79,6 +86,41 @@ def _collect_pm_scope_tokens(
             scope_tokens.append(next_token)
         index += 1
     return scope_tokens
+
+
+def _uv_run_python_prefix(tokens: list[str], uv_index: int) -> str | None:
+    """Build ``uv [global opts] run [run opts] python`` when tokens contain a uv run invocation."""
+    if tokens[uv_index].rsplit("/", 1)[-1] != "uv":
+        return None
+
+    index = uv_index + 1
+    global_scope: list[str] = []
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "run":
+            break
+        if token == "--":
+            return None
+        if not token.startswith("-"):
+            return None
+        global_scope.append(token)
+        option_name = token.split("=", 1)[0]
+        if "=" not in token and option_name in _UV_GLOBAL_SCOPE_VALUE_FLAGS:
+            if index + 1 >= len(tokens):
+                return None
+            next_token = tokens[index + 1]
+            if next_token.startswith("-"):
+                index += 1
+                continue
+            index += 1
+            global_scope.append(next_token)
+        index += 1
+
+    if index >= len(tokens) or tokens[index] != "run":
+        return None
+
+    run_scope = _collect_uv_run_scope_tokens(tokens, index)
+    return shlex.join(["uv", *global_scope, "run", *run_scope, "python"])
 
 
 def _collect_uv_run_scope_tokens(tokens: list[str], run_index: int) -> list[str]:
@@ -201,9 +243,10 @@ def _python_playwright_executable(profile: WorkspaceProfile) -> str | None:
             base = token.rsplit("/", 1)[-1]
             if _PYTHON_EXECUTABLE_RE.match(base):
                 return token
-            if base == "uv" and index + 1 < len(tokens) and tokens[index + 1] == "run":
-                scope_tokens = _collect_uv_run_scope_tokens(tokens, index + 1)
-                return shlex.join(["uv", "run", *scope_tokens, "python"])
+            if base == "uv":
+                uv_prefix = _uv_run_python_prefix(tokens, index)
+                if uv_prefix is not None:
+                    return uv_prefix
             if base == "pytest" and "playwright" in command:
                 return "python"
     return None

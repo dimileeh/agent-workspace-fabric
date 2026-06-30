@@ -196,6 +196,18 @@ def test_browser_install_preserves_package_manager_scope(
             "uv run --project=apps/api pytest",
             "uv run --project=apps/api python",
         ),
+        (
+            "uv --project apps/api run pytest",
+            "uv --project apps/api run python",
+        ),
+        (
+            "uv --directory apps/api run pytest",
+            "uv --directory apps/api run python",
+        ),
+        (
+            "uv --project=apps/api run pytest",
+            "uv --project=apps/api run python",
+        ),
     ],
 )
 def test_browser_install_preserves_uv_run_project_scope(
