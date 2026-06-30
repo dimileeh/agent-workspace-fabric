@@ -243,6 +243,30 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_lint_syntax_markers_with_transient_text_dispatch_agent_repair(self) -> None:
+        """Generic lint/syntax markers in logs beat transient tail text.
+
+        Regression for PRRT_kwDOSJAM6s6NbkyN.
+        """
+        failure = CheckFailure(
+            name="console",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "eslint found 3 errors in 2 files\nfailed to download from cache/artifact cleanup\n"
+            ),
+            run_id="27091023780",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_parsed_coverage_threshold_evidence_prevents_transient_rerun(self) -> None:
         """Coverage threshold annotations in parsed evidence beat transient tail text.
 

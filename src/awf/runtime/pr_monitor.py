@@ -664,6 +664,8 @@ _CI_CODE_FAILURE_MARKERS = (
     "assertionfailederror",
     "=== short test summary info ===",
     "found type errors",
+    "found lint errors",
+    "syntaxerror",
     "expect(received)",
     "test result: failed",
     "panicked at",
@@ -672,11 +674,17 @@ _CI_CODE_FAILURE_MARKERS = (
 )
 
 _RUFF_DIAGNOSTIC_RE = re.compile(r"\S+\.py:\d+:\d+:\s+[a-z]{1,4}\d{3,4}\b", re.IGNORECASE)
+_LINT_TOOL_FAILURE_RE = re.compile(
+    r"\b(?:ruff|mypy|eslint)\b[^\n]*\b(?:failed|found|would reformat|errors?)\b",
+    re.IGNORECASE,
+)
 
 
 def _log_shows_code_failure(log_text: str) -> bool:
     """Return whether CI log text contains markers of a code-level test or lint failure."""
     if any(marker in log_text for marker in _CI_CODE_FAILURE_MARKERS):
+        return True
+    if _LINT_TOOL_FAILURE_RE.search(log_text):
         return True
     for line in log_text.splitlines():
         stripped = line.lstrip()
