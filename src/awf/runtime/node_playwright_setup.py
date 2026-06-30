@@ -88,8 +88,10 @@ def _collect_pm_scope_tokens(
     return scope_tokens
 
 
-def _uv_run_python_prefix(tokens: list[str], uv_index: int) -> str | None:
-    """Build ``uv [global opts] run [run opts] python`` when tokens contain a uv run invocation."""
+def _collect_uv_global_scope_tokens(
+    tokens: list[str], uv_index: int
+) -> tuple[list[str], int] | None:
+    """Return ``(global_scope, next_index)`` after the ``uv`` token, or ``None`` if invalid."""
     if tokens[uv_index].rsplit("/", 1)[-1] != "uv":
         return None
 
@@ -97,12 +99,10 @@ def _uv_run_python_prefix(tokens: list[str], uv_index: int) -> str | None:
     global_scope: list[str] = []
     while index < len(tokens):
         token = tokens[index]
-        if token == "run":
-            break
         if token == "--":
             return None
         if not token.startswith("-"):
-            return None
+            break
         global_scope.append(token)
         option_name = token.split("=", 1)[0]
         if "=" not in token and option_name in _UV_GLOBAL_SCOPE_VALUE_FLAGS:
@@ -115,11 +115,103 @@ def _uv_run_python_prefix(tokens: list[str], uv_index: int) -> str | None:
             index += 1
             global_scope.append(next_token)
         index += 1
+    return global_scope, index
 
+
+def _uv_run_python_prefix(tokens: list[str], uv_index: int) -> str | None:
+    """Build ``uv [global opts] run [run opts] python`` when tokens contain a uv run invocation."""
+    collected = _collect_uv_global_scope_tokens(tokens, uv_index)
+    if collected is None:
+        return None
+    global_scope, index = collected
     if index >= len(tokens) or tokens[index] != "run":
         return None
 
     run_scope = _collect_uv_run_scope_tokens(tokens, index)
+    return shlex.join(["uv", *global_scope, "run", *run_scope, "python"])
+
+
+_UV_SYNC_SCOPE_VALUE_FLAGS = _UV_RUN_SCOPE_VALUE_FLAGS | frozenset(
+    {"--all-extras", "--all-groups", "--no-dev"}
+)
+_UV_PIP_SCOPE_VALUE_FLAGS = frozenset({"--python", "--python-platform", "-p"})
+
+
+def _collect_uv_sync_scope_tokens(tokens: list[str], sync_index: int) -> list[str]:
+    """Collect ``uv sync`` scope flags after the ``sync`` token."""
+    scope_tokens: list[str] = []
+    index = sync_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            break
+        if not token.startswith("-"):
+            break
+        scope_tokens.append(token)
+        option_name = token.split("=", 1)[0]
+        if "=" not in token and option_name in _UV_SYNC_SCOPE_VALUE_FLAGS:
+            if index + 1 >= len(tokens):
+                break
+            next_token = tokens[index + 1]
+            if next_token.startswith("-"):
+                index += 1
+                continue
+            index += 1
+            scope_tokens.append(next_token)
+        index += 1
+    return scope_tokens
+
+
+def _collect_uv_pip_scope_tokens(tokens: list[str], pip_subcommand_index: int) -> list[str]:
+    """Collect ``uv pip install|sync`` scope flags that select the target Python environment."""
+    scope_tokens: list[str] = []
+    index = pip_subcommand_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            break
+        if not token.startswith("-"):
+            break
+        option_name = token.split("=", 1)[0]
+        if option_name not in _UV_PIP_SCOPE_VALUE_FLAGS:
+            break
+        scope_tokens.append(token)
+        if "=" not in token and option_name in _UV_PIP_SCOPE_VALUE_FLAGS:
+            if index + 1 >= len(tokens):
+                break
+            next_token = tokens[index + 1]
+            if next_token.startswith("-"):
+                index += 1
+                continue
+            index += 1
+            scope_tokens.append(next_token)
+        index += 1
+    return scope_tokens
+
+
+def _uv_setup_python_prefix(tokens: list[str], uv_index: int) -> str | None:
+    """Build ``uv [global opts] run [scope opts] python`` from ``uv sync`` or ``uv pip install``."""
+    collected = _collect_uv_global_scope_tokens(tokens, uv_index)
+    if collected is None:
+        return None
+    global_scope, index = collected
+    if index >= len(tokens):
+        return None
+
+    subcommand = tokens[index]
+    run_scope: list[str] = []
+    if subcommand == "sync":
+        run_scope = _collect_uv_sync_scope_tokens(tokens, index)
+    elif subcommand == "pip":
+        if index + 1 >= len(tokens):
+            return None
+        pip_subcommand = tokens[index + 1]
+        if pip_subcommand not in {"install", "sync"}:
+            return None
+        run_scope = _collect_uv_pip_scope_tokens(tokens, index + 1)
+    else:
+        return None
+
     return shlex.join(["uv", *global_scope, "run", *run_scope, "python"])
 
 
@@ -245,6 +337,9 @@ def _python_playwright_executable(profile: WorkspaceProfile) -> str | None:
                 return token
             if base == "uv":
                 uv_prefix = _uv_run_python_prefix(tokens, index)
+                if uv_prefix is not None:
+                    return uv_prefix
+                uv_prefix = _uv_setup_python_prefix(tokens, index)
                 if uv_prefix is not None:
                     return uv_prefix
             if base == "pytest" and "playwright" in command:
