@@ -326,6 +326,36 @@ def test_browser_install_uses_python_interpreter_when_no_node_manager() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("setup_command", "expected_executable"),
+    [
+        ("pip install -r requirements.txt", "python"),
+        ("pip3 install playwright", "python3"),
+        ("pip3.12 install -r requirements.txt", "python3.12"),
+        ("cd apps/api && pip install -e .", "python"),
+    ],
+)
+def test_browser_install_recognizes_bare_pip_setup(
+    setup_command: str, expected_executable: str
+) -> None:
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": [setup_command], "validate": ["pytest -q"]},
+        }
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert (
+        command.command == f"{expected_executable} -m playwright install chromium"
+        if "cd " not in setup_command
+        else f"cd apps/api && {expected_executable} -m playwright install chromium"
+    )
+
+
+@pytest.mark.unit
 def test_browser_install_recognizes_bare_python_and_pytest_playwright() -> None:
     explicit_python = _profile(
         {"runtime": {"browsers": ["webkit"]}, "phases": {"validate": ["python3 -m pytest"]}}

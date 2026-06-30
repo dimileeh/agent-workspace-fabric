@@ -32,6 +32,7 @@ _NODE_PACKAGE_MANAGER_SCOPE_FLAGS = frozenset(
     }
 )
 _PYTHON_EXECUTABLE_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
+_PIP_EXECUTABLE_RE = re.compile(r"^pip(\d+(?:\.\d+)*)?$")
 _SHELL_CHAIN_SEPARATORS = frozenset({"&&", ";", "||"})
 _UV_GLOBAL_SCOPE_VALUE_FLAGS = frozenset(
     {
@@ -324,14 +325,33 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
     return None, None
 
 
+def _pip_to_python_executable(pip_base: str) -> str | None:
+    """Map ``pip`` / ``pip3`` / ``pip3.12`` to the matching ``python`` executable."""
+    match = _PIP_EXECUTABLE_RE.match(pip_base)
+    if match is None:
+        return None
+    suffix = match.group(1)
+    return "python" if suffix is None else f"python{suffix}"
+
+
+def _has_pip_install_subcommand(tokens: list[str], pip_index: int) -> bool:
+    """Return whether tokens after ``pip`` include an ``install`` subcommand."""
+    for token in tokens[pip_index + 1 :]:
+        if token == "--":
+            break
+        if token == "install":
+            return True
+    return False
+
+
 def _python_playwright_executable(profile: WorkspaceProfile) -> tuple[str | None, str | None]:
     """Infer the Python interpreter to run ``playwright install`` for a Python project.
 
     Returns ``(executable, cd_prefix)`` where ``cd_prefix`` is like
     ``cd apps/api && `` for shell-scoped commands without uv/PM scope flags.
     """
-    commands = _profile_install_commands(profile)
-    commands += [c.command for c in profile.phases.validate_commands if c.command]
+    commands = [c.command for c in profile.phases.validate_commands if c.command]
+    commands += _profile_install_commands(profile)
     for command in commands:
         try:
             tokens = shlex.split(command)
@@ -348,6 +368,9 @@ def _python_playwright_executable(profile: WorkspaceProfile) -> tuple[str | None
                 uv_prefix = _uv_setup_python_prefix(tokens, index)
                 if uv_prefix is not None:
                     return uv_prefix, _extract_cd_scope_prefix(tokens, index)
+            pip_python = _pip_to_python_executable(base)
+            if pip_python is not None and _has_pip_install_subcommand(tokens, index):
+                return pip_python, _extract_cd_scope_prefix(tokens, index)
             if base == "pytest" and "playwright" in command:
                 return "python", _extract_cd_scope_prefix(tokens, index)
     return None, None
