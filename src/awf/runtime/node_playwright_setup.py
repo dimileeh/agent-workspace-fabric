@@ -32,6 +32,7 @@ _NODE_PACKAGE_MANAGER_SCOPE_FLAGS = frozenset(
     }
 )
 _PYTHON_EXECUTABLE_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
+_SHELL_CHAIN_SEPARATORS = frozenset({"&&", ";", "||"})
 _UV_RUN_SCOPE_VALUE_FLAGS = frozenset(
     {
         "--directory",
@@ -105,6 +106,27 @@ def _collect_uv_run_scope_tokens(tokens: list[str], run_index: int) -> list[str]
     return scope_tokens
 
 
+def _extract_cd_scope_prefix(tokens: list[str], pm_index: int) -> str | None:
+    """Return ``cd <dir> <sep> `` when the package manager follows a cd-scoped shell chain."""
+    index = pm_index - 1
+    while index >= 0:
+        token = tokens[index]
+        if token in _SHELL_CHAIN_SEPARATORS:
+            index -= 1
+            continue
+        if index >= 1 and tokens[index - 1] == "cd":
+            cd_path = tokens[index]
+            if cd_path.endswith(";"):
+                cd_path = cd_path[:-1]
+                return f"cd {shlex.quote(cd_path)}; "
+            separator = "&&"
+            if pm_index > 0 and tokens[pm_index - 1] in _SHELL_CHAIN_SEPARATORS:
+                separator = tokens[pm_index - 1]
+            return f"cd {shlex.quote(cd_path)} {separator} "
+        break
+    return None
+
+
 def playwright_command(package_manager: str, *args: str) -> str:
     """Build a package-manager-aware Playwright command (e.g. ``npx playwright install``)."""
     escaped_args = shlex.join(args)
@@ -140,8 +162,12 @@ def _profile_install_commands(profile: WorkspaceProfile) -> list[str]:
     return commands
 
 
-def _detected_node_package_manager(profile: WorkspaceProfile) -> str | None:
-    """Infer the Node package manager from an install command in the profile, if any."""
+def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | None, str | None]:
+    """Infer the Node package manager from an install command in the profile, if any.
+
+    Returns ``(package_manager, cd_prefix)`` where ``cd_prefix`` is like
+    ``cd apps/console && `` for shell-scoped installs without PM scope flags.
+    """
     for command in _profile_install_commands(profile):
         try:
             tokens = shlex.split(command)
@@ -156,9 +182,10 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> str | None:
                         tokens, index, require_consecutive=False
                     )
                     if scope_tokens:
-                        return shlex.join([token, *scope_tokens])
-                    return base
-    return None
+                        return shlex.join([token, *scope_tokens]), None
+                    cd_prefix = _extract_cd_scope_prefix(tokens, index)
+                    return base, cd_prefix
+    return None, None
 
 
 def _python_playwright_executable(profile: WorkspaceProfile) -> str | None:
@@ -198,9 +225,10 @@ def playwright_browser_install_command(
     """
     if not profile.runtime.browsers:
         return None
-    package_manager = _detected_node_package_manager(profile)
+    package_manager, cd_prefix = _detected_node_package_manager(profile)
     if package_manager is not None:
-        command = playwright_command(package_manager, "install", *profile.runtime.browsers)
+        playwright_cmd = playwright_command(package_manager, "install", *profile.runtime.browsers)
+        command = f"{cd_prefix}{playwright_cmd}" if cd_prefix else playwright_cmd
     else:
         python_executable = _python_playwright_executable(profile)
         if python_executable is not None:
