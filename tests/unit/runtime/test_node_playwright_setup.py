@@ -20,6 +20,7 @@ _BROWSER_INSTALL_TIMEOUT = 900
 
 
 def _profile(payload: dict[str, object]) -> WorkspaceProfile:
+    """Test helper for profile."""
     return WorkspaceProfile.model_validate({"name": "pw-profile", **payload})
 
 
@@ -36,12 +37,14 @@ def _profile(payload: dict[str, object]) -> WorkspaceProfile:
 )
 def test_playwright_command_is_package_manager_aware(package_manager: str, expected: str) -> None:
     # A bare path-qualified manager still resolves by its leading token.
+    """Verify playwright command is package manager aware."""
     assert playwright_command(package_manager.rsplit("/", 1)[-1], "install", "chromium") == expected
 
 
 @pytest.mark.unit
 def test_playwright_command_handles_unparseable_and_empty_manager() -> None:
     # An unbalanced quote makes shlex raise; we fall back to the raw token (npx).
+    """Verify playwright command handles unparseable and empty manager."""
     assert playwright_command('"', "test") == "npx playwright test"
     # An empty manager string yields no tokens and defaults to npx.
     assert playwright_command("", "test") == "npx playwright test"
@@ -50,6 +53,7 @@ def test_playwright_command_handles_unparseable_and_empty_manager() -> None:
 @pytest.mark.unit
 def test_browser_install_detects_node_manager_from_bare_install_token() -> None:
     # A bare manager token (no subcommand) still counts as an install signal.
+    """Verify browser install detects node manager from bare install token."""
     profile = _profile({"runtime": {"browsers": ["chromium"]}, "phases": {"setup": ["yarn"]}})
 
     command = playwright_browser_install_command(profile)
@@ -61,6 +65,7 @@ def test_browser_install_detects_node_manager_from_bare_install_token() -> None:
 @pytest.mark.unit
 def test_browser_install_ignores_node_manager_with_non_install_subcommand() -> None:
     # ``pnpm run build`` is not an install signal, so detection falls through to npx.
+    """Verify browser install ignores node manager with non install subcommand."""
     profile = _profile(
         {"runtime": {"browsers": ["chromium"]}, "phases": {"setup": ["pnpm run build"]}}
     )
@@ -75,6 +80,7 @@ def test_browser_install_ignores_node_manager_with_non_install_subcommand() -> N
 def test_browser_install_skips_unparseable_commands_and_still_finds_python() -> None:
     # The malformed (unbalanced-quote) command is skipped by both the node-manager
     # scan and the python-interpreter scan; detection continues to ``uv run``.
+    """Verify browser install skips unparseable commands and still finds python."""
     profile = _profile(
         {
             "runtime": {"browsers": ["chromium"]},
@@ -90,6 +96,7 @@ def test_browser_install_skips_unparseable_commands_and_still_finds_python() -> 
 
 @pytest.mark.unit
 def test_browser_install_is_none_without_declared_browsers() -> None:
+    """Verify browser install is none without declared browsers."""
     assert playwright_browser_install_command(_profile({"phases": {"setup": ["npm ci"]}})) is None
 
 
@@ -97,6 +104,7 @@ def test_browser_install_is_none_without_declared_browsers() -> None:
 def test_browser_install_does_not_infer_package_manager_from_pre_agent() -> None:
     # Browser install is appended to setup before pre_agent runs; only setup hooks
     # may influence package-manager detection.
+    """Verify browser install does not infer package manager from pre agent."""
     profile = _profile(
         {"runtime": {"browsers": ["chromium"]}, "phases": {"pre_agent": ["pnpm install"]}}
     )
@@ -109,6 +117,7 @@ def test_browser_install_does_not_infer_package_manager_from_pre_agent() -> None
 
 @pytest.mark.unit
 def test_setup_plan_runs_npx_browser_install_before_pre_agent_install() -> None:
+    """Verify setup plan runs npx browser install before pre agent install."""
     profile = _profile(
         {"runtime": {"browsers": ["chromium"]}, "phases": {"pre_agent": ["pnpm install"]}}
     )
@@ -121,6 +130,7 @@ def test_setup_plan_runs_npx_browser_install_before_pre_agent_install() -> None:
 
 @pytest.mark.unit
 def test_browser_install_prefers_detected_node_package_manager() -> None:
+    """Verify browser install prefers detected node package manager."""
     profile = _profile(
         {"runtime": {"browsers": ["chromium", "firefox"]}, "phases": {"setup": ["pnpm install"]}}
     )
@@ -166,6 +176,7 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
 def test_browser_install_preserves_package_manager_scope(
     setup_command: str, expected_install_command: str
 ) -> None:
+    """Verify browser install preserves package manager scope."""
     profile = _profile(
         {"runtime": {"browsers": ["chromium"]}, "phases": {"setup": [setup_command]}}
     )
@@ -225,6 +236,7 @@ def test_browser_install_preserves_package_manager_scope(
 def test_browser_install_preserves_uv_run_project_scope(
     validate_command: str, expected_executable_prefix: str
 ) -> None:
+    """Verify browser install preserves uv run project scope."""
     profile = _profile(
         {"runtime": {"browsers": ["chromium"]}, "phases": {"validate": [validate_command]}}
     )
@@ -260,6 +272,7 @@ def test_browser_install_preserves_uv_run_project_scope(
 def test_browser_install_preserves_uv_setup_project_scope(
     setup_command: str, expected_executable_prefix: str
 ) -> None:
+    """Verify browser install preserves uv setup project scope."""
     profile = _profile(
         {
             "runtime": {"browsers": ["chromium"]},
@@ -287,6 +300,7 @@ def test_browser_install_preserves_uv_setup_project_scope(
 def test_browser_install_uses_system_python_for_uv_pip_system(
     setup_command: str, expected_executable: str
 ) -> None:
+    """Verify browser install uses system python for uv pip system."""
     profile = _profile(
         {
             "runtime": {"browsers": ["chromium"]},
@@ -330,6 +344,7 @@ def test_browser_install_uses_system_python_for_uv_pip_system(
 def test_browser_install_preserves_cd_scope_for_python(
     profile_command: str, phase: str, expected_install_command: str
 ) -> None:
+    """Verify browser install preserves cd scope for python."""
     profile = _profile(
         {
             "runtime": {"browsers": ["chromium"]},
@@ -345,6 +360,7 @@ def test_browser_install_preserves_cd_scope_for_python(
 
 @pytest.mark.unit
 def test_browser_install_uses_python_interpreter_when_no_node_manager() -> None:
+    """Verify browser install uses python interpreter when no node manager."""
     profile = _profile(
         {
             "runtime": {"browsers": ["chromium"]},
@@ -371,6 +387,7 @@ def test_browser_install_uses_python_interpreter_when_no_node_manager() -> None:
 def test_browser_install_recognizes_bare_pip_setup(
     setup_command: str, expected_executable: str
 ) -> None:
+    """Verify browser install recognizes bare pip setup."""
     profile = _profile(
         {
             "runtime": {"browsers": ["chromium"]},
@@ -391,6 +408,7 @@ def test_browser_install_recognizes_bare_pip_setup(
 @pytest.mark.unit
 def test_browser_install_prefers_uv_setup_over_pytest_playwright_validate_path() -> None:
     # A validate path containing "playwright" must not win over setup ``uv sync`` scope.
+    """Verify browser install prefers uv setup over pytest playwright validate path."""
     profile = _profile(
         {
             "runtime": {"browsers": ["chromium"]},
@@ -409,6 +427,7 @@ def test_browser_install_prefers_uv_setup_over_pytest_playwright_validate_path()
 
 @pytest.mark.unit
 def test_browser_install_recognizes_bare_python_and_pytest_playwright() -> None:
+    """Verify browser install recognizes bare python and pytest playwright."""
     explicit_python = _profile(
         {"runtime": {"browsers": ["webkit"]}, "phases": {"validate": ["python3 -m pytest"]}}
     )
@@ -429,6 +448,7 @@ def test_browser_install_recognizes_bare_python_and_pytest_playwright() -> None:
 
 @pytest.mark.unit
 def test_browser_install_falls_back_to_npx() -> None:
+    """Verify browser install falls back to npx."""
     profile = _profile({"runtime": {"browsers": ["chromium"]}, "phases": {"validate": ["echo hi"]}})
 
     command = playwright_browser_install_command(profile)
@@ -445,6 +465,7 @@ def test_browser_install_falls_back_to_npx() -> None:
 def test_browser_install_does_not_treat_node_playwright_cli_as_python(
     validate_command: str,
 ) -> None:
+    """Verify browser install does not treat node playwright cli as python."""
     profile = _profile(
         {"runtime": {"browsers": ["chromium"]}, "phases": {"validate": [validate_command]}}
     )
@@ -457,6 +478,7 @@ def test_browser_install_does_not_treat_node_playwright_cli_as_python(
 
 @pytest.mark.unit
 def test_setup_plan_appends_browser_install_after_setup_and_db_hooks() -> None:
+    """Verify setup plan appends browser install after setup and db hooks."""
     profile = _profile(
         {
             "runtime": {"browsers": ["chromium"]},
@@ -474,6 +496,7 @@ def test_setup_plan_appends_browser_install_after_setup_and_db_hooks() -> None:
 
 @pytest.mark.unit
 def test_setup_plan_omits_browser_install_when_no_browsers_declared() -> None:
+    """Verify setup plan omits browser install when no browsers declared."""
     profile = _profile({"phases": {"setup": ["npm ci"]}})
 
     plan = profile_phase_command_plan(profile, ["setup"])

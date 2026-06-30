@@ -129,6 +129,7 @@ def _orphan_summary_with_compose_and_worktree(tmp_path: Path, *, auto_cleanup_or
 def test_reaper_uses_git_aware_remover_for_git_managed_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper uses git aware remover for git managed worktree."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     worktree = tmp_path / "git" / "worktrees" / "ws_dead"
@@ -146,6 +147,7 @@ def test_reaper_uses_git_aware_remover_for_git_managed_worktree(
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
+        """Test helper for git aware remover."""
         calls.append((workspace_id, path))
         assert work_dir == tmp_path.resolve()
         return WorkspaceGCWorktreeRemoveResult(
@@ -163,6 +165,7 @@ def test_reaper_uses_git_aware_remover_for_git_managed_worktree(
     def _direct_delete_forbidden(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete forbidden."""
         raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
 
     monkeypatch.setattr(
@@ -196,6 +199,7 @@ def test_reaper_uses_git_aware_remover_for_git_managed_worktree(
 def test_reaper_falls_back_to_direct_delete_when_git_remover_skips_not_git_managed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper falls back to direct delete when git remover skips not git managed."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     worktree = tmp_path / "git" / "worktrees" / "ws_dead"
@@ -214,6 +218,7 @@ def test_reaper_falls_back_to_direct_delete_when_git_remover_skips_not_git_manag
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
+        """Test helper for git aware remover."""
         remover_calls.append((workspace_id, path))
         assert work_dir == tmp_path.resolve()
         return WorkspaceGCWorktreeRemoveResult(
@@ -231,6 +236,7 @@ def test_reaper_falls_back_to_direct_delete_when_git_remover_skips_not_git_manag
     def _direct_delete(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete."""
         direct_delete_calls.append((kind, path, work_dir))
         return True, None, "PATH_DELETED"
 
@@ -265,6 +271,7 @@ def test_reaper_falls_back_to_direct_delete_when_git_remover_skips_not_git_manag
 def test_reaper_uses_git_aware_remover_for_stale_linked_mirror_gitfile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper uses git aware remover for stale linked mirror gitfile."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     worktree = tmp_path / "git" / "worktrees" / "ws_dead"
@@ -288,6 +295,7 @@ def test_reaper_uses_git_aware_remover_for_stale_linked_mirror_gitfile(
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
+        """Test helper for git aware remover."""
         calls.append((workspace_id, path))
         assert work_dir == tmp_path.resolve()
         return WorkspaceGCWorktreeRemoveResult(
@@ -305,6 +313,7 @@ def test_reaper_uses_git_aware_remover_for_stale_linked_mirror_gitfile(
     def _direct_delete(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete."""
         direct_delete_calls.append((kind, path, work_dir))
         return True, None, "PATH_DELETED"
 
@@ -339,6 +348,7 @@ def test_reaper_uses_git_aware_remover_for_stale_linked_mirror_gitfile(
 def test_reaper_uses_direct_delete_for_unmanaged_standalone_git_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper uses direct delete for unmanaged standalone git dir."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     worktree = tmp_path / "git" / "worktrees" / "ws_dead"
@@ -359,11 +369,13 @@ def test_reaper_uses_direct_delete_for_unmanaged_standalone_git_dir(
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
+        """Test helper for git aware remover."""
         raise AssertionError(f"git-aware remover used for unmanaged worktree {workspace_id}")
 
     def _direct_delete(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete."""
         direct_delete_calls.append((kind, path, work_dir))
         return True, None, "PATH_DELETED"
 
@@ -397,6 +409,7 @@ def test_reaper_uses_direct_delete_for_unmanaged_standalone_git_dir(
 def test_reaper_uses_scanned_companion_worktree_id_for_git_aware_remover(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper uses scanned companion worktree id for git aware remover."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     worktree = tmp_path / "git" / "worktrees" / "ws_parent__companion__backend"
@@ -417,6 +430,7 @@ def test_reaper_uses_scanned_companion_worktree_id_for_git_aware_remover(
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
+        """Test helper for git aware remover."""
         calls.append((workspace_id, path))
         assert work_dir == tmp_path.resolve()
         return WorkspaceGCWorktreeRemoveResult(
@@ -434,6 +448,7 @@ def test_reaper_uses_scanned_companion_worktree_id_for_git_aware_remover(
     def _direct_delete_forbidden(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete forbidden."""
         raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
 
     monkeypatch.setattr(
@@ -467,6 +482,7 @@ def test_reaper_uses_scanned_companion_worktree_id_for_git_aware_remover(
 def test_reaper_refuses_symlinked_worktree_before_git_remover(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper refuses symlinked worktree before git remover."""
     from awf.service.gc_classify import PATH_DELETE_FAILED
     from awf.service.orphan_resources import reap_classified_orphans
 
@@ -487,11 +503,13 @@ def test_reaper_refuses_symlinked_worktree_before_git_remover(
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
+        """Test helper for git aware remover."""
         raise AssertionError(f"git-aware removal used for symlinked worktree: {path}")
 
     def _direct_delete_forbidden(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete forbidden."""
         raise AssertionError(f"direct filesystem delete used for symlinked {kind}: {path}")
 
     monkeypatch.setattr(
@@ -525,6 +543,7 @@ def test_reaper_refuses_symlinked_worktree_before_git_remover(
 def test_reaper_reports_worktree_probe_os_error_as_partial_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper reports worktree probe os error as partial failure."""
     from awf.service.gc_classify import PATH_DELETE_FAILED
     from awf.service.orphan_resources import reap_classified_orphans
 
@@ -540,17 +559,20 @@ def test_reaper_reports_worktree_probe_os_error_as_partial_failure(
     )
 
     def _probe_fails(path: Path, *, work_dir: Path | None = None, **kwargs: object) -> bool:
+        """Test helper for probe fails."""
         del path, work_dir, kwargs
         raise OSError("bad gitdir")
 
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
+        """Test helper for git aware remover."""
         raise AssertionError(f"git-aware removal used after failed probe: {path}")
 
     def _direct_delete_forbidden(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete forbidden."""
         raise AssertionError(f"direct filesystem delete used after failed probe: {kind} {path}")
 
     monkeypatch.setattr("awf.service.orphan_resources.is_existing_non_git_worktree", _probe_fails)
@@ -585,6 +607,7 @@ def test_reaper_reports_worktree_probe_os_error_as_partial_failure(
 def test_reaper_uses_direct_delete_for_plain_worktree_with_malformed_mirror_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper uses direct delete for plain worktree with malformed mirror registry."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     workspace_id = "ws_dead"
@@ -609,11 +632,13 @@ def test_reaper_uses_direct_delete_for_plain_worktree_with_malformed_mirror_regi
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
+        """Test helper for git aware remover."""
         raise AssertionError(f"git-aware removal used for unresolved mirror registry: {path}")
 
     def _direct_delete(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete."""
         direct_delete_calls.append((kind, path, work_dir))
         return True, None, "PATH_DELETED"
 
@@ -647,6 +672,7 @@ def test_reaper_uses_direct_delete_for_plain_worktree_with_malformed_mirror_regi
 def test_reaper_uses_direct_delete_for_plain_worktree_with_damaged_mirror_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper uses direct delete for plain worktree with damaged mirror registry."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     workspace_id = "ws_dead"
@@ -672,6 +698,7 @@ def test_reaper_uses_direct_delete_for_plain_worktree_with_damaged_mirror_regist
     def _direct_delete(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete."""
         direct_delete_calls.append((kind, path, work_dir))
         return True, None, "PATH_DELETED"
 
@@ -704,6 +731,7 @@ def test_reaper_uses_direct_delete_for_plain_worktree_with_damaged_mirror_regist
 def test_reaper_reports_git_aware_worktree_remover_failure_without_direct_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper reports git aware worktree remover failure without direct fallback."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     worktree = tmp_path / "git" / "worktrees" / "ws_dead"
@@ -720,6 +748,7 @@ def test_reaper_reports_git_aware_worktree_remover_failure_without_direct_fallba
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
+        """Test helper for git aware remover."""
         del path, work_dir
         return WorkspaceGCWorktreeRemoveResult(
             status="failed",
@@ -738,6 +767,7 @@ def test_reaper_reports_git_aware_worktree_remover_failure_without_direct_fallba
     def _direct_delete_forbidden(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete forbidden."""
         raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
 
     monkeypatch.setattr(
@@ -768,6 +798,7 @@ def test_reaper_reports_git_aware_worktree_remover_failure_without_direct_fallba
 def test_reaper_uses_git_aware_remover_for_worktree_missing_gitfile_with_mirror_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper uses git aware remover for worktree missing gitfile with mirror registry."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     worktree = tmp_path / "git" / "worktrees" / "ws_dead"
@@ -789,6 +820,7 @@ def test_reaper_uses_git_aware_remover_for_worktree_missing_gitfile_with_mirror_
     async def _git_aware_remover(
         *, workspace_id: str, path: Path, work_dir: Path
     ) -> WorkspaceGCWorktreeRemoveResult:
+        """Test helper for git aware remover."""
         calls.append((workspace_id, path))
         assert work_dir == tmp_path.resolve()
         return WorkspaceGCWorktreeRemoveResult(
@@ -808,6 +840,7 @@ def test_reaper_uses_git_aware_remover_for_worktree_missing_gitfile_with_mirror_
     def _direct_delete_forbidden(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete forbidden."""
         raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
 
     monkeypatch.setattr(
@@ -835,6 +868,7 @@ def test_reaper_uses_git_aware_remover_for_worktree_missing_gitfile_with_mirror_
 def test_reaper_reports_unscannable_mirror_registry_without_direct_delete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper reports unscannable mirror registry without direct delete."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     worktree = tmp_path / "git" / "worktrees" / "ws_dead"
@@ -851,6 +885,7 @@ def test_reaper_reports_unscannable_mirror_registry_without_direct_delete(
     original_iterdir = Path.iterdir
 
     def _raise_for_mirrors_dir(path: Path):
+        """Test helper for raise for mirrors dir."""
         if path == mirrors_dir:
             raise PermissionError("permission denied")
         return original_iterdir(path)
@@ -858,6 +893,7 @@ def test_reaper_reports_unscannable_mirror_registry_without_direct_delete(
     def _direct_delete_forbidden(
         kind: str, path: Path, *, work_dir: Path
     ) -> tuple[bool, str | None, str | None]:
+        """Test helper for direct delete forbidden."""
         raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
 
     monkeypatch.setattr(Path, "iterdir", _raise_for_mirrors_dir)
@@ -888,6 +924,7 @@ def test_reaper_reports_unscannable_mirror_registry_without_direct_delete(
 
 @pytest.mark.unit
 def test_reaper_flag_off_is_dry_run_and_noop(tmp_path: Path) -> None:
+    """Verify reaper flag off is dry run and noop."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     summary = _orphan_summary_with_compose_and_worktree(tmp_path, auto_cleanup_orphans=False)
@@ -911,6 +948,7 @@ def test_reaper_flag_off_is_dry_run_and_noop(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_reaper_flag_on_reaps_compose_and_worktree(tmp_path: Path) -> None:
+    """Verify reaper flag on reaps compose and worktree."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     summary = _orphan_summary_with_compose_and_worktree(tmp_path, auto_cleanup_orphans=True)
@@ -944,6 +982,7 @@ def test_reaper_flag_on_reaps_compose_and_worktree(tmp_path: Path) -> None:
 def test_reaper_flag_on_reaps_terminal_volume_and_worktree(
     tmp_path: Path,
 ) -> None:
+    """Verify reaper flag on reaps terminal volume and worktree."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     worktree = tmp_path / "git" / "worktrees" / "ws_dead"
@@ -993,6 +1032,7 @@ def test_reaper_flag_on_reaps_terminal_volume_and_worktree(
 
 @pytest.mark.unit
 def test_reaper_leaves_expected_and_unknown_records(tmp_path: Path) -> None:
+    """Verify reaper leaves expected and unknown records."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     (tmp_path / "git" / "worktrees" / "ws_live").mkdir(parents=True)
@@ -1022,6 +1062,7 @@ def test_reaper_leaves_expected_and_unknown_records(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_reaper_skips_when_classification_unknown(tmp_path: Path) -> None:
+    """Verify reaper skips when classification unknown."""
     from awf.service.orphan_resources import reap_classified_orphans
 
     summary = build_orphan_resource_summary(
@@ -1117,6 +1158,7 @@ def test_reaper_skips_when_scanner_unavailable_with_partial_orphans(tmp_path: Pa
 
 @pytest.mark.unit
 def test_reaper_permission_denied_is_loud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify reaper permission denied is loud."""
     from awf.service.gc_classify import PATH_DELETE_PERMISSION_DENIED
     from awf.service.orphan_resources import reap_classified_orphans
 
@@ -1130,6 +1172,7 @@ def test_reaper_permission_denied_is_loud(tmp_path: Path, monkeypatch: pytest.Mo
     )
 
     def _denied(kind: str, path: Path, *, work_dir: Path) -> tuple[bool, str | None, str | None]:
+        """Test helper for denied."""
         return False, "permission denied", PATH_DELETE_PERMISSION_DENIED
 
     monkeypatch.setattr("awf.service.orphan_resources.build_and_delete_gc_path", _denied)
@@ -1155,6 +1198,7 @@ def test_reaper_permission_denied_is_loud(tmp_path: Path, monkeypatch: pytest.Mo
 def test_reaper_worktree_already_removed_is_idempotent_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify reaper worktree already removed is idempotent success."""
     from awf.service.gc_classify import PATH_ALREADY_REMOVED
     from awf.service.orphan_resources import reap_classified_orphans
 
@@ -1168,6 +1212,7 @@ def test_reaper_worktree_already_removed_is_idempotent_success(
     )
 
     def _vanished(kind: str, path: Path, *, work_dir: Path) -> tuple[bool, str | None, str | None]:
+        """Test helper for vanished."""
         return False, None, PATH_ALREADY_REMOVED
 
     monkeypatch.setattr("awf.service.orphan_resources.build_and_delete_gc_path", _vanished)
@@ -1190,11 +1235,13 @@ def test_reaper_worktree_already_removed_is_idempotent_success(
 
 @pytest.mark.unit
 def test_build_orphan_compose_teardown_invokes_manager() -> None:
+    """Verify build orphan compose teardown invokes manager."""
     from awf.node.compose_manager import ComposeTeardownResult
     from awf.service.orphan_resources import build_orphan_compose_teardown
 
     class _FakeManager:
         def __init__(self) -> None:
+            """Test helper for  init  ."""
             self.calls: list[dict[str, object]] = []
 
         async def teardown_project(
@@ -1206,6 +1253,7 @@ def test_build_orphan_compose_teardown_invokes_manager() -> None:
             remove_volumes: bool = True,
             fallback_volume_names: tuple[str, ...] = (),
         ) -> ComposeTeardownResult:
+            """Teardown project."""
             self.calls.append(
                 {
                     "project_name": project_name,

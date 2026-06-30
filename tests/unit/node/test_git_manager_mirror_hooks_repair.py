@@ -120,6 +120,7 @@ class TestRepairMirrorHooksPath:
     async def test_repo_url_derived_mirror_uses_same_lock_as_actual_mirror(
         self, tmp_path: Path
     ) -> None:
+        """Verify repo url derived mirror uses same lock as actual mirror."""
         repo = tmp_path / "origin"
         repo.mkdir()
         _git(["init", "-q", "-b", "main"], repo)
@@ -146,6 +147,7 @@ class TestRepairMirrorHooksPath:
     async def test_remove_worktree_waits_for_same_mirror_lock_as_repair(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify remove worktree waits for same mirror lock as repair."""
         repo_url = "git@github.com:example/repo.git"
         manager = git_module.GitManager(tmp_path / "git")
         mirror = manager._mirror_path(repo_url)  # noqa: SLF001
@@ -155,6 +157,7 @@ class TestRepairMirrorHooksPath:
         entered: list[str] = []
 
         async def _run(args: list[str], *, operation: str) -> git_module.GitResult:
+            """Test helper for run."""
             del args
             entered.append(operation)
             return git_module.GitResult(returncode=0, stdout="", stderr="")
@@ -330,6 +333,7 @@ class TestRepairMirrorHooksPath:
         )
 
         def linked_worktree_path_from_git_dir(_path: Path) -> Path:
+            """Linked worktree path from git dir."""
             raise probe_error
 
         monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
@@ -734,6 +738,7 @@ class TestRepairMirrorHooksPath:
     async def test_existing_registered_worktree_missing_gitfile_is_stale_before_probe(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify existing registered worktree missing gitfile is stale before probe."""
         mirror = tmp_path / "mirror.git"
         linked_git_dir = mirror / "worktrees" / "workspace"
         linked_git_dir.mkdir(parents=True)
@@ -750,11 +755,13 @@ class TestRepairMirrorHooksPath:
             config_path: Path,
             operation_prefix: str,
         ) -> bool:
+            """Test helper for repair hooks path config."""
             del git_args, config_scope_args, config_path
             repair_prefixes.append(operation_prefix)
             return False
 
         async def _run_git_worktree_prune(path: Path) -> None:
+            """Test helper for run git worktree prune."""
             nonlocal prune_calls
             prune_calls += 1
             assert path == mirror
@@ -773,6 +780,7 @@ class TestRepairMirrorHooksPath:
     async def test_replacement_repo_at_worktree_path_is_stale_before_probe(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify replacement repo at worktree path is stale before probe."""
         mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
         linked_git_dir = git_module.linked_worktree_git_dir(worktree)
         assert linked_git_dir is not None
@@ -789,11 +797,13 @@ class TestRepairMirrorHooksPath:
             config_path: Path,
             operation_prefix: str,
         ) -> bool:
+            """Test helper for repair hooks path config."""
             del git_args, config_scope_args, config_path
             repair_prefixes.append(operation_prefix)
             return False
 
         async def _run_git_worktree_prune(path: Path) -> None:
+            """Test helper for run git worktree prune."""
             nonlocal prune_calls
             prune_calls += 1
             assert path == mirror

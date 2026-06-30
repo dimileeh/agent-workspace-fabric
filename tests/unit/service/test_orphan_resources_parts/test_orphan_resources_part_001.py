@@ -63,6 +63,7 @@ def _ok_view(
 
 @pytest.mark.unit
 def test_orphan_resources_reexports_classification_type() -> None:
+    """Verify orphan resources reexports classification type."""
     from awf.service.orphan_resources import Classification
 
     assert Classification is ExtractedClassification

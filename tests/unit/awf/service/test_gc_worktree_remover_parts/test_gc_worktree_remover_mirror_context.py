@@ -36,6 +36,7 @@ from tests.unit.service.test_gc_worktree_remover import _workspace
 async def session_factory(
     engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Session factory."""
     yield make_session_factory(engine)
 
 
@@ -44,6 +45,7 @@ async def test_default_worktree_remover_uses_registry_mirror_when_gitfile_is_mis
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover uses registry mirror when gitfile is missing."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     original_repo_url = "./relative-origin"
@@ -112,6 +114,7 @@ async def test_default_worktree_remover_uses_linked_mirror_when_gitfile_is_prese
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover uses linked mirror when gitfile is present."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     original_repo_url = "./relative-origin"
@@ -179,6 +182,7 @@ async def test_default_worktree_remover_skips_existing_standalone_git_directory(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover skips existing standalone git directory."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -240,6 +244,7 @@ async def test_default_worktree_remover_preserves_mirror_git_operation_error_rea
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover preserves mirror git operation error reason code."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -313,6 +318,7 @@ async def test_default_worktree_remover_preserves_mirror_git_operation_error_rea
 async def test_remove_orphan_worktree_uses_resolved_linked_mirror(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree uses resolved linked mirror."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     _make_mirror_with_worktree(tmp_path, work_dir, workspace_id)
@@ -341,6 +347,7 @@ async def test_remove_orphan_worktree_uses_resolved_linked_mirror(
 async def test_remove_orphan_worktree_prefers_valid_linked_mirror_over_duplicate_registry(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree prefers valid linked mirror over duplicate registry."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -378,6 +385,7 @@ async def test_remove_orphan_worktree_prefers_valid_linked_mirror_over_duplicate
 async def test_remove_orphan_worktree_ignores_malformed_duplicate_registry_for_linked_mirror(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree ignores malformed duplicate registry for linked mirror."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -409,6 +417,7 @@ async def test_remove_orphan_worktree_ignores_malformed_duplicate_registry_for_l
 async def test_remove_orphan_worktree_ignores_malformed_duplicate_registry_before_valid_match(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree ignores malformed duplicate registry before valid match."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -444,6 +453,7 @@ async def test_remove_orphan_worktree_ignores_malformed_duplicate_registry_befor
 def test_git_context_mirror_path_fails_closed_when_registry_fails_before_linked_validation(
     tmp_path: Path,
 ) -> None:
+    """Verify git context mirror path fails closed when registry fails before linked validation."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -463,6 +473,7 @@ def test_git_context_mirror_path_fails_closed_when_registry_fails_before_linked_
 def test_git_context_mirror_path_fails_closed_when_bare_probe_fails(
     tmp_path: Path,
 ) -> None:
+    """Verify git context mirror path fails closed when bare probe fails."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -485,6 +496,7 @@ def test_git_context_mirror_path_fails_closed_when_bare_probe_fails(
         path: Path | None,
         mirrors_root: Path,
     ) -> Path | None:
+        """Test helper for managed bare mirror side effect."""
         if path is None:
             return None
         raise probe_error
@@ -506,6 +518,7 @@ def test_git_context_mirror_path_fails_closed_when_bare_probe_fails(
 def test_git_context_mirror_path_keeps_linked_registry_when_fallback_probe_fails(
     tmp_path: Path,
 ) -> None:
+    """Verify git context mirror path keeps linked registry when fallback probe fails."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -529,6 +542,7 @@ def test_git_context_mirror_path_keeps_linked_registry_when_fallback_probe_fails
 def test_git_context_mirror_path_keeps_linked_registry_when_fallback_resolution_fails(
     tmp_path: Path,
 ) -> None:
+    """Verify git context mirror path keeps linked registry when fallback resolution fails."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -561,6 +575,7 @@ def test_git_context_mirror_path_keeps_linked_registry_when_fallback_resolution_
 def test_bare_git_repository_fail_closed_surfaces_probe_start_failure(
     tmp_path: Path,
 ) -> None:
+    """Verify bare git repository fail closed surfaces probe start failure."""
     mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
     _write(mirror_path / "config", "[core]\n\tbare = true\n")
     _write(mirror_path / "HEAD", "ref: refs/heads/main\n")
@@ -585,6 +600,7 @@ def test_bare_git_repository_fail_closed_surfaces_probe_start_failure(
 def test_bare_git_repository_fail_closed_surfaces_probe_timeout(
     tmp_path: Path,
 ) -> None:
+    """Verify bare git repository fail closed surfaces probe timeout."""
     mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
     _write(mirror_path / "config", "[core]\n\tbare = true\n")
     _write(mirror_path / "HEAD", "ref: refs/heads/main\n")
@@ -609,6 +625,7 @@ def test_bare_git_repository_fail_closed_surfaces_probe_timeout(
 def test_bare_git_repository_returns_false_on_probe_timeout_when_not_fail_closed(
     tmp_path: Path,
 ) -> None:
+    """Verify bare git repository returns false on probe timeout when not fail closed."""
     mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
     _write(mirror_path / "config", "[core]\n\tbare = true\n")
     _write(mirror_path / "HEAD", "ref: refs/heads/main\n")
@@ -626,6 +643,7 @@ def test_bare_git_repository_returns_false_on_probe_timeout_when_not_fail_closed
 def test_bare_git_repository_returns_false_on_probe_start_failure_when_not_fail_closed(
     tmp_path: Path,
 ) -> None:
+    """Verify bare git repository returns false on probe start failure when not fail closed."""
     mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
     _write(mirror_path / "config", "[core]\n\tbare = true\n")
     _write(mirror_path / "HEAD", "ref: refs/heads/main\n")
@@ -643,6 +661,7 @@ def test_bare_git_repository_returns_false_on_probe_start_failure_when_not_fail_
 def test_git_context_mirror_path_uses_registry_fallback_when_metadata_match_is_not_bare(
     tmp_path: Path,
 ) -> None:
+    """Verify git context mirror path uses registry fallback when metadata match is not bare."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -669,6 +688,7 @@ def test_git_context_mirror_path_uses_registry_fallback_when_metadata_match_is_n
 def test_git_context_mirror_path_prefers_registered_mirror_when_linked_registry_mismatches(
     tmp_path: Path,
 ) -> None:
+    """Verify git context mirror path prefers registered mirror when linked registry mismatches."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -698,6 +718,7 @@ def test_git_context_mirror_path_prefers_registered_mirror_when_linked_registry_
 async def test_remove_orphan_worktree_uses_managed_linked_mirror_without_registry(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree uses managed linked mirror without registry."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -725,6 +746,7 @@ async def test_remove_orphan_worktree_uses_managed_linked_mirror_without_registr
 async def test_remove_orphan_worktree_skips_existing_non_git_linked_mirror_directory(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree skips existing non git linked mirror directory."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -752,6 +774,7 @@ async def test_remove_orphan_worktree_skips_existing_non_git_linked_mirror_direc
 async def test_remove_orphan_worktree_fails_closed_for_external_linked_mirror(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree fails closed for external linked mirror."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -780,6 +803,7 @@ async def test_remove_orphan_worktree_fails_closed_for_external_linked_mirror(
 async def test_remove_orphan_worktree_falls_back_when_linked_mirror_registry_mismatches(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree falls back when linked mirror registry mismatches."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -817,6 +841,7 @@ async def test_remove_orphan_worktree_falls_back_when_linked_mirror_registry_mis
 async def test_remove_orphan_worktree_falls_back_when_linked_metadata_dir_is_missing(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree falls back when linked metadata dir is missing."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -854,6 +879,7 @@ def test_mirror_registry_probe_uses_absolute_worktree_when_resolve_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify mirror registry probe uses absolute worktree when resolve fails."""
     worktree_path = tmp_path / "service" / "git" / "worktrees" / "ws_rowless"
     mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
     linked_git_dir = mirror_path / "worktrees" / worktree_path.name
@@ -862,6 +888,7 @@ def test_mirror_registry_probe_uses_absolute_worktree_when_resolve_fails(
     original_resolve = Path.resolve
 
     def resolve_or_fail(path: Path, *args: object, **kwargs: object) -> Path:
+        """Resolve or fail."""
         if path == worktree_path:
             raise OSError("synthetic resolve failure")
         return original_resolve(path, *args, **kwargs)
@@ -875,6 +902,7 @@ def test_mirror_registry_probe_uses_absolute_worktree_when_resolve_fails(
 def test_mirror_registry_probe_returns_false_when_link_is_missing(
     tmp_path: Path,
 ) -> None:
+    """Verify mirror registry probe returns false when link is missing."""
     worktree_path = tmp_path / "service" / "git" / "worktrees" / "ws_rowless"
     mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
 
@@ -885,6 +913,7 @@ def test_mirror_registry_probe_returns_false_when_link_is_missing(
 def test_mirror_registry_probe_returns_false_for_malformed_back_reference(
     tmp_path: Path,
 ) -> None:
+    """Verify mirror registry probe returns false for malformed back reference."""
     worktree_path = tmp_path / "service" / "git" / "worktrees" / "ws_rowless"
     mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
     linked_git_dir = mirror_path / "worktrees" / worktree_path.name
@@ -898,6 +927,7 @@ def test_mirror_registry_probe_returns_false_for_malformed_back_reference(
 def test_bare_probe_env_strips_git_object_lookup_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify bare probe env strips git object lookup overrides."""
     monkeypatch.setenv("GIT_DIR", "/tmp/foreign.git")
     monkeypatch.setenv("GIT_WORK_TREE", "/tmp/foreign-worktree")
     monkeypatch.setenv("GIT_COMMON_DIR", "/tmp/foreign-common")
@@ -920,11 +950,13 @@ def test_managed_mirror_path_uses_absolute_paths_when_resolve_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify managed mirror path uses absolute paths when resolve fails."""
     mirrors_root = tmp_path / "service" / "git" / "mirrors"
     mirror_path = mirrors_root / "repo.git"
     original_resolve = Path.resolve
 
     def resolve_or_fail(path: Path, *args: object, **kwargs: object) -> Path:
+        """Resolve or fail."""
         if path in {mirror_path, mirrors_root}:
             raise OSError("synthetic resolve failure")
         return original_resolve(path, *args, **kwargs)
@@ -939,11 +971,13 @@ def test_managed_mirror_path_normalizes_fallback_before_root_check(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify managed mirror path normalizes fallback before root check."""
     mirrors_root = tmp_path / "service" / "git" / "mirrors"
     mirror_path = mirrors_root / ".." / "outside.git"
     original_resolve = Path.resolve
 
     def resolve_or_fail(path: Path, *args: object, **kwargs: object) -> Path:
+        """Resolve or fail."""
         if path in {mirror_path, mirrors_root}:
             raise OSError("synthetic resolve failure")
         return original_resolve(path, *args, **kwargs)
@@ -955,6 +989,7 @@ def test_managed_mirror_path_normalizes_fallback_before_root_check(
 
 @pytest.mark.unit
 def test_missing_path_is_not_existing_non_git_worktree(tmp_path: Path) -> None:
+    """Verify missing path is not existing non git worktree."""
     assert (
         is_existing_non_git_worktree(tmp_path / "service" / "git" / "worktrees" / "ws_missing")
         is False
@@ -963,6 +998,7 @@ def test_missing_path_is_not_existing_non_git_worktree(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_existing_directory_without_work_dir_context_is_non_git_worktree(tmp_path: Path) -> None:
+    """Verify existing directory without work dir context is non git worktree."""
     worktree_path = tmp_path / "service" / "git" / "worktrees" / "ws_salvage"
     worktree_path.mkdir(parents=True)
 
@@ -971,6 +1007,7 @@ def test_existing_directory_without_work_dir_context_is_non_git_worktree(tmp_pat
 
 @pytest.mark.unit
 def test_managed_git_context_is_not_existing_non_git_worktree(tmp_path: Path) -> None:
+    """Verify managed git context is not existing non git worktree."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     _make_mirror_with_worktree(tmp_path, work_dir, workspace_id)
@@ -986,6 +1023,7 @@ def test_managed_git_context_is_not_existing_non_git_worktree(tmp_path: Path) ->
 
 @pytest.mark.unit
 def test_existing_directory_without_git_context_is_non_git_worktree(tmp_path: Path) -> None:
+    """Verify existing directory without git context is non git worktree."""
     work_dir = tmp_path / "service"
     worktree_path = work_dir / "git" / "worktrees" / "ws_salvage"
     worktree_path.mkdir(parents=True)
@@ -997,6 +1035,7 @@ def test_existing_directory_without_git_context_is_non_git_worktree(tmp_path: Pa
 def test_existing_directory_without_git_entry_ignores_malformed_registry(
     tmp_path: Path,
 ) -> None:
+    """Verify existing directory without git entry ignores malformed registry."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_salvage"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -1012,6 +1051,7 @@ def test_existing_directory_without_git_entry_ignores_malformed_registry(
 async def test_remove_orphan_worktree_skips_stale_managed_linked_mirror(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree skips stale managed linked mirror."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -1045,6 +1085,7 @@ async def test_remove_orphan_worktree_skips_stale_managed_linked_mirror(
 def test_stale_managed_linked_mirror_probe_errors_are_not_stale(
     tmp_path: Path,
 ) -> None:
+    """Verify stale managed linked mirror probe errors are not stale."""
     work_dir = tmp_path / "service"
     worktree_path = work_dir / "git" / "worktrees" / "ws_rowless"
 

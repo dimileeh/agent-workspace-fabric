@@ -21,6 +21,7 @@ from awf.runtime.driver import (
 
 @pytest.mark.unit
 def test_runtime_driver_config_defaults_to_local_execution_capability() -> None:
+    """Verify runtime driver config defaults to local execution capability."""
     config = RuntimeDriverConfig()
 
     assert config.name == "local"
@@ -29,12 +30,14 @@ def test_runtime_driver_config_defaults_to_local_execution_capability() -> None:
 
 @pytest.mark.unit
 def test_runtime_driver_config_rejects_unsupported_core_driver() -> None:
+    """Verify runtime driver config rejects unsupported core driver."""
     with pytest.raises(ValueError, match="Unsupported AWF Core runtime driver"):
         RuntimeDriverConfig(name="gke")
 
 
 @pytest.mark.unit
 async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: Path) -> None:
+    """Verify local runtime driver delegates to local collaborators."""
     calls: list[tuple[str, dict[str, Any]]] = []
     provision_result = object()
     start_result = object()
@@ -50,6 +53,7 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
 
     class _Provisioner:
         async def provision(self, workspace_id: str) -> object:
+            """Provision."""
             calls.append(("provision", {"workspace_id": workspace_id}))
             return provision_result
 
@@ -58,6 +62,7 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
             workspace_id: str,
             execution_claim_epoch: int | None = None,
         ) -> object:
+            """Provision claimed."""
             calls.append(
                 (
                     "provision_claimed",
@@ -77,6 +82,7 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
             execution_owner_id: str | None = None,
             execution_lease_expires_at: object = None,
         ) -> object:
+            """Execute."""
             calls.append(
                 (
                     "execute",
@@ -91,16 +97,19 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
 
     class _Cleaner:
         async def cleanup(self, **kwargs: object) -> object:
+            """Cleanup."""
             calls.append(("cleanup", dict(kwargs)))
             return stop_result
 
     class _Validation:
         async def run(self, **kwargs: object) -> object:
+            """Run."""
             calls.append(("validate", dict(kwargs)))
             return validate_result
 
     class _Inspector:
         async def inspect(self, compose_project_name: str | None) -> object:
+            """Inspect."""
             calls.append(("inspect", {"compose_project_name": compose_project_name}))
             return status_result
 
@@ -205,11 +214,13 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
 
 @pytest.mark.unit
 async def test_local_runtime_driver_uses_legacy_provision_without_claim_epoch() -> None:
+    """Verify local runtime driver uses legacy provision without claim epoch."""
     calls: list[tuple[str, str]] = []
     provision_result = object()
 
     class _Provisioner:
         async def provision(self, workspace_id: str) -> object:
+            """Provision."""
             calls.append(("provision", workspace_id))
             return provision_result
 
@@ -218,6 +229,7 @@ async def test_local_runtime_driver_uses_legacy_provision_without_claim_epoch() 
             workspace_id: str,
             execution_claim_epoch: int | None = None,
         ) -> object:
+            """Provision claimed."""
             calls.append(("provision_claimed", workspace_id))
             return object()
 

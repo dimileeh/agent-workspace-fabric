@@ -479,6 +479,7 @@ class TestMiscMonitorHelpers:
 
     @pytest.mark.unit
     def test_ci_failure_replacement_records_in_progress_signal(self) -> None:
+        """Verify ci failure replacement records in progress signal."""
         failure = CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom")
         updated = _with_ci_failures(
             _status(),

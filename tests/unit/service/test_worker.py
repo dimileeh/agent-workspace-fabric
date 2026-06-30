@@ -517,6 +517,7 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify build worker runtime defaults to local runtime driver without changing worker dependencies."""
     created: dict[str, Any] = {}
 
     class _Engine:
@@ -527,12 +528,14 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
 
     class _LogStore:
         def __init__(self, *, root: Path, session_factory: object) -> None:
+            """Test helper for  init  ."""
             created["log_store"] = self
             created["log_root"] = root
             created["log_session_factory"] = session_factory
 
     class _ValidationRunner:
         def __init__(self, *, runner: object, artifacts_dir: Path, log_store: object) -> None:
+            """Test helper for  init  ."""
             created["validation"] = self
             created["validation_runner"] = runner
             created["validation_artifacts_dir"] = artifacts_dir
@@ -540,54 +543,64 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
 
     class _PullRequestCreator:
         def __init__(self, runner: object) -> None:
+            """Test helper for  init  ."""
             created["pr_creator"] = self
             created["pr_creator_runner"] = runner
 
     class _BranchOpenPullRequestResolver:
         def __init__(self, runner: object) -> None:
+            """Test helper for  init  ."""
             created["open_pr_resolver"] = self
             created["open_pr_resolver_runner"] = runner
 
     class _GitManager:
         def __init__(self, work_dir: Path, **kwargs: object) -> None:
+            """Test helper for  init  ."""
             created["git"] = self
             created["git_work_dir"] = work_dir
             created["git_kwargs"] = kwargs
 
     class _ComposeManager:
         def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+            """Test helper for  init  ."""
             created["compose"] = self
             created["compose_work_dir"] = work_dir
             created["compose_template_path"] = template_path
 
     class _WorkspaceCleaner:
         def __init__(self, *, git: object, compose: object) -> None:
+            """Test helper for  init  ."""
             created["runtime_cleaner"] = self
             created["cleaner_git"] = git
             created["cleaner_compose"] = compose
 
     class _LocalSecretLeaseMountResolver:
         def __init__(self, **kwargs: object) -> None:
+            """Test helper for  init  ."""
             created["secret_lease_resolver"] = self
             created["secret_lease_kwargs"] = kwargs
 
     class _ComposeStackLauncher:
         def __init__(self, **kwargs: object) -> None:
+            """Test helper for  init  ."""
             created["stack_launcher"] = self
             created["stack_launcher_kwargs"] = kwargs
 
     class _Provisioner:
         def __init__(self, **kwargs: object) -> None:
+            """Test helper for  init  ."""
             created["provisioner"] = self
             created["provisioner_kwargs"] = kwargs
 
     class _WorkspaceExecutor:
         def __init__(self, **kwargs: object) -> None:
+            """Test helper for  init  ."""
             created["executor"] = self
             created["executor_kwargs"] = kwargs
 
     class _ControlWorker:
         def __init__(self, **kwargs: object) -> None:
+            """Test helper for  init  ."""
             created["worker"] = self
             created["worker_kwargs"] = kwargs
 

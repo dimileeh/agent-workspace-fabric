@@ -122,6 +122,7 @@ def test_ci_failure_evidence_preserves_prefixed_github_error_annotations() -> No
 
 @pytest.mark.unit
 def test_ci_failure_evidence_preserves_ruff_diagnostics_as_error_summaries() -> None:
+    """Verify ci failure evidence preserves ruff diagnostics as error summaries."""
     evidence = ci_failure_evidence.extract_ci_failure_evidence(
         "\n".join(
             [

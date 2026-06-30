@@ -28,6 +28,7 @@ def _parse_marker_timestamp(state: MonitorState) -> datetime | None:
 
 @pytest.mark.unit
 def test_merge_block_attention_active_false_without_marker() -> None:
+    """Verify merge block attention active false without marker."""
     state = MonitorState()
 
     assert (

@@ -280,6 +280,7 @@ class TestFetchFailingCheckLogsRollupFallback:
 
     @pytest.mark.unit
     async def test_rollup_fallback_waits_when_matching_actions_run_not_completed(self) -> None:
+        """Verify rollup fallback waits when matching actions run not completed."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -322,6 +323,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         # non-completed status, and WAITS (runs_in_progress) instead of fetching
         # an empty in-progress ``--log-failed`` archive. Covers the rollup-loop
         # run-completion gate.
+        """Verify rollup fallback waits when run in progress not in failed list."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -361,6 +363,7 @@ class TestFetchFailingCheckLogsRollupFallback:
         # gh api repos/<slug> must return a JSON object; a non-object response
         # (e.g. a list when the API is degraded) raises rather than silently
         # returning no merge methods.
+        """Verify fetch repo merge methods raises when response not object."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout=json.dumps([1, 2, 3]))
         client = GitHubClient(fake)
@@ -369,6 +372,7 @@ class TestFetchFailingCheckLogsRollupFallback:
 
     @pytest.mark.unit
     async def test_rollup_fallback_fetches_logs_when_actions_run_absent_from_list(self) -> None:
+        """Verify rollup fallback fetches logs when actions run absent from list."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -411,6 +415,7 @@ class TestFetchFailingCheckLogsRollupFallback:
 
     @pytest.mark.unit
     async def test_rollup_fallback_synthesizes_external_failures(self) -> None:
+        """Verify rollup fallback synthesizes external failures."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")
         client = GitHubClient(fake)

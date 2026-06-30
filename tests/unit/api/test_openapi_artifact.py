@@ -444,6 +444,7 @@ def test_api_token_routes_are_documented_as_bearer_authenticated(
 def test_public_probe_and_discovery_routes_do_not_advertise_bearer_auth(
     openapi_spec: dict,
 ) -> None:
+    """Verify public probe and discovery routes do not advertise bearer auth."""
     paths = openapi_spec.get("paths", {})
 
     for method, path in sorted(_PUBLIC_PROBE_AND_DISCOVERY_OPERATIONS):

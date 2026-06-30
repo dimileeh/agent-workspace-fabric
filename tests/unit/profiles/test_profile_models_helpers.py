@@ -72,6 +72,7 @@ def test_runtime_toolchains_explicit_none_is_treated_as_empty() -> None:
 
 @pytest.mark.unit
 def test_runtime_browsers_absent_none_and_empty_are_noops() -> None:
+    """Verify runtime browsers absent none and empty are noops."""
     assert ProfileRuntime().browsers == []
     assert ProfileRuntime.model_validate({"browsers": None}).browsers == []
     assert ProfileRuntime.model_validate({"browsers": []}).browsers == []
@@ -79,6 +80,7 @@ def test_runtime_browsers_absent_none_and_empty_are_noops() -> None:
 
 @pytest.mark.unit
 def test_runtime_browsers_accepts_allowlist_lowercases_and_dedupes() -> None:
+    """Verify runtime browsers accepts allowlist lowercases and dedupes."""
     runtime = ProfileRuntime.model_validate(
         {"browsers": ["CHROMIUM", "firefox", "chromium", "WebKit"]}
     )
@@ -89,6 +91,7 @@ def test_runtime_browsers_accepts_allowlist_lowercases_and_dedupes() -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize("bad_browser", ["chrome", "edge", "", " chromium "])
 def test_runtime_browsers_rejects_unknown_names(bad_browser: str) -> None:
+    """Verify runtime browsers rejects unknown names."""
     with pytest.raises(ValidationError):
         ProfileRuntime.model_validate({"browsers": [bad_browser]})
 
@@ -96,18 +99,21 @@ def test_runtime_browsers_rejects_unknown_names(bad_browser: str) -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize("bad_value", ["chromium", {"name": "chromium"}, [17]])
 def test_runtime_browsers_rejects_invalid_shapes(bad_value: object) -> None:
+    """Verify runtime browsers rejects invalid shapes."""
     with pytest.raises(ValidationError):
         ProfileRuntime.model_validate({"browsers": bad_value})
 
 
 @pytest.mark.unit
 def test_runtime_browsers_caps_declaration_count_before_deduping() -> None:
+    """Verify runtime browsers caps declaration count before deduping."""
     with pytest.raises(ValidationError):
         ProfileRuntime.model_validate({"browsers": ["chromium"] * 9})
 
 
 @pytest.mark.unit
 def test_runtime_browsers_schema_exposes_allowlist_and_count_bound() -> None:
+    """Verify runtime browsers schema exposes allowlist and count bound."""
     schema = ProfileRuntime.model_json_schema()["properties"]["browsers"]
 
     assert schema["maxItems"] == 8
@@ -303,6 +309,7 @@ def test_normalize_inline_profile_snapshot_backfills_missing_runtime_browsers() 
 
 @pytest.mark.unit
 def test_normalize_inline_profile_snapshot_preserves_present_runtime_browsers() -> None:
+    """Verify normalize inline profile snapshot preserves present runtime browsers."""
     explicit = {"name": "inline", "forge": "auto", "runtime": {"browsers": ["chromium"]}}
 
     normalized = normalize_inline_profile_snapshot(explicit)

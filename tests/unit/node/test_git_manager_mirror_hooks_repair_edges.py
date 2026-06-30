@@ -15,6 +15,7 @@ class TestRepairMirrorHooksPathFailureEdges:
     async def test_ignores_git_object_lookup_envs_for_config_repair(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify ignores git object lookup envs for config repair."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -42,6 +43,7 @@ class TestRepairMirrorHooksPathFailureEdges:
 
     @pytest.mark.unit
     async def test_noop_when_hooks_path_not_set(self, tmp_path: Path) -> None:
+        """Verify noop when hooks path not set."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -58,6 +60,7 @@ class TestRepairMirrorHooksPathFailureEdges:
     async def test_repair_fails_when_poisoned_hooks_origin_is_unmapped(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify repair fails when poisoned hooks origin is unmapped."""
         config_path = tmp_path / "mirror.git" / "config"
         config_path.parent.mkdir()
         probe_value = git_module._HooksPathConfigValue(  # noqa: SLF001
@@ -66,6 +69,7 @@ class TestRepairMirrorHooksPathFailureEdges:
         )
 
         async def _probe_hooks_path_config(**_kwargs: object) -> tuple[object, ...]:
+            """Test helper for probe hooks path config."""
             return (probe_value,)
 
         monkeypatch.setattr(git_module, "_probe_hooks_path_config", _probe_hooks_path_config)
@@ -87,10 +91,12 @@ class TestRepairMirrorHooksPathFailureEdges:
     async def test_repair_fails_when_include_path_probe_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify repair fails when include path probe fails."""
         config_path = tmp_path / "mirror.git" / "config"
         config_path.parent.mkdir()
 
         async def _run_git_config(**_kwargs: object) -> tuple[int, str, str]:
+            """Test helper for run git config."""
             return 2, "", "config read failed"
 
         monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
@@ -113,6 +119,7 @@ class TestRepairMirrorHooksPathFailureEdges:
     async def test_repair_fails_when_includeif_probe_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify repair fails when includeif probe fails."""
         config_path = tmp_path / "mirror.git" / "config"
         config_path.parent.mkdir()
         calls: list[tuple[str, ...]] = []
@@ -120,6 +127,7 @@ class TestRepairMirrorHooksPathFailureEdges:
         async def _run_git_config(
             *, args: tuple[str, ...], **_kwargs: object
         ) -> tuple[int, str, str]:
+            """Test helper for run git config."""
             calls.append(args)
             if args == ("--get-all", "include.path"):
                 return 1, "", ""
@@ -149,12 +157,14 @@ class TestRepairMirrorHooksPathFailureEdges:
     async def test_repair_ignores_malformed_includeif_probe_line(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify repair ignores malformed includeif probe line."""
         config_path = tmp_path / "mirror.git" / "config"
         config_path.parent.mkdir()
 
         async def _run_git_config(
             *, args: tuple[str, ...], **_kwargs: object
         ) -> tuple[int, str, str]:
+            """Test helper for run git config."""
             if args == ("--get-all", "include.path"):
                 return 1, "", ""
             if args == ("--get-regexp", r"^includeIf\..*\.path$"):
@@ -177,6 +187,7 @@ class TestRepairMirrorHooksPathFailureEdges:
     async def test_repair_fails_when_matching_include_unset_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify repair fails when matching include unset fails."""
         config_path = tmp_path / "mirror.git" / "config"
         config_path.parent.mkdir()
         included_config = tmp_path / "included-hooks.conf"
@@ -185,6 +196,7 @@ class TestRepairMirrorHooksPathFailureEdges:
         async def _run_git_config(
             *, args: tuple[str, ...], **_kwargs: object
         ) -> tuple[int, str, str]:
+            """Test helper for run git config."""
             if args == ("--get-all", "include.path"):
                 return 0, f"not-it.conf\n{included_config}\n", ""
             if args == ("--get-regexp", r"^includeIf\..*\.path$"):
@@ -212,6 +224,7 @@ class TestRepairMirrorHooksPathFailureEdges:
     async def test_repair_fails_when_hooks_path_unset_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify repair fails when hooks path unset fails."""
         config_path = tmp_path / "mirror.git" / "config"
         config_path.parent.mkdir()
         probe_value = git_module._HooksPathConfigValue(  # noqa: SLF001
@@ -220,9 +233,11 @@ class TestRepairMirrorHooksPathFailureEdges:
         )
 
         async def _probe_hooks_path_config(**_kwargs: object) -> tuple[object, ...]:
+            """Test helper for probe hooks path config."""
             return (probe_value,)
 
         async def _run_git_config(**_kwargs: object) -> tuple[int, str, str]:
+            """Test helper for run git config."""
             return 2, "", "hooksPath unset failed"
 
         monkeypatch.setattr(git_module, "_probe_hooks_path_config", _probe_hooks_path_config)

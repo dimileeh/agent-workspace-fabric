@@ -210,6 +210,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_skips_failing_run_until_workflow_run_completed(self) -> None:
+        """Verify skips failing run until workflow run completed."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -238,6 +239,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_failed_run_with_empty_status_still_reports_failure(self) -> None:
+        """Verify failed run with empty status still reports failure."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -269,6 +271,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_completed_failure_with_in_progress_sibling_reports_failure(self) -> None:
+        """Verify completed failure with in progress sibling reports failure."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -974,6 +977,7 @@ class TestFetchFailingCheckLogs:
     async def test_failed_rollup_status_without_target_url_synthesizes_no_log_failure(
         self,
     ) -> None:
+        """Verify failed rollup status without target url synthesizes no log failure."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout=json.dumps([]))
         client = GitHubClient(fake)
@@ -1002,6 +1006,7 @@ class TestFetchFailingCheckLogs:
     async def test_failed_rollup_error_status_normalizes_to_failure_conclusion(
         self,
     ) -> None:
+        """Verify failed rollup error status normalizes to failure conclusion."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout=json.dumps([]))
         client = GitHubClient(fake)

@@ -109,6 +109,7 @@ def test_reaper_reaps_missing_volume_via_name_fallback_and_leaves_expected(
 
 @pytest.mark.unit
 def test_reaper_compose_teardown_failure_is_loud(tmp_path: Path) -> None:
+    """Verify reaper compose teardown failure is loud."""
     from awf.node.compose_manager import ComposeTeardownResult
     from awf.service.orphan_resources import reap_classified_orphans
 
@@ -447,6 +448,7 @@ def test_sweep_classified_orphans_forwards_now_anchor_to_reap(
     monkeypatch.setattr(orphan_resources, "session_scope", lambda _factory: _SessionScope())
 
     async def _workspace_view(_session: object, **_kwargs: object) -> WorkspaceIdView:
+        """Test helper for workspace view."""
         return _ok_view()
 
     monkeypatch.setattr(orphan_resources, "workspace_id_view_from_session", _workspace_view)
@@ -454,6 +456,7 @@ def test_sweep_classified_orphans_forwards_now_anchor_to_reap(
     captured: dict[str, object] = {}
 
     async def _fake_reap(_summary: object, **kwargs: object) -> object:
+        """Test helper for fake reap."""
         captured.update(kwargs)
         return object()
 

@@ -522,6 +522,7 @@ async def test_default_worktree_remover_reports_primary_metadata_probe_failure(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover reports primary metadata probe failure."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -672,6 +673,7 @@ async def test_default_worktree_remover_reports_companion_metadata_probe_failure
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover reports companion metadata probe failure."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -734,6 +736,7 @@ async def test_default_worktree_remover_reports_companion_metadata_probe_failure
     )
 
     def _probe_side_effect(path: Path, *, work_dir: Path) -> None:
+        """Test helper for probe side effect."""
         del work_dir
         if path == companion_path:
             raise probe_error
@@ -837,6 +840,7 @@ async def test_default_worktree_remover_preserves_git_operation_error_reason_cod
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover preserves git operation error reason code."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(

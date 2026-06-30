@@ -5,6 +5,7 @@ from awf.runtime.pr_monitor_models import CheckFailure, CheckFailureLogResult
 
 @pytest.mark.unit
 def test_check_failure_log_result_empty_tuple_compatibility_is_hash_consistent() -> None:
+    """Verify check failure log result empty tuple compatibility is hash consistent."""
     failure = CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom")
     result = CheckFailureLogResult(failures=(failure,), runs_in_progress=False)
     equivalent_result = CheckFailureLogResult(failures=(failure,), runs_in_progress=False)
@@ -22,6 +23,7 @@ def test_check_failure_log_result_empty_tuple_compatibility_is_hash_consistent()
 
 @pytest.mark.unit
 def test_check_failure_log_result_preserves_tuple_like_access() -> None:
+    """Verify check failure log result preserves tuple like access."""
     first = CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="ruff failed")
     second = CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="pytest failed")
     result = CheckFailureLogResult(failures=(first, second), runs_in_progress=True)

@@ -19,13 +19,18 @@ from tests.unit.service.test_provider_readiness_parts.test_provider_readiness_pa
 
 @pytest.mark.unit
 def test_cli_auth_probe_failure_modes_are_structured_and_redacted() -> None:
+    """Verify cli auth probe failure modes are structured and redacted."""
+
     def _missing(_args: list[str], **_kwargs: object) -> Any:
+        """Test helper for missing."""
         raise FileNotFoundError("missing-cli")
 
     def _timeout(args: list[str], **_kwargs: object) -> Any:
+        """Test helper for timeout."""
         raise subprocess.TimeoutExpired(args, timeout=0.1)
 
     def _unexpected(_args: list[str], **_kwargs: object) -> Any:
+        """Test helper for unexpected."""
         raise RuntimeError("transport leaked sk-ant-probe-secret")
 
     missing = provider_readiness._probe_cli_auth_status(
@@ -74,16 +79,20 @@ def test_agent_runtime_cli_probe_failure_modes_are_structured_and_redacted(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Verify agent runtime cli probe failure modes are structured and redacted."""
     caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
     settings = _settings(tmp_path)
 
     def _missing(_args: list[str], **_kwargs: object) -> Any:
+        """Test helper for missing."""
         raise FileNotFoundError("docker")
 
     def _timeout(args: list[str], **_kwargs: object) -> Any:
+        """Test helper for timeout."""
         raise subprocess.TimeoutExpired(args, timeout=0.1)
 
     def _unexpected(_args: list[str], **_kwargs: object) -> Any:
+        """Test helper for unexpected."""
         raise RuntimeError("runtime probe leaked sk-proj-runtime-secret")
 
     missing = provider_readiness._probe_agent_runtime_cli(
@@ -122,6 +131,7 @@ def test_agent_runtime_cli_probe_failure_modes_are_structured_and_redacted(
 
 @pytest.mark.unit
 def test_agent_runtime_cli_probe_reports_success_and_missing_cli(tmp_path: Path) -> None:
+    """Verify agent runtime cli probe reports success and missing cli."""
     settings = _settings(tmp_path)
 
     ok = provider_readiness._probe_agent_runtime_cli(
@@ -160,10 +170,12 @@ def test_agent_runtime_cli_probe_reports_success_and_missing_cli(tmp_path: Path)
 def test_runtime_cli_probe_uses_docker_start_timeout_without_slowing_auth_probe(
     tmp_path: Path,
 ) -> None:
+    """Verify runtime cli probe uses docker start timeout without slowing auth probe."""
     settings = _settings(tmp_path)
     observed: dict[str, float] = {}
 
     def _runtime_probe(_args: list[str], **kwargs: object) -> Any:
+        """Test helper for runtime probe."""
         observed["runtime_timeout"] = float(kwargs["timeout"])
         return _completed(stdout="/usr/bin/codex\n")
 
@@ -177,6 +189,7 @@ def test_runtime_cli_probe_uses_docker_start_timeout_without_slowing_auth_probe(
     )
 
     def _auth_probe(_args: list[str], **kwargs: object) -> Any:
+        """Test helper for auth probe."""
         observed["auth_timeout"] = float(kwargs["timeout"])
         return _completed(stdout="ok")
 
@@ -200,6 +213,7 @@ def test_runtime_cli_probe_uses_docker_start_timeout_without_slowing_auth_probe(
 
 @pytest.mark.unit
 def test_cli_auth_probe_reports_success_and_unusable_auth() -> None:
+    """Verify cli auth probe reports success and unusable auth."""
     success = provider_readiness._probe_cli_auth_status(
         provider_label="Probe",
         args=["probe", "auth", "status"],

@@ -36,6 +36,7 @@ def _git(args: list[str], cwd: Path) -> None:
 
 
 def _init_bare_mirror(path: Path) -> None:
+    """Test helper for init bare mirror."""
     path.mkdir(parents=True)
     (path / "worktrees").mkdir()
 
@@ -44,9 +45,11 @@ def _init_bare_mirror(path: Path) -> None:
 def synthetic_bare_mirror(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[[Path], None]:
+    """Synthetic bare mirror."""
     bare_mirrors: set[Path] = set()
 
     def _init(path: Path) -> None:
+        """Test helper for init."""
         _init_bare_mirror(path)
         bare_mirrors.add(path.resolve())
 
@@ -791,6 +794,7 @@ def test_mirror_path_for_registered_worktree_prefers_newest_duplicate_match(
     tmp_path: Path,
     synthetic_bare_mirror: Callable[[Path], None],
 ) -> None:
+    """Verify mirror path for registered worktree prefers newest duplicate match."""
     mirrors_dir = tmp_path / "mirrors"
     worktree = tmp_path / "worktrees" / "ws"
     worktree.mkdir(parents=True)
@@ -818,6 +822,7 @@ def test_mirror_path_for_registered_worktree_ignores_newer_non_bare_match(
     tmp_path: Path,
     synthetic_bare_mirror: Callable[[Path], None],
 ) -> None:
+    """Verify mirror path for registered worktree ignores newer non bare match."""
     mirrors_dir = tmp_path / "mirrors"
     worktree = tmp_path / "worktrees" / "ws"
     worktree.mkdir(parents=True)
@@ -844,6 +849,7 @@ def test_mirror_path_for_registered_worktree_ignores_external_symlinked_mirror(
     tmp_path: Path,
     synthetic_bare_mirror: Callable[[Path], None],
 ) -> None:
+    """Verify mirror path for registered worktree ignores external symlinked mirror."""
     mirrors_dir = tmp_path / "mirrors"
     worktree = tmp_path / "worktrees" / "ws"
     worktree.mkdir(parents=True)
@@ -873,6 +879,7 @@ def test_mirror_path_for_registered_worktree_ignores_earlier_unreadable_match(
     monkeypatch: pytest.MonkeyPatch,
     synthetic_bare_mirror: Callable[[Path], None],
 ) -> None:
+    """Verify mirror path for registered worktree ignores earlier unreadable match."""
     mirrors_dir = tmp_path / "mirrors"
     worktree = tmp_path / "worktrees" / "ws"
     worktree.mkdir(parents=True)
@@ -889,6 +896,7 @@ def test_mirror_path_for_registered_worktree_ignores_earlier_unreadable_match(
     original_read_text = Path.read_text
 
     def _raise_for_unreadable_gitdir(path: Path, *args: object, **kwargs: object) -> str:
+        """Test helper for raise for unreadable gitdir."""
         if path == unreadable_gitdir:
             raise PermissionError("permission denied")
         return original_read_text(path, *args, **kwargs)
@@ -907,6 +915,7 @@ def test_mirror_path_for_registered_worktree_returns_none_when_only_match_is_unr
     monkeypatch: pytest.MonkeyPatch,
     synthetic_bare_mirror: Callable[[Path], None],
 ) -> None:
+    """Verify mirror path for registered worktree returns none when only match is unreadable."""
     mirrors_dir = tmp_path / "mirrors"
     worktree = tmp_path / "worktrees" / "ws"
     worktree.mkdir(parents=True)
@@ -918,6 +927,7 @@ def test_mirror_path_for_registered_worktree_returns_none_when_only_match_is_unr
     original_read_text = Path.read_text
 
     def _raise_for_unreadable_gitdir(path: Path, *args: object, **kwargs: object) -> str:
+        """Test helper for raise for unreadable gitdir."""
         if path == unreadable_gitdir:
             raise PermissionError("permission denied")
         return original_read_text(path, *args, **kwargs)
@@ -932,6 +942,7 @@ def test_mirror_path_for_registered_worktree_returns_none_for_corrupt_gitdir_wit
     tmp_path: Path,
     synthetic_bare_mirror: Callable[[Path], None],
 ) -> None:
+    """Verify mirror path for registered worktree returns none for corrupt gitdir without match."""
     mirrors_dir = tmp_path / "mirrors"
     worktree = tmp_path / "worktrees" / "ws"
     worktree.mkdir(parents=True)
@@ -949,6 +960,7 @@ def test_mirror_path_for_registered_worktree_fails_closed_when_registry_unscanna
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify mirror path for registered worktree fails closed when registry unscannable."""
     mirrors_dir = tmp_path / "mirrors"
     mirrors_dir.mkdir()
     worktree = tmp_path / "worktrees" / "ws"
@@ -956,6 +968,7 @@ def test_mirror_path_for_registered_worktree_fails_closed_when_registry_unscanna
     original_iterdir = Path.iterdir
 
     def _raise_for_mirrors_dir(path: Path):
+        """Test helper for raise for mirrors dir."""
         if path == mirrors_dir:
             raise PermissionError("permission denied")
         return original_iterdir(path)
@@ -974,6 +987,7 @@ def test_mirror_path_for_registered_worktree_wraps_worktree_resolution_os_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify mirror path for registered worktree wraps worktree resolution os error."""
     mirrors_dir = tmp_path / "mirrors"
     mirrors_dir.mkdir()
     worktree = tmp_path / "worktrees" / "ws"
@@ -981,6 +995,7 @@ def test_mirror_path_for_registered_worktree_wraps_worktree_resolution_os_error(
     original_resolve = Path.resolve
 
     def _raise_for_worktree(path: Path, *args: object, **kwargs: object) -> Path:
+        """Test helper for raise for worktree."""
         if path == worktree:
             raise OSError("too many levels of symbolic links")
         return original_resolve(path, *args, **kwargs)
@@ -1001,10 +1016,12 @@ def test_bare_registered_mirror_candidate_returns_false_on_probe_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify bare registered mirror candidate returns false on probe timeout."""
     mirror_path = tmp_path / "repo.git"
     mirror_path.mkdir()
 
     def _timeout(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Test helper for timeout."""
         raise subprocess.TimeoutExpired(cmd=["git"], timeout=5)
 
     monkeypatch.setattr(git_manager.subprocess, "run", _timeout)
@@ -1017,6 +1034,7 @@ async def test_read_mirror_origin_url_returns_configured_origin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify read mirror origin url returns configured origin."""
     repo_url = "git@github.com:example/repo.git"
     mirror = tmp_path / "repo.git"
     calls: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = []
@@ -1027,6 +1045,7 @@ async def test_read_mirror_origin_url_returns_configured_origin(
         config_scope_args: tuple[str, ...],
         args: tuple[str, ...],
     ) -> tuple[int, str, str]:
+        """Test helper for fake run git config."""
         calls.append((git_args, config_scope_args, args))
         return 0, f"{repo_url}\n", ""
 
@@ -1047,6 +1066,7 @@ async def test_read_mirror_origin_url_returns_none_when_unset_or_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify read mirror origin url returns none when unset or empty."""
     mirror = tmp_path / "repo.git"
     responses = [(1, "", ""), (0, "\n", "")]
 
@@ -1056,6 +1076,7 @@ async def test_read_mirror_origin_url_returns_none_when_unset_or_empty(
         config_scope_args: tuple[str, ...],
         args: tuple[str, ...],
     ) -> tuple[int, str, str]:
+        """Test helper for fake run git config."""
         assert git_args == ("--git-dir", str(mirror))
         assert config_scope_args == ("--local",)
         assert args == ("--get", "remote.origin.url")
@@ -1438,6 +1459,7 @@ class TestRemoveWorktree:
     async def test_missing_gitfile_worktree_validation_failure_is_reclaimed(
         self, manager: GitManager, origin_repo: Path
     ) -> None:
+        """Verify missing gitfile worktree validation failure is reclaimed."""
         await manager.ensure_mirror(str(origin_repo))
         worktree_path = manager._worktrees_dir / "ws_missing_gitfile"
         worktree_path.mkdir(parents=True)
@@ -1446,6 +1468,7 @@ class TestRemoveWorktree:
         pruned: list[str] = []
 
         async def _stale_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            """Test helper for stale run."""
             if operation == "worktree.remove":
                 raise GitOperationError(
                     operation=operation,

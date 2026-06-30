@@ -675,6 +675,7 @@ class TestCursorAdapter:
 
     @pytest.mark.unit
     async def test_produces_correct_cli_invocation(self) -> None:
+        """Verify produces correct cli invocation."""
         runner = FakeCommandRunner()
         adapter = CursorAdapter(runner=runner, default_model="composer")
 
@@ -698,6 +699,7 @@ class TestCursorAdapter:
 
     @pytest.mark.unit
     async def test_produces_cli_invocation_without_model_or_effort(self) -> None:
+        """Verify produces cli invocation without model or effort."""
         runner = FakeCommandRunner()
         adapter = CursorAdapter(runner=runner)
 

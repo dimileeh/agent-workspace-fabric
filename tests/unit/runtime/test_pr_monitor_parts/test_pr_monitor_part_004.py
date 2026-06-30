@@ -166,6 +166,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_required_rollup_sibling_reports_completed_failure_set(self) -> None:
+        """Verify required rollup sibling reports completed failure set."""
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
@@ -373,6 +374,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_failed_test_node_line_without_assertion_marker_reports_failure(self) -> None:
+        """Verify failed test node line without assertion marker reports failure."""
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
@@ -416,6 +418,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_failure_with_run_still_in_progress_waits_for_ci(self) -> None:
+        """Verify failure with run still in progress waits for ci."""
         action = decide(
             _status(check_state=CheckState.FAILURE, ci_runs_in_progress=True),
             MonitorState(),

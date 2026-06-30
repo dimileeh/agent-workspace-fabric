@@ -4,11 +4,13 @@ from pathlib import Path
 
 
 def _write(path: Path, content: str) -> None:
+    """Test helper for write."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
 
 def _make_mirror_with_worktree(tmp_path: Path, work_dir: Path, workspace_id: str) -> str:
+    """Test helper for make mirror with worktree."""
     origin = tmp_path / "origin"
     origin.mkdir()
     repo_url = str(origin)
@@ -25,6 +27,7 @@ def _make_synthetic_mirror_link(
     repo_url: str = "git@github.com:example/repo.git",
     include_worktree_gitfile: bool = True,
 ) -> None:
+    """Test helper for make synthetic mirror link."""
     linked_git_dir = mirror / "worktrees" / worktree.name
     linked_git_dir.mkdir(parents=True)
     worktree.mkdir(parents=True, exist_ok=True)

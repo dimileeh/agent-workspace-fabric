@@ -14,6 +14,7 @@ from awf.node.git_manager import GitManager
 class TestGitEnvironment:
     @pytest.mark.unit
     async def test_run_uses_configured_environment(self, tmp_path: Path) -> None:
+        """Verify run uses configured environment."""
         home = tmp_path / "home"
         home.mkdir()
         manager = GitManager(tmp_path / "work", env={"HOME": str(home), "AWF_TEST_ENV": "ok"})
@@ -33,9 +34,11 @@ class TestAgentWritableWorktreeHelpers:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Verify prepare agent writable worktree skips chown when not root."""
         monkeypatch.setattr(os, "geteuid", lambda: 1000)
 
         async def _unexpected_to_thread(*_args: object, **_kwargs: object) -> None:
+            """Test helper for unexpected to thread."""
             raise AssertionError("non-root process must not chown worktrees")
 
         monkeypatch.setattr(git_module.asyncio, "to_thread", _unexpected_to_thread)
@@ -56,6 +59,7 @@ class TestAgentWritableWorktreeHelpers:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Verify linked worktree git dir handles absent unreadable and relative gitfiles."""
         missing_gitfile = tmp_path / "missing"
         missing_gitfile.mkdir()
         assert git_module.linked_worktree_git_dir(missing_gitfile) is None
@@ -67,6 +71,7 @@ class TestAgentWritableWorktreeHelpers:
         original_read_text = Path.read_text
 
         def _read_text(path: Path, *args: object, **kwargs: object) -> str:
+            """Test helper for read text."""
             if path == unreadable_gitfile:
                 raise OSError("cannot read gitfile")
             return original_read_text(path, *args, **kwargs)
@@ -97,6 +102,7 @@ class TestAgentWritableWorktreeHelpers:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Verify chown targets skip missing and duplicate paths."""
         chowned: list[tuple[Path, int, int]] = []
         file_path = tmp_path / "owned-file"
         file_path.write_text("content\n", encoding="utf-8")

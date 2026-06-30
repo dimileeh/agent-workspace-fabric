@@ -143,6 +143,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
 
 @pytest.mark.unit
 def test_agent_runtime_prepares_writable_cursor_config_home() -> None:
+    """Verify agent runtime prepares writable cursor config home."""
     dockerfile = _agent_runtime_dockerfile()
 
     assert "mkdir -p /workspace /home/agent/.config/cursor" in dockerfile

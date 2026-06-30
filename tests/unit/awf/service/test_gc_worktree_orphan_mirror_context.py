@@ -18,6 +18,7 @@ from tests.unit.awf.service.gc_worktree_test_helpers import (
 async def test_remove_orphan_worktree_reports_already_removed_path(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree reports already removed path."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_removed"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -45,6 +46,7 @@ async def test_remove_orphan_worktree_reports_already_removed_path(
 async def test_remove_orphan_worktree_skips_existing_non_git_directory(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree skips existing non git directory."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_non_git"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -75,6 +77,7 @@ async def test_remove_orphan_worktree_skips_existing_non_git_directory(
 async def test_remove_orphan_worktree_uses_companion_path_name_as_worktree_id(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree uses companion path name as worktree id."""
     work_dir = tmp_path / "service"
     parent_workspace_id = "ws_parent"
     companion_id = f"{parent_workspace_id}__companion__backend"
@@ -111,6 +114,7 @@ async def test_remove_orphan_worktree_uses_companion_path_name_as_worktree_id(
 async def test_remove_orphan_worktree_uses_mirror_registry_when_gitfile_is_missing(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree uses mirror registry when gitfile is missing."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     repo_url = "git@github.com:example/repo.git"
@@ -147,6 +151,7 @@ async def test_remove_orphan_worktree_registry_probe_ignores_git_object_lookup_e
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remove orphan worktree registry probe ignores git object lookup env."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_poisoned_git_env"
     mirror = work_dir / "git" / "mirrors" / "repo.git"
@@ -181,6 +186,7 @@ async def test_remove_orphan_worktree_registry_probe_ignores_git_work_tree_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remove orphan worktree registry probe ignores git work tree env."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_poisoned_git_work_tree"
     mirror = work_dir / "git" / "mirrors" / "repo.git"
@@ -214,6 +220,7 @@ async def test_remove_orphan_worktree_registry_probe_ignores_git_common_dir_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remove orphan worktree registry probe ignores git common dir env."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_poisoned_git_common_dir"
     mirror = work_dir / "git" / "mirrors" / "repo.git"
@@ -246,6 +253,7 @@ async def test_remove_orphan_worktree_registry_probe_ignores_git_common_dir_env(
 async def test_remove_orphan_worktree_does_not_rehash_rewritten_origin_url(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree does not rehash rewritten origin url."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     original_repo_url = "./relative-origin"
@@ -282,6 +290,7 @@ async def test_remove_orphan_worktree_does_not_rehash_rewritten_origin_url(
 async def test_remove_orphan_worktree_preserves_git_operation_error_reason_code(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree preserves git operation error reason code."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -326,6 +335,7 @@ async def test_remove_orphan_worktree_preserves_git_operation_error_reason_code(
 async def test_remove_orphan_worktree_reports_metadata_probe_failure(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree reports metadata probe failure."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -371,6 +381,7 @@ async def test_remove_orphan_worktree_reports_metadata_probe_failure(
 async def test_remove_orphan_worktree_propagates_unexpected_remove_failure(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree propagates unexpected remove failure."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -399,6 +410,7 @@ async def test_remove_orphan_worktree_propagates_unexpected_remove_failure(
 async def test_remove_orphan_worktree_propagates_unexpected_metadata_probe_failure(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree propagates unexpected metadata probe failure."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -426,6 +438,7 @@ async def test_remove_orphan_worktree_propagates_unexpected_metadata_probe_failu
 async def test_remove_orphan_worktree_wraps_linked_git_resolution_failure(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree wraps linked git resolution failure."""
     work_dir = tmp_path / "service"
     workspace_id = "ws_rowless"
     worktree_path = work_dir / "git" / "worktrees" / workspace_id
@@ -466,6 +479,7 @@ async def test_remove_orphan_worktree_wraps_linked_git_resolution_failure(
 async def test_remove_orphan_worktree_fails_loudly_when_mirror_context_unresolved(
     tmp_path: Path,
 ) -> None:
+    """Verify remove orphan worktree fails loudly when mirror context unresolved."""
     work_dir = tmp_path / "service"
     worktree_path = work_dir / "git" / "worktrees" / "ws_rowless"
     _write(worktree_path / ".git", "[core]\n\trepositoryformatversion = 0\n")

@@ -126,6 +126,7 @@ class TestCiFailure:
     def test_transient_failure_with_required_rollup_reports_completed_failure_set(
         self,
     ) -> None:
+        """Verify transient failure with required rollup reports completed failure set."""
         transient_failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
@@ -232,6 +233,7 @@ class TestCiFailure:
     def test_required_rollup_without_underlying_transient_job_reports_failure(
         self,
     ) -> None:
+        """Verify required rollup without underlying transient job reports failure."""
         rollup_failure = CheckFailure(
             name="ci-required",
             conclusion="FAILURE",
@@ -254,6 +256,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_arbitrary_completed_ci_failure_reports_failure(self) -> None:
+        """Verify arbitrary completed ci failure reports failure."""
         failure = CheckFailure(
             name="go-tests",
             conclusion="FAILURE",
@@ -276,6 +279,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_completed_ci_failure_reports_while_other_runs_are_in_progress(self) -> None:
+        """Verify completed ci failure reports while other runs are in progress."""
         failure = CheckFailure(
             name="go-tests",
             conclusion="FAILURE",
@@ -302,6 +306,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_failed_ci_without_failure_evidence_waits_for_in_progress_runs(self) -> None:
+        """Verify failed ci without failure evidence waits for in progress runs."""
         action = decide(
             _status(check_state=CheckState.FAILURE, ci_runs_in_progress=True),
             MonitorState(),
@@ -1320,6 +1325,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_timed_out_failure_without_logs_or_run_id_escalates_to_human(self) -> None:
+        """Verify timed out failure without logs or run id escalates to human."""
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="TIMED_OUT",
@@ -1408,6 +1414,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_ruff_diagnostics_with_transient_text_dispatch_agent_repair(self) -> None:
+        """Verify ruff diagnostics with transient text dispatch agent repair."""
         failure = CheckFailure(
             name="lint-and-type",
             conclusion="FAILURE",
