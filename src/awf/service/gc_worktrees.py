@@ -531,7 +531,7 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
 
 
 def _registered_mirror_path_from_metadata(worktree_path: Path, mirrors_root: Path) -> Path | None:
-    from awf.node.git_manager import GitOperationError, _linked_worktree_path_from_git_dir
+    from awf.node.git_manager import GitOperationError, linked_worktree_path_from_git_dir
 
     if not mirrors_root.exists():
         return None
@@ -564,7 +564,7 @@ def _registered_mirror_path_from_metadata(worktree_path: Path, mirrors_root: Pat
         if not linked_git_dir.is_dir():
             continue
         try:
-            registered_worktree = _linked_worktree_path_from_git_dir(linked_git_dir)
+            registered_worktree = linked_worktree_path_from_git_dir(linked_git_dir)
         except GitOperationError as exc:
             if exc.stderr.startswith("cannot read linked-worktree gitdir back-reference at "):
                 continue
@@ -586,7 +586,7 @@ def _registered_mirror_path_from_metadata(worktree_path: Path, mirrors_root: Pat
 
 
 def _mirror_registry_points_to_worktree(mirror_path: Path, worktree_path: Path) -> bool:
-    from awf.node.git_manager import GitOperationError, _linked_worktree_path_from_git_dir
+    from awf.node.git_manager import GitOperationError, linked_worktree_path_from_git_dir
 
     try:
         resolved_worktree = worktree_path.resolve()
@@ -596,7 +596,7 @@ def _mirror_registry_points_to_worktree(mirror_path: Path, worktree_path: Path) 
     if not linked_git_dir.is_dir():
         return False
     try:
-        return _linked_worktree_path_from_git_dir(linked_git_dir) == resolved_worktree
+        return linked_worktree_path_from_git_dir(linked_git_dir) == resolved_worktree
     except GitOperationError:
         return False
 

@@ -1041,7 +1041,7 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
         if not _is_bare_registered_mirror_candidate(mirror_path):
             continue
         try:
-            registered_worktree = _linked_worktree_path_from_git_dir(linked_git_dir)
+            registered_worktree = linked_worktree_path_from_git_dir(linked_git_dir)
         except GitOperationError as exc:
             if first_probe_error is None:
                 first_probe_error = exc
@@ -1121,7 +1121,7 @@ def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
     return git_dir
 
 
-def _linked_worktree_path_from_git_dir(linked_git_dir: Path) -> Path:
+def linked_worktree_path_from_git_dir(linked_git_dir: Path) -> Path:
     """Return the worktree path from Git's linked-worktree back-reference."""
     metadata_gitdir = linked_git_dir / "gitdir"
     try:
@@ -1214,7 +1214,7 @@ async def _repair_mirror_hooks_path_once(mirror_path: Path) -> tuple[bool, bool]
     worktree_config_enabled: bool | None = None
     for linked_worktree_dir in linked_worktree_dirs:
         try:
-            worktree_path = _linked_worktree_path_from_git_dir(linked_worktree_dir)
+            worktree_path = linked_worktree_path_from_git_dir(linked_worktree_dir)
         except GitOperationError as exc:
             if not _is_stale_linked_worktree_metadata_error(exc):
                 raise

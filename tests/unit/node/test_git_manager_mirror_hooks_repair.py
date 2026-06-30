@@ -329,14 +329,14 @@ class TestRepairMirrorHooksPath:
             reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
         )
 
-        def _linked_worktree_path_from_git_dir(_path: Path) -> Path:
+        def linked_worktree_path_from_git_dir(_path: Path) -> Path:
             raise probe_error
 
         monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
         monkeypatch.setattr(
             git_module,
-            "_linked_worktree_path_from_git_dir",
-            _linked_worktree_path_from_git_dir,
+            "linked_worktree_path_from_git_dir",
+            linked_worktree_path_from_git_dir,
         )
 
         # A probe error that is not the stale-metadata sentinel is a genuine

@@ -1035,7 +1035,7 @@ def test_linked_worktree_path_from_git_dir_rejects_invalid_back_reference(
     (linked_git_dir / "gitdir").write_text("\n", encoding="utf-8")
 
     with pytest.raises(GitOperationError) as raised:
-        git_manager._linked_worktree_path_from_git_dir(linked_git_dir)  # noqa: SLF001
+        git_manager.linked_worktree_path_from_git_dir(linked_git_dir)
 
     assert raised.value.operation == "worktree.hooks_path_probe"
     assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
@@ -1054,7 +1054,7 @@ def test_linked_worktree_path_from_git_dir_resolves_relative_back_reference(
     relative_git_file = Path("../../../worktree/.git")
     (linked_git_dir / "gitdir").write_text(f"{relative_git_file}\n", encoding="utf-8")
 
-    resolved = git_manager._linked_worktree_path_from_git_dir(linked_git_dir)  # noqa: SLF001
+    resolved = git_manager.linked_worktree_path_from_git_dir(linked_git_dir)
 
     assert resolved == git_file.resolve().parent
 
@@ -1078,7 +1078,7 @@ def test_linked_worktree_path_from_git_dir_wraps_metadata_read_error(
     monkeypatch.setattr(Path, "read_text", _raise_for_metadata)
 
     with pytest.raises(GitOperationError) as raised:
-        git_manager._linked_worktree_path_from_git_dir(linked_git_dir)  # noqa: SLF001
+        git_manager.linked_worktree_path_from_git_dir(linked_git_dir)
 
     assert raised.value.operation == "worktree.hooks_path_probe"
     assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
@@ -1106,7 +1106,7 @@ def test_linked_worktree_path_from_git_dir_wraps_resolution_error(
     monkeypatch.setattr(Path, "resolve", _raise_for_resolved_git_file)
 
     with pytest.raises(GitOperationError) as raised:
-        git_manager._linked_worktree_path_from_git_dir(linked_git_dir)  # noqa: SLF001
+        git_manager.linked_worktree_path_from_git_dir(linked_git_dir)
 
     assert raised.value.operation == "worktree.hooks_path_probe"
     assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
