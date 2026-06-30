@@ -14,4 +14,5 @@ router = APIRouter(tags=["system"])
 
 @router.get("/.well-known/awf-core.json", response_model=CoreDiscoveryResponse)
 async def core_discovery(request: Request) -> CoreDiscoveryResponse:
+    """Return the cached, secret-free AWF Core capability discovery payload."""
     return core_discovery_payload_from_state(request.app.state).to_response()

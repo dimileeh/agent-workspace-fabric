@@ -671,6 +671,7 @@ _RUFF_DIAGNOSTIC_RE = re.compile(r"^\S+\.py:\d+:\d+:\s+[a-z]{1,4}\d{3,4}\b", re.
 
 
 def _log_shows_code_failure(log_text: str) -> bool:
+    """Return whether CI log text contains markers of a code-level test or lint failure."""
     if any(marker in log_text for marker in _CI_CODE_FAILURE_MARKERS):
         return True
     for line in log_text.splitlines():
@@ -685,6 +686,7 @@ def _log_shows_code_failure(log_text: str) -> bool:
 
 
 def _failure_has_parsed_code_evidence(failure: CheckFailure) -> bool:
+    """Return whether structured CI failure evidence points to a code defect."""
     if failure.test_node_ids or failure.assertion_snippets:
         return True
     if failure.error_summaries:

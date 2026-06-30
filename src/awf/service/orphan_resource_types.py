@@ -56,17 +56,21 @@ class ClassifiedResource:
 
     @property
     def kind(self) -> ResourceKind:
+        """Return the classified resource kind."""
         return self.resource.kind
 
     @property
     def workspace_id(self) -> str:
+        """Return the classified resource workspace id."""
         return self.resource.workspace_id
 
     @property
     def compose_project(self) -> str | None:
+        """Return the classified resource compose project, when present."""
         return self.resource.compose_project
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize this classified resource for API and audit payloads."""
         payload: dict[str, object] = {
             "kind": self.resource.kind,
             "workspace_id": self.resource.workspace_id,
@@ -99,6 +103,7 @@ class ResourceScan:
     detail: str | None = None
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize this scanner summary for API and audit payloads."""
         payload: dict[str, object] = {
             "ok": self.ok,
             "status": self.status,
@@ -121,6 +126,7 @@ class CleanupReadiness:
     dry_run_only: bool = True
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize this cleanup-readiness decision for API and audit payloads."""
         return {
             "ready": self.ready,
             "status": self.status,
@@ -153,6 +159,7 @@ class OrphanResourceSummary:
     records: tuple[ClassifiedResource, ...] = field(default=(), repr=False)
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize this orphan-resource summary for API and audit payloads."""
         payload: dict[str, object] = {
             "ok": self.ok,
             "status": self.status,

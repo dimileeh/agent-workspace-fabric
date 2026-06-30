@@ -169,24 +169,33 @@ class CheckFailureLogResult:
     runs_in_progress: bool = False
 
     def __iter__(self) -> Iterator[CheckFailure]:
+        """Iterate the failing checks in this snapshot."""
         return iter(self.failures)
 
     def __len__(self) -> int:
+        """Return the number of failing checks in this snapshot."""
         return len(self.failures)
 
     @overload
-    def __getitem__(self, index: int) -> CheckFailure: ...
+    def __getitem__(self, index: int) -> CheckFailure:
+        """Return the failing check at ``index``."""
+        ...
 
     @overload
-    def __getitem__(self, index: slice) -> tuple[CheckFailure, ...]: ...
+    def __getitem__(self, index: slice) -> tuple[CheckFailure, ...]:
+        """Return a slice of failing checks."""
+        ...
 
     def __getitem__(self, index: int | slice) -> CheckFailure | tuple[CheckFailure, ...]:
+        """Index into the failing checks like a tuple."""
         return self.failures[index]
 
     def __bool__(self) -> bool:
+        """Return whether this snapshot contains any failing checks."""
         return bool(self.failures)
 
     def __eq__(self, other: object) -> bool:
+        """Compare against another snapshot or an empty tuple alias."""
         if isinstance(other, CheckFailureLogResult):
             return (
                 self.failures == other.failures and self.runs_in_progress == other.runs_in_progress
@@ -196,6 +205,7 @@ class CheckFailureLogResult:
         return NotImplemented
 
     def __hash__(self) -> int:
+        """Hash the snapshot, treating an empty snapshot like ``()``."""
         if not self.failures and not self.runs_in_progress:
             return hash(())
         return hash((self.failures, self.runs_in_progress))

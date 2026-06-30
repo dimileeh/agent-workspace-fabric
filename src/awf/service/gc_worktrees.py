@@ -86,6 +86,8 @@ class WorkspaceGCWorktreeRemoveResult:
 
 @dataclass(frozen=True)
 class _ExistingWorktreeGitContext:
+    """Resolved Git-management context for an existing worktree path."""
+
     is_non_git_worktree: bool
     mirror_path: Path | None = None
 
@@ -127,6 +129,7 @@ def _first_failed_target_reason_code(
     *,
     fallback: str,
 ) -> str:
+    """Return the first failed target reason code, or ``fallback`` when none exist."""
     return next(
         (
             target.reason_code
@@ -145,6 +148,7 @@ def _existing_worktree_git_context_result(
     target_results: list[WorkspaceGCWorktreeRemoveTargetResult],
     errors: list[str],
 ) -> _ExistingWorktreeGitContext | None:
+    """Resolve mirror ownership for an existing worktree path or record probe failures."""
     from awf.node.git_manager import GitOperationError
 
     if not path.exists():
@@ -481,6 +485,7 @@ def git_context_mirror_path_for_worktree(path: Path, *, work_dir: Path) -> Path 
 
 
 def _mirror_registry_points_to_worktree(mirror_path: Path, worktree_path: Path) -> bool:
+    """Return whether ``mirror_path`` registry metadata points at ``worktree_path``."""
     from awf.node.git_manager import GitOperationError, linked_worktree_path_from_git_dir
 
     try:
@@ -502,6 +507,7 @@ def _managed_mirror_path(
     *,
     require_existing_dir: bool = False,
 ) -> Path | None:
+    """Return ``path`` when it resolves under ``mirrors_root``, else ``None``."""
     if path is None:
         return None
     try:
@@ -521,6 +527,7 @@ def _managed_mirror_path(
 
 
 def _managed_bare_mirror_path(path: Path | None, mirrors_root: Path) -> Path | None:
+    """Return a managed bare mirror path under ``mirrors_root``, if resolvable."""
     mirror_path = _managed_mirror_path(path, mirrors_root, require_existing_dir=True)
     if mirror_path is None:
         return None
@@ -530,6 +537,7 @@ def _managed_bare_mirror_path(path: Path | None, mirrors_root: Path) -> Path | N
 
 
 def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
+    """Return whether ``path`` probes as a bare Git repository."""
     from awf.node.git_manager import _GIT_BARE_PROBE_TIMEOUT_SECONDS, GitOperationError
 
     operation = "worktree.git_context_probe"
@@ -577,6 +585,7 @@ def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
 
 
 def _git_bare_probe_env() -> dict[str, str]:
+    """Build the Git environment used for bare-repository probes during GC."""
     from awf.node.git_manager import git_env_without_object_lookup_overrides
 
     env = git_env_without_object_lookup_overrides()
@@ -586,6 +595,7 @@ def _git_bare_probe_env() -> dict[str, str]:
 
 
 def _looks_like_bare_git_repository(path: Path) -> bool:
+    """Return whether ``path`` has the on-disk layout of a bare Git repository."""
     return (
         (path / "config").is_file()
         and (path / "HEAD").is_file()
@@ -595,6 +605,7 @@ def _looks_like_bare_git_repository(path: Path) -> bool:
 
 
 def _has_stale_managed_linked_mirror(path: Path, *, work_dir: Path) -> bool:
+    """Return whether a managed linked mirror exists but no longer probes as bare."""
     from awf.node.git_manager import mirror_path_for_worktree
 
     mirrors_root = work_dir / "git" / "mirrors"

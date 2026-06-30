@@ -148,6 +148,7 @@ _TERMINAL_STATUS_STATES = frozenset({"FAILED", "STOPPED", "SUCCESSFUL"})
 
 
 def _has_non_terminal_status(statuses: Sequence[Mapping[str, Any]]) -> bool:
+    """Return whether any commit status is still pending or in progress."""
     return any(
         str(status.get("state") or "").upper() not in _TERMINAL_STATUS_STATES for status in statuses
     )

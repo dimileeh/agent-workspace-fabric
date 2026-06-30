@@ -999,6 +999,7 @@ def mirror_path_for_worktree(worktree_path: Path) -> Path | None:
 
 
 def _path_within_root(path: Path, root: Path) -> Path | None:
+    """Return ``path`` resolved under ``root``, or ``None`` when it escapes ``root``."""
     try:
         resolved_path = path.resolve()
         resolved_root = root.resolve()
@@ -1079,6 +1080,7 @@ def mirror_path_for_registered_worktree(worktree_path: Path, mirrors_dir: Path) 
 
 
 def _is_bare_registered_mirror_candidate(mirror_path: Path) -> bool:
+    """Return whether ``mirror_path`` probes as a bare Git repository."""
     try:
         probe = subprocess.run(
             [
@@ -1388,6 +1390,7 @@ def git_env_without_object_lookup_overrides() -> dict[str, str]:
 
 
 def git_env_for_bare_repository_probe() -> dict[str, str]:
+    """Build a Git environment suitable for bare-repository probe subprocesses."""
     env = git_env_without_object_lookup_overrides()
     for key in _GIT_BARE_REPOSITORY_PROBE_ENV_KEYS:
         env.pop(key, None)

@@ -36,6 +36,7 @@ class CoreDiscoveryPayload:
     capabilities: tuple[str, ...] = (WORKSPACE_EXECUTION_V1,)
 
     def to_response(self) -> CoreDiscoveryResponse:
+        """Serialize this payload into the public API response model."""
         return CoreDiscoveryResponse(
             package_name=self.package_name,
             package_version=self.package_version,
@@ -60,6 +61,7 @@ def core_discovery_payload_from_state(app_state: object) -> CoreDiscoveryPayload
 
 
 def _resolve_git_commit() -> str:
+    """Resolve the Core git commit from env override or the checkout HEAD."""
     env_commit = os.environ.get("AWF_GIT_COMMIT")
     if env_commit is not None and env_commit.strip():
         return env_commit.strip()
@@ -67,6 +69,7 @@ def _resolve_git_commit() -> str:
 
 
 def _core_source_checkout_root() -> Path | None:
+    """Return the AWF Core checkout root when running from a source tree."""
     module_file = Path(__file__).resolve()
     try:
         package_dir = module_file.parents[1]
@@ -81,6 +84,7 @@ def _core_source_checkout_root() -> Path | None:
 
 
 def _git_rev_parse_head() -> str | None:
+    """Return ``git rev-parse HEAD`` for the Core checkout when available."""
     checkout_root = _core_source_checkout_root()
     if checkout_root is None:
         return None

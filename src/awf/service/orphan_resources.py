@@ -127,7 +127,9 @@ class OrphanResourceComposeTeardown(Protocol):
         remove_volumes: bool,
         *,
         fallback_volume_names: tuple[str, ...] = (),
-    ) -> ComposeTeardownOutcome: ...
+    ) -> ComposeTeardownOutcome:
+        """Tear down a compose stack for an orphan workspace resource."""
+        ...
 
 
 class OrphanResourceWorktreeRemover(Protocol):
@@ -139,7 +141,9 @@ class OrphanResourceWorktreeRemover(Protocol):
         workspace_id: str,
         path: Path,
         work_dir: Path,
-    ) -> Awaitable[WorkspaceGCWorktreeRemoveResult]: ...
+    ) -> Awaitable[WorkspaceGCWorktreeRemoveResult]:
+        """Remove a row-less orphan worktree using Git-aware GC helpers."""
+        ...
 
 
 ACTIVE_WORKSPACE_STATUSES = frozenset(
@@ -201,7 +205,9 @@ class SubprocessRun(Protocol):
         text: Literal[True],
         timeout: float,
         env: Mapping[str, str],
-    ) -> CompletedProcessLike: ...
+    ) -> CompletedProcessLike:
+        """Run a subprocess and return a completed-process-like result."""
+        ...
 
 
 class AsyncCommandResultLike(Protocol):

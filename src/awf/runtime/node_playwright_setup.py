@@ -134,6 +134,7 @@ def playwright_command(package_manager: str, *args: str) -> str:
 
 
 def _profile_install_commands(profile: WorkspaceProfile) -> list[str]:
+    """Collect setup-phase commands that may reveal the package manager or interpreter."""
     commands = [c.command for c in profile.phases.setup if c.command]
     commands += [c.command for c in profile.database.generated_setup if c.command]
     commands += [c.command for c in profile.phases.pre_agent if c.command]
@@ -183,6 +184,7 @@ def _python_playwright_executable(profile: WorkspaceProfile) -> str | None:
 
 
 def _python_playwright_install_command(executable: str, *browsers: str) -> str:
+    """Build a ``python -m playwright install`` command for the given browsers."""
     return f"{executable} -m playwright install {shlex.join(browsers)}"
 
 

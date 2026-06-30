@@ -988,6 +988,7 @@ class GitHubClient:
         def _append_rollup_failure_without_log(
             *, run_name: str, conclusion: str, details_url: str | None
         ) -> None:
+            """Record a rollup check failure when no job log could be fetched."""
             evidence_warnings = (
                 (f"External check details URL: {redact_ci_log(details_url)}",)
                 if details_url
@@ -1428,12 +1429,14 @@ def _rollup_check_is_github_actions(check: CheckTiming) -> bool:
 
 
 def _rollup_check_is_explicit_github_actions(check: CheckTiming) -> bool:
+    """Return whether the rollup check is explicitly owned by GitHub Actions."""
     app_slug = (check.app_slug or "").lower()
     app_name = (check.app_name or "").lower()
     return app_slug == "github-actions" or app_name == "github actions"
 
 
 def _rollup_check_has_external_details_url(check: CheckTiming) -> bool:
+    """Return whether the rollup check links to a non-GitHub details URL."""
     details_url = check.details_url
     if not details_url:
         return False
