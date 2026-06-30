@@ -903,6 +903,23 @@ def _ci_candidate_failures(status: PRStatus) -> tuple[CheckFailure, ...]:
     )
 
 
+def _ci_non_candidate_failures(status: PRStatus) -> tuple[CheckFailure, ...]:
+    """Return CI failures excluded from transient rerun/wait (no ``run_id``)."""
+    return tuple(
+        failure for failure in status.ci_failures if not _ci_failure_is_rerun_candidate(failure)
+    )
+
+
+def _non_candidate_carries_fixable_code_evidence(status: PRStatus) -> bool:
+    """True when a synthesized/external row still carries repairable code evidence."""
+    for failure in _ci_non_candidate_failures(status):
+        if _failure_has_parsed_code_evidence(failure):
+            return True
+        if _log_shows_code_failure(failure.log_excerpt.lower()):
+            return True
+    return False
+
+
 _CI_MISSING_LOGS_HUMAN_MESSAGE = (
     "CI failed: AWF could not retrieve actionable logs; operator attention is required."
 )
@@ -918,6 +935,8 @@ def _ci_failure_action(
     if not status.ci_failures:
         return NotifyHuman(message=_CI_MISSING_LOGS_HUMAN_MESSAGE)
     candidate_failures = _ci_candidate_failures(status)
+    if _non_candidate_carries_fixable_code_evidence(status):
+        return ReportCiFailure(failures=status.ci_failures)
     if _should_rerun_transient_ci(status, state, config):
         return RerunTransientCI(failures=candidate_failures)
     if candidate_failures and all(_looks_like_transient_ci_failure(f) for f in candidate_failures):
