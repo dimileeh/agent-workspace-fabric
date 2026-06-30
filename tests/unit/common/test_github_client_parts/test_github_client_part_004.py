@@ -237,6 +237,37 @@ class TestFetchFailingCheckLogs:
         assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == []
 
     @pytest.mark.unit
+    async def test_failed_run_with_empty_status_still_reports_failure(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 42,
+                        "name": "go-tests",
+                        "conclusion": "FAILURE",
+                        "status": "",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="failed log")
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert result.runs_in_progress is False
+        assert [failure.name for failure in result.failures] == ["go-tests"]
+        assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == [
+            ["gh", "run", "view", "42", "--repo", "o/r", "--log-failed"]
+        ]
+
+    @pytest.mark.unit
     async def test_completed_failure_with_in_progress_sibling_reports_failure(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

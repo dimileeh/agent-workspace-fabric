@@ -1013,7 +1013,8 @@ class GitHubClient:
             run_id = str(database_id) if database_id is not None else None
             if run_id is not None:
                 seen_run_ids.add(run_id)
-                if status_by_run.get(run_id) != "completed":
+                run_status = status_by_run.get(run_id)
+                if run_status and run_status != "completed":
                     runs_in_progress = True
                     continue
             run_name = run.get("name") or (f"run/{run_id}" if run_id is not None else "run/unknown")
@@ -1040,7 +1041,7 @@ class GitHubClient:
             if not _rollup_check_is_github_actions(check) or run_id in seen_run_ids:
                 continue
             run_status = status_by_run.get(run_id)
-            if run_status is not None and run_status != "completed":
+            if run_status and run_status != "completed":
                 runs_in_progress = True
                 seen_run_ids.add(run_id)
                 continue
