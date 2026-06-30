@@ -135,9 +135,7 @@ def _uv_run_python_prefix(tokens: list[str], uv_index: int) -> str | None:
     return shlex.join(["uv", *global_scope, "run", *run_scope, "python"])
 
 
-_UV_SYNC_SCOPE_VALUE_FLAGS = _UV_RUN_SCOPE_VALUE_FLAGS | frozenset(
-    {"--all-extras", "--all-groups", "--no-dev"}
-)
+_UV_SYNC_SCOPE_VALUE_FLAGS = _UV_RUN_SCOPE_VALUE_FLAGS
 _UV_PIP_SCOPE_VALUE_FLAGS = frozenset({"--python", "--python-platform", "-p"})
 
 
