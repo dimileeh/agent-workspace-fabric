@@ -290,17 +290,6 @@ async def default_worktree_remover(
                     error=error,
                 )
             )
-        except Exception as exc:
-            error = str(exc)
-            errors.append(f"{worktree_id}: {error}")
-            target_results.append(
-                WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=worktree_id,
-                    status="failed",
-                    reason_code="GIT_WORKTREE_REMOVE_FAILED",
-                    error=error,
-                )
-            )
         else:
             if path_existed:
                 existing_path_successes.add(worktree_id)
@@ -381,22 +370,6 @@ async def remove_orphan_worktree(
                 ),
             ),
         )
-    except Exception as exc:
-        error = str(exc)
-        reason_code = "ORPHAN_WORKTREE_GIT_CONTEXT_PROBE_FAILED"
-        return WorkspaceGCWorktreeRemoveResult(
-            status="failed",
-            reason_code=reason_code,
-            error=error,
-            target_results=(
-                WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=worktree_id,
-                    status="failed",
-                    reason_code=reason_code,
-                    error=error,
-                ),
-            ),
-        )
 
     if is_non_git_worktree:
         return WorkspaceGCWorktreeRemoveResult(
@@ -441,21 +414,6 @@ async def remove_orphan_worktree(
                     worktree_id=worktree_id,
                     status="failed",
                     reason_code=exc.reason_code,
-                    error=error,
-                ),
-            ),
-        )
-    except Exception as exc:
-        error = str(exc)
-        return WorkspaceGCWorktreeRemoveResult(
-            status="failed",
-            reason_code="GIT_WORKTREE_REMOVE_FAILED",
-            error=error,
-            target_results=(
-                WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=worktree_id,
-                    status="failed",
-                    reason_code="GIT_WORKTREE_REMOVE_FAILED",
                     error=error,
                 ),
             ),

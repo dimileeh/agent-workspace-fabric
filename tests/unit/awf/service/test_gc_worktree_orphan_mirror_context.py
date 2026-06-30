@@ -368,7 +368,7 @@ async def test_remove_orphan_worktree_reports_metadata_probe_failure(
 
 
 @pytest.mark.unit
-async def test_remove_orphan_worktree_reports_unexpected_remove_failure(
+async def test_remove_orphan_worktree_propagates_unexpected_remove_failure(
     tmp_path: Path,
 ) -> None:
     work_dir = tmp_path / "service"
@@ -384,30 +384,19 @@ async def test_remove_orphan_worktree_reports_unexpected_remove_failure(
             return_value=mirror,
         ),
         patch("awf.node.git_manager.GitManager") as mock_gm_cls,
+        pytest.raises(RuntimeError, match="filesystem refused worktree metadata cleanup"),
     ):
         mock_gm = mock_gm_cls.return_value
         mock_gm.remove_worktree_from_mirror = AsyncMock(side_effect=remove_error)
-        result = await remove_orphan_worktree(
+        await remove_orphan_worktree(
             workspace_id=workspace_id,
             path=worktree_path,
             work_dir=work_dir,
         )
 
-    assert result.status == "failed"
-    assert result.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
-    assert result.error == "filesystem refused worktree metadata cleanup"
-    assert [target.to_dict() for target in result.target_results] == [
-        {
-            "worktree_id": workspace_id,
-            "status": "failed",
-            "reason_code": "GIT_WORKTREE_REMOVE_FAILED",
-            "error": "filesystem refused worktree metadata cleanup",
-        }
-    ]
-
 
 @pytest.mark.unit
-async def test_remove_orphan_worktree_reports_unexpected_metadata_probe_failure(
+async def test_remove_orphan_worktree_propagates_unexpected_metadata_probe_failure(
     tmp_path: Path,
 ) -> None:
     work_dir = tmp_path / "service"
@@ -422,27 +411,15 @@ async def test_remove_orphan_worktree_reports_unexpected_metadata_probe_failure(
             side_effect=probe_error,
         ),
         patch("awf.node.git_manager.GitManager") as mock_gm_cls,
+        pytest.raises(RuntimeError, match="symlink loop from linked worktree gitdir"),
     ):
         mock_gm = mock_gm_cls.return_value
         mock_gm.remove_worktree_from_mirror = AsyncMock()
-        result = await remove_orphan_worktree(
+        await remove_orphan_worktree(
             workspace_id=workspace_id,
             path=worktree_path,
             work_dir=work_dir,
         )
-
-    assert result.status == "failed"
-    assert result.reason_code == "ORPHAN_WORKTREE_GIT_CONTEXT_PROBE_FAILED"
-    assert result.error == "symlink loop from linked worktree gitdir"
-    assert [target.to_dict() for target in result.target_results] == [
-        {
-            "worktree_id": workspace_id,
-            "status": "failed",
-            "reason_code": "ORPHAN_WORKTREE_GIT_CONTEXT_PROBE_FAILED",
-            "error": "symlink loop from linked worktree gitdir",
-        }
-    ]
-    mock_gm.remove_worktree_from_mirror.assert_not_awaited()
 
 
 @pytest.mark.unit

@@ -263,10 +263,18 @@ async def test_default_worktree_remover_continues_after_companion_failure(
         ),
     )
 
+    remove_error = GitOperationError(
+        operation="worktree.remove",
+        returncode=1,
+        stdout="",
+        stderr="backend mirror missing",
+        reason_code="GIT_WORKTREE_REMOVE_FAILED",
+    )
+
     async def _remove_worktree(*, workspace_id: str, repo_url: str) -> None:
         del repo_url
         if workspace_id.endswith("__companion__backend"):
-            raise RuntimeError("backend mirror missing")
+            raise remove_error
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value
@@ -291,7 +299,7 @@ async def test_default_worktree_remover_continues_after_companion_failure(
             "worktree_id": f"{workspace_id}__companion__backend",
             "status": "failed",
             "reason_code": "GIT_WORKTREE_REMOVE_FAILED",
-            "error": "backend mirror missing",
+            "error": str(remove_error),
         },
         {
             "worktree_id": f"{workspace_id}__companion__web",
@@ -371,10 +379,18 @@ async def test_default_worktree_remover_missing_companion_noop_does_not_make_par
         ),
     )
 
+    remove_error = GitOperationError(
+        operation="worktree.remove",
+        returncode=1,
+        stdout="",
+        stderr="primary mirror missing",
+        reason_code="GIT_WORKTREE_REMOVE_FAILED",
+    )
+
     async def _remove_worktree(*, workspace_id: str, repo_url: str) -> None:
         del repo_url
         if workspace_id == primary_id:
-            raise RuntimeError("primary mirror missing")
+            raise remove_error
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value
@@ -392,7 +408,7 @@ async def test_default_worktree_remover_missing_companion_noop_does_not_make_par
             "worktree_id": primary_id,
             "status": "failed",
             "reason_code": "GIT_WORKTREE_REMOVE_FAILED",
-            "error": "primary mirror missing",
+            "error": str(remove_error),
         },
         {
             "worktree_id": companion_id,
@@ -717,10 +733,15 @@ async def test_default_worktree_remover_reports_companion_metadata_probe_failure
         reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
     )
 
+    def _probe_side_effect(path: Path, *, work_dir: Path) -> None:
+        del work_dir
+        if path == companion_path:
+            raise probe_error
+
     with (
         patch(
             "awf.service.gc_worktrees.git_context_mirror_path_for_worktree",
-            side_effect=probe_error,
+            side_effect=_probe_side_effect,
         ),
         patch("awf.node.git_manager.GitManager") as mock_gm_cls,
     ):
@@ -792,7 +813,15 @@ async def test_default_worktree_remover_handles_git_error(
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value
-        mock_gm.remove_worktree = AsyncMock(side_effect=RuntimeError("mirror missing"))
+        mock_gm.remove_worktree = AsyncMock(
+            side_effect=GitOperationError(
+                operation="worktree.remove",
+                returncode=1,
+                stdout="",
+                stderr="mirror missing",
+                reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            )
+        )
         result = await _default_worktree_remover(
             candidate,
             session_factory=session_factory,
