@@ -108,6 +108,134 @@ async def test_default_worktree_remover_uses_registry_mirror_when_gitfile_is_mis
 
 
 @pytest.mark.unit
+async def test_default_worktree_remover_uses_linked_mirror_when_gitfile_is_present(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    original_repo_url = "./relative-origin"
+    rewritten_repo_url = str(tmp_path / "relative-origin")
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        repo_url=original_repo_url,
+        pr=True,
+        pr_merge_sha="p" * 40,
+    )
+    mirror = work_dir / "git" / "mirrors" / "relative-origin-original.git"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    _make_synthetic_mirror_link(
+        mirror=mirror,
+        worktree=worktree_path,
+        repo_url=rewritten_repo_url,
+        include_worktree_gitfile=True,
+    )
+    candidate = WorkspaceGCCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus.completed.value,
+        updated_at=now,
+        age_hours=200,
+        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=worktree_path,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=work_dir / "compose" / workspace_id,
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
+        ),
+    )
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        mock_gm.remove_worktree = AsyncMock()
+        result = await _default_worktree_remover(
+            candidate,
+            session_factory=session_factory,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
+    mock_gm.remove_worktree_from_mirror.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        mirror_path=mirror.resolve(),
+    )
+    mock_gm.remove_worktree.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_default_worktree_remover_skips_existing_standalone_git_directory(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="s" * 40,
+    )
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    (worktree_path / ".git").mkdir()
+    (worktree_path / ".git" / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n",
+        encoding="utf-8",
+    )
+    candidate = WorkspaceGCCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus.completed.value,
+        updated_at=now,
+        age_hours=200,
+        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=worktree_path,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=work_dir / "compose" / workspace_id,
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
+        ),
+    )
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree_from_mirror = AsyncMock()
+        mock_gm.remove_worktree = AsyncMock()
+        result = await _default_worktree_remover(
+            candidate,
+            session_factory=session_factory,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "skipped"
+    assert result.reason_code == "WORKTREE_NOT_GIT_MANAGED"
+    assert is_existing_non_git_worktree(worktree_path, work_dir=work_dir) is True
+    mock_gm.remove_worktree_from_mirror.assert_not_awaited()
+    mock_gm.remove_worktree.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_default_worktree_remover_preserves_mirror_git_operation_error_reason_code(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

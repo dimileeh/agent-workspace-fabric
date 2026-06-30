@@ -147,11 +147,16 @@ def _existing_worktree_git_context_result(
 ) -> _ExistingWorktreeGitContext | None:
     from awf.node.git_manager import GitOperationError
 
-    if not path.exists() or (path / ".git").exists():
+    if not path.exists():
         return _ExistingWorktreeGitContext(is_non_git_worktree=False)
 
     try:
         mirror_path = git_context_mirror_path_for_worktree(path, work_dir=work_dir)
+        is_non_git_worktree = mirror_path is None and is_existing_non_git_worktree(
+            path,
+            work_dir=work_dir,
+            fail_on_metadata_probe_error=True,
+        )
     except GitOperationError as exc:
         error = str(exc)
         errors.append(f"{worktree_id}: {error}")
@@ -166,7 +171,7 @@ def _existing_worktree_git_context_result(
         return None
 
     return _ExistingWorktreeGitContext(
-        is_non_git_worktree=mirror_path is None,
+        is_non_git_worktree=is_non_git_worktree,
         mirror_path=mirror_path,
     )
 
