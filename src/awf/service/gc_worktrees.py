@@ -582,7 +582,7 @@ def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
                 stderr=f"could not probe bare mirror {path}: {exc}",
                 reason_code="WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
             ) from exc
-        raise
+        return False
     if fail_closed and probe.returncode != 0 and _looks_like_bare_git_repository(path):
         raise GitOperationError(
             operation=operation,

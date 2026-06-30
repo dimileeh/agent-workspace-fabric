@@ -623,6 +623,23 @@ def test_bare_git_repository_returns_false_on_probe_timeout_when_not_fail_closed
 
 
 @pytest.mark.unit
+def test_bare_git_repository_returns_false_on_probe_start_failure_when_not_fail_closed(
+    tmp_path: Path,
+) -> None:
+    mirror_path = tmp_path / "service" / "git" / "mirrors" / "repo.git"
+    _write(mirror_path / "config", "[core]\n\tbare = true\n")
+    _write(mirror_path / "HEAD", "ref: refs/heads/main\n")
+    (mirror_path / "objects").mkdir(parents=True)
+    (mirror_path / "refs").mkdir()
+
+    with patch(
+        "awf.service.gc_worktrees.subprocess.run",
+        side_effect=OSError("git unavailable"),
+    ):
+        assert _is_bare_git_repository(mirror_path, fail_closed=False) is False
+
+
+@pytest.mark.unit
 def test_git_context_mirror_path_uses_registry_fallback_when_metadata_match_is_not_bare(
     tmp_path: Path,
 ) -> None:
