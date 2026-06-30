@@ -208,6 +208,18 @@ def test_browser_install_preserves_package_manager_scope(
             "uv --project=apps/api run pytest",
             "uv --project=apps/api run python",
         ),
+        (
+            "uv run --with pytest-playwright pytest",
+            "uv run --with pytest-playwright python",
+        ),
+        (
+            "uv run --with-requirements requirements-dev.txt pytest",
+            "uv run --with-requirements requirements-dev.txt python",
+        ),
+        (
+            "uv run -w pytest-playwright pytest",
+            "uv run -w pytest-playwright python",
+        ),
     ],
 )
 def test_browser_install_preserves_uv_run_project_scope(

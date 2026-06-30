@@ -53,7 +53,11 @@ _UV_RUN_SCOPE_VALUE_FLAGS = frozenset(
         "--project",
         "--python",
         "--python-platform",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
         "-p",
+        "-w",
     }
 )
 
