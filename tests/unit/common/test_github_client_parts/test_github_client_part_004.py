@@ -305,6 +305,37 @@ class TestFetchFailingCheckLogs:
         ]
 
     @pytest.mark.unit
+    async def test_in_progress_run_without_failure_conclusion_marks_runs_in_progress(
+        self,
+    ) -> None:
+        """Active runs with no failed conclusion still signal a CI wait."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 42,
+                        "name": "ci-required",
+                        "conclusion": None,
+                        "status": "in_progress",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert result.failures == ()
+        assert result.runs_in_progress is True
+        assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == []
+
+    @pytest.mark.unit
     async def test_extracts_full_nested_pytest_node_path(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
@@ -1011,7 +1042,8 @@ class TestFetchFailingCheckLogs:
         failures = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
         )
-        assert failures == ()
+        assert failures.failures == ()
+        assert failures.runs_in_progress is True
 
     @pytest.mark.unit
     async def test_empty_run_list_stdout_returns_no_failures_without_fetching_logs(self) -> None:

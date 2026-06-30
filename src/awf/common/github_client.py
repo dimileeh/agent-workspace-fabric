@@ -1052,6 +1052,10 @@ class GitHubClient:
                 run_name=check.name,
                 conclusion=conclusion,
             )
+        if not failures and any(
+            status != "completed" for status in status_by_run.values() if status
+        ):
+            runs_in_progress = True
         return CheckFailureLogResult(
             failures=tuple(failures),
             runs_in_progress=runs_in_progress,
