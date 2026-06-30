@@ -408,5 +408,5 @@ def playwright_browser_install_command(
     return ProfileCommand(
         command=command,
         timeout_seconds=_PLAYWRIGHT_BROWSER_INSTALL_TIMEOUT_SECONDS,
-        required=False,
+        required=True,
     )

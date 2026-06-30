@@ -130,7 +130,7 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
     assert command is not None
     assert command.command == "pnpm exec playwright install chromium firefox"
     assert command.timeout_seconds == _BROWSER_INSTALL_TIMEOUT
-    assert command.required is False
+    assert command.required is True
 
 
 @pytest.mark.unit
