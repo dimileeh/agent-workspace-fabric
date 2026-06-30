@@ -735,7 +735,10 @@ class TestFetchFailingCheckLogs:
             "uv run --python 3.12 --extra dev ruff check src/awf tests",
         )
         assert failure.suggested_repro_commands == ()
-        assert failure.error_summaries == ("Error: Process completed with exit code 1.",)
+        assert failure.error_summaries == (
+            "src/awf/runtime/foo.py:10:1: F401 imported but unused",
+            "Error: Process completed with exit code 1.",
+        )
 
     @pytest.mark.unit
     async def test_redacts_secrets_before_log_and_evidence_are_stored(self) -> None:
