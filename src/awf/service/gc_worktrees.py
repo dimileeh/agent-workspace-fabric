@@ -116,6 +116,7 @@ def blocked_worktree_paths_after_remove(
 
 
 def worktree_paths_by_id(candidate: WorkspaceGCCandidate) -> dict[str, Path]:
+    """Map GC worktree ids to filesystem paths for the primary and companion worktrees."""
     paths = {candidate.workspace_id: candidate.worktree.path}
     paths.update({target.path.name: target.path for target in candidate.companion_worktrees})
     return paths

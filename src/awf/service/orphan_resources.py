@@ -192,6 +192,8 @@ KNOWN_WORKSPACE_STATUSES = sorted(ACTIVE_WORKSPACE_STATUSES | TERMINAL_WORKSPACE
 
 
 class CompletedProcessLike(Protocol):
+    """Minimal synchronous subprocess result surface used by orphan-resource scans."""
+
     returncode: int
     stdout: str
     stderr: str
@@ -232,7 +234,9 @@ class AsyncCommandRunnerLike(Protocol):
         input_bytes: bytes | None = None,
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
-    ) -> Any: ...
+    ) -> Any:
+        """Run a subprocess asynchronously and return a completed-process-like result."""
+        ...
 
 
 def docker_resource_commands() -> tuple[DockerResourceCommand, ...]:

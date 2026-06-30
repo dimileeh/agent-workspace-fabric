@@ -861,6 +861,7 @@ def _ci_transient_infra_wait_seconds(
     config: MonitorConfig,
     failures: tuple[CheckFailure, ...],
 ) -> float:
+    """Return exponential backoff seconds before retrying transient CI infra failures."""
     wait_count = _ci_transient_infra_wait_count(
         state,
         head_sha=status.head_sha,
