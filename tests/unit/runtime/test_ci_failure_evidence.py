@@ -140,6 +140,28 @@ def test_ci_failure_evidence_preserves_ruff_diagnostics_as_error_summaries() -> 
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_preserves_ruff_diagnostics_with_failing_command() -> None:
+    """Mixed logs keep path.py diagnostics even when the failing command is known."""
+    ruff_diagnostic = "src/awf/runtime/example.py:1:1: F401 `os` imported but unused"
+    failing_command = "uv run --python 3.12 --extra dev ruff check src/awf tests"
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                f"lint-and-type\tRun ruff check\t{failing_command}",
+                ruff_diagnostic,
+                "Found 1 error.",
+                "Error: Process completed with exit code 1.",
+            ]
+        ),
+        check_name="lint-and-type",
+    )
+
+    assert evidence.failing_commands == (failing_command,)
+    assert ruff_diagnostic in evidence.error_summaries
+
+
+@pytest.mark.unit
 def test_ci_failure_evidence_rejects_glued_prefix_before_pytest_node() -> None:
     valid_node_id = "tests/unit/test_example.py::test_valid_failure"
 

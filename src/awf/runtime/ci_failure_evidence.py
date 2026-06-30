@@ -75,12 +75,7 @@ def extract_ci_failure_evidence(
     test_nodes = _dedupe_preserving_values(_extract_test_nodes(non_empty_lines))[:_MAX_TEST_NODES]
     failing_commands = _dedupe(_extract_commands(non_empty_lines))[:_MAX_COMMANDS]
     assertion_snippets = _dedupe(_extract_assertion_snippets(display_lines))[:_MAX_SNIPPETS]
-    error_summaries = _dedupe(
-        _extract_error_summaries(
-            display_lines,
-            include_code_diagnostics=not failing_commands,
-        )
-    )[:_MAX_SUMMARIES]
+    error_summaries = _dedupe(_extract_error_summaries(display_lines))[:_MAX_SUMMARIES]
     suggested_repro_commands = _suggest_repro_commands(
         test_node_ids=test_nodes,
         failing_commands=failing_commands,
