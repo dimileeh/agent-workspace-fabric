@@ -128,7 +128,7 @@ def _python_playwright_executable(profile: WorkspaceProfile) -> str | None:
                 return token
             if base == "uv" and index + 1 < len(tokens) and tokens[index + 1] == "run":
                 return "uv run python"
-            if base in {"pytest", "playwright"} and "playwright" in command:
+            if base == "pytest" and "playwright" in command:
                 return "python"
     return None
 

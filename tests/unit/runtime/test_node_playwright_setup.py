@@ -180,6 +180,24 @@ def test_browser_install_falls_back_to_npx() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "validate_command",
+    ["npx playwright test", "playwright test"],
+)
+def test_browser_install_does_not_treat_node_playwright_cli_as_python(
+    validate_command: str,
+) -> None:
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"validate": [validate_command]}}
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == "npx playwright install chromium"
+
+
+@pytest.mark.unit
 def test_setup_plan_appends_browser_install_after_setup_and_db_hooks() -> None:
     profile = _profile(
         {
