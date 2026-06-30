@@ -36,6 +36,7 @@ from awf.common.logging import get_logger
 _log = get_logger(__name__)
 
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
+_GIT_BARE_PROBE_TIMEOUT_SECONDS = 5.0
 _GIT_OBJECT_LOOKUP_ENV_KEYS = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 _POISONED_MIRROR_HOOKS_PATH_PATTERNS = {
     "/dev/null": "^/dev/null$",
@@ -1074,7 +1075,10 @@ def _is_bare_registered_mirror_candidate(mirror_path: Path) -> bool:
             check=False,
             env=git_env_without_object_lookup_overrides(),
             text=True,
+            timeout=_GIT_BARE_PROBE_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired:
+        return False
     except OSError as exc:
         raise GitOperationError(
             operation="mirror_registry_scan",

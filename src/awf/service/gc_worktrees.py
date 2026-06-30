@@ -635,7 +635,7 @@ def _managed_bare_mirror_path(path: Path | None, mirrors_root: Path) -> Path | N
 
 
 def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
-    from awf.node.git_manager import GitOperationError
+    from awf.node.git_manager import _GIT_BARE_PROBE_TIMEOUT_SECONDS, GitOperationError
 
     operation = "worktree.git_context_probe"
     try:
@@ -645,7 +645,21 @@ def _is_bare_git_repository(path: Path, *, fail_closed: bool = False) -> bool:
             check=False,
             env=_git_bare_probe_env(),
             text=True,
+            timeout=_GIT_BARE_PROBE_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        if fail_closed:
+            raise GitOperationError(
+                operation=operation,
+                returncode=1,
+                stdout="",
+                stderr=(
+                    f"bare mirror probe timed out after {_GIT_BARE_PROBE_TIMEOUT_SECONDS:g}s "
+                    f"for {path}"
+                ),
+                reason_code="WORKTREE_GIT_CONTEXT_RESOLUTION_FAILED",
+            ) from exc
+        return False
     except OSError as exc:
         if fail_closed:
             raise GitOperationError(

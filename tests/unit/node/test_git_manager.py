@@ -954,6 +954,22 @@ def test_mirror_path_for_registered_worktree_wraps_worktree_resolution_os_error(
 
 
 @pytest.mark.unit
+def test_bare_registered_mirror_candidate_returns_false_on_probe_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mirror_path = tmp_path / "repo.git"
+    mirror_path.mkdir()
+
+    def _timeout(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=["git"], timeout=5)
+
+    monkeypatch.setattr(git_manager.subprocess, "run", _timeout)
+
+    assert git_manager._is_bare_registered_mirror_candidate(mirror_path) is False
+
+
+@pytest.mark.unit
 async def test_read_mirror_origin_url_returns_configured_origin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
