@@ -11727,6 +11727,7 @@
   "paths": {
     "/.well-known/awf-core.json": {
       "get": {
+        "description": "Return the cached, secret-free AWF Core capability discovery payload.",
         "operationId": "core_discovery__well_known_awf_core_json_get",
         "responses": {
           "200": {
