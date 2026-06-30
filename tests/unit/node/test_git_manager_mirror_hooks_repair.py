@@ -770,6 +770,45 @@ class TestRepairMirrorHooksPath:
         assert repair_prefixes == ["mirror", "mirror"]
 
     @pytest.mark.unit
+    async def test_replacement_repo_at_worktree_path_is_stale_before_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        linked_git_dir = git_module.linked_worktree_git_dir(worktree)
+        assert linked_git_dir is not None
+        shutil.rmtree(worktree)
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True, capture_output=True)
+        repair_prefixes: list[str] = []
+        prune_calls = 0
+
+        async def _repair_hooks_path_config(
+            *,
+            git_args: tuple[str, ...],
+            config_scope_args: tuple[str, ...],
+            config_path: Path,
+            operation_prefix: str,
+        ) -> bool:
+            del git_args, config_scope_args, config_path
+            repair_prefixes.append(operation_prefix)
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            nonlocal prune_calls
+            prune_calls += 1
+            assert path == mirror
+            shutil.rmtree(linked_git_dir)
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is False
+        assert prune_calls == 1
+        assert repair_prefixes == ["mirror", "mirror"]
+
+    @pytest.mark.unit
     async def test_removes_worktree_include_exposing_poisoned_hooks_path(
         self, tmp_path: Path
     ) -> None:
