@@ -344,14 +344,10 @@ def _has_pip_install_subcommand(tokens: list[str], pip_index: int) -> bool:
     return False
 
 
-def _python_playwright_executable(profile: WorkspaceProfile) -> tuple[str | None, str | None]:
-    """Infer the Python interpreter to run ``playwright install`` for a Python project.
-
-    Returns ``(executable, cd_prefix)`` where ``cd_prefix`` is like
-    ``cd apps/api && `` for shell-scoped commands without uv/PM scope flags.
-    """
-    commands = [c.command for c in profile.phases.validate_commands if c.command]
-    commands += _profile_install_commands(profile)
+def _python_executable_from_commands(
+    commands: list[str], *, allow_pytest_playwright_shortcut: bool
+) -> tuple[str | None, str | None] | None:
+    """Return interpreter inference from ``commands``, or ``None`` if none matched."""
     for command in commands:
         try:
             tokens = shlex.split(command)
@@ -371,8 +367,34 @@ def _python_playwright_executable(profile: WorkspaceProfile) -> tuple[str | None
             pip_python = _pip_to_python_executable(base)
             if pip_python is not None and _has_pip_install_subcommand(tokens, index):
                 return pip_python, _extract_cd_scope_prefix(tokens, index)
-            if base == "pytest" and "playwright" in command:
+            if allow_pytest_playwright_shortcut and base == "pytest" and "playwright" in command:
                 return "python", _extract_cd_scope_prefix(tokens, index)
+    return None
+
+
+def _python_playwright_executable(profile: WorkspaceProfile) -> tuple[str | None, str | None]:
+    """Infer the Python interpreter to run ``playwright install`` for a Python project.
+
+    Returns ``(executable, cd_prefix)`` where ``cd_prefix`` is like
+    ``cd apps/api && `` for shell-scoped commands without uv/PM scope flags.
+
+    Validate commands are scanned before setup for ``uv run`` / explicit interpreters so
+    a scoped runner wins over a bare ``pip install`` in setup. The ``pytest … playwright``
+    shortcut is deferred until after setup so a path like ``tests/playwright`` does not
+    mask ``uv sync`` scope from setup.
+    """
+    validate_commands = [c.command for c in profile.phases.validate_commands if c.command]
+    install_commands = _profile_install_commands(profile)
+    for commands, allow_pytest_shortcut in (
+        (validate_commands, False),
+        (install_commands, False),
+        (validate_commands, True),
+    ):
+        result = _python_executable_from_commands(
+            commands, allow_pytest_playwright_shortcut=allow_pytest_shortcut
+        )
+        if result is not None:
+            return result
     return None, None
 
 

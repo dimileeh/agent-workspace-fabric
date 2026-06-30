@@ -356,6 +356,25 @@ def test_browser_install_recognizes_bare_pip_setup(
 
 
 @pytest.mark.unit
+def test_browser_install_prefers_uv_setup_over_pytest_playwright_validate_path() -> None:
+    # A validate path containing "playwright" must not win over setup ``uv sync`` scope.
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {
+                "setup": ["uv sync --extra dev"],
+                "validate": ["pytest tests/playwright"],
+            },
+        }
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == "uv run --extra dev python -m playwright install chromium"
+
+
+@pytest.mark.unit
 def test_browser_install_recognizes_bare_python_and_pytest_playwright() -> None:
     explicit_python = _profile(
         {"runtime": {"browsers": ["webkit"]}, "phases": {"validate": ["python3 -m pytest"]}}
