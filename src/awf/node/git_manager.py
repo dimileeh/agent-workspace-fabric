@@ -1379,6 +1379,7 @@ def _repository_alternates_path_for_worktree(worktree_path: Path) -> Path | None
 
 
 def git_env_without_object_lookup_overrides() -> dict[str, str]:
+    """Return a copy of ``os.environ`` without Git object-lookup override variables."""
     env = dict(os.environ)
     for key in _GIT_OBJECT_LOOKUP_ENV_KEYS:
         env.pop(key, None)
@@ -1394,6 +1395,7 @@ def git_env_for_bare_repository_probe() -> dict[str, str]:
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
+    """Recursively chown a directory tree, honoring symlinks and optional file skipping."""
     if path.is_symlink():
         os.lchown(path, uid, gid)
         return

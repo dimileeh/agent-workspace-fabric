@@ -70,9 +70,11 @@ class WorkspaceGCWorktreeRemoveResult:
 
     @property
     def ok(self) -> bool:
+        """Return whether worktree removal succeeded or was intentionally skipped."""
         return self.status in {"succeeded", "skipped"}
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize the aggregate worktree-removal outcome for audit payloads."""
         payload: dict[str, object] = {
             "status": self.status,
             "reason_code": self.reason_code,
@@ -96,6 +98,7 @@ def blocked_worktree_paths_after_remove(
     candidate: WorkspaceGCCandidate,
     worktree_remove: WorkspaceGCWorktreeRemoveResult,
 ) -> set[Path]:
+    """Return worktree paths that must not be filesystem-deleted after a partial remove."""
     worktree_paths_by_id_map = worktree_paths_by_id(candidate)
     if not worktree_remove.target_results:
         return set(worktree_paths_by_id_map.values())
@@ -119,6 +122,7 @@ def worktree_paths_by_id(candidate: WorkspaceGCCandidate) -> dict[str, Path]:
 
 
 def worktree_id_for_gc_path(candidate: WorkspaceGCCandidate, path: WorkspaceGCPath) -> str:
+    """Map a GC worktree path to its git worktree id for mirror-aware removal."""
     if path.path == candidate.worktree.path:
         return candidate.workspace_id
     return path.path.name
@@ -664,6 +668,7 @@ async def run_worktree_remove(
         | None
     ),
 ) -> WorkspaceGCWorktreeRemoveResult | None:
+    """Invoke an optional worktree remover, awaiting async implementations when needed."""
     if worktree_remover is None:
         return None
     result = worktree_remover(candidate)

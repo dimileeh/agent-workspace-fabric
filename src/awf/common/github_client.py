@@ -946,6 +946,7 @@ class GitHubClient:
             run_name: str,
             conclusion: str,
         ) -> None:
+            """Fetch failed-step logs and append one structured ``CheckFailure``."""
             log = (
                 await self._run_gh(
                     [
@@ -1424,6 +1425,7 @@ def _rollup_check_failure_conclusion(check: CheckTiming) -> str | None:
 
 
 def _rollup_check_is_github_actions(check: CheckTiming) -> bool:
+    """Return whether a rollup check is owned by GitHub Actions (explicit or implicit)."""
     app_slug = (check.app_slug or "").lower()
     app_name = (check.app_name or "").lower()
     return app_slug in {"", "github-actions"} or app_name == "github actions"
@@ -1445,6 +1447,7 @@ def _rollup_check_has_external_details_url(check: CheckTiming) -> bool:
 
 
 def _actions_run_id_from_details_url(details_url: str | None) -> str | None:
+    """Extract a GitHub Actions run id from a github.com details URL, when present."""
     if not details_url:
         return None
     parsed = urlsplit(details_url)

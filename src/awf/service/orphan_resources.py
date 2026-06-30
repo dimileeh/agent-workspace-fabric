@@ -215,12 +215,16 @@ class SubprocessRun(Protocol):
 
 
 class AsyncCommandResultLike(Protocol):
+    """Minimal async subprocess result surface used by orphan-resource scans."""
+
     returncode: int
     stdout: str
     stderr: str
 
 
 class AsyncCommandRunnerLike(Protocol):
+    """Callable contract for async subprocess execution in orphan scans."""
+
     async def run(  # pragma: no cover - Protocol method declaration only.
         self,
         args: list[str],

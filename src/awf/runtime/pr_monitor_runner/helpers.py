@@ -470,6 +470,7 @@ def _drop_stale_review_comment_addressed_state(
 
 
 def _monitor_state_verdict(verdict: str) -> Verdict:
+    """Normalize a persisted monitor verdict string into the typed ``Verdict`` enum."""
     normalized = verdict.strip().lower()
     if normalized == "false_positive":
         return "false_positive"

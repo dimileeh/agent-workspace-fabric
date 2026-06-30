@@ -981,6 +981,7 @@ def _ci_failure_action(
 
 
 def _supports_failed_job_rerun(failure: CheckFailure) -> bool:
+    """Return whether a CI failure conclusion is eligible for a failed-job rerun."""
     return failure.conclusion.upper() in _CI_FAILED_JOB_RERUN_CONCLUSIONS
 
 
