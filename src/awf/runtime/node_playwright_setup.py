@@ -159,8 +159,11 @@ def _pm_invocation_tokens(tokens: list[str], pm_index: int) -> list[str]:
             break
         if token.endswith(";"):
             prefix = token[:-1]
-            if prefix:
-                invocation.append(prefix)
+            if (
+                not prefix
+            ):  # pragma: no cover — only ``";"`` strips empty; that token is a chain separator
+                break
+            invocation.append(prefix)
             break
         invocation.append(token)
         index += 1
@@ -189,7 +192,9 @@ def _collect_pm_scope_tokens(
         if token.endswith(";") and not ends_chain:
             token = token[:-1]
             ends_chain = True
-            if not token:
+            if (
+                not token
+            ):  # pragma: no cover — only ``";"`` strips empty; that token is a chain separator
                 break
         if token == "--":
             break
@@ -208,17 +213,23 @@ def _collect_pm_scope_tokens(
                 if ends_chain:
                     break
                 continue
-            if option_name in value_flags:
-                if index + 1 >= len(tokens):
-                    break
-                next_token = tokens[index + 1]
-                if next_token.startswith("-"):
-                    index += 1
-                    if ends_chain:
-                        break
-                    continue
+            if (
+                option_name not in value_flags
+            ):  # pragma: no cover — scope flags partition boolean/value
                 index += 1
-                scope_tokens.append(next_token)
+                if ends_chain:
+                    break
+                continue
+            if index + 1 >= len(tokens):
+                break
+            next_token = tokens[index + 1]
+            if next_token.startswith("-"):
+                index += 1
+                if ends_chain:
+                    break
+                continue
+            index += 1
+            scope_tokens.append(next_token)
         index += 1
         if ends_chain:
             break
@@ -524,7 +535,9 @@ def _is_node_option_only_install_command(tokens: list[str], pm_index: int, base:
             break
         if token.endswith(";"):
             token = token[:-1]
-            if not token:
+            if (
+                not token
+            ):  # pragma: no cover — only ``";"`` strips empty; that token is a chain separator
                 break
             if token == "--" or not token.startswith("-"):
                 return False
@@ -571,7 +584,9 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
                 if cd_only_prefix is not None:
                     try:
                         cd_only_tokens = shlex.split(stripped)
-                    except ValueError:
+                    except (
+                        ValueError
+                    ):  # pragma: no cover — cd_only_prefix implies shlex already succeeded
                         pending_cd_prefix = None
                         continue
                     if not any(
