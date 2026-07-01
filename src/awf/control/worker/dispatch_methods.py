@@ -923,22 +923,28 @@ async def _safely_resume_pr_monitor(
             # later. Finalize through the shielded helper so a second cancellation
             # (e.g. worker shutdown) landing mid-write cannot re-orphan it, then
             # re-raise so the task still ends cancelled and the slot drains.
+            finalize_status = OperationStatus.cancelled
+            finalize_error_code: str | None = "MONITOR_RECOVERY_CANCELLED"
+            finalize_error_message: str | None = (
+                "Monitor resume cancelled after workspace left monitoring_pr."
+            )
             if handoff_succeeded:
-                finalized = await self._finish_monitor_recovery_operation_after_cancellation(
-                    workspace_id,
-                    operation_id=recovery_operation_id,
-                    status=OperationStatus.succeeded,
-                )
-            else:
-                finalized = await self._finish_monitor_recovery_operation_after_cancellation(
-                    workspace_id,
-                    operation_id=recovery_operation_id,
-                    status=OperationStatus.cancelled,
-                    error_code="MONITOR_RECOVERY_CANCELLED",
-                    error_message="Monitor resume cancelled after workspace left monitoring_pr.",
-                )
-            if finalized:
-                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+                ws_status = (await self._load_workspace_statuses([workspace_id])).get(workspace_id)
+                if ws_status is None or ws_status == WorkspaceStatus.monitoring_pr.value:
+                    finalize_status = OperationStatus.succeeded
+                    finalize_error_code = None
+                    finalize_error_message = None
+            await self._finish_monitor_recovery_operation_after_cancellation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=finalize_status,
+                error_code=finalize_error_code,
+                error_message=finalize_error_message,
+            )
+            # Drop the recovery handle once cancellation finalize was attempted so
+            # the caller's finally block does not re-finalize with a different
+            # terminal status when the write succeeded but returned falsy.
+            self._monitor_recovery_operation_ids.pop(workspace_id, None)
         raise
     except Exception as exc:
         if not handoff_succeeded:

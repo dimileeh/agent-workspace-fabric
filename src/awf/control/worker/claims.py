@@ -1127,6 +1127,11 @@ async def _monitor_recovery_terminal_finalize_status(
                     workspace_id,
                 )
                 return OperationStatus.failed, error_code, error_message
+            return (
+                OperationStatus.cancelled,
+                "MONITOR_RECOVERY_CANCELLED",
+                "Monitor resume cancelled after workspace left monitoring_pr.",
+            )
     except Exception:
         _log.exception(
             "worker.monitor_recovery_terminal_finalize_status_lookup_failed",
