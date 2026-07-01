@@ -1695,6 +1695,54 @@ async def test_monitor_recovery_handoff_failure_error_preserves_policy_task_kind
 
 
 @pytest.mark.unit
+async def test_monitor_recovery_handoff_failure_error_uses_event_message_not_stale_workspace_row(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Audit-only handoff failures must not reuse an unrelated workspace failure_message."""
+    stale_message = "Stale failure from an earlier unrelated terminal failure."
+    compose_stderr = "compose up failed: service postgres unhealthy"
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-handoff-failure-message",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        ws.failure_message = stale_message
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_runtime_restart_failed",
+            reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+            payload={
+                "reason_code": "MONITOR_RECOVERY_COMPOSE_FAILED",
+                "operation": "up",
+                "stderr": compose_stderr,
+            },
+        )
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    (
+        error_code,
+        error_message,
+    ) = await worker_dispatch_methods._monitor_recovery_handoff_failure_error(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert error_code == "MONITOR_RECOVERY_COMPOSE_FAILED"
+    assert error_message == compose_stderr
+    assert stale_message not in error_message
+
+
+@pytest.mark.unit
 async def test_safely_provision_isolates_epoch_read_failure(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

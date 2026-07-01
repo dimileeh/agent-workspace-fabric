@@ -28,6 +28,7 @@ from awf.db.enums import (
     OperationStatus,
     WorkspaceStatus,
 )
+from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 
 # Per-pause-reason wiring for the shared resume path: the slot-tracking task kind
@@ -73,6 +74,28 @@ def _is_monitor_recovery_handoff_failure_reason(reason_code: str) -> bool:
     if not reason_code.startswith("MONITOR_RECOVERY"):
         return False
     return reason_code.endswith("_FAILED") or reason_code.endswith("_MISSING")
+
+
+def _monitor_recovery_handoff_failure_message(
+    event: WorkspaceEvent,
+    *,
+    workspace: Workspace,
+    default_message: str,
+) -> str:
+    """Derive the remonitor error message aligned with a handoff-failure event."""
+    payload = event.payload or {}
+    message = payload.get("message")
+    if isinstance(message, str) and message.strip():
+        return message[:2000]
+    stderr = payload.get("stderr")
+    if isinstance(stderr, str) and stderr.strip():
+        return stderr[:2000]
+    operation = payload.get("operation")
+    if isinstance(operation, str) and operation.strip():
+        return f"Monitor recovery handoff failed during {operation}."[:2000]
+    if workspace.status == WorkspaceStatus.failed.value and workspace.failure_message:
+        return workspace.failure_message[:2000]
+    return default_message
 
 
 def _draining_execution_task_count(self: Any) -> int:
@@ -683,8 +706,12 @@ async def _monitor_recovery_handoff_failure_error(
                     continue
                 if not _is_monitor_recovery_handoff_failure_reason(reason_code):
                     continue
-                message = ws.failure_message or default_message
-                return reason_code, message[:2000]
+                message = _monitor_recovery_handoff_failure_message(
+                    event,
+                    workspace=ws,
+                    default_message=default_message,
+                )
+                return reason_code, message
             if ws.status == WorkspaceStatus.failed.value and ws.failure_message:
                 return default_code, ws.failure_message[:2000]
     except Exception:
