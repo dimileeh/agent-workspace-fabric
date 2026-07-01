@@ -801,20 +801,24 @@ async def _safely_resume_pr_monitor(
     try:
         handoff = await self._executor.resume_pr_monitor_handoff(workspace_id)
         if handoff is None:
-            error_code, error_message = await _monitor_recovery_handoff_failure_error(
+            (
+                status,
+                error_code,
+                error_message,
+            ) = await _monitor_recovery_start_skipped_operation_status(
                 self,
                 workspace_id,
             )
             finalized = await self._finish_monitor_recovery_operation(
                 workspace_id,
                 operation_id=recovery_operation_id,
-                status=OperationStatus.failed,
+                status=status,
                 error_code=error_code,
                 error_message=error_message,
             )
             if finalized:
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
-            return False
+            return status != OperationStatus.failed
 
         verify_start = getattr(self._executor, "verify_resume_monitor_start", None)
         if verify_start is not None and not await verify_start(workspace_id):
