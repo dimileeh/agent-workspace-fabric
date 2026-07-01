@@ -504,8 +504,8 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
     """Cancellation after handoff but before succeed finalize uses the shielded helper."""
     handoff = object()
     finish_calls: list[dict[str, object]] = []
-    after_cancellation_calls: list[dict[str, object]] = []
     finalize_started = asyncio.Event()
+    finish_attempts = 0
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
@@ -526,19 +526,16 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        nonlocal finish_attempts
+        finish_attempts += 1
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
-        finalize_started.set()
-        await asyncio.Event().wait()
+        if finish_attempts == 1:
+            finalize_started.set()
+            await asyncio.Event().wait()
         return True
-
-    async def _finish_after_cancellation(*args: object, **kwargs: object) -> None:
-        after_cancellation_calls.append(dict(kwargs))
 
     worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
         _finish_monitor_recovery_operation
-    )
-    worker._finish_monitor_recovery_operation_after_cancellation = (  # type: ignore[method-assign]
-        _finish_after_cancellation
     )
 
     resume_task = asyncio.create_task(
@@ -552,10 +549,12 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
     with contextlib.suppress(asyncio.CancelledError):
         await resume_task
 
-    assert len(after_cancellation_calls) == 1
-    assert after_cancellation_calls[0]["status"] == OperationStatus.succeeded
-    assert after_cancellation_calls[0]["operation_id"] == "op_during_finalize"
-    assert len(finish_calls) == 1
+    assert finish_attempts == 2
+    assert len(finish_calls) == 2
+    assert finish_calls[0]["status"] == OperationStatus.succeeded
+    assert finish_calls[0]["operation_id"] == "op_during_finalize"
+    assert finish_calls[1]["status"] == OperationStatus.succeeded
+    assert finish_calls[1]["operation_id"] == "op_during_finalize"
 
 
 @pytest.mark.unit
