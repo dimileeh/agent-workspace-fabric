@@ -147,6 +147,7 @@ def test_core_discovery_payload_from_state_uses_default_when_cache_missing() -> 
     assert payload.git_commit == "unknown"
     assert payload.capabilities == ("workspace.execution.v1",)
     assert payload.profile_capability_schema == core_discovery_service.profile_capability_schema()
+    assert payload.to_response().profile_capability_schema == payload.profile_capability_schema
 
 
 def test_git_rev_parse_head_returns_none_when_source_checkout_has_no_git_dir(
