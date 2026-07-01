@@ -189,7 +189,7 @@ def _collect_pm_scope_tokens(
         if token.endswith(";") and not ends_chain:
             token = token[:-1]
             ends_chain = True
-            if not token:  # pragma: no cover — bare ``;`` is a chain separator at loop start
+            if not token:
                 break
         if token == "--":
             break
@@ -247,7 +247,8 @@ def _collect_uv_global_scope_tokens(
                 return None
             next_token = tokens[index + 1]
             if next_token.startswith("-"):
-                return None
+                index += 1
+                continue
             index += 1
             global_scope.append(next_token)
         index += 1
@@ -447,11 +448,6 @@ def _cd_prefix_from_cd_only_segment(segment: str, terminator: str) -> str | None
     return f"cd {shlex.quote(cd_path)} {terminator} "
 
 
-def _is_cd_path_operand(tokens: list[str], index: int) -> bool:
-    """Return whether ``tokens[index]`` is the directory argument to ``cd``."""
-    return index >= 1 and tokens[index - 1] == "cd"
-
-
 def _extract_cd_scope_prefix(tokens: list[str], pm_index: int) -> str | None:
     """Return ``cd <dir> <sep> `` when the package manager follows a cd-scoped shell chain."""
     index = pm_index - 1
@@ -528,7 +524,7 @@ def _is_node_option_only_install_command(tokens: list[str], pm_index: int, base:
             break
         if token.endswith(";"):
             token = token[:-1]
-            if not token:  # pragma: no cover — bare ``;`` is a chain separator above
+            if not token:
                 break
             if token == "--" or not token.startswith("-"):
                 return False
@@ -575,13 +571,12 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
                 if cd_only_prefix is not None:
                     try:
                         cd_only_tokens = shlex.split(stripped)
-                    except ValueError:  # pragma: no cover — cd_only_prefix already parsed stripped
+                    except ValueError:
                         pending_cd_prefix = None
                         continue
                     if not any(
                         token.rsplit("/", 1)[-1] in _NODE_PACKAGE_MANAGERS
-                        for idx, token in enumerate(cd_only_tokens)
-                        if not _is_cd_path_operand(cd_only_tokens, idx)
+                        for token in cd_only_tokens
                     ):
                         pending_cd_prefix = cd_only_prefix
                         continue
@@ -591,8 +586,6 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
                     pending_cd_prefix = None
                     continue
                 for index, token in enumerate(tokens):
-                    if _is_cd_path_operand(tokens, index):
-                        continue
                     base = token.rsplit("/", 1)[-1]
                     if base in _NODE_PACKAGE_MANAGERS:
                         rest = _pm_invocation_tokens(tokens, index)
