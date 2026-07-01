@@ -85,6 +85,7 @@ def test_agent_runtime_installs_pinned_docker_buildx_plugin() -> None:
 
 @pytest.mark.unit
 def test_agent_runtime_installs_all_supported_coding_clis() -> None:
+    """Verify agent runtime installs all supported coding clis."""
     dockerfile = _agent_runtime_dockerfile()
 
     assert "ARG CODEX_VERSION=0.130.0" in dockerfile
@@ -142,7 +143,20 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_prepares_writable_cursor_config_home() -> None:
+    """Verify agent runtime prepares writable cursor config home."""
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "mkdir -p /workspace /home/agent/.config/cursor" in dockerfile
+    assert "chown -R agent:agent /workspace /home/agent/.config" in dockerfile
+    assert dockerfile.index("mkdir -p /workspace /home/agent/.config/cursor") < dockerfile.index(
+        "USER agent"
+    )
+
+
+@pytest.mark.unit
 def test_agent_runtime_links_gemini_bundled_ripgrep() -> None:
+    """Verify agent runtime links gemini bundled ripgrep."""
     dockerfile = _agent_runtime_dockerfile()
 
     assert "vendor/ripgrep" in dockerfile

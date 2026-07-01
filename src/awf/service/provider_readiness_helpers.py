@@ -372,6 +372,7 @@ def _probe_agent_runtime_cli(
     run_subprocess: SubprocessRun,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
+    """Verify a provider CLI exists inside the configured agent runtime image."""
     reason_prefix = _agent_runtime_cli_reason_prefix(provider)
     args = [
         "docker",
@@ -389,7 +390,7 @@ def _probe_agent_runtime_cli(
             check=False,
             capture_output=True,
             text=True,
-            timeout=_PROVIDER_PROBE_TIMEOUT_SECONDS,
+            timeout=_RUNTIME_CLI_PROBE_TIMEOUT_SECONDS,
             env=environ,
         )
     except FileNotFoundError:
@@ -406,7 +407,7 @@ def _probe_agent_runtime_cli(
             "reason_code": f"{reason_prefix}_RUNTIME_CLI_PROBE_TIMEOUT",
             "message": (
                 f"Agent runtime CLI probe for {executable!r} exceeded "
-                f"{_PROVIDER_PROBE_TIMEOUT_SECONDS:g}s."
+                f"{_RUNTIME_CLI_PROBE_TIMEOUT_SECONDS:g}s."
             ),
         }
     except Exception as exc:
@@ -1447,6 +1448,7 @@ from awf.service.provider_readiness import (  # noqa: E402
     _OLLAMA_AUTH_FILES,
     _OPENCODE_ENV_KEYS,
     _PROVIDER_PROBE_TIMEOUT_SECONDS,
+    _RUNTIME_CLI_PROBE_TIMEOUT_SECONDS,
     _XAI_ENV_KEYS,
     KNOWN_SECRET_ENV_KEYS,
     PROVIDER_NAMES,

@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from awf.common.redaction import redact_secrets
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_RUFF_DIAGNOSTIC_RE = re.compile(r"\b(?:src|tests)/[^\s:]+\.py:\d+:\d+:")
 _COMMAND_MARKERS = (
     "uv run ",
     "python -m pytest",
@@ -31,6 +30,10 @@ _MAX_SNIPPETS = 8
 _MAX_SUMMARIES = 8
 _MAX_LINE_CHARS = 500
 _DEFAULT_PYTEST_REPRO_COMMAND = "uv run --python 3.12 --extra dev pytest"
+_PYTHON_CODE_DIAGNOSTIC_RE = re.compile(
+    r"\S+\.py(?::\d+){1,2}:\s+(?:[A-Z]{1,4}\d{3,4}\b|error:)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -235,18 +238,20 @@ def _extract_assertion_snippets(lines: Iterable[str]) -> list[str]:
     return snippets
 
 
-def _extract_error_summaries(lines: Iterable[str]) -> list[str]:
+def _extract_error_summaries(
+    lines: Iterable[str],
+    *,
+    include_code_diagnostics: bool = True,
+) -> list[str]:
     """Collect concise error summary lines from displayed CI log output."""
     summaries: list[str] = []
     for line in lines:
         if (
-            line.startswith("FAILED ")
-            or "AssertionError" in line
-            or line.startswith("Error:")
+            line.startswith("Error:")
             or "::error" in line
             or "Process completed with exit code" in line
-            or _RUFF_DIAGNOSTIC_RE.search(line)
             or line.lower().startswith(("error ", "error:", "fatal:"))
+            or (include_code_diagnostics and _PYTHON_CODE_DIAGNOSTIC_RE.search(line))
         ):
             summaries.append(line)
     return summaries

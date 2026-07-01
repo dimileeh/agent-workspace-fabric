@@ -12,24 +12,22 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.node.git_manager import GitOperationError
 from awf.service.gc import (
     WorkspaceGCCandidate,
     WorkspaceGCPath,
     _default_worktree_remover,
     plan_terminal_workspace_gc,
 )
+from tests.unit.awf.service.gc_worktree_test_helpers import _write
 
 
 @pytest.fixture
 async def session_factory(
     engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a session factory bound to the test database engine."""
     yield make_session_factory(engine)
-
-
-def _write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
 
 
 async def _workspace(
@@ -37,14 +35,16 @@ async def _workspace(
     *,
     status: WorkspaceStatus,
     updated_at: datetime,
+    repo_url: str = "git@github.com:example/repo.git",
     title: str = "gc candidate",
     pr: bool = False,
     pr_merge_sha: str | None = None,
     task_policy: dict[str, object] | None = None,
 ) -> str:
+    """Create a workspace row for GC worktree remover tests."""
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).create(
-            repo_url="git@github.com:example/repo.git",
+            repo_url=repo_url,
             branch_base="development",
             task_title=title,
             task_prompt="p",
@@ -219,6 +219,7 @@ async def test_default_worktree_remover_continues_after_companion_failure(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover continues after companion failure."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -265,10 +266,19 @@ async def test_default_worktree_remover_continues_after_companion_failure(
         ),
     )
 
+    remove_error = GitOperationError(
+        operation="worktree.remove",
+        returncode=1,
+        stdout="",
+        stderr="backend mirror missing",
+        reason_code="GIT_WORKTREE_REMOVE_FAILED",
+    )
+
     async def _remove_worktree(*, workspace_id: str, repo_url: str) -> None:
+        """Test helper for remove worktree."""
         del repo_url
         if workspace_id.endswith("__companion__backend"):
-            raise RuntimeError("backend mirror missing")
+            raise remove_error
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value
@@ -293,7 +303,7 @@ async def test_default_worktree_remover_continues_after_companion_failure(
             "worktree_id": f"{workspace_id}__companion__backend",
             "status": "failed",
             "reason_code": "GIT_WORKTREE_REMOVE_FAILED",
-            "error": "backend mirror missing",
+            "error": str(remove_error),
         },
         {
             "worktree_id": f"{workspace_id}__companion__web",
@@ -322,6 +332,7 @@ async def test_default_worktree_remover_missing_companion_noop_does_not_make_par
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover missing companion noop does not make partial."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     primary_id = await _workspace(
@@ -373,10 +384,19 @@ async def test_default_worktree_remover_missing_companion_noop_does_not_make_par
         ),
     )
 
+    remove_error = GitOperationError(
+        operation="worktree.remove",
+        returncode=1,
+        stdout="",
+        stderr="primary mirror missing",
+        reason_code="GIT_WORKTREE_REMOVE_FAILED",
+    )
+
     async def _remove_worktree(*, workspace_id: str, repo_url: str) -> None:
+        """Test helper for remove worktree."""
         del repo_url
         if workspace_id == primary_id:
-            raise RuntimeError("primary mirror missing")
+            raise remove_error
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value
@@ -394,7 +414,7 @@ async def test_default_worktree_remover_missing_companion_noop_does_not_make_par
             "worktree_id": primary_id,
             "status": "failed",
             "reason_code": "GIT_WORKTREE_REMOVE_FAILED",
-            "error": "primary mirror missing",
+            "error": str(remove_error),
         },
         {
             "worktree_id": companion_id,
@@ -459,6 +479,7 @@ async def test_default_worktree_remover_skips_existing_plain_directory(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover skips existing plain directory."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -504,10 +525,87 @@ async def test_default_worktree_remover_skips_existing_plain_directory(
 
 
 @pytest.mark.unit
+async def test_default_worktree_remover_reports_primary_metadata_probe_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Verify default worktree remover reports primary metadata probe failure."""
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="m" * 40,
+    )
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    candidate = WorkspaceGCCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus.completed.value,
+        updated_at=now,
+        age_hours=200,
+        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=worktree_path,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=work_dir / "compose" / workspace_id,
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
+        ),
+    )
+    probe_error = GitOperationError(
+        operation="worktree.hooks_path_probe",
+        returncode=1,
+        stdout="",
+        stderr="empty linked-worktree gitdir back-reference",
+        reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+    )
+
+    with (
+        patch(
+            "awf.service.gc_worktrees.git_context_mirror_path_for_worktree",
+            side_effect=probe_error,
+        ),
+        patch("awf.node.git_manager.GitManager") as mock_gm_cls,
+    ):
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree = AsyncMock()
+        result = await _default_worktree_remover(
+            candidate,
+            session_factory=session_factory,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "failed"
+    assert result.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    assert "empty linked-worktree gitdir back-reference" in (result.error or "")
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": workspace_id,
+            "status": "failed",
+            "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            "error": str(probe_error),
+        }
+    ]
+    mock_gm.remove_worktree.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_default_worktree_remover_removes_companion_when_primary_plain_directory(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover removes companion when primary plain directory."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -579,10 +677,120 @@ async def test_default_worktree_remover_removes_companion_when_primary_plain_dir
 
 
 @pytest.mark.unit
+async def test_default_worktree_remover_reports_companion_metadata_probe_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Verify default worktree remover reports companion metadata probe failure."""
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="n" * 40,
+        task_policy={
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/backend.git",
+                    "base_branch": "development",
+                }
+            ]
+        },
+    )
+    companion_id = f"{workspace_id}__companion__backend"
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    companion_path = work_dir / "git" / "worktrees" / companion_id
+    _write(worktree_path / ".git", "gitdir")
+    companion_path.mkdir(parents=True)
+    candidate = WorkspaceGCCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus.completed.value,
+        updated_at=now,
+        age_hours=200,
+        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=worktree_path,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=work_dir / "compose" / workspace_id,
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
+        ),
+        companion_worktrees=(
+            WorkspaceGCPath(
+                kind=f"companion_worktree:{companion_id}",
+                path=companion_path,
+                exists=True,
+                estimated_bytes=0,
+            ),
+        ),
+    )
+    probe_error = GitOperationError(
+        operation="worktree.hooks_path_probe",
+        returncode=1,
+        stdout="",
+        stderr="empty linked-worktree gitdir back-reference",
+        reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+    )
+
+    def _probe_side_effect(path: Path, *, work_dir: Path) -> None:
+        """Test helper for probe side effect."""
+        del work_dir
+        if path == companion_path:
+            raise probe_error
+
+    with (
+        patch(
+            "awf.service.gc_worktrees.git_context_mirror_path_for_worktree",
+            side_effect=_probe_side_effect,
+        ),
+        patch("awf.node.git_manager.GitManager") as mock_gm_cls,
+    ):
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree = AsyncMock()
+        result = await _default_worktree_remover(
+            candidate,
+            session_factory=session_factory,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "partial"
+    assert result.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": companion_id,
+            "status": "failed",
+            "reason_code": "MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            "error": str(probe_error),
+        },
+        {
+            "worktree_id": workspace_id,
+            "status": "succeeded",
+            "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+        },
+    ]
+    mock_gm.remove_worktree.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        repo_url="git@github.com:example/repo.git",
+    )
+
+
+@pytest.mark.unit
 async def test_default_worktree_remover_handles_git_error(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover handles git error."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -617,7 +825,15 @@ async def test_default_worktree_remover_handles_git_error(
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
         mock_gm = mock_gm_cls.return_value
-        mock_gm.remove_worktree = AsyncMock(side_effect=RuntimeError("mirror missing"))
+        mock_gm.remove_worktree = AsyncMock(
+            side_effect=GitOperationError(
+                operation="worktree.remove",
+                returncode=1,
+                stdout="",
+                stderr="mirror missing",
+                reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            )
+        )
         result = await _default_worktree_remover(
             candidate,
             session_factory=session_factory,
@@ -626,3 +842,69 @@ async def test_default_worktree_remover_handles_git_error(
         assert result.status == "failed"
         assert result.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
         assert "mirror missing" in result.error
+
+
+@pytest.mark.unit
+async def test_default_worktree_remover_preserves_git_operation_error_reason_code(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Verify default worktree remover preserves git operation error reason code."""
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="q" * 40,
+    )
+    candidate = WorkspaceGCCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus.completed.value,
+        updated_at=now,
+        age_hours=200,
+        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=work_dir / "git" / "worktrees" / workspace_id,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=work_dir / "compose" / workspace_id,
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
+        ),
+    )
+    git_error = GitOperationError(
+        operation="worktree.remove",
+        returncode=128,
+        stdout="",
+        stderr="git worktree list failed",
+        reason_code="GIT_WORKTREE_LIST_FAILED",
+    )
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree = AsyncMock(side_effect=git_error)
+        result = await _default_worktree_remover(
+            candidate,
+            session_factory=session_factory,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "failed"
+    assert result.reason_code == "GIT_WORKTREE_LIST_FAILED"
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": workspace_id,
+            "status": "failed",
+            "reason_code": "GIT_WORKTREE_LIST_FAILED",
+            "error": str(git_error),
+        }
+    ]

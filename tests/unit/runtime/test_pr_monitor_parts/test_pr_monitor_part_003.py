@@ -15,13 +15,12 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorConfig,
     MonitorState,
-    NotifyHuman,
     PRStatus,
     ReportCiFailure,
     RerunTransientCI,
     ReviewComment,
     ReviewThread,
-    _log_shows_docker_registry_timeout,
+    WaitForCI,
     decide,
 )
 
@@ -73,9 +72,11 @@ def _status(
     base_behind: int = 0,
     merge_state_status: MergeStateStatus = MergeStateStatus.CLEAN,
     ci_failures: tuple[CheckFailure, ...] = (),
+    ci_runs_in_progress: bool = False,
     closed: bool = False,
     merged: bool = False,
 ) -> PRStatus:
+    """Build a PRStatus fixture for CI failure monitor tests."""
     return PRStatus(
         number=42,
         head_sha=head_sha,
@@ -91,14 +92,18 @@ def _status(
         base_behind_count=base_behind,
         merge_state_status=merge_state_status,
         ci_failures=ci_failures,
+        ci_runs_in_progress=ci_runs_in_progress,
         closed=closed,
         merged=merged,
     )
 
 
 class TestCiFailure:
+    """Tests for CiFailure."""
+
     @pytest.mark.unit
     def test_transient_failure_dispatches_rerun_before_agent_repair(self) -> None:
+        """Verify transient failure dispatches rerun before agent repair."""
         failure = CheckFailure(
             name="CI",
             conclusion="FAILURE",
@@ -120,9 +125,10 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_transient_failure_with_required_rollup_dispatches_rerun_for_underlying_job(
+    def test_transient_failure_with_required_rollup_reports_completed_failure_set(
         self,
     ) -> None:
+        """Verify transient failure with required rollup reports completed failure set."""
         transient_failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
@@ -143,6 +149,41 @@ class TestCiFailure:
                 "release-artifacts: success"
             ),
             run_id="25897584271",
+        )
+
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(transient_failure, rollup_failure),
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (transient_failure, rollup_failure)
+
+    @pytest.mark.unit
+    def test_transient_failure_with_synthesized_rollup_reruns_transient_job(
+        self,
+    ) -> None:
+        """A no-log/no-run-id required-rollup sibling must not block transient rerun.
+
+        Regression for PRRT_kwDOSJAM6s6Nad-D."""
+        transient_failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "error: Failed to install cpython-3.12.9-linux-x86_64-gnu\n"
+                "Caused by: HTTP status server error (503 Service Unavailable)"
+            ),
+            run_id="25897584271",
+        )
+        rollup_failure = CheckFailure(
+            name="ci-required",
+            conclusion="FAILURE",
+            log_excerpt="",
+            run_id=None,
         )
 
         action = decide(
@@ -191,9 +232,10 @@ class TestCiFailure:
         assert action.failures == (mixed_failure,)
 
     @pytest.mark.unit
-    def test_required_rollup_without_underlying_transient_job_notifies_human(
+    def test_required_rollup_without_underlying_transient_job_reports_failure(
         self,
     ) -> None:
+        """Verify required rollup without underlying transient job reports failure."""
         rollup_failure = CheckFailure(
             name="ci-required",
             conclusion="FAILURE",
@@ -211,9 +253,124 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, NotifyHuman)
-        assert action.message is not None
-        assert "without actionable code-failure evidence" in action.message
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (rollup_failure,)
+
+    @pytest.mark.unit
+    def test_arbitrary_completed_ci_failure_reports_failure(self) -> None:
+        """Verify arbitrary completed ci failure reports failure."""
+        failure = CheckFailure(
+            name="go-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "=== RUN   TestWidgetLifecycle\n"
+                "widget_test.go:42: expected active widget, got archived\n"
+                "--- FAIL: TestWidgetLifecycle (0.03s)"
+            ),
+            run_id="25897584272",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_completed_ci_failure_reports_while_other_runs_are_in_progress(self) -> None:
+        """Verify completed ci failure reports while other runs are in progress."""
+        failure = CheckFailure(
+            name="go-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "=== RUN   TestWidgetLifecycle\n"
+                "widget_test.go:42: expected active widget, got archived\n"
+                "--- FAIL: TestWidgetLifecycle (0.03s)"
+            ),
+            run_id="25897584272",
+        )
+
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(failure,),
+                ci_runs_in_progress=True,
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_failed_ci_without_failure_evidence_waits_for_in_progress_runs(self) -> None:
+        """Verify failed ci without failure evidence waits for in progress runs."""
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_runs_in_progress=True),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, WaitForCI)
+        assert action.reason == "ci_run_in_progress"
+
+    @pytest.mark.unit
+    def test_generic_transient_text_inside_pytest_failure_reports_failure(self) -> None:
+        """Transient marker substrings inside real test failure output must not
+        turn the entire check into a rerunnable CI flake."""
+        failure = CheckFailure(
+            name="integration-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "tests/integration/test_fetch.py::test_download_prompt FAILED\n"
+                "E   AssertionError: failed to download prompt fixture\n"
+                "E   assert 'try again later' == 'ready'\n"
+                "=== short test summary info ===\n"
+                "FAILED tests/integration/test_fetch.py::test_download_prompt"
+            ),
+            run_id="25897584272",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_docker_pull_registry_timeout_with_code_failure_reports_failure(self) -> None:
+        """Combined logs with code failures and Docker timeouts must be repaired."""
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "tests/integration/test_fetch.py::test_download_prompt FAILED\n"
+                "E   AssertionError: expected 'ready'\n"
+                "=== short test summary info ===\n"
+                "FAILED tests/integration/test_fetch.py::test_download_prompt\n"
+                "/usr/bin/docker pull postgres:16\n"
+                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
+                "context deadline exceeded (Client.Timeout exceeded while awaiting headers)\n"
+                "Docker pull failed with exit code 1"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
 
     @pytest.mark.unit
     def test_mixed_run_with_rollup_marker_and_code_evidence_reports_failure(
@@ -337,853 +494,46 @@ class TestCiFailure:
         assert action.failures == (transient_failure, mixed_failure)
 
     @pytest.mark.unit
-    def test_transient_tool_download_failure_dispatches_rerun(self) -> None:
-        failure = CheckFailure(
+    def test_transient_rerun_skipped_when_no_run_id_sibling_has_code_evidence(
+        self,
+    ) -> None:
+        """A rerunnable transient Actions failure must not win over a separate
+        synthesized rollup row (no ``run_id``) that still carries fixable code
+        evidence. The repair agent must be dispatched instead of burning reruns
+        on the flake.
+
+        Regression for PRRT_kwDOSJAM6s6NarzR."""
+        transient_failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "error: Failed to install cpython-3.12.9-linux-x86_64-gnu\n"
+                "Caused by: HTTP status server error (503 Service Unavailable)"
+            ),
+            run_id="25897584271",
+        )
+        rollup_failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
             log_excerpt=(
-                "Install tools\n"
-                "Failed to download ruff from PyPI\n"
-                "curl: (56) Recv failure: Connection reset by peer"
+                "src/awf/foo.py:12: error: Incompatible return value type "
+                "[return-value]\n"
+                "Found type errors\n"
+                "A required CI job did not pass.\n"
+                "python-full-coverage: failure\n"
+                "console: success"
             ),
-            run_id="25655330295",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_docker_pull_registry_timeout_dispatches_rerun(self) -> None:
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
-                "context deadline exceeded (Client.Timeout exceeded while awaiting headers)\n"
-                "net/http: request canceled while waiting for connection "
-                "(Client.Timeout exceeded while awaiting headers)\n"
-                "Docker pull failed with exit code 1"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_docker_pull_failed_wording_anchors_request_canceled_rerun(self) -> None:
-        """A request-canceled timeout tied to an explicit ``docker pull failed``
-        line (no daemon-error wrapper) is still a registry pull failure → rerun."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                "net/http: request canceled while waiting for connection\n"
-                "Docker pull failed with exit code 1"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_docker_pull_failed_summary_does_not_corroborate_same_token_image_event(
-        self,
-    ) -> None:
-        """A ``docker pull failed ...`` *failure summary* must not be mistaken for a
-        ``docker pull <ref>`` *command echo*. Its ``split()`` tokens
-        (``docker``/``pull``/``failed``/...) would otherwise let an adjacent kubelet
-        ``Failed to pull image "docker"`` event — ``docker`` is a real Docker Hub
-        image — match by token and be wrongly corroborated as Docker-CLI pull
-        evidence, dropping it out of the uncorroborated set so its own
-        ``context deadline exceeded`` timeout is no longer excluded. That real
-        application-image deploy bug must reach the repair agent rather than be
-        silently rerun as transient infra."""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "=== RUN   TestDeployApp\n"
-                '  Warning  Failed   kubelet  Failed to pull image "docker": '
-                "context deadline exceeded\n"
-                "Docker pull failed with exit code 1\n"
-                "--- FAIL: TestDeployApp (120.00s)"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_log_shows_docker_registry_timeout_lowercases_raw_text(self) -> None:
-        """The helper is self-contained: it lowercases its own input, so raw
-        mixed-case log text matches the all-lowercase marker tuples without the
-        caller having to pre-lowercase. Guards against a future caller passing
-        unnormalized text and silently getting a False negative."""
-        raw_log = (
-            "/usr/bin/docker pull postgres:16\n"
-            'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
-            "context deadline exceeded (Client.Timeout exceeded while awaiting headers)\n"
-            "Docker pull failed with exit code 1"
-        )
-
-        assert _log_shows_docker_registry_timeout(raw_log) is True
-        # Pre-lowercased text (today's only caller) keeps returning True.
-        assert _log_shows_docker_registry_timeout(raw_log.lower()) is True
-
-    @pytest.mark.unit
-    def test_docker_pull_echo_then_bare_request_canceled_reports_ci_failure(self) -> None:
-        """A bare ``docker pull`` *command* echo followed by a request-canceled
-        timeout — with no daemon-error or pull-failed wording tying the timeout to
-        a pull failure — is indistinguishable from a successful setup pull followed
-        by an unrelated test timeout, so it must reach the repair agent."""
-        failure = CheckFailure(
-            name="integration-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                "net/http: request canceled while waiting for connection"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_awaiting_headers_timeout_without_client_prefix_dispatches_rerun(self) -> None:
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
-                "net/http: timeout exceeded while awaiting headers"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_registry_timeout_phrase_without_docker_pull_reports_ci_failure(self) -> None:
-        """A real app/integration failure that merely logs a net/http timeout
-        phrase (no Docker pull / daemon evidence) must reach the repair agent,
-        not be silently rerun as transient CI."""
-        failure = CheckFailure(
-            name="integration-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "calling downstream payments service\n"
-                "net/http: request canceled while waiting for connection"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_context_deadline_exceeded_without_docker_pull_reports_ci_failure(self) -> None:
-        """A bare Go ``context deadline exceeded`` timeout (gRPC / k8s / HTTP
-        client) with no Docker pull evidence and no pytest output is a real
-        application regression and must reach the repair agent, not be silently
-        rerun as transient CI."""
-        failure = CheckFailure(
-            name="integration-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "calling downstream grpc service\n"
-                "rpc error: code = DeadlineExceeded desc = context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_successful_setup_pull_then_unrelated_test_timeout_reports_ci_failure(
-        self,
-    ) -> None:
-        """A successful setup ``docker pull`` must not license rerunning a real
-        integration/Go test that logs ``context deadline exceeded`` many lines
-        later in the same ``gh run view --log-failed`` step. The timeout is not
-        part of the pull failure, so it must reach the repair agent."""
-        failure = CheckFailure(
-            name="integration-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                "16: Pulling from library/postgres\n"
-                "Status: Downloaded newer image for postgres:16\n"
-                "=== RUN   TestPaymentsIntegration\n"
-                "    payments_test.go:88: calling downstream payments service\n"
-                "    payments_test.go:91: context deadline exceeded\n"
-                "--- FAIL: TestPaymentsIntegration (30.01s)"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_compact_cached_pull_then_test_timeout_at_window_reports_ci_failure(
-        self,
-    ) -> None:
-        """A compact *cached* ``docker pull`` (``Status: Image is up to date``)
-        followed by a real Go test ``context deadline exceeded`` sitting exactly
-        ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines below the bare ``docker pull``
-        echo must still reach the repair agent. The timeout is anchored on Docker
-        pull-*failure* wording, not the bare echo, and a cached pull emits no such
-        failure line — so there is no Docker evidence to license a rerun."""
-        failure = CheckFailure(
-            name="integration-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                "Status: Image is up to date for postgres:16\n"
-                "    payments_test.go:91: context deadline exceeded\n"
-                "--- FAIL: TestPaymentsIntegration (30.01s)"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_app_failed_to_pull_records_timeout_reports_ci_failure(self) -> None:
-        """A real application error whose message merely contains the generic
-        ``failed to pull`` phrase (e.g. ``failed to pull records: context
-        deadline exceeded``) — with no Docker, daemon, image, or registry
-        wording — is not a Docker registry pull failure and must reach the
-        repair agent, not be silently rerun as transient CI."""
-        failure = CheckFailure(
-            name="integration-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "calling downstream records service\n"
-                "failed to pull records: context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_docker_failed_to_pull_image_timeout_dispatches_rerun(self) -> None:
-        """A Docker-specific ``failed to pull image`` failure tied to a registry
-        timeout is genuine transient infra and is rerun, confirming the marker
-        still recognizes real image-pull failures when corroborated by a nearby
-        ``docker pull`` command echo."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                'failed to pull image "postgres:16": context deadline exceeded'
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_unrelated_setup_pull_echo_does_not_corroborate_image_failure(
-        self,
-    ) -> None:
-        """A successful service-container setup ``docker pull postgres:16`` echo
-        sitting within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of a kubelet
-        ``Failed to pull image "app"`` event for an *unrelated* application image
-        must not corroborate it: the echo targets a different image (and a
-        successful setup pull at that), so the real application-image bug must reach
-        the repair agent rather than be silently rerun as transient CI."""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                "Status: Downloaded newer image for postgres:16\n"
-                '    deploy_test.go:51: Failed to pull image "app": '
-                "context deadline exceeded"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_successful_same_ref_pre_pull_does_not_corroborate_image_failure(
-        self,
-    ) -> None:
-        """A *successful* same-ref ``docker pull ghcr.io/org/app`` pre-pull — proven
-        by the ``Status: Image is up to date for ghcr.io/org/app`` success line it
-        prints — sitting within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of a
-        kubelet ``Failed to pull image "ghcr.io/org/app"`` event must not corroborate
-        it. The echoed pull *succeeded*, so the failure is a separate deploy/image
-        bug (a real failure) that must reach the repair agent rather than be silently
-        rerun as transient CI. The bare same-ref command echo is not, on its own,
-        evidence that the same-ref Docker pull failed."""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull ghcr.io/org/app\n"
-                "Status: Image is up to date for ghcr.io/org/app\n"
-                'Failed to pull image "ghcr.io/org/app": context deadline exceeded'
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_prefix_ref_success_status_does_not_suppress_same_ref_pull_failure(
-        self,
-    ) -> None:
-        """A success status for a *different* image whose name merely has the failed
-        ref as a prefix (``Status: Downloaded newer image for app-db`` vs a failed
-        ``app`` pull) must not suppress corroboration of a genuine same-ref ``app``
-        pull failure. The success status is matched on the ref as a whitespace token,
-        not by substring, so the real transient ``app`` pull failure is still rerun."""
-        failure = CheckFailure(
-            name="integration-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull app\n"
-                "Status: Downloaded newer image for app-db\n"
-                'failed to pull image "app": context deadline exceeded'
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_k8s_failed_to_pull_image_without_docker_context_reports_ci_failure(
-        self,
-    ) -> None:
-        """A bare Kubernetes/containerd kubelet ``Failed to pull image "app"``
-        event for an *application* image in an e2e deployment — no ``docker pull``
-        echo, daemon error, or registry/``/v2/`` context — is a real image/deploy
-        bug, not flaky registry infra. ``failed to pull image`` wording is shared
-        with containerd/k8s, so without corroborating Docker pull context it must
-        reach the repair agent rather than be silently rerun. (``--- FAIL`` Go
-        output is not caught by ``_looks_like_code_failure_text``, so this would
-        otherwise be misrouted to ``RerunTransientCI``.)"""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "=== RUN   TestDeployApp\n"
-                "    deploy_test.go:42: waiting for app pod to become ready\n"
-                '    deploy_test.go:51: Failed to pull image "app": '
-                "context deadline exceeded\n"
-                "--- FAIL: TestDeployApp (120.00s)"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_k8s_registry_qualified_failed_to_pull_image_reports_ci_failure(
-        self,
-    ) -> None:
-        """A registry-*qualified* kubelet/containerd ``Failed to pull image
-        "ghcr.io/org/app"`` event must not self-corroborate. The registry host is
-        just the image ref's domain, not actual Docker CLI pull context (a same-ref
-        ``docker pull`` echo), so the failing application image is a real deploy bug
-        that must reach the repair agent rather than be silently rerun as transient
-        CI."""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "=== RUN   TestDeployApp\n"
-                '    deploy_test.go:51: Failed to pull image "ghcr.io/org/app": '
-                "context deadline exceeded\n"
-                "--- FAIL: TestDeployApp (120.00s)"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_k8s_failed_to_pull_image_with_embedded_v2_url_reports_ci_failure(
-        self,
-    ) -> None:
-        """A kubelet/containerd ``Failed to pull image`` event for an *application*
-        image embeds the registry transport URL — ``Head "https://ghcr.io/v2/...":
-        context deadline exceeded`` — on its own line. The ``/v2/`` is part of the
-        kubelet event itself, not separate Docker CLI / registry-protocol evidence,
-        so it must not self-corroborate: a ``/v2/`` URL on the failing line (or an
-        adjacent wrapped line of the same multi-line event) cannot license a silent
-        rerun of a real deploy bug. ``--- FAIL`` Go output is not caught by the
-        structured code-failure checks, so without this guard it would be misrouted
-        to ``RerunTransientCI`` instead of reaching the repair agent."""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "=== RUN   TestDeployApp\n"
-                '    deploy_test.go:51: Failed to pull image "ghcr.io/org/app": '
-                "rpc error: code = Unknown desc = failed to do request: "
-                'Head "https://ghcr.io/v2/org/app/manifests/v1": '
-                "context deadline exceeded\n"
-                "--- FAIL: TestDeployApp (120.00s)"
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_k8s_multiline_registry_image_event_reports_ci_failure(self) -> None:
-        """A multi-line kubelet event repeats the registry-qualified image ref on
-        adjacent lines (``Failed to pull`` then ``Back-off pulling``). A registry
-        host on a *neighbouring* ref line is still just the image ref, not Docker
-        pull context, so it must not corroborate the ``failed to pull image``
-        marker — the application image bug reaches the repair agent rather than
-        being silently rerun."""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                '  Warning  Failed   kubelet  Failed to pull image "ghcr.io/org/app:v1": '
-                "context deadline exceeded\n"
-                '  Normal   BackOff  kubelet  Back-off pulling image "ghcr.io/org/app:v1"'
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure(
-        self,
-    ) -> None:
-        """A transient service-container ``Docker pull failed`` line (a self-evident
-        pull-failure anchor) sitting within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW``
-        lines of an *uncorroborated* kubelet ``Failed to pull image "app"`` event
-        must not lend its proximity to that event's ``context deadline exceeded``.
-        The timeout belongs to the real application-image/deploy bug, not the
-        transient pull, so the failure must reach the repair agent rather than be
-        silently rerun as transient CI."""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Docker pull failed with exit code 1\n"
-                'Failed to pull image "app": context deadline exceeded'
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_wrapped_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure(
-        self,
-    ) -> None:
-        """The wrapped multi-line variant of the uncorroborated-event guard: a
-        transient ``Docker pull failed`` anchor, then an *uncorroborated* kubelet
-        ``Failed to pull image "app"`` event whose ``context deadline exceeded``
-        error is wrapped onto the *next* line. The timeout line carries no ``failed
-        to pull image`` text of its own, so an on-line-only guard would attribute it
-        to the nearby transient anchor and silently rerun a real deploy bug. The
-        timeout belongs to the kubelet event, so the failure must reach the repair
-        agent (companion to the same-line
-        ``test_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure``)."""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Docker pull failed with exit code 1\n"  # evidence index 0
-                'Failed to pull image "app"\n'  # uncorroborated index 1, no timeout
-                "context deadline exceeded"  # index 2 — wrapped kubelet error
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_app_failed_to_pull_image_phrase_does_not_suppress_transient_pull_timeout(
-        self,
-    ) -> None:
-        """An ordinary application log line that merely *contains* the
-        ``failed to pull image`` substring without a quoted ``"<ref>"`` (e.g.
-        ``failed to pull image catalog from https://cdn``) is not a
-        kubelet/containerd image-pull event, so it must not be treated as an
-        uncorroborated pull. A genuine service-container ``Docker pull failed``
-        registry timeout within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of such
-        an app line must therefore still be rerun as transient CI, not reported.
-        Regression for the loose-substring exclusion that blocked genuine reruns."""
-        failure = CheckFailure(
-            name="e2e-tests",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Docker pull failed with exit code 1\n"  # evidence index 0
-                "failed to pull image catalog from https://cdn\n"  # index 1 — app line, no ref
-                "context deadline exceeded"  # index 2 — registry timeout within window of index 0
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_uncorroborated_summary_does_not_suppress_self_evident_daemon_timeout(
-        self,
-    ) -> None:
-        """An *uncorroborated* ``Failed to pull image "app"`` summary (no same-ref
-        ``docker pull`` echo to corroborate it) sitting immediately before a daemon
-        registry-timeout line must not drag the daemon line out of the transient set.
-        The daemon line — ``Error response from daemon: Get
-        "https://registry-1.docker.io/v2/": context deadline exceeded`` — is *itself*
-        self-evident registry-timeout evidence (daemon marker + ``/v2/`` request form +
-        timeout marker), so the uncorroborated-event proximity guard must exempt
-        timeout lines that are their own pull-failure evidence. Otherwise a real
-        registry flake reaches the repair agent instead of being rerun."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                'Failed to pull image "app"\n'  # uncorroborated index 0, no timeout
-                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
-                "context deadline exceeded"  # index 1 — self-evident daemon timeout
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_unrecognized_failure_log_reports_ci_failure(self) -> None:
-        """A failure whose log matches neither transient nor registry-timeout
-        markers falls through to the repair agent."""
-        failure = CheckFailure(
-            name="build",
-            conclusion="FAILURE",
-            log_excerpt="unexpected job termination with no diagnostic output",
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_registry_timeout_at_exact_window_boundary_dispatches_rerun(self) -> None:
-        """A timeout marker exactly ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` (2)
-        lines from the pull-failure anchor must still trigger rerun, confirming
-        the boundary condition ``abs(index - evidence_index) <= window`` is
-        inclusive at the limit. Pins the window so an accidental tightening to 1
-        would fail here rather than slip through the closer positive tests."""
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Docker pull failed with exit code 1\n"  # evidence index 0
-                "Retrying pull…\n"  # index 1
-                "context deadline exceeded"  # index 2 — distance == 2
-            ),
-            run_id="27091023772",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_docker_pull_with_structured_test_evidence_reports_ci_failure(self) -> None:
-        failure = CheckFailure(
-            name="python-coverage-shards (2)",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "/usr/bin/docker pull postgres:16\n"
-                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
-                "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
-            ),
-            run_id="27091023772",
-            test_node_ids=("pkg/tests/test_api.py::test_x",),
-            assertion_snippets=("E   AssertionError: boom",),
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_transient_failure_with_code_like_check_name_dispatches_rerun(self) -> None:
-        failure = CheckFailure(
-            name="TypeCheck / ubuntu-latest",
-            conclusion="FAILURE",
-            log_excerpt="runner has received a shutdown signal",
-            run_id="25655330295",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_timed_out_failure_without_logs_dispatches_rerun(self) -> None:
-        failure = CheckFailure(
-            name="python-full-coverage",
-            conclusion="TIMED_OUT",
-            log_excerpt="",
-            run_id="25655330295",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, RerunTransientCI)
-        assert action.failures == (failure,)
-
-    @pytest.mark.unit
-    def test_timed_out_failure_without_logs_or_run_id_notifies_human(self) -> None:
-        failure = CheckFailure(
-            name="python-full-coverage",
-            conclusion="TIMED_OUT",
-            log_excerpt="",
             run_id=None,
         )
 
         action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, NotifyHuman)
-        assert action.message is not None
-        assert "without actionable code-failure evidence" in action.message
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize("conclusion", ["CANCELLED", "ACTION_REQUIRED"])
-    def test_transient_non_failed_job_conclusions_notify_human(
-        self,
-        conclusion: str,
-    ) -> None:
-        failure = CheckFailure(
-            name="python-full-coverage",
-            conclusion=conclusion,
-            log_excerpt="runner has received a shutdown signal",
-            run_id="25655330295",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
-            MonitorState(),
-            MonitorConfig(),
-        )
-
-        assert isinstance(action, NotifyHuman)
-        assert action.message is not None
-        assert "transient or infrastructure-related" in action.message
-
-    @pytest.mark.unit
-    def test_tool_diagnostics_still_dispatch_agent_repair(self) -> None:
-        failure = CheckFailure(
-            name="lint-and-type",
-            conclusion="FAILURE",
-            log_excerpt=(
-                "Would reformat: src/awf/runtime/pr_monitor_runner.py\n"
-                "src/awf/runtime/pr_monitor.py:12: error: Incompatible types [assignment]"
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(transient_failure, rollup_failure),
             ),
-            run_id="25655330295",
-        )
-
-        action = decide(
-            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
             MonitorState(),
             MonitorConfig(),
         )
 
         assert isinstance(action, ReportCiFailure)
-        assert action.failures == (failure,)
+        assert action.failures == (transient_failure, rollup_failure)

@@ -20,10 +20,25 @@ from awf.runtime.pr_monitor import (
 
 
 def _parse_marker_timestamp(state: MonitorState) -> datetime | None:
+    """Parse marker timestamp."""
     raw = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
     if raw is None or raw == "1":
         return None
     return datetime.fromisoformat(raw)
+
+
+@pytest.mark.unit
+def test_merge_block_attention_active_false_without_marker() -> None:
+    """Verify merge block attention active false without marker."""
+    state = MonitorState()
+
+    assert (
+        state.merge_block_attention_active(
+            now=datetime(2026, 6, 22, 12, 0, tzinfo=UTC),
+            ttl_seconds=120.0,
+        )
+        is False
+    )
 
 
 @pytest.mark.unit

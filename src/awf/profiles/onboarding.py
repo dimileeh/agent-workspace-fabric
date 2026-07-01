@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +25,7 @@ from awf.profiles.models import (
     ProfileValidation,
     WorkspaceProfile,
 )
+from awf.runtime.node_playwright_setup import playwright_command
 
 _COMPOSE_FILENAMES = (
     "compose.yml",
@@ -473,6 +474,7 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
             validation_scripts=_playwright_validation_scripts(inspection),
             fallback_validation=(),
             fallback_commands=(_playwright_command(inspection.package_manager or "npm"),),
+            runtime=ProfileRuntime(browsers=["chromium"]),
         )
     elif template == "python-postgres":
         database_url = "postgresql+psycopg://awf:${POSTGRES_PASSWORD}@postgres:5432/awf"
@@ -555,12 +557,15 @@ def _node_profile(
     validation_scripts: tuple[str, ...],
     fallback_validation: tuple[str, ...],
     fallback_commands: tuple[str, ...] = (),
+    runtime: ProfileRuntime | None = None,
+    script_command: Callable[[str, str], str] | None = None,
 ) -> WorkspaceProfile:
     """Build a node-based profile including install and validation command derivation."""
     package_manager = inspection.package_manager or "npm"
     scripts = inspection.scripts()
+    resolve_script_command = script_command or _script_command
     validate_commands = [
-        _script_command(package_manager, script)
+        resolve_script_command(package_manager, script)
         for script in validation_scripts
         if script in scripts
     ]
@@ -577,6 +582,7 @@ def _node_profile(
         source=f"onboarding:{name}",
         confidence="medium",
         description=description,
+        runtime=runtime or ProfileRuntime(),
         phases={
             "setup": [_node_install_command(inspection.path, package_manager)],
             "validate": validate_commands,
@@ -888,13 +894,7 @@ def _playwright_validation_scripts(inspection: ProjectInspection) -> tuple[str, 
 
 def _playwright_command(package_manager: str) -> str:
     """Build the package-manager-specific Playwright command for one-shot validation."""
-    if package_manager == "pnpm":
-        return "pnpm exec playwright test"
-    if package_manager == "yarn":
-        return "yarn playwright test"
-    if package_manager == "bun":
-        return "bunx playwright test"
-    return "npx playwright test"
+    return playwright_command(package_manager, "test")
 
 
 def _compose_ports(inspection: ProjectInspection) -> dict[str, str]:

@@ -32,6 +32,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     CheckFailure,
+    CheckFailureLogResult,
     CheckState,
     Merge,
     MergeableState,
@@ -438,8 +439,11 @@ async def _dispatch_merge_recovery(
 
 
 class TestMiscMonitorHelpers:
+    """Tests for MiscMonitorHelpers."""
+
     @pytest.mark.unit
     def test_merge_rejection_reason_and_service_work_dir_edges(self) -> None:
+        """Verify merge rejection reason and service work dir edges."""
         assert _merge_rejection_reason("") == "GitHub rejected the merge attempt"
         assert _merge_rejection_reason(" ! [rejected] main -> main ") == (
             "GitHub rejected the merge attempt: ! [rejected] main -> main"
@@ -449,6 +453,8 @@ class TestMiscMonitorHelpers:
 
     @pytest.mark.unit
     def test_target_reconcile_payload_accepts_dict_to_dict_and_fallback_objects(self) -> None:
+        """Verify target reconcile payload accepts dict, to_dict, and fallback objects."""
+
         class _DictResult:
             def to_dict(self) -> dict[str, object]:
                 return {"status": "clean"}
@@ -469,17 +475,33 @@ class TestMiscMonitorHelpers:
 
     @pytest.mark.unit
     def test_ci_failure_replacement_preserves_status_shape(self) -> None:
+        """Verify ci failure replacement preserves status shape."""
         failure = CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom")
         updated = _with_ci_failures(_status(), (failure,))
 
         assert updated.ci_failures == (failure,)
+        assert updated.ci_runs_in_progress is False
         assert updated.head_sha == "abc123"
+
+    @pytest.mark.unit
+    def test_ci_failure_replacement_records_in_progress_signal(self) -> None:
+        """Verify ci failure replacement records in progress signal."""
+        failure = CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom")
+        updated = _with_ci_failures(
+            _status(),
+            CheckFailureLogResult(failures=(failure,), runs_in_progress=True),
+        )
+
+        assert updated.ci_failures == (failure,)
+        assert updated.ci_runs_in_progress is True
 
     @pytest.mark.unit
     async def test_write_monitor_log_swallows_sink_failures(
         self,
         tmp_path: Path,
     ) -> None:
+        """Verify write monitor log swallows sink failures."""
+
         class _FailingSink:
             async def write(self, _payload: str) -> None:
                 raise OSError("disk full")

@@ -68,6 +68,7 @@ from awf.runtime.monitor_state_keys import (
 )
 from awf.runtime.pr_monitor import (
     CheckFailure,
+    CheckFailureLogResult,
     CheckTiming,
     Merge,
     MergeStateStatus,
@@ -469,6 +470,7 @@ def _drop_stale_review_comment_addressed_state(
 
 
 def _monitor_state_verdict(verdict: str) -> Verdict:
+    """Normalize a persisted monitor verdict string into the typed ``Verdict`` enum."""
     normalized = verdict.strip().lower()
     if normalized == "false_positive":
         return "false_positive"
@@ -481,12 +483,21 @@ def _monitor_state_verdict(verdict: str) -> Verdict:
     return "fix_committed"
 
 
-def _with_ci_failures(status: PRStatus, failures: tuple[CheckFailure, ...]) -> PRStatus:
+def _with_ci_failures(
+    status: PRStatus,
+    failures: tuple[CheckFailure, ...] | CheckFailureLogResult,
+) -> PRStatus:
     """Immutable-replace ci_failures on a ``PRStatus`` (frozen dataclass)."""
     # Import dataclasses.replace locally to keep the top-level imports tight.
     from dataclasses import replace
 
-    return replace(status, ci_failures=failures)
+    if isinstance(failures, CheckFailureLogResult):
+        return replace(
+            status,
+            ci_failures=failures.failures,
+            ci_runs_in_progress=failures.runs_in_progress,
+        )
+    return replace(status, ci_failures=failures, ci_runs_in_progress=False)
 
 
 @dataclass(frozen=True)

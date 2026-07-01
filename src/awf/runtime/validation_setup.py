@@ -24,6 +24,9 @@ from awf.common.logging import get_logger
 from awf.profiles.models import (
     WorkspaceProfile,
 )
+from awf.runtime.node_playwright_setup import (
+    playwright_browser_install_command,
+)
 from awf.runtime.validation_command_probe import (
     _ENV_ASSIGNMENT_RE,
 )
@@ -194,6 +197,9 @@ def profile_phase_command_plan(
                 )
                 for command in profile.database.generated_setup
             )
+            browser_install = playwright_browser_install_command(profile)
+            if browser_install is not None:
+                commands.append(ProfileExecutionCommand(phase="setup", command=browser_install))
             continue
         if phase == "validate":
             commands.extend(

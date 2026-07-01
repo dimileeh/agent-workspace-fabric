@@ -14,10 +14,11 @@ A checked-in stable copy is available as `openapi.json` in the repository root.
 All endpoints return JSON. Endpoints requiring authentication use the
 `Authorization: Bearer $AWF_API_TOKEN` header.
 
-Public operators' health/readiness probes intentionally remain usable without
-`AWF_API_TOKEN` so monitoring can run during bootstrapping. Workspace metadata
-and control surfaces require the header and return a `503 API_TOKEN_NOT_CONFIGURED`
-envelope when authentication is enabled but `AWF_API_TOKEN` is missing.
+Public health/readiness probes and Core discovery intentionally remain usable
+without `AWF_API_TOKEN` so monitoring and in-cluster discovery can run during
+bootstrapping. Workspace metadata, control surfaces, and release readiness
+require the header and return a `503 API_TOKEN_NOT_CONFIGURED` envelope when
+authentication is enabled but `AWF_API_TOKEN` is missing.
 
 Common response patterns:
 
@@ -29,6 +30,27 @@ Common response patterns:
 ---
 
 ## Health and Readiness
+
+### Core discovery
+
+No auth required. Dependency-free discovery document for Core package identity
+and public capabilities. The payload is stable and does not include configured
+tokens or runtime secrets.
+
+```bash
+curl http://localhost:8000/.well-known/awf-core.json
+```
+
+Response shape:
+
+```json
+{
+  "package_name": "agent-workspace-fabric",
+  "package_version": "0.1.0",
+  "git_commit": "unknown",
+  "capabilities": ["workspace.execution.v1"]
+}
+```
 
 ### Liveness check
 
@@ -58,17 +80,20 @@ Each sub-check includes a stable `reason` code for alert routing.
 
 ### Release readiness
 
-No auth required. Returns the AWF Core local release scorecard.
+Auth required (`Authorization: Bearer $AWF_API_TOKEN`). Returns the AWF Core
+local release scorecard.
 
 ```bash
-curl http://localhost:8000/release-readiness
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  http://localhost:8000/release-readiness
 ```
 
 Returns `200` when the release is ready, `503` otherwise. Supports query params
 `provider`, `failure_window_hours`, `slo_window_hours`.
 
 ```bash
-curl "http://localhost:8000/release-readiness?provider=claude_code&provider=cursor"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/release-readiness?provider=claude_code&provider=cursor"
 ```
 
 The filtered example intentionally includes Cursor. Repeat `provider` to compare
@@ -305,10 +330,11 @@ curl -X POST "http://localhost:8000/v1/workspaces/ws_123/retry?provider_readines
 ## Release Readiness
 
 See Health and Readiness above. Evaluates SLO metrics, validation, and
-dependency health to produce a local release scorecard.
+dependency health to produce a local release scorecard. Auth required.
 
 ```bash
-curl http://localhost:8000/release-readiness
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  http://localhost:8000/release-readiness
 ```
 
 ---

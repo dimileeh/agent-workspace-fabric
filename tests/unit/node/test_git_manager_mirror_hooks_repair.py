@@ -30,10 +30,13 @@ def _git(args: list[str], cwd: Path) -> None:
 
 
 class TestRepairMirrorHooksPath:
+    """Tests for RepairMirrorHooksPath."""
+
     @staticmethod
     def _mirror_with_attached_worktree(
         tmp_path: Path, *, create_hooks_dir: bool
     ) -> tuple[Path, Path]:
+        """Create a mirror repository with an attached linked worktree."""
         repo = tmp_path / "origin"
         repo.mkdir()
         _git(["init", "-q", "-b", "main"], repo)
@@ -88,6 +91,7 @@ class TestRepairMirrorHooksPath:
     async def test_repair_waits_for_shared_mirror_lock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify repair waits for shared mirror lock."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -117,9 +121,72 @@ class TestRepairMirrorHooksPath:
         assert started is True
 
     @pytest.mark.unit
+    async def test_repo_url_derived_mirror_uses_same_lock_as_actual_mirror(
+        self, tmp_path: Path
+    ) -> None:
+        """Verify repo url derived mirror uses same lock as actual mirror."""
+        repo = tmp_path / "origin"
+        repo.mkdir()
+        _git(["init", "-q", "-b", "main"], repo)
+        _git(["config", "user.name", "AWF Test"], repo)
+        _git(["config", "user.email", "awf@test.local"], repo)
+        (repo / "README.md").write_text("initial\n", encoding="utf-8")
+        _git(["add", "."], repo)
+        _git(["commit", "-q", "-m", "init"], repo)
+
+        manager = git_module.GitManager(tmp_path / "git")
+        repo_url = str(repo)
+        actual_mirror = await manager.ensure_mirror(repo_url)
+
+        origin_url = await git_module.read_mirror_origin_url(actual_mirror)
+        assert origin_url == repo_url
+        url_derived_mirror = manager._mirror_path(origin_url)  # noqa: SLF001
+
+        assert url_derived_mirror.resolve() == actual_mirror.resolve()
+        assert git_module.GitManager._lock_for_mirror(  # noqa: SLF001
+            url_derived_mirror
+        ) is git_module.GitManager._lock_for_mirror(actual_mirror)  # noqa: SLF001
+
+    @pytest.mark.unit
+    async def test_remove_worktree_waits_for_same_mirror_lock_as_repair(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify remove worktree waits for same mirror lock as repair."""
+        repo_url = "git@github.com:example/repo.git"
+        manager = git_module.GitManager(tmp_path / "git")
+        mirror = manager._mirror_path(repo_url)  # noqa: SLF001
+        worktree = manager.get_worktree_path("ws_dead")
+        mirror.mkdir(parents=True)
+        worktree.mkdir(parents=True)
+        entered: list[str] = []
+
+        async def _run(args: list[str], *, operation: str) -> git_module.GitResult:
+            """Test helper for run."""
+            del args
+            entered.append(operation)
+            return git_module.GitResult(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(manager, "_run", _run)
+        lock = git_module.GitManager._lock_for_mirror(mirror)  # noqa: SLF001
+        await lock.acquire()
+        task = asyncio.create_task(
+            manager.remove_worktree(workspace_id="ws_dead", repo_url=repo_url)
+        )
+        try:
+            await asyncio.sleep(0)
+            assert entered == []
+            assert task.done() is False
+        finally:
+            lock.release()
+
+        await task
+        assert entered == ["worktree.remove", "worktree.prune"]
+
+    @pytest.mark.unit
     async def test_prunes_and_retries_when_linked_worktree_metadata_disappears(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify prunes and retries when linked worktree metadata disappears."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -209,6 +276,7 @@ class TestRepairMirrorHooksPath:
     async def test_fails_closed_when_worktrees_dir_is_unreadable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify repair fails closed when the mirror worktrees directory is unreadable."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -249,6 +317,7 @@ class TestRepairMirrorHooksPath:
     async def test_propagates_non_stale_linked_worktree_probe_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify propagates non stale linked worktree probe error."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -270,14 +339,15 @@ class TestRepairMirrorHooksPath:
             reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
         )
 
-        def _linked_worktree_path_from_git_dir(_path: Path) -> Path:
+        def linked_worktree_path_from_git_dir(_path: Path) -> Path:
+            """Linked worktree path from git dir."""
             raise probe_error
 
         monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
         monkeypatch.setattr(
             git_module,
-            "_linked_worktree_path_from_git_dir",
-            _linked_worktree_path_from_git_dir,
+            "linked_worktree_path_from_git_dir",
+            linked_worktree_path_from_git_dir,
         )
 
         # A probe error that is not the stale-metadata sentinel is a genuine
@@ -606,6 +676,7 @@ class TestRepairMirrorHooksPath:
     async def test_ignores_config_worktree_when_worktree_config_extension_is_disabled(
         self, tmp_path: Path
     ) -> None:
+        """Verify config worktree entries are ignored when worktreeConfig is disabled."""
         mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
         linked_git_dir = git_module.linked_worktree_git_dir(worktree)
         assert linked_git_dir is not None
@@ -628,6 +699,7 @@ class TestRepairMirrorHooksPath:
     async def test_linked_worktree_config_probes_include_safe_directory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify linked worktree config probes include safe directory."""
         mirror = tmp_path / "mirror.git"
         linked_git_dir = mirror / "worktrees" / "workspace"
         linked_git_dir.mkdir(parents=True)
@@ -635,6 +707,7 @@ class TestRepairMirrorHooksPath:
         worktree = tmp_path / "workspace"
         worktree.mkdir()
         (linked_git_dir / "gitdir").write_text(str(worktree / ".git"), encoding="utf-8")
+        (worktree / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
         (linked_git_dir / "config.worktree").write_text("", encoding="utf-8")
         calls: list[tuple[tuple[str, ...], tuple[str, ...], Path, str]] = []
 
@@ -660,7 +733,7 @@ class TestRepairMirrorHooksPath:
                 (*safe_args, "-C", str(worktree)),
                 ("--local",),
                 mirror / "config",
-                "mirror",
+                "linked_worktree",
             ),
             (
                 (*safe_args, "-C", str(worktree)),
@@ -671,9 +744,94 @@ class TestRepairMirrorHooksPath:
         ]
 
     @pytest.mark.unit
+    async def test_existing_registered_worktree_missing_gitfile_is_stale_before_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify existing registered worktree missing gitfile is stale before probe."""
+        mirror = tmp_path / "mirror.git"
+        linked_git_dir = mirror / "worktrees" / "workspace"
+        linked_git_dir.mkdir(parents=True)
+        worktree = tmp_path / "workspace"
+        worktree.mkdir()
+        (linked_git_dir / "gitdir").write_text(str(worktree / ".git"), encoding="utf-8")
+        repair_prefixes: list[str] = []
+        prune_calls = 0
+
+        async def _repair_hooks_path_config(
+            *,
+            git_args: tuple[str, ...],
+            config_scope_args: tuple[str, ...],
+            config_path: Path,
+            operation_prefix: str,
+        ) -> bool:
+            """Test helper for repair hooks path config."""
+            del git_args, config_scope_args, config_path
+            repair_prefixes.append(operation_prefix)
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            """Test helper for run git worktree prune."""
+            nonlocal prune_calls
+            prune_calls += 1
+            assert path == mirror
+            shutil.rmtree(linked_git_dir)
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is False
+        assert prune_calls == 1
+        assert repair_prefixes == ["mirror", "mirror"]
+
+    @pytest.mark.unit
+    async def test_replacement_repo_at_worktree_path_is_stale_before_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify replacement repo at worktree path is stale before probe."""
+        mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
+        linked_git_dir = git_module.linked_worktree_git_dir(worktree)
+        assert linked_git_dir is not None
+        shutil.rmtree(worktree)
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True, capture_output=True)
+        repair_prefixes: list[str] = []
+        prune_calls = 0
+
+        async def _repair_hooks_path_config(
+            *,
+            git_args: tuple[str, ...],
+            config_scope_args: tuple[str, ...],
+            config_path: Path,
+            operation_prefix: str,
+        ) -> bool:
+            """Test helper for repair hooks path config."""
+            del git_args, config_scope_args, config_path
+            repair_prefixes.append(operation_prefix)
+            return False
+
+        async def _run_git_worktree_prune(path: Path) -> None:
+            """Test helper for run git worktree prune."""
+            nonlocal prune_calls
+            prune_calls += 1
+            assert path == mirror
+            shutil.rmtree(linked_git_dir)
+
+        monkeypatch.setattr(git_module, "_repair_hooks_path_config", _repair_hooks_path_config)
+        monkeypatch.setattr(git_module, "_run_git_worktree_prune", _run_git_worktree_prune)
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is False
+        assert prune_calls == 1
+        assert repair_prefixes == ["mirror", "mirror"]
+
+    @pytest.mark.unit
     async def test_removes_worktree_include_exposing_poisoned_hooks_path(
         self, tmp_path: Path
     ) -> None:
+        """Verify removes worktree include exposing poisoned hooks path."""
         mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
         subprocess.run(
             ["git", "-C", str(worktree), "config", "extensions.worktreeConfig", "true"],
@@ -1175,6 +1333,7 @@ class TestRepairMirrorHooksPath:
     async def test_treats_concurrent_hooks_path_cleanup_as_success(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify treats concurrent hooks path cleanup as success."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -1211,233 +1370,3 @@ class TestRepairMirrorHooksPath:
             text=True,
         )
         assert check.returncode != 0
-
-    @pytest.mark.unit
-    async def test_ignores_git_object_lookup_envs_for_config_repair(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        mirror = tmp_path / "mirror.git"
-        mirror.mkdir()
-        subprocess.run(
-            ["git", "init", "--bare", str(mirror)],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "--git-dir", str(mirror), "config", "core.hooksPath", "/dev/null"],
-            check=True,
-            capture_output=True,
-        )
-        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "")
-        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "")
-
-        result = await git_module.repair_mirror_hooks_path(mirror)
-
-        assert result is True
-        check = subprocess.run(
-            ["git", "--git-dir", str(mirror), "config", "--local", "core.hooksPath"],
-            capture_output=True,
-            text=True,
-        )
-        assert check.returncode != 0
-
-    @pytest.mark.unit
-    async def test_noop_when_hooks_path_not_set(self, tmp_path: Path) -> None:
-        mirror = tmp_path / "mirror.git"
-        mirror.mkdir()
-        subprocess.run(
-            ["git", "init", "--bare", str(mirror)],
-            check=True,
-            capture_output=True,
-        )
-
-        result = await git_module.repair_mirror_hooks_path(mirror)
-
-        assert result is False
-
-    @pytest.mark.unit
-    async def test_repair_fails_when_poisoned_hooks_origin_is_unmapped(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        config_path = tmp_path / "mirror.git" / "config"
-        config_path.parent.mkdir()
-        probe_value = git_module._HooksPathConfigValue(  # noqa: SLF001
-            hooks_path="/dev/null",
-            origin_path=None,
-        )
-
-        async def _probe_hooks_path_config(**_kwargs: object) -> tuple[object, ...]:
-            return (probe_value,)
-
-        monkeypatch.setattr(git_module, "_probe_hooks_path_config", _probe_hooks_path_config)
-
-        with pytest.raises(git_module.GitOperationError) as raised:
-            await git_module._repair_hooks_path_config(  # noqa: SLF001
-                git_args=("--git-dir", str(config_path.parent)),
-                config_scope_args=("--local",),
-                config_path=config_path,
-                operation_prefix="mirror",
-            )
-
-        assert raised.value.operation == "mirror.hooks_path_include_repair"
-        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
-        assert raised.value.stdout == "/dev/null"
-        assert "origin is not directly included" in raised.value.stderr
-
-    @pytest.mark.unit
-    async def test_repair_fails_when_include_path_probe_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        config_path = tmp_path / "mirror.git" / "config"
-        config_path.parent.mkdir()
-
-        async def _run_git_config(**_kwargs: object) -> tuple[int, str, str]:
-            return 2, "", "config read failed"
-
-        monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
-
-        with pytest.raises(git_module.GitOperationError) as raised:
-            await git_module._unset_matching_include_path(  # noqa: SLF001
-                git_args=("--git-dir", str(config_path.parent)),
-                config_scope_args=("--local",),
-                config_path=config_path,
-                included_origin=tmp_path / "included-hooks.conf",
-                operation_prefix="mirror",
-            )
-
-        assert raised.value.operation == "mirror.hooks_path_include_probe"
-        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
-        assert raised.value.returncode == 2
-        assert raised.value.stderr == "config read failed"
-
-    @pytest.mark.unit
-    async def test_repair_fails_when_includeif_probe_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        config_path = tmp_path / "mirror.git" / "config"
-        config_path.parent.mkdir()
-        calls: list[tuple[str, ...]] = []
-
-        async def _run_git_config(
-            *, args: tuple[str, ...], **_kwargs: object
-        ) -> tuple[int, str, str]:
-            calls.append(args)
-            if args == ("--get-all", "include.path"):
-                return 1, "", ""
-            return 2, "", "includeIf probe failed"
-
-        monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
-
-        with pytest.raises(git_module.GitOperationError) as raised:
-            await git_module._unset_matching_include_path(  # noqa: SLF001
-                git_args=("--git-dir", str(config_path.parent)),
-                config_scope_args=("--local",),
-                config_path=config_path,
-                included_origin=tmp_path / "included-hooks.conf",
-                operation_prefix="mirror",
-            )
-
-        assert calls == [
-            ("--get-all", "include.path"),
-            ("--get-regexp", r"^includeIf\..*\.path$"),
-        ]
-        assert raised.value.operation == "mirror.hooks_path_include_probe"
-        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
-        assert raised.value.returncode == 2
-        assert raised.value.stderr == "includeIf probe failed"
-
-    @pytest.mark.unit
-    async def test_repair_ignores_malformed_includeif_probe_line(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        config_path = tmp_path / "mirror.git" / "config"
-        config_path.parent.mkdir()
-
-        async def _run_git_config(
-            *, args: tuple[str, ...], **_kwargs: object
-        ) -> tuple[int, str, str]:
-            if args == ("--get-all", "include.path"):
-                return 1, "", ""
-            if args == ("--get-regexp", r"^includeIf\..*\.path$"):
-                return 0, "includeIf.gitdir:bad.path\n", ""
-            raise AssertionError(f"unexpected git config args: {args!r}")
-
-        monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
-
-        removed = await git_module._unset_matching_include_path(  # noqa: SLF001
-            git_args=("--git-dir", str(config_path.parent)),
-            config_scope_args=("--local",),
-            config_path=config_path,
-            included_origin=tmp_path / "included-hooks.conf",
-            operation_prefix="mirror",
-        )
-
-        assert removed is False
-
-    @pytest.mark.unit
-    async def test_repair_fails_when_matching_include_unset_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        config_path = tmp_path / "mirror.git" / "config"
-        config_path.parent.mkdir()
-        included_config = tmp_path / "included-hooks.conf"
-        included_config.write_text("[core]\n\thooksPath = /dev/null\n", encoding="utf-8")
-
-        async def _run_git_config(
-            *, args: tuple[str, ...], **_kwargs: object
-        ) -> tuple[int, str, str]:
-            if args == ("--get-all", "include.path"):
-                return 0, f"not-it.conf\n{included_config}\n", ""
-            if args == ("--get-regexp", r"^includeIf\..*\.path$"):
-                return 1, "", ""
-            assert args[0] == "--unset-all"
-            return 2, "", "include unset failed"
-
-        monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
-
-        with pytest.raises(git_module.GitOperationError) as raised:
-            await git_module._unset_matching_include_path(  # noqa: SLF001
-                git_args=("--git-dir", str(config_path.parent)),
-                config_scope_args=("--local",),
-                config_path=config_path,
-                included_origin=included_config,
-                operation_prefix="mirror",
-            )
-
-        assert raised.value.operation == "mirror.hooks_path_include_repair"
-        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
-        assert raised.value.returncode == 2
-        assert raised.value.stderr == "include unset failed"
-
-    @pytest.mark.unit
-    async def test_repair_fails_when_hooks_path_unset_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        config_path = tmp_path / "mirror.git" / "config"
-        config_path.parent.mkdir()
-        probe_value = git_module._HooksPathConfigValue(  # noqa: SLF001
-            hooks_path="/dev/null",
-            origin_path=config_path,
-        )
-
-        async def _probe_hooks_path_config(**_kwargs: object) -> tuple[object, ...]:
-            return (probe_value,)
-
-        async def _run_git_config(**_kwargs: object) -> tuple[int, str, str]:
-            return 2, "", "hooksPath unset failed"
-
-        monkeypatch.setattr(git_module, "_probe_hooks_path_config", _probe_hooks_path_config)
-        monkeypatch.setattr(git_module, "_run_git_config", _run_git_config)
-
-        with pytest.raises(git_module.GitOperationError) as raised:
-            await git_module._repair_hooks_path_config(  # noqa: SLF001
-                git_args=("--git-dir", str(config_path.parent)),
-                config_scope_args=("--local",),
-                config_path=config_path,
-                operation_prefix="mirror",
-            )
-
-        assert raised.value.operation == "mirror.hooks_path_repair"
-        assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
-        assert raised.value.returncode == 2
-        assert raised.value.stderr == "hooksPath unset failed"

@@ -74,6 +74,7 @@ async def test_failing_check_logs_pipeline_chain() -> None:
 
 
 async def test_failing_check_logs_no_failed_statuses_returns_empty() -> None:
+    """Verify failing check logs no failed statuses returns empty."""
     fake = FakeBitbucket()
     fake.page(
         "GET",
@@ -85,7 +86,22 @@ async def test_failing_check_logs_no_failed_statuses_returns_empty() -> None:
     assert failures == ()
 
 
+async def test_failing_check_logs_pending_status_marks_runs_in_progress_without_failures() -> None:
+    """Verify failing check logs pending status marks runs in progress without failures."""
+    fake = FakeBitbucket()
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "PENDING", "name": "queued"}],
+    )
+    client = make_client(fake)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert failures.failures == ()
+    assert failures.runs_in_progress is True
+
+
 async def test_failing_check_logs_external_status_falls_back_to_pytest() -> None:
+    """Verify failing check logs external status falls back to pytest."""
     fake = FakeBitbucket()
     fake.page(
         "GET",
@@ -107,7 +123,26 @@ async def test_failing_check_logs_external_status_falls_back_to_pytest() -> None
     assert failures[0].evidence_warnings  # surfaced the no-log fallback warning
 
 
+async def test_failing_external_status_does_not_wait_for_active_sibling() -> None:
+    """Verify failing external status does not wait for active sibling."""
+    fake = FakeBitbucket()
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[
+            {"state": "FAILED", "name": "external-linter"},
+            {"state": "INPROGRESS", "name": "integration"},
+        ],
+    )
+    fake.page("GET", _PIPELINES, values=[])  # no pipeline -> external status
+    client = make_client(fake)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert [failure.name for failure in failures] == ["external-linter"]
+    assert failures.runs_in_progress is False
+
+
 async def test_failing_check_logs_pipeline_without_failing_step_falls_back() -> None:
+    """Verify failing check logs pipeline without failing step falls back."""
     fake = FakeBitbucket()
     fake.page(
         "GET",
@@ -124,6 +159,29 @@ async def test_failing_check_logs_pipeline_without_failing_step_falls_back() -> 
     failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
     assert len(failures) == 1
     assert failures[0].run_id is None  # external fallback path
+
+
+async def test_failing_pipeline_fallback_does_not_wait_for_active_sibling() -> None:
+    """Verify failing pipeline fallback does not wait for active sibling."""
+    fake = FakeBitbucket()
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[
+            {"state": "FAILED", "name": "Pipeline #5"},
+            {"state": "PENDING", "name": "integration"},
+        ],
+    )
+    fake.page("GET", _PIPELINES, values=[{"uuid": "pipe-1"}])
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/",
+        values=[{"uuid": "s1", "name": "Build", "state": {"result": {"name": "SUCCESSFUL"}}}],
+    )
+    client = make_client(fake)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert [failure.name for failure in failures] == ["Pipeline #5"]
+    assert failures.runs_in_progress is False
 
 
 async def test_failing_check_logs_stopped_pipeline_step_keeps_log_evidence() -> None:
@@ -210,6 +268,34 @@ async def test_failing_check_logs_surfaces_external_status_alongside_failing_ste
     assert by_name["Test"].run_id == "pipe-1"  # pipeline step keeps its log evidence
     assert by_name["external-linter"].run_id is None  # external status, no pipeline log
     assert by_name["external-linter"].log_excerpt == ""
+
+
+async def test_failing_pipeline_steps_do_not_wait_for_active_sibling() -> None:
+    """Verify failing pipeline steps do not wait for active sibling."""
+    fake = FakeBitbucket()
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[
+            {"state": "FAILED", "name": "Pipeline #5", "key": "PIPELINE"},
+            {"state": "INPROGRESS", "name": "integration"},
+        ],
+    )
+    fake.page("GET", _PIPELINES, values=[{"uuid": "pipe-1", "state": {"name": "COMPLETED"}}])
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/",
+        values=[{"uuid": "step-2", "name": "Test", "state": {"result": {"name": "FAILED"}}}],
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/step-2/log",
+        text="FAILED tests/test_x.py::test_y\n",
+    )
+    client = make_client(fake)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert [failure.name for failure in failures] == ["Test"]
+    assert failures.runs_in_progress is False
 
 
 async def test_failing_check_logs_skips_pipeline_status_identified_by_url() -> None:

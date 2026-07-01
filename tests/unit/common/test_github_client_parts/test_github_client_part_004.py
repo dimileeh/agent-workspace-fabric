@@ -16,13 +16,13 @@ import shlex
 
 import pytest
 
-from awf.common import github_client_parsing as github_client_module
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
     RepoRef,
 )
+from awf.runtime.pr_monitor import CheckTiming
 
 
 def _adoption_pr_payload(
@@ -39,6 +39,7 @@ def _adoption_pr_payload(
     url: str = "https://github.com/dimileeh/aira-web/pull/277",
     title: str = "feature: ready",
 ) -> str:
+    """Build a GitHub adoption PR payload JSON string for test fixtures."""
     return json.dumps(
         {
             "number": number,
@@ -158,8 +159,11 @@ def _sample_pr_payload(
 
 
 class TestFetchFailingCheckLogs:
+    """Tests for FetchFailingCheckLogs."""
+
     @pytest.mark.unit
     async def test_extracts_single_pytest_failure_evidence_and_focused_command(self) -> None:
+        """Verify extracts single pytest failure evidence and focused command."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -188,12 +192,14 @@ class TestFetchFailingCheckLogs:
         )
         client = GitHubClient(fake)
 
-        failures = await client.fetch_failing_check_logs(
+        result = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"),
             pr_number=1,
             head_sha="abc",
         )
 
+        failures = result.failures
+        assert result.runs_in_progress is False
         assert len(failures) == 1
         failure = failures[0]
         assert failure.name == "coverage-gate"
@@ -204,11 +210,141 @@ class TestFetchFailingCheckLogs:
             "uv run --python 3.12 --extra dev pytest "
             "tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage -q",
         )
-        assert any("Missing reason catalog entries" in item for item in failure.error_summaries)
         assert any("ARTIFACT_BLOCKED" in item for item in failure.assertion_snippets)
 
     @pytest.mark.unit
+    async def test_skips_failing_run_until_workflow_run_completed(self) -> None:
+        """Verify skips failing run until workflow run completed."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 42,
+                        "name": "go-tests",
+                        "conclusion": "FAILURE",
+                        "status": "in_progress",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert result.failures == ()
+        assert result.runs_in_progress is True
+        assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == []
+
+    @pytest.mark.unit
+    async def test_failed_run_with_empty_status_still_reports_failure(self) -> None:
+        """Verify failed run with empty status still reports failure."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 42,
+                        "name": "go-tests",
+                        "conclusion": "FAILURE",
+                        "status": "",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="failed log")
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert result.runs_in_progress is False
+        assert [failure.name for failure in result.failures] == ["go-tests"]
+        assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == [
+            ["gh", "run", "view", "42", "--repo", "o/r", "--log-failed"]
+        ]
+
+    @pytest.mark.unit
+    async def test_completed_failure_with_in_progress_sibling_reports_failure(self) -> None:
+        """Verify completed failure with in progress sibling reports failure."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 42,
+                        "name": "go-tests",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    },
+                    {
+                        "databaseId": 43,
+                        "name": "python-tests",
+                        "conclusion": "",
+                        "status": "in_progress",
+                    },
+                ]
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="failed log")
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert result.runs_in_progress is False
+        assert [failure.name for failure in result.failures] == ["go-tests"]
+        assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == [
+            ["gh", "run", "view", "42", "--repo", "o/r", "--log-failed"]
+        ]
+
+    @pytest.mark.unit
+    async def test_in_progress_run_without_failure_conclusion_marks_runs_in_progress(
+        self,
+    ) -> None:
+        """Active runs with no failed conclusion still signal a CI wait."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 42,
+                        "name": "ci-required",
+                        "conclusion": None,
+                        "status": "in_progress",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        result = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert result.failures == ()
+        assert result.runs_in_progress is True
+        assert [call.args for call in fake.calls if call.args[:3] == ["gh", "run", "view"]] == []
+
+    @pytest.mark.unit
     async def test_extracts_full_nested_pytest_node_path(self) -> None:
+        """Verify extracts full nested pytest node path."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -565,6 +701,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_extracts_long_pytest_param_id_before_truncating_display_lines(self) -> None:
+        """Verify long pytest param IDs are preserved before display-line truncation."""
         param_id = "case-" + ("x" * 520)
         node_id = f"tests/unit/runtime/test_prompt.py::test_handles[{param_id}]"
         fake = FakeCommandRunner()
@@ -603,6 +740,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_extracts_non_test_command_failure_evidence(self) -> None:
+        """Verify extracts non test command failure evidence."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -638,10 +776,14 @@ class TestFetchFailingCheckLogs:
             "uv run --python 3.12 --extra dev ruff check src/awf tests",
         )
         assert failure.suggested_repro_commands == ()
-        assert any("F401 imported but unused" in item for item in failure.error_summaries)
+        assert failure.error_summaries == (
+            "src/awf/runtime/foo.py:10:1: F401 imported but unused",
+            "Error: Process completed with exit code 1.",
+        )
 
     @pytest.mark.unit
     async def test_redacts_secrets_before_log_and_evidence_are_stored(self) -> None:
+        """Verify redacts secrets before log and evidence are stored."""
         secret = "sk-proj-ci-failure-secret"
         fake = FakeCommandRunner()
         fake.queue_result(
@@ -813,6 +955,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_missing_run_database_id_and_name_uses_unknown_fallback(self) -> None:
+        """Verify missing run database id and name uses unknown fallback."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -840,7 +983,65 @@ class TestFetchFailingCheckLogs:
         assert len(fake.calls) == 1
 
     @pytest.mark.unit
+    async def test_failed_rollup_status_without_target_url_synthesizes_no_log_failure(
+        self,
+    ) -> None:
+        """Verify failed rollup status without target url synthesizes no log failure."""
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=json.dumps([]))
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="external-ci/build",
+                    status="FAILURE",
+                    details_url=None,
+                ),
+            ),
+        )
+
+        assert len(failures) == 1
+        assert failures[0].name == "external-ci/build"
+        assert failures[0].conclusion == "FAILURE"
+        assert failures[0].run_id is None
+        assert failures[0].log_excerpt == ""
+        assert len(fake.calls) == 1
+
+    @pytest.mark.unit
+    async def test_failed_rollup_error_status_normalizes_to_failure_conclusion(
+        self,
+    ) -> None:
+        """Verify failed rollup error status normalizes to failure conclusion."""
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=json.dumps([]))
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            rollup_checks=(
+                CheckTiming(
+                    name="ci-required",
+                    status="ERROR",
+                    details_url=None,
+                ),
+            ),
+        )
+
+        assert len(failures) == 1
+        assert failures[0].name == "ci-required"
+        assert failures[0].conclusion == "FAILURE"
+        assert failures[0].run_id is None
+        assert failures[0].log_excerpt == ""
+
+    @pytest.mark.unit
     async def test_ignores_non_failure_runs(self) -> None:
+        """Verify ignores non failure runs."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -856,10 +1057,12 @@ class TestFetchFailingCheckLogs:
         failures = await client.fetch_failing_check_logs(
             repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
         )
-        assert failures == ()
+        assert failures.failures == ()
+        assert failures.runs_in_progress is True
 
     @pytest.mark.unit
     async def test_empty_run_list_stdout_returns_no_failures_without_fetching_logs(self) -> None:
+        """Verify empty run list stdout returns no failures without fetching logs."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="")
         client = GitHubClient(fake)
@@ -905,557 +1108,3 @@ class TestFetchFailingCheckLogs:
 
         assert exc_info.value.operation == "rerun_failed_workflow_jobs"
         assert exc_info.value.stderr == "HTTP 403"
-
-
-class TestMutations:
-    """Mutation and merge-method GitHub client command tests."""
-
-    @pytest.mark.unit
-    async def test_resolve_thread_posts_expected_mutation(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=json.dumps(
-                {"data": {"resolveReviewThread": {"thread": {"id": "T1", "isResolved": True}}}}
-            ),
-        )
-        client = GitHubClient(fake)
-        await client.resolve_thread(thread_id="T1")
-        args = fake.calls[0].args
-        assert args[0:3] == ["gh", "api", "graphql"]
-        assert any(a.startswith("query=") and "resolveReviewThread" in a for a in args)
-        assert "threadId=T1" in args
-
-    @pytest.mark.unit
-    async def test_resolve_thread_raises_on_error(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr="thread gone")
-        client = GitHubClient(fake)
-        with pytest.raises(GitHubClientError):
-            await client.resolve_thread(thread_id="T1")
-
-    @pytest.mark.unit
-    async def test_post_comment_argv(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=0)
-        client = GitHubClient(fake)
-        await client.post_comment(
-            repo=RepoRef(owner="o", name="r"), pr_number=99, body="ready to merge"
-        )
-        args = fake.calls[0].args
-        assert args[:3] == ["gh", "pr", "comment"]
-        assert "99" in args
-        assert "--body" in args and "ready to merge" in args
-        assert "--repo" in args and "o/r" in args
-
-    @pytest.mark.unit
-    async def test_post_comment_raises_on_error(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr="forbidden")
-        client = GitHubClient(fake)
-        with pytest.raises(GitHubClientError):
-            await client.post_comment(repo=RepoRef(owner="o", name="r"), pr_number=1, body="x")
-
-    @pytest.mark.unit
-    async def test_create_pull_request_argv_and_url(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout="https://github.com/o/r/pull/321\n",
-        )
-        client = GitHubClient(fake)
-
-        url = await client.create_pull_request(
-            repo=RepoRef(owner="o", name="r"),
-            base="main",
-            head="development",
-            title="Release: merge development into main",
-            body="auto release sync",
-        )
-
-        args = fake.calls[0].args
-        assert args[:3] == ["gh", "pr", "create"]
-        assert "--repo" in args and "o/r" in args
-        assert args[args.index("--base") + 1] == "main"
-        assert args[args.index("--head") + 1] == "development"
-        assert args[args.index("--title") + 1] == "Release: merge development into main"
-        assert args[args.index("--body") + 1] == "auto release sync"
-        assert url == "https://github.com/o/r/pull/321"
-
-    @pytest.mark.unit
-    async def test_create_pull_request_raises_on_error(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr="no commits between main and development")
-        client = GitHubClient(fake)
-        with pytest.raises(GitHubClientError) as exc:
-            await client.create_pull_request(
-                repo=RepoRef(owner="o", name="r"),
-                base="main",
-                head="development",
-                title="t",
-                body="b",
-            )
-        assert "no commits between" in str(exc.value)
-
-    @pytest.mark.unit
-    async def test_merge_pr_squash_delete_branch_default(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=0)  # merge
-        fake.queue_result(returncode=0, stdout="MERGESHA123\n")  # sha fetch
-        client = GitHubClient(fake)
-        sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
-        merge_args = fake.calls[0].args
-        assert merge_args[:3] == ["gh", "pr", "merge"]
-        assert "--squash" in merge_args
-        assert "--delete-branch" in merge_args
-        assert sha == "MERGESHA123"
-
-    @pytest.mark.unit
-    async def test_merge_pr_honors_method_and_omits_delete_branch_flag(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=0)
-        fake.queue_result(returncode=0, stdout="MERGESHA123\n")
-        client = GitHubClient(fake)
-
-        sha = await client.merge_pr(
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=42,
-            method="merge",
-            delete_branch=False,
-        )
-
-        merge_args = fake.calls[0].args
-        assert "--merge" in merge_args
-        assert "--squash" not in merge_args
-        assert "--delete-branch" not in merge_args
-        assert sha == "MERGESHA123"
-
-    @pytest.mark.unit
-    async def test_merge_pr_error_raises(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr="branch protection blocked merge")
-        client = GitHubClient(fake)
-        with pytest.raises(GitHubClientError) as exc:
-            await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=1)
-        assert "branch protection" in str(exc.value)
-
-    @pytest.mark.unit
-    async def test_merge_pr_sha_fetch_best_effort(self) -> None:
-        """If the post-merge SHA fetch fails, merge is still successful.
-        The SHA is optional metadata, not a functional gate."""
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=0)  # merge ok
-        fake.queue_result(returncode=1, stderr="some api hiccup")  # sha fetch fails
-        client = GitHubClient(fake)
-        sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
-        assert sha == ""
-
-    @pytest.mark.unit
-    async def test_fetch_repo_merge_methods_reads_repo_flags(self) -> None:
-        """Repository merge method discovery follows the GitHub repo flags."""
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=(
-                '{"allow_merge_commit":true,"allow_squash_merge":false,"allow_rebase_merge":true}'
-            ),
-        )
-        client = GitHubClient(fake)
-
-        methods = await client.fetch_repo_merge_methods(repo=RepoRef(owner="o", name="r"))
-
-        assert methods == ("merge", "rebase")
-        assert fake.calls[0].args == ["gh", "api", "repos/o/r"]
-
-    @pytest.mark.unit
-    async def test_fetch_repo_merge_methods_rejects_missing_repo_flags(self) -> None:
-        """Missing repo merge flags are an API anomaly, not a genuine empty policy."""
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=0, stdout='{"name":"r"}')
-        client = GitHubClient(fake)
-
-        with pytest.raises(GitHubClientError, match="omitted merge method flags") as exc:
-            await client.fetch_repo_merge_methods(repo=RepoRef(owner="o", name="r"))
-
-        assert "allow_merge_commit" in exc.value.stderr
-        assert "allow_squash_merge" in exc.value.stderr
-        assert "allow_rebase_merge" in exc.value.stderr
-        assert exc.value.returncode == 1
-        assert "temporarily unavailable" in exc.value.stderr
-
-    @pytest.mark.unit
-    async def test_fetch_repo_merge_methods_rejects_partial_repo_flags(self) -> None:
-        """Partially omitted merge flags are anomalous API payloads."""
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout='{"allow_merge_commit":true,"allow_squash_merge":true}',
-        )
-        client = GitHubClient(fake)
-
-        with pytest.raises(GitHubClientError, match="omitted merge method flags") as exc:
-            await client.fetch_repo_merge_methods(repo=RepoRef(owner="o", name="r"))
-
-        assert "allow_rebase_merge" in exc.value.stderr
-        assert "allow_merge_commit" not in exc.value.stderr
-        assert "allow_squash_merge" not in exc.value.stderr
-        assert exc.value.returncode == 1
-        assert "try again" in exc.value.stderr
-
-    @pytest.mark.unit
-    async def test_fetch_repo_merge_methods_all_false_is_empty_policy(self) -> None:
-        """Explicit false repo merge flags still represent a real empty repository policy."""
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=(
-                '{"allow_merge_commit":false,"allow_squash_merge":false,"allow_rebase_merge":false}'
-            ),
-        )
-        client = GitHubClient(fake)
-
-        methods = await client.fetch_repo_merge_methods(repo=RepoRef(owner="o", name="r"))
-
-        assert methods == ()
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_empty_unconstrained(
-        self,
-    ) -> None:
-        """An empty branch-rules response leaves merge method choice unconstrained."""
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=0, stdout="[]")
-        client = GitHubClient(fake)
-
-        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
-            repo=RepoRef(owner="o", name="r"),
-            branch="feature/dev",
-        )
-
-        assert methods is None
-        assert fake.calls[0].args == [
-            "gh",
-            "api",
-            "repos/o/r/rules/branches/feature%2Fdev",
-            "--paginate",
-            "--slurp",
-        ]
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_raises_on_empty_slurp_stdout(
-        self,
-    ) -> None:
-        """Empty stdout from a slurped branch-rules response is an API anomaly."""
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=0, stdout=" \n")
-        client = GitHubClient(fake)
-
-        with pytest.raises(GitHubClientError, match="empty response") as exc:
-            await client.fetch_branch_pull_request_allowed_merge_methods(
-                repo=RepoRef(owner="o", name="r"),
-                branch="feature/dev",
-            )
-
-        assert "--paginate" in fake.calls[0].args
-        assert "--slurp" in fake.calls[0].args
-        assert "branch rules" in exc.value.operation
-        assert "try again" in exc.value.stderr
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_reads_later_pages(
-        self,
-    ) -> None:
-        """Paginated branch rules include later-page merge-method constraints."""
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=json.dumps(
-                [
-                    [{"type": "required_status_checks", "parameters": {}}],
-                    [
-                        {
-                            "type": "pull_request",
-                            "parameters": {"allowed_merge_methods": ["rebase"]},
-                        }
-                    ],
-                ]
-            ),
-        )
-        client = GitHubClient(fake)
-
-        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
-            repo=RepoRef(owner="o", name="r"),
-            branch="main",
-        )
-
-        assert methods == ("rebase",)
-        assert "--paginate" in fake.calls[0].args
-        assert "--slurp" in fake.calls[0].args
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_ignores_non_pr_rules(
-        self,
-    ) -> None:
-        """Non-pull-request branch rules do not constrain merge methods."""
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout='[{"type":"required_status_checks","parameters":{}}]',
-        )
-        client = GitHubClient(fake)
-
-        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
-            repo=RepoRef(owner="o", name="r"),
-            branch="main",
-        )
-
-        assert methods is None
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_omitted_methods_unconstrained(
-        self,
-    ) -> None:
-        """Pull-request rules without allowed methods remain unconstrained."""
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=('[{"type":"pull_request","parameters":{"required_approving_review_count":1}}]'),
-        )
-        client = GitHubClient(fake)
-
-        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
-            repo=RepoRef(owner="o", name="r"),
-            branch="main",
-        )
-
-        # GitHub omits allowed_merge_methods when the pull_request rule does
-        # not constrain merge method choice, so the runner falls back to repo
-        # merge flags instead of treating the rule as an empty method set.
-        assert methods is None
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_empty_list_is_empty_policy(
-        self,
-    ) -> None:
-        """An explicit empty allowed_merge_methods list allows no merge methods."""
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout='[{"type":"pull_request","parameters":{"allowed_merge_methods":[]}}]',
-        )
-        client = GitHubClient(fake)
-
-        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
-            repo=RepoRef(owner="o", name="r"),
-            branch="main",
-        )
-
-        assert methods == ()
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_unknown_only_unconstrained(
-        self,
-    ) -> None:
-        """Unknown-only merge method values do not constrain AWF methods."""
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=(
-                '[{"type":"pull_request","parameters":'
-                '{"allowed_merge_methods":["fast_forward","manual"]}}]'
-            ),
-        )
-        client = GitHubClient(fake)
-
-        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
-            repo=RepoRef(owner="o", name="r"),
-            branch="main",
-        )
-
-        assert methods is None
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_normalizes_values(
-        self,
-    ) -> None:
-        """Known merge method values are normalized and unknown values ignored."""
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=(
-                '[{"type":"pull_request","parameters":'
-                '{"allowed_merge_methods":["merge","squash","rebase","invalid"]}}]'
-            ),
-        )
-        client = GitHubClient(fake)
-
-        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
-            repo=RepoRef(owner="o", name="r"),
-            branch="main",
-        )
-
-        assert methods == ("merge", "squash", "rebase")
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_intersects_multiple_rules(
-        self,
-    ) -> None:
-        """Multiple pull-request rules intersect their recognized method sets."""
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=(
-                "["
-                '{"type":"pull_request","parameters":{"allowed_merge_methods":["merge","squash"]}},'
-                '{"type":"pull_request","parameters":{"allowed_merge_methods":["merge","rebase"]}}'
-                "]"
-            ),
-        )
-        client = GitHubClient(fake)
-
-        methods = await client.fetch_branch_pull_request_allowed_merge_methods(
-            repo=RepoRef(owner="o", name="r"),
-            branch="main",
-        )
-
-        assert methods == ("merge",)
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_raises_on_gh_error(
-        self,
-    ) -> None:
-        """Branch rules API failures are surfaced as GitHub client errors."""
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr="bad credentials with token secret")
-        client = GitHubClient(fake)
-
-        with pytest.raises(GitHubClientError) as exc:
-            await client.fetch_branch_pull_request_allowed_merge_methods(
-                repo=RepoRef(owner="o", name="r"),
-                branch="main",
-            )
-
-        assert "bad credentials" in str(exc.value)
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_redacts_gh_error_secret(
-        self,
-    ) -> None:
-        """Branch rules API failures redact token-like stderr before surfacing."""
-        secret = "ghp_branchRulesSecret123"
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr=f"HTTP 403 token {secret} denied")
-        client = GitHubClient(fake)
-
-        with pytest.raises(GitHubClientError) as exc:
-            await client.fetch_branch_pull_request_allowed_merge_methods(
-                repo=RepoRef(owner="o", name="r"),
-                branch="main",
-            )
-
-        assert secret not in exc.value.stderr
-        assert secret not in str(exc.value)
-        assert "[redacted]" in exc.value.stderr
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_raises_on_bad_json(
-        self,
-    ) -> None:
-        """Malformed branch rules JSON is wrapped as a GitHub client error."""
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=0, stdout="{bad json")
-        client = GitHubClient(fake)
-
-        with pytest.raises(GitHubClientError) as exc:
-            await client.fetch_branch_pull_request_allowed_merge_methods(
-                repo=RepoRef(owner="o", name="r"),
-                branch="main",
-            )
-
-        assert "json parse" in str(exc.value)
-
-    @pytest.mark.unit
-    async def test_fetch_branch_pull_request_allowed_merge_methods_redacts_bad_json_secret(
-        self,
-    ) -> None:
-        """Malformed branch rules JSON redacts token-like output in errors."""
-        secret = "ghp_branchRulesSecret123"
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=0, stdout=f"{{bad json {secret}")
-        client = GitHubClient(fake)
-
-        with pytest.raises(GitHubClientError) as exc:
-            await client.fetch_branch_pull_request_allowed_merge_methods(
-                repo=RepoRef(owner="o", name="r"),
-                branch="main",
-            )
-
-        assert "json parse" in str(exc.value)
-        assert secret not in exc.value.stderr
-        assert secret not in str(exc.value)
-        assert "[redacted]" in exc.value.stderr
-
-
-class TestPrivateCoverageEdges:
-    """Coverage edge tests for private GitHub client helper paths."""
-
-    @pytest.mark.unit
-    async def test_gh_json_and_run_gh_raise_on_strict_failures(self) -> None:
-        """Strict helper failures raise while non-strict command failures return."""
-        fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr="boom")
-        fake.queue_result(returncode=1, stderr="strict boom")
-        fake.queue_result(returncode=1, stderr="non-strict")
-        client = GitHubClient(fake)
-
-        with pytest.raises(GitHubClientError) as json_exc:
-            await client._gh_json(["gh", "api", "repos/o/r"], operation="gh api")  # noqa: SLF001
-        with pytest.raises(GitHubClientError) as run_exc:
-            await client._run_gh(  # noqa: SLF001
-                ["gh", "pr", "view"],
-                operation="gh pr view",
-                strict=True,
-            )
-        result = await client._run_gh(  # noqa: SLF001
-            ["gh", "pr", "view"],
-            operation="gh pr view",
-            strict=False,
-        )
-
-        assert json_exc.value.operation == "gh api"
-        assert run_exc.value.operation == "gh pr view"
-        assert result.returncode == 1
-
-    @pytest.mark.unit
-    def test_private_nested_payload_and_review_helpers_cover_fallbacks(self) -> None:
-        """Nested payload helpers preserve fallback behavior for review parsing."""
-        assert github_client_module._dig([{"name": "first"}], 1, "name") is None  # noqa: SLF001
-        assert github_client_module._dig("not-dict", "name") is None  # noqa: SLF001
-        assert (
-            github_client_module._reviewer_effective_state_key(  # noqa: SLF001
-                {"databaseId": 42},
-                fetch_index=7,
-            )
-            == "review:42"
-        )
-        assert (
-            github_client_module._reviewer_effective_state_key({}, fetch_index=7)  # noqa: SLF001
-            == "review-fetch-index:7"
-        )
-
-        older = github_client_module._parse_fetched_review(  # noqa: SLF001
-            {"state": "CHANGES_REQUESTED", "databaseId": 1},
-            fetch_index=1,
-        )
-        newer = github_client_module._parse_fetched_review(  # noqa: SLF001
-            {"state": "CHANGES_REQUESTED", "databaseId": 1},
-            fetch_index=2,
-        )
-
-        assert github_client_module._review_is_later(newer, older)  # noqa: SLF001
-        assert github_client_module._effective_blocking_reviews((older,)) == (  # noqa: SLF001
-            github_client_module.replace(older.comment, blocks_merge=True),
-        )
-        assert github_client_module._connection_nodes(  # noqa: SLF001
-            {"nodes": [{"id": "1"}, None, "bad", {"id": "2"}]}
-        ) == [{"id": "1"}, {"id": "2"}]

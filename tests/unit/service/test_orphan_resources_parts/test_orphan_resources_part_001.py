@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from awf.service import orphan_resources
+from awf.service.orphan_resource_types import Classification as ExtractedClassification
 from awf.service.orphan_resources import (
     DetectedResource,
     ResourceScan,
@@ -52,6 +53,7 @@ def _ok_view(
     terminal: set[str] | None = None,
     retained: set[str] | None = None,
 ) -> WorkspaceIdView:
+    """Build a workspace ID view with optional active, terminal, and retained sets."""
     return WorkspaceIdView(
         active_ids=frozenset(active or set()),
         terminal_ids=frozenset(terminal or set()),
@@ -61,7 +63,16 @@ def _ok_view(
 
 
 @pytest.mark.unit
+def test_orphan_resources_reexports_classification_type() -> None:
+    """Verify orphan resources reexports classification type."""
+    from awf.service.orphan_resources import Classification
+
+    assert Classification is ExtractedClassification
+
+
+@pytest.mark.unit
 def test_orphan_resource_to_utc_accepts_naive_datetime() -> None:
+    """Verify orphan resource to utc accepts naive datetime."""
     naive = datetime(2026, 5, 7, 14, 15)
 
     assert orphan_resources._to_utc(naive) == naive.replace(tzinfo=orphan_resources.UTC)
@@ -1219,9 +1230,26 @@ def test_workspace_id_from_managed_volume_name_covers_legacy_name_shapes() -> No
     assert f("awf-ws_abc123-postgres_data") == "ws_abc123"  # hyphen-delimited tail
     assert f("awf_ws_abc123_postgres_data") == "ws_abc123"  # underscore walk breaks at "_"
     assert f("awf-ws_abc123") == "ws_abc123"  # bare tail: the walk completes with no break
+    assert f("awf_ws_abc123") == "ws_abc123"  # underscore prefix + bare tail
+    assert f("awf-ws_abc123.extra") == "ws_abc123"  # walk stops at punctuation
     assert f("some-other-volume") is None  # no awf managed prefix -> tail is None
     assert f("awf-notaworkspace") is None  # awf prefix but the tail is not a ws_ id
+    assert f("awf_ws_") is None  # underscore prefix + ws_ but an empty id suffix
     assert f("awf-ws_") is None  # awf prefix + ws_ but an empty id suffix
+
+
+@pytest.mark.unit
+def test_label_less_dash_prefixed_volume_infers_dash_project() -> None:
+    """A recovered ``awf-`` volume name stays in its dash-prefixed compose project."""
+    resources = parse_docker_resource_rows(
+        "volume",
+        json.dumps({"name": "awf-ws_abc123-dind_data", "project": "", "driver": "local"}) + "\n",
+    )
+
+    assert len(resources) == 1
+    assert resources[0].workspace_id == "ws_abc123"
+    assert resources[0].compose_project == "awf-ws_abc123"
+    assert resources[0].name == "awf-ws_abc123-dind_data"
 
 
 @pytest.mark.unit

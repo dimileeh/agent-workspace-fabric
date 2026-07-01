@@ -8,8 +8,7 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -23,12 +22,19 @@ from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.session import make_engine, session_scope
+from awf.node.git_manager import GitOperationError
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.gc_classify import (
     PATH_ALREADY_REMOVED,
+    PATH_DELETE_FAILED,
     PATH_DELETED,
 )
 from awf.service.gc_reconcile import ComposeTeardownOutcome, build_and_delete_gc_path
+from awf.service.gc_worktrees import (
+    WorkspaceGCWorktreeRemoveResult,
+    is_existing_non_git_worktree,
+    remove_orphan_worktree,
+)
 from awf.service.orphan_reaping import (
     OrphanReapOutcome as OrphanReapOutcome,
 )
@@ -41,6 +47,36 @@ from awf.service.orphan_reaping import (
 )
 from awf.service.orphan_reaping import (
     build_orphan_compose_teardown as build_orphan_compose_teardown,
+)
+from awf.service.orphan_resource_types import (
+    RESOURCE_KINDS as RESOURCE_KINDS,
+)
+from awf.service.orphan_resource_types import (
+    Classification as Classification,
+)
+from awf.service.orphan_resource_types import (
+    ClassifiedResource as ClassifiedResource,
+)
+from awf.service.orphan_resource_types import (
+    CleanupReadiness as CleanupReadiness,
+)
+from awf.service.orphan_resource_types import (
+    DetectedResource as DetectedResource,
+)
+from awf.service.orphan_resource_types import (
+    DockerResourceCommand as DockerResourceCommand,
+)
+from awf.service.orphan_resource_types import (
+    OrphanResourceSummary as OrphanResourceSummary,
+)
+from awf.service.orphan_resource_types import (
+    ResourceKind as ResourceKind,
+)
+from awf.service.orphan_resource_types import (
+    ResourceScan as ResourceScan,
+)
+from awf.service.orphan_resource_types import (
+    WorkspaceIdView as WorkspaceIdView,
 )
 
 _log = get_logger(__name__)
@@ -83,6 +119,8 @@ ORPHAN_REAP_PARTIAL = "ORPHAN_REAP_PARTIAL"
 # reaped while it silently remained (PRRT_kwDOSJAM6s6LCiLk). It is keyword-only
 # with a default so non-volume teardowns and other callers stay unaffected.
 class OrphanResourceComposeTeardown(Protocol):
+    """Callable contract for tearing down row-less orphan compose stacks."""
+
     async def __call__(  # pragma: no cover - Protocol method declaration only.
         self,
         project_name: str,
@@ -91,13 +129,25 @@ class OrphanResourceComposeTeardown(Protocol):
         remove_volumes: bool,
         *,
         fallback_volume_names: tuple[str, ...] = (),
-    ) -> ComposeTeardownOutcome: ...
+    ) -> ComposeTeardownOutcome:
+        """Tear down a compose stack for an orphan workspace resource."""
+        ...
 
 
-ResourceKind = Literal["container", "network", "volume", "worktree"]
-Classification = Literal["expected", "terminal", "missing", "unknown"]
+class OrphanResourceWorktreeRemover(Protocol):
+    """Callable contract for Git-aware row-less orphan worktree removal."""
 
-RESOURCE_KINDS: tuple[ResourceKind, ...] = ("container", "network", "volume", "worktree")
+    def __call__(  # pragma: no cover - Protocol method declaration only.
+        self,
+        *,
+        workspace_id: str,
+        path: Path,
+        work_dir: Path,
+    ) -> Awaitable[WorkspaceGCWorktreeRemoveResult]:
+        """Remove a row-less orphan worktree using Git-aware GC helpers."""
+        ...
+
+
 ACTIVE_WORKSPACE_STATUSES = frozenset(
     {
         WorkspaceStatus.requested.value,
@@ -142,12 +192,16 @@ KNOWN_WORKSPACE_STATUSES = sorted(ACTIVE_WORKSPACE_STATUSES | TERMINAL_WORKSPACE
 
 
 class CompletedProcessLike(Protocol):
+    """Minimal synchronous subprocess result surface used by orphan-resource scans."""
+
     returncode: int
     stdout: str
     stderr: str
 
 
 class SubprocessRun(Protocol):
+    """Callable contract for synchronous subprocess execution in orphan scans."""
+
     def __call__(  # pragma: no cover - Protocol method declaration only.
         self,
         args: list[str],
@@ -157,16 +211,22 @@ class SubprocessRun(Protocol):
         text: Literal[True],
         timeout: float,
         env: Mapping[str, str],
-    ) -> CompletedProcessLike: ...
+    ) -> CompletedProcessLike:
+        """Run a subprocess and return a completed-process-like result."""
+        ...
 
 
 class AsyncCommandResultLike(Protocol):
+    """Minimal async subprocess result surface used by orphan-resource scans."""
+
     returncode: int
     stdout: str
     stderr: str
 
 
 class AsyncCommandRunnerLike(Protocol):
+    """Callable contract for async subprocess execution in orphan scans."""
+
     async def run(  # pragma: no cover - Protocol method declaration only.
         self,
         args: list[str],
@@ -174,159 +234,9 @@ class AsyncCommandRunnerLike(Protocol):
         input_bytes: bytes | None = None,
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
-    ) -> Any: ...
-
-
-@dataclass(frozen=True)
-class WorkspaceIdView:
-    """Snapshot of workspace ids partitioned by lifecycle."""
-
-    active_ids: frozenset[str]
-    terminal_ids: frozenset[str]
-    available: bool
-    retained_ids: frozenset[str] = frozenset()
-
-
-@dataclass(frozen=True)
-class DockerResourceCommand:
-    kind: ResourceKind
-    args: list[str]
-
-
-@dataclass(frozen=True)
-class DetectedResource:
-    kind: ResourceKind
-    workspace_id: str
-    compose_project: str | None = None
-    id: str | None = None
-    name: str | None = None
-    path: str | None = None
-    service: str | None = None
-    state: str | None = None
-    status_text: str | None = None
-    driver: str | None = None
-    scope: str | None = None
-
-
-@dataclass(frozen=True)
-class ClassifiedResource:
-    resource: DetectedResource
-    classification: Classification
-    reason: str
-
-    @property
-    def kind(self) -> ResourceKind:
-        return self.resource.kind
-
-    @property
-    def workspace_id(self) -> str:
-        return self.resource.workspace_id
-
-    @property
-    def compose_project(self) -> str | None:
-        return self.resource.compose_project
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "kind": self.resource.kind,
-            "workspace_id": self.resource.workspace_id,
-            "classification": self.classification,
-            "reason": self.reason,
-        }
-        optional: dict[str, str | None] = {
-            "compose_project": self.resource.compose_project,
-            "id": self.resource.id,
-            "name": self.resource.name,
-            "path": self.resource.path,
-            "service": self.resource.service,
-            "state": self.resource.state,
-            "status": self.resource.status_text,
-            "driver": self.resource.driver,
-            "scope": self.resource.scope,
-        }
-        payload.update({key: value for key, value in optional.items() if value})
-        return payload
-
-
-@dataclass(frozen=True)
-class ResourceScan:
-    ok: bool
-    status: str
-    reason: str
-    resources: tuple[DetectedResource, ...] = ()
-    detail: str | None = None
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "ok": self.ok,
-            "status": self.status,
-            "reason": self.reason,
-            "resource_count": len(self.resources),
-        }
-        if self.detail:
-            payload["detail"] = self.detail
-        return payload
-
-
-@dataclass(frozen=True)
-class CleanupReadiness:
-    ready: bool
-    status: str
-    reason: str
-    action: str
-    dry_run_only: bool = True
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "ready": self.ready,
-            "status": self.status,
-            "reason": self.reason,
-            "action": self.action,
-            "dry_run_only": self.dry_run_only,
-        }
-
-
-@dataclass(frozen=True)
-class OrphanResourceSummary:
-    ok: bool
-    status: str
-    reason: str
-    resource_count: int
-    expected_count: int
-    orphan_count: int
-    unknown_count: int
-    counts_by_kind: dict[str, int]
-    orphan_counts_by_kind: dict[str, int]
-    expected_counts_by_kind: dict[str, int]
-    unknown_counts_by_kind: dict[str, int]
-    orphan_classification_counts: dict[str, int]
-    cleanup_readiness: CleanupReadiness
-    scanners: dict[str, dict[str, object]]
-    examples: tuple[dict[str, object], ...] = ()
-    detail: str | None = None
-    records: tuple[ClassifiedResource, ...] = field(default=(), repr=False)
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "ok": self.ok,
-            "status": self.status,
-            "reason": self.reason,
-            "resource_count": self.resource_count,
-            "expected_count": self.expected_count,
-            "orphan_count": self.orphan_count,
-            "unknown_count": self.unknown_count,
-            "counts_by_kind": self.counts_by_kind,
-            "orphan_counts_by_kind": self.orphan_counts_by_kind,
-            "expected_counts_by_kind": self.expected_counts_by_kind,
-            "unknown_counts_by_kind": self.unknown_counts_by_kind,
-            "orphan_classification_counts": self.orphan_classification_counts,
-            "cleanup_readiness": self.cleanup_readiness.to_dict(),
-            "scanners": self.scanners,
-            "examples": list(self.examples),
-        }
-        if self.detail:
-            payload["detail"] = self.detail
-        return payload
+    ) -> Any:
+        """Run a subprocess asynchronously and return a completed-process-like result."""
+        ...
 
 
 def docker_resource_commands() -> tuple[DockerResourceCommand, ...]:
@@ -782,6 +692,7 @@ async def reap_classified_orphans(
     min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
     row_less_only: bool = False,
     limit: int | None = None,
+    worktree_remover: OrphanResourceWorktreeRemover | None = None,
 ) -> OrphanReapResult:
     """Reap ``terminal`` / aged ``missing`` classified orphans when ``enabled``.
 
@@ -789,8 +700,9 @@ async def reap_classified_orphans(
     historical ``dry_run_only`` behavior. With ``enabled=True`` it tears down
     each orphaned compose stack (containers/networks/volumes) via
     WS-B1's :meth:`ComposeManager.teardown_project` and removes orphaned worktree
-    directories via WS-B1's :func:`build_and_delete_gc_path` (which keeps the
-    recursive byte-estimate scan off the event loop). Records classified
+    directories via Git-aware removal when they carry linked Git metadata, or
+    via WS-B1's :func:`build_and_delete_gc_path` for plain non-Git directories
+    (which keeps the recursive byte-estimate scan off the event loop). Records classified
     ``expected`` / ``unknown`` are left untouched, and a permission refusal
     surfaces loudly (``PATH_DELETE_PERMISSION_DENIED``) as a ``partial`` run --
     never a silent success. When classification is unreliable (DB/scanner
@@ -878,6 +790,9 @@ async def reap_classified_orphans(
         orphan_records = _limit_records_to_oldest_workspaces(
             orphan_records, limit=limit, resolved_work_dir=resolved_work_dir
         )
+    resolved_worktree_remover = (
+        remove_orphan_worktree if worktree_remover is None else worktree_remover
+    )
     # One teardown per (project, workspace) so multiple docker resources from the
     # same stack do not trigger redundant downs.
     compose_projects: dict[tuple[str, str], None] = {}
@@ -944,11 +859,97 @@ async def reap_classified_orphans(
         path_text = record.resource.path
         if not path_text:  # pragma: no cover - worktree records always carry a path.
             continue
+        worktree_path = Path(path_text)
+        if worktree_path.is_symlink():
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="failed",
+                reason_code=PATH_DELETE_FAILED,
+                error="refusing to remove symlinked worktree",
+            )
+            errors.append(outcome)
+            _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+            continue
+        try:
+            worktree_exists = worktree_path.exists()
+            has_linked_git_file = worktree_exists and (worktree_path / ".git").is_file()
+            is_non_git_worktree = worktree_exists and is_existing_non_git_worktree(
+                worktree_path,
+                work_dir=resolved_work_dir,
+                fail_on_metadata_probe_error=True,
+            )
+            use_git_aware_remover = worktree_exists and (
+                has_linked_git_file or not is_non_git_worktree
+            )
+        except GitOperationError as exc:
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="failed",
+                reason_code=exc.reason_code,
+                error=str(exc),
+            )
+            errors.append(outcome)
+            _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+            continue
+        except (OSError, RuntimeError) as exc:
+            outcome = OrphanReapOutcome(
+                kind="worktree",
+                workspace_id=record.workspace_id,
+                status="failed",
+                reason_code=PATH_DELETE_FAILED,
+                error=str(exc),
+            )
+            errors.append(outcome)
+            _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+            continue
+
+        if use_git_aware_remover:
+            removal = await resolved_worktree_remover(
+                workspace_id=worktree_path.name,
+                path=worktree_path,
+                work_dir=resolved_work_dir,
+            )
+            if removal.ok:
+                if removal.status == "succeeded" or removal.reason_code == PATH_ALREADY_REMOVED:
+                    outcome = OrphanReapOutcome(
+                        kind="worktree",
+                        workspace_id=record.workspace_id,
+                        status=("reaped" if removal.status == "succeeded" else "already_removed"),
+                        reason_code=removal.reason_code,
+                    )
+                    reaped.append(outcome)
+                    _log.info("orphan_resources.reaped_worktree", **outcome.to_dict())
+                    continue
+                if removal.status != "skipped" or removal.reason_code != "WORKTREE_NOT_GIT_MANAGED":
+                    outcome = OrphanReapOutcome(
+                        kind="worktree",
+                        workspace_id=record.workspace_id,
+                        status="failed",
+                        reason_code=removal.reason_code,
+                        error=removal.error,
+                    )
+                    errors.append(outcome)
+                    _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+                    continue
+            else:
+                outcome = OrphanReapOutcome(
+                    kind="worktree",
+                    workspace_id=record.workspace_id,
+                    status="failed",
+                    reason_code=removal.reason_code,
+                    error=removal.error,
+                )
+                errors.append(outcome)
+                _log.error("orphan_resources.reap_worktree_failed", **outcome.to_dict())
+                continue
+
         # Build the GC path (a recursive ``rglob`` byte estimate over a full
         # worktree checkout) and delete it inside one ``to_thread`` so the scan
         # never blocks the worker event loop -- matching WS-B1's reconciler.
         deleted, error, reason_code = await asyncio.to_thread(
-            build_and_delete_gc_path, "worktree", Path(path_text), work_dir=resolved_work_dir
+            build_and_delete_gc_path, "worktree", worktree_path, work_dir=resolved_work_dir
         )
         if deleted:
             outcome = OrphanReapOutcome(

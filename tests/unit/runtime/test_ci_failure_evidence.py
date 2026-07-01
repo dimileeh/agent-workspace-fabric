@@ -121,7 +121,70 @@ def test_ci_failure_evidence_preserves_prefixed_github_error_annotations() -> No
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_preserves_ruff_diagnostics_as_error_summaries() -> None:
+    """Verify ci failure evidence preserves ruff diagnostics as error summaries."""
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                "src/awf/runtime/example.py:1:1: F401 `os` imported but unused",
+                "Found 1 error.",
+                "failed to download cleanup artifact: connection reset",
+                "Error: Process completed with exit code 1.",
+            ]
+        ),
+        check_name="python-lint",
+    )
+
+    assert (
+        "src/awf/runtime/example.py:1:1: F401 `os` imported but unused" in evidence.error_summaries
+    )
+
+
+@pytest.mark.unit
+def test_ci_failure_evidence_preserves_tab_prefixed_ruff_diagnostics() -> None:
+    """gh run view --log-failed lines prefix diagnostics with job/step columns."""
+    ruff_diagnostic = "src/awf/runtime/example.py:1:1: F401 `os` imported but unused"
+    prefixed_line = f"lint-and-type\tRun ruff check\t{ruff_diagnostic}"
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                prefixed_line,
+                "failed to download cleanup artifact: connection reset",
+                "Error: Process completed with exit code 1.",
+            ]
+        ),
+        check_name="lint-and-type",
+    )
+
+    assert any(ruff_diagnostic in summary for summary in evidence.error_summaries)
+
+
+@pytest.mark.unit
+def test_ci_failure_evidence_preserves_ruff_diagnostics_with_failing_command() -> None:
+    """Mixed logs keep path.py diagnostics even when the failing command is known."""
+    ruff_diagnostic = "src/awf/runtime/example.py:1:1: F401 `os` imported but unused"
+    failing_command = "uv run --python 3.12 --extra dev ruff check src/awf tests"
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                f"lint-and-type\tRun ruff check\t{failing_command}",
+                ruff_diagnostic,
+                "Found 1 error.",
+                "Error: Process completed with exit code 1.",
+            ]
+        ),
+        check_name="lint-and-type",
+    )
+
+    assert evidence.failing_commands == (failing_command,)
+    assert ruff_diagnostic in evidence.error_summaries
+
+
+@pytest.mark.unit
 def test_ci_failure_evidence_rejects_glued_prefix_before_pytest_node() -> None:
+    """Verify ci failure evidence rejects glued prefix before pytest node."""
     valid_node_id = "tests/unit/test_example.py::test_valid_failure"
 
     evidence = ci_failure_evidence.extract_ci_failure_evidence(
