@@ -247,8 +247,7 @@ def _collect_uv_global_scope_tokens(
                 return None
             next_token = tokens[index + 1]
             if next_token.startswith("-"):
-                index += 1
-                continue
+                return None
             index += 1
             global_scope.append(next_token)
         index += 1

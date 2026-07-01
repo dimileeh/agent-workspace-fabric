@@ -977,8 +977,7 @@ def test_collect_uv_global_scope_tokens_requires_value_arguments() -> None:
     assert _collect_uv_global_scope_tokens(tokens, 0) is None
 
     hyphen_value = shlex.split("uv --cache-dir --project apps run python")
-    collected = _collect_uv_global_scope_tokens(hyphen_value, 0)
-    assert collected == (["--cache-dir", "--project", "apps"], hyphen_value.index("run"))
+    assert _collect_uv_global_scope_tokens(hyphen_value, 0) is None
 
 
 @pytest.mark.unit
