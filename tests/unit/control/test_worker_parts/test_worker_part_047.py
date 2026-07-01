@@ -548,6 +548,58 @@ async def test_safely_resume_pr_monitor_post_handoff_cancellation_does_not_cance
 
 
 @pytest.mark.unit
+async def test_safely_resume_pr_monitor_falls_back_to_protocol_resume(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Protocol-only executors without handoff helpers still resume via resume_pr_monitor."""
+    finish_calls: list[dict[str, object]] = []
+
+    class _ProtocolOnlyExecutor:
+        def __init__(self) -> None:
+            self.resume_calls: list[str] = []
+
+        async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+            del workspace_id
+
+        async def resume_pr_monitor(self, workspace_id: str) -> None:
+            self.resume_calls.append(workspace_id)
+
+    executor = _ProtocolOnlyExecutor()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_protocol",
+        recovery_operation_id="op_protocol_resume",
+    )
+
+    assert result is True
+    assert executor.resume_calls == ["ws_protocol"]
+    assert finish_calls == [
+        {
+            "workspace_id": "ws_protocol",
+            "operation_id": "op_protocol_resume",
+            "status": OperationStatus.succeeded,
+        }
+    ]
+
+
+@pytest.mark.unit
 async def test_monitor_recovery_handoff_failure_error_skips_restart_start_event(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

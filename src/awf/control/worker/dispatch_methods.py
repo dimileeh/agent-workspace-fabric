@@ -693,6 +693,47 @@ async def _monitor_recovery_handoff_failure_error(
     return default_code, default_message
 
 
+def _executor_supports_pr_monitor_handoff(executor: Any) -> bool:
+    return callable(getattr(executor, "resume_pr_monitor_handoff", None))
+
+
+async def _safely_resume_pr_monitor_legacy(
+    self: Any,
+    workspace_id: str,
+    *,
+    recovery_operation_id: str | None = None,
+) -> bool:
+    """Resume via ``resume_pr_monitor()`` for protocol-only executor implementations."""
+    try:
+        await self._executor.resume_pr_monitor(workspace_id)
+    except asyncio.CancelledError:
+        await self._finish_monitor_recovery_operation_after_cancellation(
+            workspace_id,
+            operation_id=recovery_operation_id,
+            status=OperationStatus.cancelled,
+            error_code="MONITOR_RECOVERY_CANCELLED",
+            error_message="Monitor resume cancelled after workspace left monitoring_pr.",
+        )
+        raise
+    except Exception as exc:
+        _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
+        await self._finish_monitor_recovery_operation(
+            workspace_id,
+            operation_id=recovery_operation_id,
+            status=OperationStatus.failed,
+            error_code="MONITOR_RECOVERY_FAILED",
+            error_message=repr(exc)[:2000],
+        )
+        return False
+
+    await self._finish_monitor_recovery_operation(
+        workspace_id,
+        operation_id=recovery_operation_id,
+        status=OperationStatus.succeeded,
+    )
+    return True
+
+
 async def _safely_resume_pr_monitor(
     self: Any,
     workspace_id: str,
@@ -708,6 +749,12 @@ async def _safely_resume_pr_monitor(
             error_message="Worker has no executor configured.",
         )
         return False
+    if not _executor_supports_pr_monitor_handoff(self._executor):
+        return await _safely_resume_pr_monitor_legacy(
+            self,
+            workspace_id,
+            recovery_operation_id=recovery_operation_id,
+        )
     handoff_succeeded = False
     handoff_finalized = False
     try:
