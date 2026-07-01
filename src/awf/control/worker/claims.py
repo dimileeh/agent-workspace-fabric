@@ -680,23 +680,27 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
         )
         if claimed:
             pending_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)
+            pending_operation = None
             if pending_operation_id is not None:
-                cached_operation = await OperationRepository(session).get(pending_operation_id)
-                cached_payload = cached_operation.payload if cached_operation is not None else None
+                pending_operation = await OperationRepository(session).get(pending_operation_id)
+                pending_payload = (
+                    pending_operation.payload if pending_operation is not None else None
+                )
                 if (
-                    cached_operation is None
-                    or cached_operation.workspace_id != workspace_id
-                    or cached_operation.status
+                    pending_operation is None
+                    or pending_operation.workspace_id != workspace_id
+                    or pending_operation.status
                     not in (
                         OperationStatus.pending.value,
                         OperationStatus.running.value,
                     )
-                    or not isinstance(cached_payload, dict)
-                    or cached_payload.get("source") != _MONITOR_RECOVERY_SOURCE
-                    or cached_payload.get("owner") != _MONITOR_RECOVERY_OWNER
+                    or not isinstance(pending_payload, dict)
+                    or pending_payload.get("source") != _MONITOR_RECOVERY_SOURCE
+                    or pending_payload.get("owner") != _MONITOR_RECOVERY_OWNER
                 ):
                     self._monitor_recovery_operation_ids.pop(workspace_id, None)
                     pending_operation_id = None
+                    pending_operation = None
             if pending_operation_id is None:
                 pending_operation_id = await _active_worker_restart_remonitor_operation_id(
                     session,
@@ -704,8 +708,20 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
                 )
                 if pending_operation_id is not None:
                     self._monitor_recovery_operation_ids[workspace_id] = pending_operation_id
+                    pending_operation = await OperationRepository(session).get(pending_operation_id)
             if pending_operation_id is not None:
                 await session.commit()
+                pending_payload = (
+                    pending_operation.payload if pending_operation is not None else None
+                )
+                if (
+                    isinstance(pending_payload, dict)
+                    and pending_payload.get("active_execution_salvage_reason_code")
+                    == _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE
+                ):
+                    self._remember_active_salvage_monitor_recovery_operation_id(
+                        pending_operation_id
+                    )
                 return True
             await session.refresh(ws)
             if (

@@ -363,6 +363,69 @@ async def test_claim_monitoring_pr_reuses_pending_recovery_operation_without_dup
 
 
 @pytest.mark.unit
+async def test_claim_monitoring_pr_reuses_active_salvage_recovery_registers_cooldown_tracking(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    """Reused in-flight active-salvage remonitor ops must register salvage cooldown tracking."""
+    monitor_id = await _create_monitoring_pr(
+        session_factory,
+        origin_repo,
+        "monitor-reuse-active-salvage-recovery",
+        pr_number=463,
+    )
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(monitor_id)
+        assert ws is not None
+        await repo.add_event(
+            ws,
+            event_type="workspace.active_execution_salvage_monitor_attached",
+            reason_code="ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED",
+            payload={
+                "source": "worker_restart",
+                "reason_code": "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED",
+                "workspace_status": WorkspaceStatus.monitoring_pr.value,
+                "decision": "attach_pr_monitor",
+            },
+        )
+        await session.commit()
+
+    worker_a = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+        executor=_RecordingExecutor(),
+        runtime_inspector=_HealthyRuntimeInspector(),
+        config=WorkerConfig(
+            poll_interval_seconds=0.01,
+            max_concurrent_executions=1,
+            node_id="worker-node-a",
+        ),
+    )
+    worker_b = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+        executor=_RecordingExecutor(),
+        runtime_inspector=_HealthyRuntimeInspector(),
+        config=WorkerConfig(
+            poll_interval_seconds=0.01,
+            max_concurrent_executions=1,
+            node_id="worker-node-b",
+        ),
+    )
+
+    assert await worker_a._claim_monitoring_pr(monitor_id) is True  # noqa: SLF001
+    first_operation_id = worker_a._monitor_recovery_operation_ids[monitor_id]  # noqa: SLF001
+    assert first_operation_id in worker_a._active_salvage_monitor_recovery_operation_ids  # noqa: SLF001
+
+    await worker_a._release_monitoring_pr_claim(monitor_id)  # noqa: SLF001
+
+    assert await worker_b._claim_monitoring_pr(monitor_id) is True  # noqa: SLF001
+    assert worker_b._monitor_recovery_operation_ids[monitor_id] == first_operation_id  # noqa: SLF001
+    assert first_operation_id in worker_b._active_salvage_monitor_recovery_operation_ids  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_claim_monitoring_pr_reuses_db_pending_recovery_without_in_memory_handle(
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,
