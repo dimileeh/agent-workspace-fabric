@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -677,6 +678,77 @@ async def test_read_residue_path_content_returns_none_when_worktree_read_raises_
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+async def test_read_residue_path_content_rejects_symlink_to_log_shaped_target(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Symlink residue must fail closed even when the target looks like CLI capture."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "capture.txt"
+    target.write_text("deadbeef accidental log line\n", encoding="utf-8")
+    (worktree / "--oneline").symlink_to(target)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    content = await _read_residue_path_content(
+        runner,
+        worktree_path=worktree,
+        path="--oneline",
+    )
+
+    assert content is None
+    assert (
+        await _path_provable_as_git_cli_flag_capture(
+            runner,
+            worktree_path=worktree,
+            path="--oneline",
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+async def test_read_residue_path_content_rejects_staged_index_symlink(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Staged index symlinks must fail closed before ``git show`` content proof."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=0,
+        stdout="120000 deadbeefdeadbeefdeadbeefdeadbeefdeadbeef 0\t--oneline\0",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    assert (
+        await _path_provable_as_git_cli_flag_capture(
+            runner,
+            worktree_path=worktree,
+            path="--oneline",
+        )
+        is False
+    )
+    assert [call.args[call.args.index("-C") + 2 :] for call in cmd.calls] == [
+        ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", "--oneline"],
+    ]
+
+
+@pytest.mark.unit
 async def test_read_residue_path_content_reads_staged_index_when_file_missing_on_disk(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -685,6 +757,10 @@ async def test_read_residue_path_content_reads_staged_index_when_file_missing_on
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=0,
+        stdout="100644 deadbeefdeadbeefdeadbeefdeadbeefdeadbeef 0\t--oneline\0",
+    )
     cmd.queue_result(returncode=0, stdout="deadbeef staged residue\n")
     runner = make_runner(
         factory=factory,
@@ -720,6 +796,7 @@ async def test_read_residue_path_content_returns_none_when_git_show_fails(
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=1, stdout="", stderr="fatal: path not in index\n")
     runner = make_runner(
         factory=factory,
@@ -747,6 +824,7 @@ async def test_path_provable_as_git_cli_flag_capture_returns_false_when_content_
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=1, stdout="", stderr="fatal: path not in index\n")
     runner = make_runner(
         factory=factory,

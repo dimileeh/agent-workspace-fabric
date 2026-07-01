@@ -123,6 +123,43 @@ def _content_provable_as_git_oneline_capture(content: str) -> bool:
     return all(line and _ONELINE_LOG_LINE_RE.match(line) for line in lines)
 
 
+async def _path_is_symlink_in_index(
+    self: Any,
+    *,
+    worktree_path: Path,
+    path: str,
+) -> bool | None:
+    """Return whether ``path`` is staged as a symlink (mode ``120000``).
+
+    Returns ``None`` when the index entry cannot be inspected so callers can
+    fail closed before treating ``git show :path`` bytes as residue proof.
+    """
+    ls_result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "--literal-pathspecs",
+            "ls-files",
+            "--stage",
+            "-z",
+            "--",
+            path,
+        )
+    )
+    if not ls_result.ok:
+        _log.warning(
+            "monitor.pre_push_post_operation_residue_index_mode_unavailable",
+            path=path,
+            returncode=ls_result.returncode,
+            stderr=(ls_result.stderr or "")[:400],
+        )
+        return None
+    stdout = ls_result.stdout or ""
+    if not stdout.strip("\0"):
+        return False
+    mode = stdout.split(" ", 1)[0]
+    return mode == "120000"
+
+
 async def _read_residue_path_content(
     self: Any,
     *,
@@ -131,6 +168,12 @@ async def _read_residue_path_content(
 ) -> str | None:
     """Return worktree or index content for ``path``, or ``None`` when unreadable."""
     local_path = worktree_path / path
+    # Known CLI-capture residue is a regular file; ``Path.is_file()`` follows
+    # symlinks and ``read_text()`` would read the target bytes, letting a
+    # same-named symlink pass proof and be deleted by scoped cleanup (review
+    # thread ``PRRT_kwDOSJAM6s6NmGN-``).
+    if local_path.is_symlink():
+        return None
     if local_path.is_file():
         try:
             return local_path.read_text(encoding="utf-8", errors="replace")
@@ -140,6 +183,13 @@ async def _read_residue_path_content(
                 path=path,
             )
             return None
+    index_symlink = await _path_is_symlink_in_index(
+        self,
+        worktree_path=worktree_path,
+        path=path,
+    )
+    if index_symlink is not False:
+        return None
     show_result = await self._deps.runner.run(
         git_worktree_command(worktree_path, "show", f":{path}")
     )
