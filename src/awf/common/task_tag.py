@@ -74,7 +74,7 @@ def validate_task_tag(value: str | None) -> str | None:
     candidate = _strip_balanced_brackets(normalized)
     if not candidate:
         raise ValueError(
-            "invalid task tag: expected a Jira issue key like 'PROJ-123' "
+            f"invalid task tag {normalized!r}: expected a Jira issue key like 'PROJ-123' "
             "or an Aira task entity key like 'PROJ-T123' "
             "(uppercase project key, hyphen, number; entity keys use -T<number>)"
         )

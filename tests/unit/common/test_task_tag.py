@@ -264,8 +264,9 @@ def test_validate_jira_regression_aira_299() -> None:
     ],
 )
 def test_validate_rejects_empty_bracket_wrapper(value: str) -> None:
-    with pytest.raises(ValueError, match="task tag"):
+    with pytest.raises(ValueError, match="task tag") as exc_info:
         validate_task_tag(value)
+    assert repr(value) in str(exc_info.value)
 
 
 # --- Entity key title / commit (T2) ---
