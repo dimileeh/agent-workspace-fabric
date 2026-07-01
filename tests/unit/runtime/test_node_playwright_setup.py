@@ -251,6 +251,18 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
             "pnpm -w exec playwright install chromium",
         ),
         (
+            "npm install -w apps/console",
+            "npm -w apps/console exec playwright install chromium",
+        ),
+        (
+            "npm -w apps/console ci",
+            "npm -w apps/console exec playwright install chromium",
+        ),
+        (
+            "npm --workspace apps/console ci",
+            "npm --workspace apps/console exec playwright install chromium",
+        ),
+        (
             "cd apps && npm --prefix console ci",
             "cd apps && npm --prefix console exec playwright install chromium",
         ),

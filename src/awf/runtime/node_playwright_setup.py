@@ -38,12 +38,30 @@ _NODE_PACKAGE_MANAGER_SCOPE_VALUE_FLAGS = frozenset(
 _NODE_PACKAGE_MANAGER_SCOPE_BOOLEAN_FLAGS = frozenset(
     {
         "--workspace-root",
-        "-w",
     }
 )
-_NODE_PACKAGE_MANAGER_SCOPE_FLAGS = (
-    _NODE_PACKAGE_MANAGER_SCOPE_VALUE_FLAGS | _NODE_PACKAGE_MANAGER_SCOPE_BOOLEAN_FLAGS
-)
+
+
+def _pm_scope_boolean_flags(pm_base: str) -> frozenset[str]:
+    """Return PM-specific boolean scope flags (``pnpm -w`` is workspace-root)."""
+    flags = set(_NODE_PACKAGE_MANAGER_SCOPE_BOOLEAN_FLAGS)
+    if pm_base == "pnpm":
+        flags.add("-w")
+    return frozenset(flags)
+
+
+def _pm_scope_value_flags(pm_base: str) -> frozenset[str]:
+    """Return PM-specific value scope flags (``npm -w`` selects a workspace)."""
+    flags = set(_NODE_PACKAGE_MANAGER_SCOPE_VALUE_FLAGS)
+    if pm_base == "npm":
+        flags.add("-w")
+    return frozenset(flags)
+
+
+def _pm_scope_flags(pm_base: str) -> frozenset[str]:
+    return _pm_scope_boolean_flags(pm_base) | _pm_scope_value_flags(pm_base)
+
+
 _PYTHON_EXECUTABLE_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
 _PIP_EXECUTABLE_RE = re.compile(r"^pip(\d+(?:\.\d+)*)?$")
 _SHELL_CHAIN_SEPARATORS = frozenset({"&&", ";", "||"})
@@ -109,9 +127,19 @@ def _pm_invocation_tokens(tokens: list[str], pm_index: int) -> list[str]:
 
 
 def _collect_pm_scope_tokens(
-    tokens: list[str], pm_index: int, *, require_consecutive: bool = True
+    tokens: list[str],
+    pm_index: int,
+    *,
+    pm_base: str | None = None,
+    require_consecutive: bool = True,
 ) -> list[str]:
     """Collect package-manager scope flags following the executable token."""
+    if pm_base is None:
+        pm_base = tokens[pm_index].rsplit("/", 1)[-1]
+    scope_flags = _pm_scope_flags(pm_base)
+    boolean_flags = _pm_scope_boolean_flags(pm_base)
+    value_flags = _pm_scope_value_flags(pm_base)
+
     scope_tokens: list[str] = []
     index = pm_index + 1
     while index < len(tokens):
@@ -125,7 +153,7 @@ def _collect_pm_scope_tokens(
         if token == "--":
             break
         option_name = token.split("=", 1)[0]
-        if option_name not in _NODE_PACKAGE_MANAGER_SCOPE_FLAGS:
+        if option_name not in scope_flags:
             if require_consecutive:
                 break
             index += 1
@@ -134,12 +162,12 @@ def _collect_pm_scope_tokens(
             continue
         scope_tokens.append(token)
         if "=" not in token:
-            if option_name in _NODE_PACKAGE_MANAGER_SCOPE_BOOLEAN_FLAGS:
+            if option_name in boolean_flags:
                 index += 1
                 if ends_chain:
                     break
                 continue
-            if option_name in _NODE_PACKAGE_MANAGER_SCOPE_VALUE_FLAGS:
+            if option_name in value_flags:
                 if index + 1 >= len(tokens):
                     break
                 next_token = tokens[index + 1]
@@ -476,7 +504,7 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
                     or _is_node_option_only_install_command(tokens, index, base)
                 ):
                     scope_tokens = _collect_pm_scope_tokens(
-                        tokens, index, require_consecutive=False
+                        tokens, index, pm_base=base, require_consecutive=False
                     )
                     cd_prefix = _extract_cd_scope_prefix(tokens, index)
                     if scope_tokens:
