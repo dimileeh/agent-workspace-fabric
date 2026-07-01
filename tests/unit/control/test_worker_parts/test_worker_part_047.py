@@ -1064,6 +1064,56 @@ async def test_monitor_recovery_handoff_failure_error_prefers_latest_failure_eve
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("reason_code",),
+    [
+        ("DEPRECATED_TASK_KIND",),
+        ("UNSUPPORTED_TASK_KIND",),
+    ],
+)
+async def test_monitor_recovery_handoff_failure_error_preserves_policy_task_kind_codes(
+    session_factory: async_sessionmaker[AsyncSession],
+    reason_code: str,
+) -> None:
+    """Policy rejections during monitor handoff must surface on the remonitor op."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-handoff-policy-failure",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_recovery_started",
+            reason_code="MONITOR_RECOVERY_AFTER_RESTART",
+            payload={"operation_id": "op-recovery"},
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.failed",
+            reason_code=reason_code,
+            payload={"reason_code": reason_code},
+        )
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    error_code, _ = await worker_dispatch_methods._monitor_recovery_handoff_failure_error(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert error_code == reason_code
+
+
+@pytest.mark.unit
 async def test_safely_provision_isolates_epoch_read_failure(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
