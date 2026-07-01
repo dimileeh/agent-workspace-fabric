@@ -849,9 +849,10 @@ async def _try_cleanup_pre_push_post_operation_residue(
     When the dirty-finalize gate skips unrelated dirt (paths outside
     ``operation_start_head..HEAD``), attempt a HEAD-preserving cleanup via
     ``git restore`` + ``git clean`` before failing closed with
-    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``. Only runs when every dirty path
-    is disjoint from the operation-owned committed delta and cleanup leaves
-    HEAD unchanged with a clean worktree.
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``. Only runs when the operation
+    has a non-empty committed delta (so dirty paths provably disjoint from
+    ownership are post-operation residue, not uncommitted repair edits) and
+    cleanup leaves HEAD unchanged with a clean worktree.
     """
     from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
 
@@ -868,6 +869,15 @@ async def _try_cleanup_pre_push_post_operation_residue(
         operation_start_head=operation_start_head,
     )
     if owned_delta_paths is None:
+        return None
+    if not owned_delta_paths:
+        # An empty committed delta cannot prove dirty paths are post-operation
+        # residue rather than operation-owned staged/uncommitted repair edits
+        # (``PRRT_kwDOSJAM6s6KYd-r`` / ``PRRT_kwDOSJAM6s6KaUHP``). Every dirty
+        # path is trivially disjoint from an empty owned set, so cleanup would
+        # ``git restore`` tracked edits the monitor never committed and proceed
+        # to validation without the intended repair changes (review thread
+        # ``PRRT_kwDOSJAM6s6Nfpvy``).
         return None
     dirty_paths = set(check.paths)
     if not dirty_paths:
