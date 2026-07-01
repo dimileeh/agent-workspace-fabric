@@ -100,17 +100,24 @@ def test_compose_files_disqualify_autopilot_without_dind() -> None:
 
 
 @pytest.mark.unit
-def test_build_context_alone_is_autopilot_supported() -> None:
-    """Verify build_context alone is autopilot supported."""
+def test_build_context_alone_requires_docker_disqualifying_autopilot() -> None:
+    """A build_context-only service renders a Compose ``build:`` stanza.
+
+    That requires a Docker builder/daemon before the workspace can start, so it
+    must be reported as ``docker_required=true`` and ``autopilot_supported=false``
+    even when no docker mode, privileged service, host ports, or compose files
+    are declared. awf-cloud must not route such a profile onto a backend that
+    cannot satisfy a Docker build.
+    """
     service = ProfileService(name="app", build_context=".")
     profile = WorkspaceProfile(name="build", services=[service])
 
     capabilities = classify_profile_capabilities(profile)
 
-    assert capabilities.autopilot_supported is True
-    assert capabilities.docker_required is False
+    assert capabilities.docker_required is True
     assert capabilities.privileged_required is False
     assert capabilities.unsupported_compose_feature is False
+    assert capabilities.autopilot_supported is False
 
 
 @pytest.mark.unit
