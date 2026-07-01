@@ -434,16 +434,22 @@ async def run_resumed_pr_monitor(
     self: Any,
     workspace_id: str,
     handoff: ResumeHandoff,
-) -> None:
-    """Run the long-lived PR monitor loop after a successful handoff."""
+) -> bool:
+    """Run the long-lived PR monitor loop after a successful handoff.
+
+    Returns ``True`` when the monitor loop was entered, ``False`` when the
+    start recheck bailed before ``monitor.run`` (e.g. workspace left
+    ``monitoring_pr`` between handoff finalize and loop entry).
+    """
     if not await verify_resume_monitor_start(self, workspace_id):
-        return
+        return False
     await handoff.monitor.run(
         workspace_id=workspace_id,
         compose_project=handoff.compose_project,
         compose_file=handoff.compose_file,
         **handoff.run_kwargs,
     )
+    return True
 
 
 def _precheck_required_companion_env_secrets_for_resume(

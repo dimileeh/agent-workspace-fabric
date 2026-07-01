@@ -185,7 +185,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
             workspace_id=workspace_id,
         )
 
-    async def run_resumed_pr_monitor(self: Any, workspace_id: str, handoff: Any) -> None:
+    async def run_resumed_pr_monitor(self: Any, workspace_id: str, handoff: Any) -> bool:
         """Run the long-lived PR monitor loop after a successful restart handoff."""
         return await _monitor_handoff.run_resumed_pr_monitor(
             self,

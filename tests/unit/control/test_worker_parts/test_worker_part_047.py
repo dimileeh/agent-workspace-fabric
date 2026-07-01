@@ -652,6 +652,66 @@ async def test_safely_resume_pr_monitor_fails_operation_when_start_recheck_bails
 
 
 @pytest.mark.unit
+async def test_safely_resume_pr_monitor_corrects_operation_when_post_finalize_start_recheck_bails(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Post-handoff start recheck must not leave a succeeded remonitor op with no monitor."""
+    handoff = object()
+    finish_calls: list[dict[str, object]] = []
+    verify_calls = 0
+
+    class HandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def verify_resume_monitor_start(self, workspace_id: str) -> bool:
+            nonlocal verify_calls
+            assert workspace_id == "ws_monitor"
+            verify_calls += 1
+            return verify_calls == 1
+
+        async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> bool:
+            assert handoff_obj is handoff
+            assert workspace_id == "ws_monitor"
+            if not await self.verify_resume_monitor_start(workspace_id):
+                return False
+            raise AssertionError("monitor run must not start when post-finalize recheck bails")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_post_finalize_recheck_bailed",
+    )
+
+    assert result is True
+    assert verify_calls == 2
+    assert len(finish_calls) == 2
+    assert finish_calls[0]["operation_id"] == "op_post_finalize_recheck_bailed"
+    assert finish_calls[0]["status"] == OperationStatus.succeeded
+    assert finish_calls[1]["operation_id"] == "op_post_finalize_recheck_bailed"
+    assert finish_calls[1]["status"] == OperationStatus.failed
+    assert finish_calls[1]["error_code"] == "MONITOR_RECOVERY_FAILED"
+
+
+@pytest.mark.unit
 async def test_safely_resume_pr_monitor_post_handoff_cancellation_does_not_cancel_recovery_op(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

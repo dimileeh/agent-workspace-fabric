@@ -871,7 +871,26 @@ async def _safely_resume_pr_monitor(
             )
             return False
 
-        await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
+        monitor_started = await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
+        if not monitor_started:
+            (
+                status,
+                error_code,
+                error_message,
+            ) = await _monitor_recovery_start_skipped_operation_status(
+                self,
+                workspace_id,
+            )
+            finalized = await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+            )
+            if finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            return True
     except asyncio.CancelledError:
         if not handoff_finalized:
             # A stale-monitor reconcile cancels this task once its workspace has
