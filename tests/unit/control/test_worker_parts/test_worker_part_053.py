@@ -505,6 +505,7 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
     handoff = object()
     finish_calls: list[dict[str, object]] = []
     finalize_started = asyncio.Event()
+    first_finalize_blocked = asyncio.Event()
     finish_attempts = 0
 
     class HandoffExecutor(_RecordingExecutor):
@@ -531,7 +532,7 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         if finish_attempts == 1:
             finalize_started.set()
-            await asyncio.Event().wait()
+            await first_finalize_blocked.wait()
         return True
 
     worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
@@ -544,10 +545,13 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
             recovery_operation_id="op_during_finalize",
         )
     )
-    await asyncio.wait_for(finalize_started.wait(), timeout=5.0)
-    resume_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await resume_task
+    try:
+        await asyncio.wait_for(finalize_started.wait(), timeout=5.0)
+        resume_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await resume_task
+    finally:
+        first_finalize_blocked.set()
 
     assert finish_attempts == 2
     assert len(finish_calls) == 2
