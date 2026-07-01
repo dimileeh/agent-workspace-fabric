@@ -73,7 +73,7 @@ class _RecordingExecutor:
         if self.fail:
             raise RuntimeError("executor crashed")
 
-    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object | None:
         del workspace_id
         return object()
 
@@ -85,6 +85,8 @@ class _RecordingExecutor:
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        if handoff is None:
+            return
         await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
