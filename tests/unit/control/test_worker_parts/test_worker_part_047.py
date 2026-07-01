@@ -476,16 +476,65 @@ async def test_safely_resume_pr_monitor_skips_monitor_when_finalize_never_succee
     worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
         _finish_monitor_recovery_operation
     )
+    worker._monitor_recovery_operation_ids["ws_monitor"] = "op_finalize_never_succeeds"  # noqa: SLF001
 
     result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
         "ws_monitor",
         recovery_operation_id="op_finalize_never_succeeds",
     )
 
-    assert result is True
+    assert result is False
     assert monitor_ran is False
     assert len(finish_calls) == 2
     assert all(call["status"] == OperationStatus.succeeded for call in finish_calls)
+    assert "ws_monitor" in worker._monitor_recovery_operation_ids  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_retains_claim_when_finalize_pending(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    claim_released = False
+    prompt_released = False
+
+    async def _resume(
+        workspace_id: str,
+        *,
+        recovery_operation_id: str | None = None,
+    ) -> bool:
+        assert workspace_id == "ws_monitor"
+        assert recovery_operation_id == "op_finalize_pending"
+        return False
+
+    async def _release_monitor_claim(workspace_id: str) -> None:
+        nonlocal claim_released
+        assert workspace_id == "ws_monitor"
+        claim_released = True
+
+    async def _prompt_release(workspace_id: str) -> None:
+        nonlocal prompt_released
+        assert workspace_id == "ws_monitor"
+        prompt_released = True
+
+    worker._monitor_recovery_operation_ids["ws_monitor"] = "op_finalize_pending"  # noqa: SLF001
+    worker._safely_resume_pr_monitor = _resume  # type: ignore[method-assign]
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._release_terminal_runtime_promptly = _prompt_release  # type: ignore[method-assign]
+
+    await worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_finalize_pending",
+    )
+
+    assert claim_released is False
+    assert prompt_released is False
+    assert worker._monitor_recovery_operation_ids["ws_monitor"] == "op_finalize_pending"  # noqa: SLF001
 
 
 @pytest.mark.unit

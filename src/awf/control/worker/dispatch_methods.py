@@ -745,20 +745,24 @@ async def _safely_resume_pr_monitor_legacy(
         raise
     except Exception as exc:
         _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
-        await self._finish_monitor_recovery_operation(
+        finalized = await self._finish_monitor_recovery_operation(
             workspace_id,
             operation_id=recovery_operation_id,
             status=OperationStatus.failed,
             error_code="MONITOR_RECOVERY_FAILED",
             error_message=repr(exc)[:2000],
         )
+        if finalized:
+            self._monitor_recovery_operation_ids.pop(workspace_id, None)
         return False
 
-    await self._finish_monitor_recovery_operation(
+    finalized = await self._finish_monitor_recovery_operation(
         workspace_id,
         operation_id=recovery_operation_id,
         status=OperationStatus.succeeded,
     )
+    if finalized:
+        self._monitor_recovery_operation_ids.pop(workspace_id, None)
     return True
 
 
@@ -772,16 +776,19 @@ async def _safely_resume_pr_monitor(
 
     Returns ``True`` when the worker should treat the recovery dispatch as complete
     (handoff succeeded or post-handoff monitor errors that must not crash the worker).
-    Returns ``False`` when handoff failed before the monitor loop started.
+    Returns ``False`` when handoff failed before the monitor loop started, or when
+    the remonitor operation could not be finalized after a successful handoff.
     """
     if self._executor is None:
-        await self._finish_monitor_recovery_operation(
+        finalized = await self._finish_monitor_recovery_operation(
             workspace_id,
             operation_id=recovery_operation_id,
             status=OperationStatus.failed,
             error_code="MONITOR_RECOVERY_NO_EXECUTOR",
             error_message="Worker has no executor configured.",
         )
+        if finalized:
+            self._monitor_recovery_operation_ids.pop(workspace_id, None)
         return False
     if not _executor_supports_pr_monitor_handoff(self._executor):
         return await _safely_resume_pr_monitor_legacy(
@@ -798,13 +805,15 @@ async def _safely_resume_pr_monitor(
                 self,
                 workspace_id,
             )
-            await self._finish_monitor_recovery_operation(
+            finalized = await self._finish_monitor_recovery_operation(
                 workspace_id,
                 operation_id=recovery_operation_id,
                 status=OperationStatus.failed,
                 error_code=error_code,
                 error_message=error_message,
             )
+            if finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
             return False
 
         verify_start = getattr(self._executor, "verify_resume_monitor_start", None)
@@ -817,13 +826,15 @@ async def _safely_resume_pr_monitor(
                 self,
                 workspace_id,
             )
-            await self._finish_monitor_recovery_operation(
+            finalized = await self._finish_monitor_recovery_operation(
                 workspace_id,
                 operation_id=recovery_operation_id,
                 status=status,
                 error_code=error_code,
                 error_message=error_message,
             )
+            if finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
             return True
 
         handoff_succeeded = True
@@ -850,7 +861,7 @@ async def _safely_resume_pr_monitor(
                 workspace_id=workspace_id,
                 operation_id=recovery_operation_id,
             )
-            return True
+            return False
 
         await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
     except asyncio.CancelledError:
@@ -881,13 +892,15 @@ async def _safely_resume_pr_monitor(
     except Exception as exc:
         if not handoff_succeeded:
             _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
-            await self._finish_monitor_recovery_operation(
+            finalized = await self._finish_monitor_recovery_operation(
                 workspace_id,
                 operation_id=recovery_operation_id,
                 status=OperationStatus.failed,
                 error_code="MONITOR_RECOVERY_FAILED",
                 error_message=repr(exc)[:2000],
             )
+            if finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
             return False
         # The monitor runner owns post-handoff terminal transitions. Recovery
         # dispatch still must not take the service worker down if a single

@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
-from awf.db.enums import OperationType, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
     WorkerHeartbeatRepository,
@@ -314,3 +314,49 @@ class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
 
         assert len(recovery_events) == 1
         assert deferred_events == []
+
+
+@pytest.mark.unit
+async def test_claim_monitoring_pr_reuses_pending_recovery_operation_without_duplicate(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    monitor_id = await _create_monitoring_pr(
+        session_factory,
+        origin_repo,
+        "monitor-pending-recovery-reclaim",
+        pr_number=460,
+    )
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+        executor=_RecordingExecutor(),
+        runtime_inspector=_HealthyRuntimeInspector(),
+        config=WorkerConfig(
+            poll_interval_seconds=0.01,
+            max_concurrent_executions=1,
+            node_id="worker-node-a",
+        ),
+    )
+
+    assert await worker._claim_monitoring_pr(monitor_id) is True  # noqa: SLF001
+    first_operation_id = worker._monitor_recovery_operation_ids[monitor_id]  # noqa: SLF001
+
+    async with session_factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=monitor_id)
+    remonitor_operations = [
+        operation for operation in operations if operation.type == OperationType.remonitor.value
+    ]
+    assert len(remonitor_operations) == 1
+
+    assert await worker._claim_monitoring_pr(monitor_id) is True  # noqa: SLF001
+    assert worker._monitor_recovery_operation_ids[monitor_id] == first_operation_id  # noqa: SLF001
+
+    async with session_factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=monitor_id)
+    remonitor_operations = [
+        operation for operation in operations if operation.type == OperationType.remonitor.value
+    ]
+    assert len(remonitor_operations) == 1
+    assert remonitor_operations[0].id == first_operation_id
+    assert remonitor_operations[0].status == OperationStatus.running.value
