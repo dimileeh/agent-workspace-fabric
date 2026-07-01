@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from awf import __version__
+from awf.profiles.capabilities import ProfileCapabilities
 from awf.runtime.driver import WORKSPACE_EXECUTION_V1
 
 PACKAGE_NAME = "agent-workspace-fabric"
@@ -17,13 +18,10 @@ UNKNOWN_GIT_COMMIT = "unknown"
 CORE_DISCOVERY_STATE_ATTR = "core_discovery_payload"
 
 # Public-safe profile capability flag names exposed through Core discovery.
-# Ordering is the stable wire contract consumed by `awf-cloud`; do not reorder.
-PROFILE_CAPABILITY_FLAGS: tuple[str, ...] = (
-    "autopilot_supported",
-    "docker_required",
-    "privileged_required",
-    "unsupported_compose_feature",
-)
+# Derived from ``ProfileCapabilities`` field declarations so the tuple cannot
+# drift from the classifier's dataclass. Ordering is the stable wire contract
+# consumed by `awf-cloud`; do not reorder the dataclass fields.
+PROFILE_CAPABILITY_FLAGS: tuple[str, ...] = tuple(f.name for f in fields(ProfileCapabilities))
 
 # Cloud-neutral rule summary describing the classification contract. Core keeps
 # this text public-safe and free of cloud product policy; `awf-cloud` interprets
