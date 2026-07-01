@@ -698,18 +698,21 @@ async def _monitor_recovery_handoff_failure_error(
 async def _monitor_recovery_start_skipped_operation_status(
     self: Any,
     workspace_id: str,
-) -> tuple[OperationStatus, str, str]:
+) -> tuple[OperationStatus, str | None, str | None]:
     """Derive remonitor terminal status when start recheck bails after handoff."""
     default_message = "Monitor resume skipped before monitor loop started."
     try:
         async with self._session_factory() as session:
             ws = await WorkspaceRepository(session).get(workspace_id)
-            if ws is not None and ws.status == WorkspaceStatus.cancelled.value:
-                return (
-                    OperationStatus.cancelled,
-                    "MONITOR_RECOVERY_CANCELLED",
-                    default_message,
-                )
+            if ws is not None:
+                if ws.status == WorkspaceStatus.cancelled.value:
+                    return (
+                        OperationStatus.cancelled,
+                        "MONITOR_RECOVERY_CANCELLED",
+                        default_message,
+                    )
+                if ws.status == WorkspaceStatus.completed.value:
+                    return OperationStatus.succeeded, None, None
     except Exception:
         _log.exception(
             "worker.monitor_recovery_start_skip_status_lookup_failed",
