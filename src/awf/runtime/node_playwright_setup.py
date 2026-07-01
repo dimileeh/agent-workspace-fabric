@@ -259,8 +259,11 @@ def _uv_pip_system_python_executable(tokens: list[str], pip_subcommand_index: in
         return None
     if python_version is None:
         return "python"
-    version = python_version.removeprefix("python")
-    return f"python{version}" if version else "python"
+    if python_version.startswith("/") or "/" in python_version:
+        return python_version
+    if python_version.startswith("python"):
+        return python_version
+    return f"python{python_version}"
 
 
 def _uv_setup_python_prefix(tokens: list[str], uv_index: int) -> str | None:

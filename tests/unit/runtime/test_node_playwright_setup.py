@@ -314,6 +314,15 @@ def test_browser_install_preserves_uv_setup_project_scope(
         ("uv pip install --system -e .", "python"),
         ("uv pip install --python 3.12 --system httpx", "python3.12"),
         ("uv pip install --system --python 3.12 httpx", "python3.12"),
+        ("uv pip install --system --python python3.12 httpx", "python3.12"),
+        (
+            "uv pip install --system --python /usr/bin/python3.12 httpx",
+            "/usr/bin/python3.12",
+        ),
+        (
+            "uv pip install --system --python=/usr/bin/python3.12 httpx",
+            "/usr/bin/python3.12",
+        ),
         ("cd apps/api && uv pip install --system -e .", "python"),
     ],
 )
