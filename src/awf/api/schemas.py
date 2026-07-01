@@ -172,7 +172,15 @@ class WorkspaceTask(BaseModel):
     @field_validator("task_tag")
     @classmethod
     def _validate_task_tag(cls, value: str | None) -> str | None:
-        """Normalize + validate the optional Jira issue key; ``None`` when absent."""
+        """Normalize and validate an optional task tag; ``None`` when absent.
+
+        Accepts a Jira issue key (``PROJ-123``) or an Aira task entity key
+        (``PROJ-T123``). Pass bare keys (``AIRA-T299``); bracketed
+        ``[AIRA-T299]`` is accepted and normalized, but bare is recommended
+        because ``[`` is a shell glob character. Entity keys appear bracketed on
+        the PR title and AWF commits but bare on the branch; Jira keys are bare
+        everywhere.
+        """
         return validate_task_tag(value)
 
     @field_validator("kind")
@@ -391,7 +399,14 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
     @field_validator("task_tag")
     @classmethod
     def _validate_task_tag(cls, value: str | None) -> str | None:
-        """Normalize + validate the optional Jira issue key; ``None`` when absent."""
+        """Normalize and validate an optional task tag; ``None`` when absent.
+
+        Accepts a Jira issue key (``PROJ-123``) or an Aira task entity key
+        (``PROJ-T123``). Pass bare keys (``AIRA-T299``); bracketed
+        ``[AIRA-T299]`` is accepted and normalized, but bare is recommended
+        because ``[`` is a shell glob character. Entity keys appear bracketed
+        on AWF monitor commits; Jira keys are bare.
+        """
         return validate_task_tag(value)
 
 

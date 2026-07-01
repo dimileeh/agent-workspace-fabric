@@ -1,6 +1,8 @@
-"""Tests for the task-tag (Jira issue key) helpers."""
+"""Tests for the task-tag (Jira issue key + Aira entity key) helpers."""
 
 from __future__ import annotations
+
+import subprocess
 
 import pytest
 
@@ -202,3 +204,170 @@ def test_commit_message_idempotent_on_colon_form_leading_key() -> None:
     # Same colon-form leading-key guard as title_with_task_tag — the helpers are
     # documented as mutually consistent.
     assert commit_message_with_task_tag("PROJ-123: do work", "PROJ-123") == "PROJ-123: do work"
+
+
+# --- Entity key validation (T1) ---
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["AIRA-T299", "PROJ-T1", "AB-T99999"],
+)
+def test_validate_accepts_entity_task_keys(value: str) -> None:
+    assert validate_task_tag(value) == value
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("[AIRA-T299]", "AIRA-T299"),
+        ("  [AIRA-T299]  ", "AIRA-T299"),
+        ("[ AIRA-T299 ]", "AIRA-T299"),
+    ],
+)
+def test_validate_normalizes_bracketed_entity_keys(value: str, expected: str) -> None:
+    assert validate_task_tag(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "AIRA-F42",  # feature key — task-only
+        "12-T3",  # digit-leading prefix
+        "AIRA-299X",  # trailing junk
+        "aira-t299",  # lowercase
+        "[AIRA-T299",  # unbalanced open bracket
+        "AIRA-T299]",  # unbalanced close bracket
+    ],
+)
+def test_validate_rejects_invalid_entity_shapes(value: str) -> None:
+    with pytest.raises(ValueError, match="task tag"):
+        validate_task_tag(value)
+
+
+def test_validate_error_message_names_both_shapes() -> None:
+    with pytest.raises(ValueError, match="PROJ-123") as exc_info:
+        validate_task_tag("bad-key")
+    message = str(exc_info.value)
+    assert "-T" in message or "entity" in message.lower()
+
+
+def test_validate_jira_regression_aira_299() -> None:
+    assert validate_task_tag("AIRA-299") == "AIRA-299"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "[]",
+        "[   ]",
+    ],
+)
+def test_validate_rejects_empty_bracket_wrapper(value: str) -> None:
+    with pytest.raises(ValueError, match="task tag") as exc_info:
+        validate_task_tag(value)
+    assert repr(value) in str(exc_info.value)
+
+
+# --- Entity key title / commit (T2) ---
+
+
+def test_title_with_entity_task_tag_brackets_key() -> None:
+    assert title_with_task_tag("Fix the bug", "AIRA-T299") == "[AIRA-T299] Fix the bug"
+
+
+def test_commit_message_with_entity_task_tag_brackets_key() -> None:
+    assert commit_message_with_task_tag("awf: do work", "AIRA-T299") == "[AIRA-T299] awf: do work"
+
+
+def test_title_jira_regression_stays_bare() -> None:
+    assert title_with_task_tag("Fix the bug", "AIRA-299") == "AIRA-299 Fix the bug"
+
+
+def test_commit_message_jira_regression_stays_bare() -> None:
+    assert commit_message_with_task_tag("awf: do work", "AIRA-299") == "AIRA-299 awf: do work"
+
+
+def test_title_entity_idempotent_on_bracketed_form() -> None:
+    once = title_with_task_tag("Fix the bug", "AIRA-T299")
+    twice = title_with_task_tag(once, "AIRA-T299")
+    assert once == twice == "[AIRA-T299] Fix the bug"
+
+
+def test_commit_message_entity_idempotent_on_bracketed_form() -> None:
+    once = commit_message_with_task_tag("awf: do work", "AIRA-T299")
+    twice = commit_message_with_task_tag(once, "AIRA-T299")
+    assert once == twice == "[AIRA-T299] awf: do work"
+
+
+def test_title_entity_longer_key_boundary_not_treated_as_tagged() -> None:
+    assert title_with_task_tag("[AIRA-T2999] Fix", "AIRA-T299") == ("[AIRA-T299] [AIRA-T2999] Fix")
+    assert title_with_task_tag("AIRA-T2999 Fix", "AIRA-T299") == ("[AIRA-T299] AIRA-T2999 Fix")
+
+
+def test_commit_message_entity_longer_key_boundary_not_treated_as_tagged() -> None:
+    assert commit_message_with_task_tag("[AIRA-T2999] msg", "AIRA-T299") == (
+        "[AIRA-T299] [AIRA-T2999] msg"
+    )
+
+
+# --- Entity key branch (T2) ---
+
+
+def test_branch_with_entity_task_tag_stays_bare() -> None:
+    assert branch_with_task_tag("awf/ws_123", "AIRA-T299") == "AIRA-T299-awf/ws_123"
+
+
+def test_branch_jira_regression_aira_299() -> None:
+    assert branch_with_task_tag("awf/ws_123", "AIRA-299") == "AIRA-299-awf/ws_123"
+
+
+def _assert_git_ref_valid(branch: str) -> None:
+    result = subprocess.run(
+        ["git", "check-ref-format", "--branch", branch],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode()
+
+
+@pytest.mark.parametrize("tag", ["AIRA-T299", "AIRA-299", "PROJ-123"])
+def test_branch_with_task_tag_passes_git_check_ref_format(tag: str) -> None:
+    branch = branch_with_task_tag("awf/ws_627d325e3d6144899eef4624", tag)
+    assert "[" not in branch
+    _assert_git_ref_valid(branch)
+
+
+# --- Entity key strip / leads-with (T2) ---
+
+
+def test_strip_leading_task_tag_entity_bracketed_form() -> None:
+    assert strip_leading_task_tag("[AIRA-T299] Fix the bug", "AIRA-T299") == "Fix the bug"
+
+
+def test_strip_leading_task_tag_entity_longer_key_untouched() -> None:
+    assert strip_leading_task_tag("[AIRA-T2999] Fix", "AIRA-T299") == "[AIRA-T2999] Fix"
+
+
+def test_strip_then_commit_tag_entity_yields_single_bracketed_key() -> None:
+    title = "[AIRA-T299] Fix the bug"
+    subject = commit_message_with_task_tag(
+        f"awf: {strip_leading_task_tag(title, 'AIRA-T299')}", "AIRA-T299"
+    )
+    assert subject == "[AIRA-T299] awf: Fix the bug"
+
+
+# --- Integration: all three formatters for entity key (T2) ---
+
+
+def test_entity_key_integration_all_formatters() -> None:
+    tag = "AIRA-T299"
+    title = title_with_task_tag("Async workspace support", tag)
+    commit = commit_message_with_task_tag("awf: initial commit", tag)
+    branch = branch_with_task_tag("awf/ws_627d325e3d6144899eef4624", tag)
+
+    assert title == "[AIRA-T299] Async workspace support"
+    assert commit == "[AIRA-T299] awf: initial commit"
+    assert branch == "AIRA-T299-awf/ws_627d325e3d6144899eef4624"
+    assert "[" not in branch
+    _assert_git_ref_valid(branch)
