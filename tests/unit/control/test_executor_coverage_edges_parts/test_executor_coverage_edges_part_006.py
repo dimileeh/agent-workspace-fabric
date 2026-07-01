@@ -835,3 +835,32 @@ async def test_git_commit_count_since_handles_failed_and_invalid_output(
     invalid_runner.queue_result(returncode=0, stdout="not-an-int\n")
     invalid_executor = _executor_with_runner(invalid_runner, tmp_path)
     assert await invalid_executor._git_commit_count_since(tmp_path / "worktree", "base") == 0
+
+
+@pytest.mark.unit
+async def test_workspace_executor_delegates_monitor_handoff_helpers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    handoff = object()
+
+    async def _resume_handoff(self: object, *, workspace_id: str) -> object:
+        assert workspace_id == "ws_monitor"
+        return handoff
+
+    async def _verify_start(self: object, *, workspace_id: str) -> bool:
+        assert workspace_id == "ws_monitor"
+        return True
+
+    monkeypatch.setattr(
+        "awf.control.executor.base._monitor_handoff.resume_pr_monitor_handoff",
+        _resume_handoff,
+    )
+    monkeypatch.setattr(
+        "awf.control.executor.base._monitor_handoff.verify_resume_monitor_start",
+        _verify_start,
+    )
+
+    assert await executor.resume_pr_monitor_handoff("ws_monitor") is handoff
+    assert await executor.verify_resume_monitor_start("ws_monitor") is True

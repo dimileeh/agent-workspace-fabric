@@ -10,6 +10,8 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1231,6 +1233,441 @@ async def test_monitor_recovery_handoff_failure_error_uses_event_message_not_sta
     assert error_code == "MONITOR_RECOVERY_COMPOSE_FAILED"
     assert error_message == compose_stderr
     assert stale_message not in error_message
+
+
+@pytest.mark.unit
+def test_monitor_recovery_handoff_failure_message_prefers_payload_message() -> None:
+    event = SimpleNamespace(payload={"message": "  compose handoff rejected  "})
+    workspace = SimpleNamespace(
+        status=WorkspaceStatus.monitoring_pr.value,
+        failure_message="ignored stale row",
+    )
+    message = worker_dispatch_methods._monitor_recovery_handoff_failure_message(  # noqa: SLF001
+        event,
+        workspace=workspace,
+        default_message="default",
+    )
+    assert message == "  compose handoff rejected  "
+
+
+@pytest.mark.unit
+def test_monitor_recovery_handoff_failure_message_uses_operation_when_no_text_fields() -> None:
+    event = SimpleNamespace(payload={"operation": "compose up"})
+    workspace = SimpleNamespace(status=WorkspaceStatus.monitoring_pr.value, failure_message=None)
+    message = worker_dispatch_methods._monitor_recovery_handoff_failure_message(  # noqa: SLF001
+        event,
+        workspace=workspace,
+        default_message="default",
+    )
+    assert message == "Monitor recovery handoff failed during compose up."
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_handoff_failure_error_skips_null_reason_events(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-null-reason-event",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_runtime_restart_failed",
+            reason_code=None,
+            payload={"stderr": "ignored because reason_code is null"},
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_runtime_restart_failed",
+            reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+            payload={"message": "compose up failed"},
+        )
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    (
+        error_code,
+        error_message,
+    ) = await worker_dispatch_methods._monitor_recovery_handoff_failure_error(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert error_code == "MONITOR_RECOVERY_COMPOSE_FAILED"
+    assert error_message == "compose up failed"
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_handoff_failure_error_uses_workspace_failure_message(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-failed-workspace-message",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        ws.failure_message = "Monitor handoff aborted after validation failure."
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="SEED")
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    (
+        error_code,
+        error_message,
+    ) = await worker_dispatch_methods._monitor_recovery_handoff_failure_error(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert error_code == "MONITOR_RECOVERY_FAILED"
+    assert error_message == "Monitor handoff aborted after validation failure."
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_handoff_failure_error_lookup_exception_returns_default(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    class _BrokenRepo:
+        async def get(self, workspace_id: str) -> None:
+            del workspace_id
+            raise RuntimeError("lookup failed")
+
+    monkeypatch.setattr(
+        worker_dispatch_methods,
+        "WorkspaceRepository",
+        lambda _session: _BrokenRepo(),
+    )
+
+    (
+        error_code,
+        error_message,
+    ) = await worker_dispatch_methods._monitor_recovery_handoff_failure_error(  # noqa: SLF001
+        worker,
+        "ws_missing",
+    )
+    assert error_code == "MONITOR_RECOVERY_FAILED"
+    assert error_message == "Monitor recovery handoff failed."
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_start_skipped_operation_status_lookup_exception_returns_failed(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    class _BrokenRepo:
+        async def get(self, workspace_id: str) -> None:
+            del workspace_id
+            raise RuntimeError("lookup failed")
+
+    monkeypatch.setattr(
+        worker_dispatch_methods,
+        "WorkspaceRepository",
+        lambda _session: _BrokenRepo(),
+    )
+    monkeypatch.setattr(
+        worker_dispatch_methods,
+        "_monitor_recovery_handoff_failure_error",
+        AsyncMock(return_value=("MONITOR_RECOVERY_FAILED", "derived failure")),
+    )
+
+    (
+        status,
+        error_code,
+        error_message,
+    ) = await worker_dispatch_methods._monitor_recovery_start_skipped_operation_status(  # noqa: SLF001
+        worker,
+        "ws_missing",
+    )
+    assert status == OperationStatus.failed
+    assert error_code == "MONITOR_RECOVERY_FAILED"
+    assert error_message == "derived failure"
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_terminal_finalize_status_handles_missing_and_cancelled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    (
+        missing_status,
+        missing_code,
+        missing_message,
+    ) = await worker_claims._monitor_recovery_terminal_finalize_status(  # noqa: SLF001
+        worker,
+        "ws_missing",
+    )
+    assert missing_status == OperationStatus.failed
+    assert missing_code == "MONITOR_RECOVERY_FAILED"
+    assert "could not be finalized" in (missing_message or "")
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-terminal-cancelled",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        cancelled_workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_OPERATOR")
+        await session.commit()
+
+    (
+        cancelled_status,
+        cancelled_code,
+        cancelled_message,
+    ) = await worker_claims._monitor_recovery_terminal_finalize_status(  # noqa: SLF001
+        worker,
+        cancelled_workspace_id,
+    )
+    assert cancelled_status == OperationStatus.cancelled
+    assert cancelled_code == "MONITOR_RECOVERY_CANCELLED"
+    assert cancelled_message == "Monitor recovery abandoned after workspace cancellation."
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_terminal_finalize_status_marks_left_monitoring_pr_cancelled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-terminal-ready",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    (
+        status,
+        error_code,
+        error_message,
+    ) = await worker_claims._monitor_recovery_terminal_finalize_status(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert status == OperationStatus.cancelled
+    assert error_code == "MONITOR_RECOVERY_CANCELLED"
+    assert error_message == "Monitor resume cancelled after workspace left monitoring_pr."
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_legacy_failure_clears_recovery_handle(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    finish_calls: list[dict[str, object]] = []
+
+    class _RaisingLegacyExecutor:
+        async def resume_pr_monitor(self, workspace_id: str) -> None:
+            del workspace_id
+            raise RuntimeError("legacy resume failed")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=_RaisingLegacyExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    worker._monitor_recovery_operation_ids["ws_legacy"] = "op_legacy_fail"  # noqa: SLF001
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_legacy",
+        recovery_operation_id="op_legacy_fail",
+    )
+
+    assert result is False
+    assert "ws_legacy" not in worker._monitor_recovery_operation_ids  # noqa: SLF001
+    assert finish_calls == [
+        {
+            "workspace_id": "ws_legacy",
+            "operation_id": "op_legacy_fail",
+            "status": OperationStatus.failed,
+            "error_code": "MONITOR_RECOVERY_FAILED",
+            "error_message": "RuntimeError('legacy resume failed')",
+        }
+    ]
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_legacy_failure_retains_handle_when_finalize_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    class _RaisingLegacyExecutor:
+        async def resume_pr_monitor(self, workspace_id: str) -> None:
+            del workspace_id
+            raise RuntimeError("legacy resume failed")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=_RaisingLegacyExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        del workspace_id, kwargs
+        return False
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    worker._monitor_recovery_operation_ids["ws_legacy"] = "op_legacy_fail"  # noqa: SLF001
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_legacy",
+        recovery_operation_id="op_legacy_fail",
+    )
+
+    assert result is False
+    assert worker._monitor_recovery_operation_ids["ws_legacy"] == "op_legacy_fail"  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_handoff_exception_clears_recovery_handle(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    finish_calls: list[dict[str, object]] = []
+
+    class _RaisingHandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            del workspace_id
+            raise RuntimeError("handoff blew up")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=_RaisingHandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    worker._monitor_recovery_operation_ids["ws_handoff"] = "op_handoff_exc"  # noqa: SLF001
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_handoff",
+        recovery_operation_id="op_handoff_exc",
+    )
+
+    assert result is False
+    assert "ws_handoff" not in worker._monitor_recovery_operation_ids  # noqa: SLF001
+    assert finish_calls == [
+        {
+            "workspace_id": "ws_handoff",
+            "operation_id": "op_handoff_exc",
+            "status": OperationStatus.failed,
+            "error_code": "MONITOR_RECOVERY_FAILED",
+            "error_message": "RuntimeError('handoff blew up')",
+        }
+    ]
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_handoff_exception_retains_handle_when_finalize_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    class _RaisingHandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            del workspace_id
+            raise RuntimeError("handoff blew up")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=_RaisingHandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        del workspace_id, kwargs
+        return False
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    worker._monitor_recovery_operation_ids["ws_handoff"] = "op_handoff_exc"  # noqa: SLF001
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_handoff",
+        recovery_operation_id="op_handoff_exc",
+    )
+
+    assert result is False
+    assert worker._monitor_recovery_operation_ids["ws_handoff"] == "op_handoff_exc"  # noqa: SLF001
 
 
 @pytest.mark.unit

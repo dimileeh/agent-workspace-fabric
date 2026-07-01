@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import structlog
@@ -357,6 +358,21 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
         )
     finally:
         monkeypatch.undo()
+
+
+@pytest.mark.unit
+async def test_active_salvage_resume_cooldown_blocks_claim_from_in_memory_cooldown() -> None:
+    """An active in-memory salvage cooldown must block claims without a DB lookup."""
+    worker = SimpleNamespace(
+        _active_salvage_monitor_resume_cooldown_active=lambda _workspace_id: True,
+        _persisted_active_salvage_monitor_resume_cooldown_active=AsyncMock(),
+    )
+
+    assert await worker_recovery_cooldown._active_salvage_monitor_resume_cooldown_blocks_claim(  # noqa: SLF001
+        worker,
+        "ws_hot",
+    )
+    worker._persisted_active_salvage_monitor_resume_cooldown_active.assert_not_called()  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit
