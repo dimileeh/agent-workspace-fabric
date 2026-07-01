@@ -282,6 +282,8 @@ def _collect_uv_sync_scope_tokens(tokens: list[str], sync_index: int) -> list[st
             and option_name not in _UV_RUN_SCOPE_VALUE_FLAGS
         ):
             index += 1
+            if "=" not in token and index < len(tokens) and not tokens[index].startswith("-"):
+                index += 1
             continue
         scope_tokens.append(token)
         if "=" not in token and option_name in _UV_RUN_SCOPE_VALUE_FLAGS:
