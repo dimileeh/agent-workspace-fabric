@@ -854,7 +854,7 @@ async def _safely_resume_pr_monitor(
 
         await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
     except asyncio.CancelledError:
-        if not handoff_succeeded:
+        if not handoff_finalized:
             # A stale-monitor reconcile cancels this task once its workspace has
             # left monitoring_pr. CancelledError is a BaseException, so it skips
             # the Exception handler below; without finalizing here the remonitor
@@ -863,13 +863,20 @@ async def _safely_resume_pr_monitor(
             # later. Finalize through the shielded helper so a second cancellation
             # (e.g. worker shutdown) landing mid-write cannot re-orphan it, then
             # re-raise so the task still ends cancelled and the slot drains.
-            await self._finish_monitor_recovery_operation_after_cancellation(
-                workspace_id,
-                operation_id=recovery_operation_id,
-                status=OperationStatus.cancelled,
-                error_code="MONITOR_RECOVERY_CANCELLED",
-                error_message="Monitor resume cancelled after workspace left monitoring_pr.",
-            )
+            if handoff_succeeded:
+                await self._finish_monitor_recovery_operation_after_cancellation(
+                    workspace_id,
+                    operation_id=recovery_operation_id,
+                    status=OperationStatus.succeeded,
+                )
+            else:
+                await self._finish_monitor_recovery_operation_after_cancellation(
+                    workspace_id,
+                    operation_id=recovery_operation_id,
+                    status=OperationStatus.cancelled,
+                    error_code="MONITOR_RECOVERY_CANCELLED",
+                    error_message="Monitor resume cancelled after workspace left monitoring_pr.",
+                )
         raise
     except Exception as exc:
         if not handoff_succeeded:
