@@ -70,6 +70,20 @@ _UV_RUN_SCOPE_VALUE_FLAGS = frozenset(
         "-w",
     }
 )
+_UV_RUN_BOOLEAN_FLAGS = frozenset(
+    {
+        "--active",
+        "--all-extras",
+        "--all-groups",
+        "--all-packages",
+        "--frozen",
+        "--locked",
+        "--no-default-groups",
+        "--no-dev",
+        "--no-editable",
+        "--only-dev",
+    }
+)
 
 
 def _collect_pm_scope_tokens(
@@ -149,12 +163,11 @@ def _uv_run_python_prefix(tokens: list[str], uv_index: int) -> str | None:
     return shlex.join(["uv", *global_scope, "run", *run_scope, "python"])
 
 
-_UV_SYNC_SCOPE_VALUE_FLAGS = _UV_RUN_SCOPE_VALUE_FLAGS
 _UV_PIP_SCOPE_VALUE_FLAGS = frozenset({"--python", "--python-platform", "-p"})
 
 
 def _collect_uv_sync_scope_tokens(tokens: list[str], sync_index: int) -> list[str]:
-    """Collect ``uv sync`` scope flags after the ``sync`` token."""
+    """Collect ``uv sync`` scope flags that ``uv run`` also accepts."""
     scope_tokens: list[str] = []
     index = sync_index + 1
     while index < len(tokens):
@@ -163,9 +176,15 @@ def _collect_uv_sync_scope_tokens(tokens: list[str], sync_index: int) -> list[st
             break
         if not token.startswith("-"):
             break
-        scope_tokens.append(token)
         option_name = token.split("=", 1)[0]
-        if "=" not in token and option_name in _UV_SYNC_SCOPE_VALUE_FLAGS:
+        if (
+            option_name not in _UV_RUN_BOOLEAN_FLAGS
+            and option_name not in _UV_RUN_SCOPE_VALUE_FLAGS
+        ):
+            index += 1
+            continue
+        scope_tokens.append(token)
+        if "=" not in token and option_name in _UV_RUN_SCOPE_VALUE_FLAGS:
             if index + 1 >= len(tokens):
                 break
             next_token = tokens[index + 1]

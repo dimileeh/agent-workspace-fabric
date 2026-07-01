@@ -268,6 +268,10 @@ def test_browser_install_preserves_uv_run_project_scope(
     ("setup_command", "expected_executable_prefix"),
     [
         ("uv sync --extra dev", "uv run --extra dev python"),
+        (
+            "uv sync --no-install-project --extra dev",
+            "uv run --extra dev python",
+        ),
         ("uv sync --group dev", "uv run --group dev python"),
         ("uv sync --all-extras", "uv run --all-extras python"),
         ("uv sync --all-groups --no-dev", "uv run --all-groups --no-dev python"),
