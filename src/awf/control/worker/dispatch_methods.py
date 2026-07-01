@@ -674,7 +674,8 @@ async def _monitor_recovery_handoff_failure_error(
                 workspace_id=workspace_id,
                 limit=10,
             )
-            for event in reversed(events):
+            # ``list()`` returns newest-first; return the latest matching failure.
+            for event in events:
                 reason_code = event.reason_code
                 if reason_code is None:
                     continue

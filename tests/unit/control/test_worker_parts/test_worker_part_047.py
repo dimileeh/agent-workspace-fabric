@@ -446,6 +446,54 @@ async def test_monitor_recovery_handoff_failure_error_skips_restart_start_event(
 
 
 @pytest.mark.unit
+async def test_monitor_recovery_handoff_failure_error_prefers_latest_failure_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The newest handoff failure reason must win over stale prior attempts."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-handoff-failure-latest",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_runtime_restart_failed",
+            reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+            payload={"reason_code": "MONITOR_RECOVERY_COMPOSE_FAILED"},
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_recovery_started",
+            reason_code="MONITOR_RECOVERY_AFTER_RESTART",
+            payload={"operation_id": "op-recovery-retry"},
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_runtime_restart_failed",
+            reason_code="MONITOR_RECOVERY_METADATA_MISSING",
+            payload={"reason_code": "MONITOR_RECOVERY_METADATA_MISSING"},
+        )
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    error_code, _ = await worker_dispatch_methods._monitor_recovery_handoff_failure_error(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert error_code == "MONITOR_RECOVERY_METADATA_MISSING"
+
+
+@pytest.mark.unit
 async def test_safely_provision_isolates_epoch_read_failure(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
