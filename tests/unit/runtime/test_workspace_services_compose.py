@@ -255,7 +255,10 @@ def test_worker_ollama_base_url_injected_when_profile_declares_none() -> None:
 @pytest.mark.unit
 def test_profile_ollama_host_suppresses_worker_base_url_exec_passthrough(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _clear_host_auth(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-worker")
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         yaml.safe_dump(
@@ -283,7 +286,11 @@ def test_profile_ollama_host_suppresses_worker_base_url_exec_passthrough(
 @pytest.mark.unit
 def test_agent_exec_env_passthrough_fails_closed_when_compose_unreadable(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _clear_host_auth(monkeypatch)
+    monkeypatch.setenv("OLLAMA_HOST", "http://ollama.worker:11434")
+
     missing = tmp_path / "missing.yml"
     assert not missing.exists()
     passthrough = agent_exec_env_passthrough(compose_file=missing)
@@ -299,7 +306,11 @@ def test_agent_exec_env_passthrough_fails_closed_when_compose_unreadable(
 @pytest.mark.unit
 def test_agent_exec_env_passthrough_includes_worker_ollama_when_compose_has_no_env_keys(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _clear_host_auth(monkeypatch)
+    monkeypatch.setenv("AWF_OPENCODE_OLLAMA_BASE_URL", "http://ollama.worker:11434/v1")
+
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         yaml.safe_dump({"services": {"agent": {"image": "agent:latest"}}}),
@@ -462,9 +473,33 @@ def test_declared_env_lease_same_name_placeholder_suppressed_from_exec_passthrou
 
 
 @pytest.mark.unit
+def test_agent_exec_env_passthrough_omits_unconfigured_worker_auth_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absent compose keys must not passthrough unless the worker env defines them."""
+
+    _clear_host_auth(monkeypatch)
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump({"services": {"agent": {"image": "agent:latest"}}}),
+        encoding="utf-8",
+    )
+
+    passthrough = agent_exec_env_passthrough(compose_file=compose_file)
+
+    assert "OPENAI_BASE_URL" not in passthrough
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in passthrough
+    assert passthrough == ()
+
+
+@pytest.mark.unit
 def test_profile_base_url_still_allows_worker_ollama_host_exec_passthrough(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _clear_host_auth(monkeypatch)
+    monkeypatch.setenv("OLLAMA_HOST", "http://ollama.worker:11434")
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         yaml.safe_dump(

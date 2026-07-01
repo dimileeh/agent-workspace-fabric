@@ -354,7 +354,10 @@ class TestCodexAdapter:
         _assert_prompt_sent_on_stdin(runner)
 
     @pytest.mark.unit
-    async def test_passthroughs_provider_auth_env_names_to_exec_without_values(self) -> None:
+    async def test_passthroughs_provider_auth_env_names_to_exec_without_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Adapter exec argv mirrors ``agent_exec_env_passthrough`` and never passes values.
 
         ``_COMPOSE_FILE`` is intentionally missing so adapter and expected helper share the
@@ -362,6 +365,8 @@ class TestCodexAdapter:
         ``test_workspace_services_compose`` and
         ``test_profile_ollama_host_exec_passthrough_skips_worker_base_url``.
         """
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-worker")
+        monkeypatch.setenv("OLLAMA_HOST", "http://ollama.worker:11434")
         runner = FakeCommandRunner()
         adapter = CodexAdapter(runner=runner)
 
@@ -385,7 +390,9 @@ class TestCodexAdapter:
     async def test_profile_ollama_host_exec_passthrough_skips_worker_base_url(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-worker")
         compose_file = tmp_path / "compose.yml"
         compose_file.write_text(
             """

@@ -460,7 +460,11 @@ def agent_environment_keys_from_compose_file(compose_file: Path) -> frozenset[st
     return _try_agent_environment_keys_from_compose_file(compose_file) or frozenset()
 
 
-def agent_exec_env_passthrough(*, compose_file: Path) -> tuple[str, ...]:
+def agent_exec_env_passthrough(
+    *,
+    compose_file: Path,
+    host_env: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
     """Return auth env var names safe to pass through on ``compose exec -e``.
 
     Mirrors ``agent_environment_with_legacy_host_auth`` shadowing: when compose
@@ -472,9 +476,11 @@ def agent_exec_env_passthrough(*, compose_file: Path) -> tuple[str, ...]:
     shell and overrides the running container's env, clobbering profile-owned or
     lease-resolved credentials/endpoints — including declared env leases that
     render as same-name ``${NAME}`` placeholders. Only auth keys absent from the
-    compose environment remain eligible for exec-time passthrough.
+    compose environment **and** configured in the worker env remain eligible for
+    exec-time passthrough.
     """
 
+    source_env = os.environ if host_env is None else host_env
     compose_env = _try_agent_environment_from_compose_file(compose_file)
     if compose_env is None:
         # Unreadable compose: assume profile-owned OLLAMA_HOST would shadow the worker
@@ -485,7 +491,9 @@ def agent_exec_env_passthrough(*, compose_file: Path) -> tuple[str, ...]:
         shadowing = _shadowing_worker_ollama_keys(set(compose_env))
         profile_owned = _profile_owned_auth_keys(compose_env)
     excluded = shadowing | profile_owned
-    return tuple(name for name in AGENT_AUTH_ENV_VARS if name not in excluded)
+    return tuple(
+        name for name in AGENT_AUTH_ENV_VARS if name not in excluded and source_env.get(name)
+    )
 
 
 def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
