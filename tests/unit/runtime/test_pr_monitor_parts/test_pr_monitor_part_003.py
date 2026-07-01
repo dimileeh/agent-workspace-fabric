@@ -1372,6 +1372,29 @@ class TestCiFailure:
         assert "could not retrieve actionable logs" in action.message
 
     @pytest.mark.unit
+    def test_logless_actions_failure_with_run_id_escalates_to_human(self) -> None:
+        """A failed Actions run with run_id but empty --log-failed output must escalate
+        instead of dispatching an empty ``ReportCiFailure``.
+
+        Regression for PRRT_kwDOSJAM6s6NcIoF."""
+        failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt="",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "could not retrieve actionable logs" in action.message
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("conclusion", ["CANCELLED", "ACTION_REQUIRED"])
     def test_transient_non_failed_job_conclusions_notify_human(
         self,
