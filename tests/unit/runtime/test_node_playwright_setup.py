@@ -1080,7 +1080,7 @@ def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
     cd_only_bad = _profile({"phases": {"validate_commands": ["cd apps/web; pnpm install"]}})
     assert _detected_node_package_manager(cd_only_bad) == ("pnpm", "cd apps/web; ")
     cd_names_pm_profile = _profile({"phases": {"validate_commands": ["cd pnpm"]}})
-    assert _detected_node_package_manager(cd_names_pm_profile) == ("pnpm", None)
+    assert _detected_node_package_manager(cd_names_pm_profile) == (None, None)
 
     assert _pip_to_python_executable("/opt/venv/bin/pip3.12") == "/opt/venv/bin/python3.12"
     pip_with_separator = shlex.split("python -m pip -- install pkg")

@@ -447,6 +447,11 @@ def _cd_prefix_from_cd_only_segment(segment: str, terminator: str) -> str | None
     return f"cd {shlex.quote(cd_path)} {terminator} "
 
 
+def _is_cd_path_operand(tokens: list[str], index: int) -> bool:
+    """Return whether ``tokens[index]`` is the directory argument to ``cd``."""
+    return index >= 1 and tokens[index - 1] == "cd"
+
+
 def _extract_cd_scope_prefix(tokens: list[str], pm_index: int) -> str | None:
     """Return ``cd <dir> <sep> `` when the package manager follows a cd-scoped shell chain."""
     index = pm_index - 1
@@ -575,7 +580,8 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
                         continue
                     if not any(
                         token.rsplit("/", 1)[-1] in _NODE_PACKAGE_MANAGERS
-                        for token in cd_only_tokens
+                        for idx, token in enumerate(cd_only_tokens)
+                        if not _is_cd_path_operand(cd_only_tokens, idx)
                     ):
                         pending_cd_prefix = cd_only_prefix
                         continue
@@ -585,6 +591,8 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
                     pending_cd_prefix = None
                     continue
                 for index, token in enumerate(tokens):
+                    if _is_cd_path_operand(tokens, index):
+                        continue
                     base = token.rsplit("/", 1)[-1]
                     if base in _NODE_PACKAGE_MANAGERS:
                         rest = _pm_invocation_tokens(tokens, index)
