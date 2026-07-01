@@ -69,6 +69,9 @@ async def test_core_discovery_advertises_profile_capability_schema() -> None:
     assert "privileged" in rule_summary
     assert "host" in rule_summary.lower()
     assert "compose" in rule_summary.lower()
+    # Regression: build_context services disqualify Autopilot
+    # (docker_required becomes true), so the public rule summary must list it.
+    assert "build_context" in rule_summary
     # No secrets in the schema projection.
     assert "token" not in response.text.lower()
     assert "password" not in response.text.lower()

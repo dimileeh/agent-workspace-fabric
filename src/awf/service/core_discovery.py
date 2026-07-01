@@ -29,9 +29,10 @@ PROFILE_CAPABILITY_FLAGS: tuple[str, ...] = tuple(f.name for f in fields(Profile
 PROFILE_CAPABILITY_RULE_SUMMARY = (
     "autopilot_supported is false when a profile requires a host Docker daemon "
     "(docker.mode != none), declares any privileged service, binds any host "
-    "ports, or relies on Compose-only orchestration (compose_files non-empty) "
-    "or Docker-in-Docker (docker.mode == dind). Otherwise the profile is "
-    "Autopilot-supported."
+    "ports, declares any service with a build_context (a Compose build: stanza "
+    "requires a Docker builder/daemon), or relies on Compose-only orchestration "
+    "(compose_files non-empty) or Docker-in-Docker (docker.mode == dind). "
+    "Otherwise the profile is Autopilot-supported."
 )
 
 
