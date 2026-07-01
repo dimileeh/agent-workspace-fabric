@@ -330,6 +330,14 @@ def test_browser_install_preserves_package_manager_scope(
             "uv run -w pytest-playwright pytest",
             "uv run -w pytest-playwright python",
         ),
+        (
+            "uv run --default-index https://mirror/simple pytest",
+            "uv run --default-index https://mirror/simple python",
+        ),
+        (
+            "uv run --index-url https://mirror/simple pytest",
+            "uv run --index-url https://mirror/simple python",
+        ),
     ],
 )
 def test_browser_install_preserves_uv_run_project_scope(
