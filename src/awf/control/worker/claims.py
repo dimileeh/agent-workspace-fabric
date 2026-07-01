@@ -1151,6 +1151,7 @@ async def _safely_resume_claimed_pr_monitor(
             await _cancel_monitor_claim_heartbeat(self, workspace_id, heartbeat=heartbeat)
             await self._release_monitoring_pr_claim(workspace_id)
         else:
+            recovery_finalized = True
             if recovery_finalize_pending:
                 pending_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)
                 (
@@ -1158,7 +1159,7 @@ async def _safely_resume_claimed_pr_monitor(
                     terminal_error_code,
                     terminal_error_message,
                 ) = await _monitor_recovery_terminal_finalize_status(self, workspace_id)
-                await self._finish_monitor_recovery_operation(
+                recovery_finalized = await self._finish_monitor_recovery_operation(
                     workspace_id,
                     operation_id=pending_operation_id,
                     status=terminal_status,
@@ -1167,15 +1168,16 @@ async def _safely_resume_claimed_pr_monitor(
                 )
             await _cancel_monitor_claim_heartbeat(self, workspace_id, heartbeat=heartbeat)
             await self._release_monitoring_pr_claim(workspace_id)
-            self._monitor_recovery_operation_ids.pop(workspace_id, None)
-            if recovery_operation_id is not None:
-                self._forget_active_salvage_monitor_recovery_operation_id(recovery_operation_id)
-            # Promptly release the terminal runtime when the monitor ended terminal
-            # (merge → ``completed``, abort → ``failed``), reclaiming the compose stack
-            # + per-ws auth overlay immediately rather than on the ~1h interval
-            # (#583, #584). A no-op for a still-monitoring exit and idempotent against
-            # the periodic backstop, which stays in place.
-            await self._release_terminal_runtime_promptly(workspace_id)
+            if recovery_finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+                if recovery_operation_id is not None:
+                    self._forget_active_salvage_monitor_recovery_operation_id(recovery_operation_id)
+                # Promptly release the terminal runtime when the monitor ended terminal
+                # (merge → ``completed``, abort → ``failed``), reclaiming the compose stack
+                # + per-ws auth overlay immediately rather than on the ~1h interval
+                # (#583, #584). A no-op for a still-monitoring exit and idempotent against
+                # the periodic backstop, which stays in place.
+                await self._release_terminal_runtime_promptly(workspace_id)
 
 
 async def _finish_monitor_recovery_operation(
