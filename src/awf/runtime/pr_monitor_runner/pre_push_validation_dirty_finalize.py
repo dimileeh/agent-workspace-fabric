@@ -980,7 +980,7 @@ async def _try_cleanup_pre_push_post_operation_residue(
         # to validation without the intended repair changes (review thread
         # ``PRRT_kwDOSJAM6s6Nfpvy``).
         return None
-    dirty_paths = set(check.paths)
+    dirty_paths = {*check.paths, *check.untracked_paths}
     if not dirty_paths:
         return None
     if dirty_paths & owned_delta_paths:
