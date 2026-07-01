@@ -41,6 +41,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_STATUS_FAILED,
 )
 
@@ -966,6 +967,15 @@ async def _try_cleanup_pre_push_post_operation_residue(
     _pre_push_validation_worktree_check = _ppv._pre_push_validation_worktree_check
 
     if check.clean or check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+        return None
+    # Only actual pre-existing dirty worktree checks may be cleaned. Synthetic
+    # fail-closed checks from dirty-finalize (e.g.
+    # ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA``) carry committed-delta paths
+    # that may be absent at HEAD; residue proof would treat them as safe CLI
+    # junk, cleanup would be a no-op on an already-clean tree, and validation
+    # would proceed instead of preserving the finalize failure (review thread
+    # ``PRRT_kwDOSJAM6s6NgIAE``).
+    if check.reason_code not in (None, VALIDATION_WORKTREE_PRE_EXISTING_DIRTY):
         return None
     if operation_start_head is None:
         return None

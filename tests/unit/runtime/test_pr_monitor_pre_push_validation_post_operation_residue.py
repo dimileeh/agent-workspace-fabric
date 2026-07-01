@@ -644,6 +644,90 @@ async def test_pre_push_validation_post_operation_residue_skips_when_committed_d
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_post_operation_residue_skips_when_finalize_unowned_delta(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Synthetic unowned-delta finalize failures must not be cleared by residue cleanup.
+
+    When dirty-finalize fails closed with ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA``
+    for a flag-shaped path like ``--old`` that is absent at HEAD, residue proof
+    would treat it as safe post-operation junk, cleanup would be a no-op on the
+    already-clean worktree, and validation would proceed unless cleanup is gated
+    to ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` only (review thread
+    ``PRRT_kwDOSJAM6s6NgIAE``).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+        _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    head_sha = "a" * 40
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    # Cleanup would succeed if invoked — the bug is invoking it at all.
+    successful_cleanup = ValidationWorktreeCleanup(
+        cleaned=True,
+        check=ValidationWorktreeCheck(clean=True),
+        restore_ref=head_sha,
+        cleaned_paths=("--old",),
+    )
+    cleanup = AsyncMock(return_value=successful_cleanup)
+    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
+    cmd.queue_result(
+        returncode=0,
+        stdout=_name_status_z("M\0src/fix.py\0", "D\0--old\0"),
+    )  # post-commit unowned flag-path deletion
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner._deps.validation = validation  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=MonitorState(),
+        operation_start_head="0" * 40,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON
+    assert result.validation_run_id is None
+    commit_dirty.assert_awaited_once()
+    assert validation.calls == []
+    cleanup.assert_not_awaited()
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_post_operation_residue_skips_uncommitted_repair_on_other_path(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
