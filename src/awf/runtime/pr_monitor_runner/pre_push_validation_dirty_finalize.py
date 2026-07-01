@@ -15,6 +15,7 @@ monkeypatches still intercept them, mirroring ``pre_push_validation_fix_pass.py`
 
 from __future__ import annotations
 
+import posixpath
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -58,11 +59,13 @@ def _is_git_cli_flag_capture_path(path: str) -> bool:
 
     Regression ws_b35338c649554377bb59f0a6: a malformed ``git log`` invocation
     created a staged file named ``--oneline``. Monitor repair output is not
-    expected to use flag-shaped basenames, so this is a narrow proof  for
+    expected to use flag-shaped basenames, so this is a narrow proof for
     provable post-operation CLI residue until attempted ``stage_paths`` can be
-    threaded to the gate (review thread ``PRRT_kwDOSJAM6s6NfrZb``).
+    threaded to the gate (review thread ``PRRT_kwDOSJAM6s6NfrZb``). Match the
+    basename only: subdirectory residue is reported as a repo-relative path such
+    as ``apps/console/--oneline`` (review thread ``PRRT_kwDOSJAM6s6NgSRm``).
     """
-    return path.startswith("-")
+    return posixpath.basename(path).startswith("-")
 
 
 async def _worktree_unstaged_change_paths(

@@ -179,6 +179,99 @@ async def test_pre_push_validation_cleans_staged_oneline_residue_and_proceeds(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_cleans_subdirectory_oneline_residue_and_proceeds(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Flag-shaped residue below a subdirectory must match on basename, not full path.
+
+    Regression for review thread ``PRRT_kwDOSJAM6s6NgSRm``: when a malformed
+    command runs from a subdirectory, git reports ``apps/console/--oneline``.
+    Checking ``path.startswith("-")`` rejected that case and skipped cleanup.
+    """
+    residue_path = "apps/console/--oneline"
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    head_sha = "a" * 40
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=(residue_path,),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    clean_check = ValidationWorktreeCheck(clean=True)
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    residue_cleanup = ValidationWorktreeCleanup(
+        cleaned=True,
+        check=clean_check,
+        restore_ref=head_sha,
+        cleaned_paths=(residue_path,),
+    )
+    post_validation_cleanup = ValidationWorktreeCleanup(
+        cleaned=False,
+        check=clean_check,
+        restore_ref=head_sha,
+    )
+    cleanup = AsyncMock(side_effect=[residue_cleanup, post_validation_cleanup])
+    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_post_operation_residue_proof_commands(cmd)
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_before
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_after
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # refresh after residue cleanup
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner._deps.validation = validation  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    with structlog.testing.capture_logs() as captured:
+        result = await pre_push_validation_module._run_pre_push_validation(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            state=state,
+            operation_start_head=operation_start_head,
+        )
+
+    assert result.passed is True
+    assert result.workspace_head_sha == head_sha
+    commit_dirty.assert_not_awaited()
+    assert validation.calls
+    assert check_worktree_clean.await_count == 2
+    assert cleanup.await_count == 2
+    residue_logs = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.pre_push_post_operation_residue_cleaned"
+    ]
+    assert len(residue_logs) == 1
+    assert residue_path in residue_logs[0]["residue_paths"]
+    assert residue_path in residue_logs[0]["cleaned_paths"]
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_cleans_untracked_oneline_residue_and_proceeds(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
