@@ -1398,6 +1398,50 @@ class TestCiFailure:
         assert "could not retrieve actionable logs" in action.message
 
     @pytest.mark.unit
+    def test_logless_failure_with_evidence_warnings_dispatches_ci_repair(self) -> None:
+        """Empty logs with evidence_warnings still reach ReportCiFailure for the repair agent.
+
+        Regression for PRRT_kwDOSJAM6s6NdNHR."""
+        failure = CheckFailure(
+            name="ci-required",
+            conclusion="FAILURE",
+            log_excerpt="",
+            run_id=None,
+            evidence_warnings=("External check details URL: https://example.com/check",),
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_logless_actions_failure_with_evidence_warnings_dispatches_ci_repair(
+        self,
+    ) -> None:
+        """Actions failures with log-unavailable warnings should not block CI repair."""
+        failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt="",
+            run_id="25655330295",
+            evidence_warnings=("GitHub Actions log unavailable for failed check lint-and-type.",),
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("conclusion", ["CANCELLED", "ACTION_REQUIRED"])
     def test_transient_non_failed_job_conclusions_notify_human(
         self,

@@ -706,6 +706,15 @@ def _failure_has_parsed_code_evidence(failure: CheckFailure) -> bool:
     return False
 
 
+def _failure_has_actionable_ci_evidence(failure: CheckFailure) -> bool:
+    """Return whether a CI failure row gives the repair agent something to work with."""
+    if failure.log_excerpt.strip():
+        return True
+    if _failure_has_parsed_code_evidence(failure):
+        return True
+    return bool(failure.evidence_warnings)
+
+
 def _ci_failure_identity(failure: CheckFailure) -> tuple[str, str, str]:
     """Stable identity for one failing check inside a retry-budget key.
 
@@ -982,10 +991,8 @@ def _ci_failure_action(
         and all(_looks_like_transient_ci_failure(failure) for failure in status.ci_failures)
     ):
         return NotifyHuman(message=_CI_TRANSIENT_HUMAN_MESSAGE)
-    if (
-        status.ci_failures
-        and all(not failure.log_excerpt.strip() for failure in status.ci_failures)
-        and not any(_failure_has_parsed_code_evidence(failure) for failure in status.ci_failures)
+    if status.ci_failures and not any(
+        _failure_has_actionable_ci_evidence(failure) for failure in status.ci_failures
     ):
         return NotifyHuman(message=_CI_MISSING_LOGS_HUMAN_MESSAGE)
     return ReportCiFailure(failures=status.ci_failures)
