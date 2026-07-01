@@ -992,6 +992,7 @@ def test_uv_setup_python_prefix_rejects_unknown_subcommands() -> None:
 def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
     """Cover fail-closed parser branches that browser-install planning relies on."""
     assert _pm_invocation_tokens(["npm", ";"], 0) == []
+    assert _pm_invocation_tokens(["npm", "run;"], 0) == ["run"]
 
     assert _collect_pm_scope_tokens(["npm", ";"], 0) == []
     assert _collect_pm_scope_tokens(["npm", "--", "install"], 0) == []
@@ -1000,6 +1001,9 @@ def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
     assert _collect_pm_scope_tokens(["npm", "-C;", "-w"], 0) == ["-C"]
     assert _collect_pm_scope_tokens(["npm", "-C", "-w"], 0) == ["-C", "-w"]
     assert _collect_pm_scope_tokens(shlex.split("pnpm -C apps;"), 0) == ["-C", "apps;"]
+    assert _collect_pm_scope_tokens(["npm", "-C;", "apps"], 0) == ["-C", "apps"]
+    assert _collect_pm_scope_tokens(shlex.split("pnpm --filter pkg"), 0) == ["--filter", "pkg"]
+    assert _pm_invocation_tokens(["npm", "run;", "build"], 0) == ["run"]
 
     assert _collect_uv_global_scope_tokens(shlex.split("uv --"), 0) is None
     assert _uv_run_python_prefix(shlex.split("uv --project apps"), 0) is None
@@ -1010,9 +1014,11 @@ def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
     assert _collect_uv_sync_scope_tokens(sync_unknown, sync_index) == ["--frozen"]
     assert _collect_uv_sync_scope_tokens(["uv", "sync", "--python"], 1) == ["--python"]
     assert _collect_uv_sync_scope_tokens(["uv", "sync", "--python", "-"], 1) == ["--python"]
+    assert _collect_uv_sync_scope_tokens(["uv", "sync", "--"], 1) == []
 
     pip_tokens = ["uv", "pip", "install", "--"]
     assert _collect_uv_pip_scope_tokens(pip_tokens, 2) == []
+    assert _collect_uv_pip_scope_tokens(["uv", "pip", "install", "--python"], 2) == ["--python"]
     assert _collect_uv_pip_scope_tokens(["uv", "pip", "install", "--python", "3.12"], 2) == [
         "--python",
         "3.12",
@@ -1029,6 +1035,10 @@ def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
     assert _uv_pip_system_python_executable(pip_system_eq, 2) == "python3.12"
     pip_system_unknown = shlex.split("uv pip install --system --reinstall pkg")
     assert _uv_pip_system_python_executable(pip_system_unknown, 2) == "python"
+    pip_system_eq_flag = shlex.split("uv pip install --system --config-setting=a=b pkg")
+    assert _uv_pip_system_python_executable(pip_system_eq_flag, 2) == "python"
+    pip_system_no_value = shlex.split("uv pip install --system --reinstall")
+    assert _uv_pip_system_python_executable(pip_system_no_value, 2) == "python"
     assert _uv_pip_system_python_executable(["uv", "pip", "install", "--"], 2) is None
 
     assert _cd_prefix_from_cd_only_segment("   ", "&&") is None
@@ -1070,8 +1080,12 @@ def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
     assert _detected_node_package_manager(bad_cd_profile) == ("pnpm", None)
     cd_only_bad = _profile({"phases": {"validate_commands": ["cd apps/web; pnpm install"]}})
     assert _detected_node_package_manager(cd_only_bad) == ("pnpm", "cd apps/web; ")
+    cd_names_pm_profile = _profile({"phases": {"validate_commands": ["cd pnpm"]}})
+    assert _detected_node_package_manager(cd_names_pm_profile) == ("pnpm", None)
 
+    assert _pip_to_python_executable("/opt/venv/bin/pip3.12") == "/opt/venv/bin/python3.12"
     pip_with_separator = shlex.split("python -m pip -- install pkg")
+    assert _has_pip_install_subcommand(shlex.split("pip wheel -- install"), 0) is False
     assert _has_pip_install_subcommand(pip_with_separator, pip_with_separator.index("pip")) is False
 
     assert (
