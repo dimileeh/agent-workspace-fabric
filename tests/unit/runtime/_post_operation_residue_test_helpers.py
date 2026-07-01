@@ -43,10 +43,21 @@ def queue_residue_cleanup_anchor_and_delta(
     cmd.queue_result(returncode=0, stdout=owned_delta_z)  # residue gate committed delta
 
 
-def queue_snapshot_residue_reproof_commands(cmd: FakeCommandRunner) -> None:
-    """Queue git commands for snapshot residue re-proof during scoped cleanup."""
+def queue_snapshot_residue_reproof_commands(
+    cmd: FakeCommandRunner,
+    *,
+    path_count: int = 1,
+) -> None:
+    """Queue git commands for snapshot residue re-proof during scoped cleanup.
+
+    Mirrors ``_dirty_paths_provable_as_post_operation_residue``: one shared
+    unstaged-delta ``git diff --name-status -z``, then one ``cat-file -e``
+    HEAD check per proven residue path. Default ``path_count=1`` matches the
+    single ``--oneline`` residue exercised by current tests.
+    """
     cmd.queue_result(returncode=0, stdout="")  # unstaged delta: staged-only residue
-    cmd.queue_result(returncode=128, stdout="")  # cat-file: path absent at HEAD
+    for _ in range(path_count):
+        cmd.queue_result(returncode=128, stdout="")  # cat-file: path absent at HEAD
 
 
 def queue_residue_cleanup_execution(
@@ -56,10 +67,11 @@ def queue_residue_cleanup_execution(
     head_after: str | None = None,
     restore_returncode: int = 0,
     restore_stderr: str = "",
+    path_count: int = 1,
 ) -> None:
     """Queue pre-cleanup HEAD verify, scoped restore/clean, and post-cleanup HEAD check."""
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # pre-cleanup HEAD verify
-    queue_snapshot_residue_reproof_commands(cmd)
+    queue_snapshot_residue_reproof_commands(cmd, path_count=path_count)
     cmd.queue_result(
         returncode=restore_returncode,
         stdout="",
