@@ -45,14 +45,15 @@ def classify_profile_capabilities(profile: WorkspaceProfile) -> ProfileCapabilit
     The function is pure: the same input always yields the same output and the
     profile is never mutated.
     """
-    has_dind = profile.docker.mode == DockerMode.dind
+    has_docker_mode = profile.docker.mode != DockerMode.none
+    has_dind_mode = profile.docker.mode == DockerMode.dind
     has_compose_files = bool(profile.docker.compose_files)
     has_privileged_service = any(service.privileged for service in profile.services)
     has_host_ports = any(bool(service.ports) for service in profile.services)
 
-    docker_required = has_dind or has_privileged_service or has_host_ports
+    docker_required = has_docker_mode or has_privileged_service or has_host_ports
     privileged_required = has_privileged_service
-    unsupported_compose_feature = has_compose_files or has_host_ports or has_dind
+    unsupported_compose_feature = has_compose_files or has_host_ports or has_dind_mode
     autopilot_supported = not (
         docker_required or privileged_required or unsupported_compose_feature
     )
