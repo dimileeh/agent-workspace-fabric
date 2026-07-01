@@ -423,10 +423,10 @@ def _shadowing_worker_ollama_keys(profile_keys: set[str]) -> frozenset[str]:
     return frozenset(_OLLAMA_BASE_URL_ENV_KEYS[:top])
 
 
-def _try_agent_environment_keys_from_compose_file(
+def _try_agent_environment_from_compose_file(
     compose_file: Path,
-) -> frozenset[str] | None:
-    """Return agent env keys from compose, or ``None`` when the file is unreadable."""
+) -> dict[str, str] | None:
+    """Return agent env pairs from compose, or ``None`` when the file is unreadable."""
 
     try:
         payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -440,7 +440,18 @@ def _try_agent_environment_keys_from_compose_file(
     agent = services.get("agent")
     if not isinstance(agent, Mapping):
         return None
-    return _compose_environment_keys(agent.get("environment"))
+    return _compose_environment_mapping(agent.get("environment"))
+
+
+def _try_agent_environment_keys_from_compose_file(
+    compose_file: Path,
+) -> frozenset[str] | None:
+    """Return agent env keys from compose, or ``None`` when the file is unreadable."""
+
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        return None
+    return frozenset(compose_env)
 
 
 def agent_environment_keys_from_compose_file(compose_file: Path) -> frozenset[str]:
@@ -455,29 +466,54 @@ def agent_exec_env_passthrough(*, compose_file: Path) -> tuple[str, ...]:
     Mirrors ``agent_environment_with_legacy_host_auth`` shadowing: when compose
     generation omitted a higher-precedence worker Ollama key so a profile-owned
     daemon wins, do not re-inject that key via exec-time ``-e`` passthrough.
+
+    Also skip keys already rendered into the agent service with a concrete value.
+    ``docker compose exec -e NAME`` (no value) re-reads ``NAME`` from the worker
+    shell and overrides the running container's env, clobbering profile-owned or
+    lease-resolved credentials/endpoints. Only legacy ``${NAME}`` placeholders —
+    intentionally host-owned — remain eligible for exec-time passthrough.
     """
 
-    keys = _try_agent_environment_keys_from_compose_file(compose_file)
-    if keys is None:
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
         # Unreadable compose: assume profile-owned OLLAMA_HOST would shadow the worker
         # base URL rather than treat a parse failure as "no profile Ollama keys".
         shadowing = _shadowing_worker_ollama_keys({"OLLAMA_HOST"})
+        profile_owned = frozenset[str]()
     else:
-        shadowing = _shadowing_worker_ollama_keys(set(keys))
-    return tuple(name for name in AGENT_AUTH_ENV_VARS if name not in shadowing)
+        shadowing = _shadowing_worker_ollama_keys(set(compose_env))
+        profile_owned = _profile_owned_auth_keys(compose_env)
+    excluded = shadowing | profile_owned
+    return tuple(name for name in AGENT_AUTH_ENV_VARS if name not in excluded)
+
+
+def _is_legacy_host_env_placeholder(key: str, value: str) -> bool:
+    return value == f"${{{key}}}"
+
+
+def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
+    return frozenset(
+        name
+        for name in AGENT_AUTH_ENV_VARS
+        if name in compose_env and not _is_legacy_host_env_placeholder(name, compose_env[name])
+    )
+
+
+def _compose_environment_mapping(environment: object) -> dict[str, str]:
+    if isinstance(environment, Mapping):
+        return {str(key): str(value) for key, value in environment.items()}
+    if isinstance(environment, list):
+        mapping: dict[str, str] = {}
+        for item in environment:
+            if isinstance(item, str):
+                key, sep, value = item.partition("=")
+                if key:
+                    mapping[key] = value if sep else ""
+            elif isinstance(item, Mapping):
+                mapping.update({str(key): str(value) for key, value in item.items()})
+        return mapping
+    return {}
 
 
 def _compose_environment_keys(environment: object) -> frozenset[str]:
-    if isinstance(environment, Mapping):
-        return frozenset(str(key) for key in environment)
-    if isinstance(environment, list):
-        keys: set[str] = set()
-        for item in environment:
-            if isinstance(item, str):
-                key, _, _ = item.partition("=")
-                if key:
-                    keys.add(key)
-            elif isinstance(item, Mapping):
-                keys.update(str(key) for key in item)
-        return frozenset(keys)
-    return frozenset()
+    return frozenset(_compose_environment_mapping(environment))

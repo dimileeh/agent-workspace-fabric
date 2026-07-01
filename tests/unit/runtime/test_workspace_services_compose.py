@@ -275,7 +275,7 @@ def test_profile_ollama_host_suppresses_worker_base_url_exec_passthrough(
 
     passthrough = agent_exec_env_passthrough(compose_file=compose_file)
 
-    assert "OLLAMA_HOST" in passthrough
+    assert "OLLAMA_HOST" not in passthrough
     assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in passthrough
     assert "OPENAI_API_KEY" in passthrough
 
@@ -395,8 +395,39 @@ def test_agent_exec_env_passthrough_honors_list_format_compose_environment(
 
     passthrough = agent_exec_env_passthrough(compose_file=compose_file)
 
-    assert "OLLAMA_HOST" in passthrough
+    assert "OLLAMA_HOST" not in passthrough
     assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in passthrough
+
+
+@pytest.mark.unit
+def test_profile_owned_auth_env_literals_suppressed_from_exec_passthrough(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "environment": {
+                            "OPENAI_API_KEY": "sk-profile-owned",
+                            "OPENAI_BASE_URL": "https://profile.proxy/v1",
+                            "ANTHROPIC_BASE_URL": "https://anthropic.profile/v1",
+                            "CODEX_API_KEY": "${CODEX_API_KEY}",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    passthrough = agent_exec_env_passthrough(compose_file=compose_file)
+
+    assert "OPENAI_API_KEY" not in passthrough
+    assert "OPENAI_BASE_URL" not in passthrough
+    assert "ANTHROPIC_BASE_URL" not in passthrough
+    assert "CODEX_API_KEY" in passthrough
 
 
 @pytest.mark.unit
@@ -421,7 +452,7 @@ def test_profile_base_url_still_allows_worker_ollama_host_exec_passthrough(
 
     passthrough = agent_exec_env_passthrough(compose_file=compose_file)
 
-    assert "AWF_OPENCODE_OLLAMA_BASE_URL" in passthrough
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in passthrough
     assert "OLLAMA_HOST" in passthrough
 
 

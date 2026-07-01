@@ -405,7 +405,7 @@ services:
             env_slice[index + 1] for index, flag in enumerate(env_slice) if flag == "-e"
         }
 
-        assert "OLLAMA_HOST" in passthrough_names
+        assert "OLLAMA_HOST" not in passthrough_names
         assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in passthrough_names
         assert "OPENAI_API_KEY" in passthrough_names
 
