@@ -58,6 +58,7 @@ def _run_for(
     fail_networks: bool = False,
 ) -> Any:
     def _run(args: list[str], **_kwargs: object) -> _Completed:
+        """Return canned Docker inventory responses for orphan-resource scans."""
         if args[:3] == ["docker", "ps", "-a"]:
             return _Completed(stdout=containers)
         if args[:3] == ["docker", "network", "ls"]:

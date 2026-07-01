@@ -729,6 +729,7 @@ class TestGeminiAdapter:
 
     @pytest.mark.unit
     async def test_produces_correct_cli_invocation(self) -> None:
+        """Verify produces correct cli invocation."""
         runner = FakeCommandRunner()
         adapter = GeminiAdapter(runner=runner, default_model="gemini-2.5-pro")
 
@@ -755,6 +756,7 @@ class TestGeminiAdapter:
 
     @pytest.mark.unit
     async def test_produces_cli_invocation_without_model_or_effort(self) -> None:
+        """Verify produces cli invocation without model or effort."""
         runner = FakeCommandRunner()
         adapter = GeminiAdapter(runner=runner)
 

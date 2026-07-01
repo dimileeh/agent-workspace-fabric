@@ -1257,6 +1257,8 @@ async def test_run_worker_forever_disposes_engine_on_exit(
             raise AssertionError("wait_for_execution_tasks should not be used")
 
     class _Engine:
+        """Test helper for Engine."""
+
         async def dispose(self) -> None:
             calls.append("dispose")
 
@@ -1359,25 +1361,41 @@ def _stub_worker_runtime_dependencies(
     """Replace build_worker_runtime's heavy collaborators with light stubs."""
 
     class _Runner:
+        """Test helper for Runner."""
+
         pass
 
     class _LogStore:
+        """Test helper for LogStore."""
+
         def __init__(self, *, root: Path, session_factory: object) -> None:
+            """Test helper for  init  ."""
             pass
 
     class _ValidationRunner:
+        """Test helper for ValidationRunner."""
+
         def __init__(self, *, runner: object, artifacts_dir: Path, log_store: object) -> None:
+            """Test helper for  init  ."""
             pass
 
     class _PullRequestCreator:
+        """Test helper for PullRequestCreator."""
+
         def __init__(self, runner: object) -> None:
+            """Test helper for  init  ."""
             pass
 
     class _BranchOpenPullRequestResolver:
+        """Test helper for BranchOpenPullRequestResolver."""
+
         def __init__(self, runner: object) -> None:
+            """Test helper for  init  ."""
             pass
 
     class _GitManager:
+        """Test helper for GitManager."""
+
         def __init__(
             self,
             work_dir: Path,
@@ -1386,17 +1404,26 @@ def _stub_worker_runtime_dependencies(
             worktree_owner_uid: int | None = None,
             worktree_owner_gid: int | None = None,
         ) -> None:
+            """Test helper for  init  ."""
             pass
 
     class _ComposeManager:
+        """Test helper for ComposeManager."""
+
         def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+            """Test helper for  init  ."""
             pass
 
     class _LocalSecretLeaseMountResolver:
+        """Test helper for LocalSecretLeaseMountResolver."""
+
         def __init__(self, *, host_home: Path, work_dir: Path, host_env: object) -> None:
+            """Test helper for  init  ."""
             pass
 
     class _ComposeStackLauncher:
+        """Test helper for ComposeStackLauncher."""
+
         def __init__(
             self,
             *,
@@ -1406,9 +1433,12 @@ def _stub_worker_runtime_dependencies(
             secret_lease_resolver: object,
             companion_image_builder: object = None,
         ) -> None:
+            """Test helper for  init  ."""
             pass
 
     class _Provisioner:
+        """Test helper for Provisioner."""
+
         def __init__(
             self,
             *,
@@ -1418,9 +1448,12 @@ def _stub_worker_runtime_dependencies(
             config: object,
             service_diagnostics: object = None,
         ) -> None:
+            """Test helper for  init  ."""
             pass
 
     class _WorkspaceExecutor:
+        """Test helper for WorkspaceExecutor."""
+
         def __init__(
             self,
             *,
@@ -1434,9 +1467,12 @@ def _stub_worker_runtime_dependencies(
             log_store: object,
             usage_sampler: object = None,
         ) -> None:
+            """Test helper for  init  ."""
             created["executor_monitor_factory"] = pr_monitor_factory
 
     class _ControlWorker:
+        """Test helper for ControlWorker."""
+
         def __init__(
             self,
             *,
@@ -1452,6 +1488,7 @@ def _stub_worker_runtime_dependencies(
             auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
+            """Test helper for  init  ."""
             pass
 
     monkeypatch.setattr(worker_mod, "make_engine", lambda _url: object())

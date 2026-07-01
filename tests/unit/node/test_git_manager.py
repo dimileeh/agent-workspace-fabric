@@ -1519,6 +1519,7 @@ class TestRemoveWorktree:
         (worktree_path / "leftover.txt").write_text("stale\n")
 
         async def _stale_run(args: list[str], *, operation: str):  # type: ignore[no-untyped-def]
+            """Test helper for stale run."""
             if operation == "worktree.remove":
                 raise GitOperationError(
                     operation=operation,
