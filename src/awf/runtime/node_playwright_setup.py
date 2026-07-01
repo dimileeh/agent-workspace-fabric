@@ -64,6 +64,7 @@ def _pm_scope_flags(pm_base: str) -> frozenset[str]:
 
 _PYTHON_EXECUTABLE_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
 _PIP_EXECUTABLE_RE = re.compile(r"^pip(\d+(?:\.\d+)*)?$")
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 _SHELL_CHAIN_SEPARATORS = frozenset({"&&", ";", "||"})
 _UV_GLOBAL_SCOPE_VALUE_FLAGS = frozenset(
     {
@@ -431,6 +432,9 @@ def _extract_cd_scope_prefix(tokens: list[str], pm_index: int) -> str | None:
     while index >= 0:
         token = tokens[index]
         if token in _SHELL_CHAIN_SEPARATORS:
+            index -= 1
+            continue
+        if _ENV_ASSIGNMENT_RE.fullmatch(token):
             index -= 1
             continue
         if index >= 1 and tokens[index - 1] == "cd":

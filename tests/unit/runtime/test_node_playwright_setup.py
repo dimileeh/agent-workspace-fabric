@@ -239,6 +239,10 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
             "cd apps/console && pnpm exec playwright install chromium",
         ),
         (
+            "cd apps/console && CI=true pnpm install",
+            "cd apps/console && pnpm exec playwright install chromium",
+        ),
+        (
             "cd apps/console; yarn install",
             "cd apps/console; yarn playwright install chromium",
         ),
@@ -486,6 +490,11 @@ def test_browser_install_uses_system_python_for_uv_pip_system(
             "cd apps/api && python3 -m pytest",
             "validate",
             "cd apps/api && python3 -m playwright install chromium",
+        ),
+        (
+            "cd apps/api && UV_PROJECT_ENVIRONMENT=.venv uv run pytest",
+            "validate",
+            "cd apps/api && uv run python -m playwright install chromium",
         ),
     ],
 )
