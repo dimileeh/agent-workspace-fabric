@@ -15,14 +15,17 @@ from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRe
 from awf.profiles.compose import (
     AGENT_AUTH_ENV_VARS,
     agent_environment_keys_from_compose_file,
+    agent_environment_with_declared_secret_leases,
     agent_environment_with_github_token,
     agent_environment_with_legacy_host_auth,
     agent_exec_env_passthrough,
     profile_agent_environment,
+    profile_app_endpoint_environment,
     profile_services,
     resolve_app_endpoints,
+    resolve_profile_app_endpoints,
 )
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import EndpointVisibility, ProfileAppEndpoint, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolver
 
 _FIXTURE = (
@@ -157,6 +160,60 @@ def test_profile_agent_environment_exposes_only_agent_and_validation_app_endpoin
     assert [endpoint["name"] for endpoint in endpoints] == ["app", "browser_validation"]
     assert endpoints[0]["internal_url"] == "http://app:3000/"
     assert endpoints[1]["health"]["internal_url"] == "http://browser:9323/healthz"
+
+
+@pytest.mark.unit
+def test_resolve_profile_app_endpoints_excludes_internal_when_disabled() -> None:
+    endpoints = [
+        ProfileAppEndpoint(name="agent_ep", service="app", port=3000),
+        ProfileAppEndpoint(
+            name="internal_ep",
+            service="metrics",
+            port=9090,
+            visibility=EndpointVisibility.internal,
+        ),
+    ]
+
+    visible = resolve_profile_app_endpoints(endpoints, include_internal=False)
+    assert [ep["name"] for ep in visible] == ["agent_ep"]
+
+    all_endpoints = resolve_profile_app_endpoints(endpoints, include_internal=True)
+    assert [ep["name"] for ep in all_endpoints] == ["agent_ep", "internal_ep"]
+
+
+@pytest.mark.unit
+def test_profile_app_endpoint_environment_uses_resolved_endpoints_argument() -> None:
+    resolved = resolve_profile_app_endpoints(
+        [
+            ProfileAppEndpoint(name="agent_ep", service="app", port=3000),
+            ProfileAppEndpoint(
+                name="console_ep",
+                service="app",
+                port=3000,
+                path="/operator",
+                visibility=EndpointVisibility.console,
+            ),
+        ]
+    )
+
+    env = dict(
+        profile_app_endpoint_environment(_load_node_browser_profile(), resolved_endpoints=resolved)
+    )
+
+    payload = json.loads(env["AWF_APP_ENDPOINTS_JSON"])
+    assert [endpoint["name"] for endpoint in payload] == ["agent_ep"]
+    assert "AWF_APP_ENDPOINT_BROWSER_VALIDATION_URL" not in env
+
+
+@pytest.mark.unit
+def test_agent_environment_with_declared_secret_leases_merges_before_legacy() -> None:
+    base: tuple[tuple[str, str], ...] = (("AWF_GITHUB_TOKEN", "legacy-token"),)
+    leases: tuple[tuple[str, str], ...] = (("AWF_SECRET_DB_PASSWORD", "leased-value"),)
+
+    merged = dict(agent_environment_with_declared_secret_leases(base, leases))
+
+    assert merged["AWF_SECRET_DB_PASSWORD"] == "leased-value"
+    assert merged["AWF_GITHUB_TOKEN"] == "legacy-token"
 
 
 @pytest.mark.unit

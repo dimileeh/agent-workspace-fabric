@@ -752,13 +752,17 @@
           "package_version": {
             "title": "Package Version",
             "type": "string"
+          },
+          "profile_capability_schema": {
+            "$ref": "#/components/schemas/ProfileCapabilitySchema"
           }
         },
         "required": [
           "package_name",
           "package_version",
           "git_commit",
-          "capabilities"
+          "capabilities",
+          "profile_capability_schema"
         ],
         "title": "CoreDiscoveryResponse",
         "type": "object"
@@ -2664,6 +2668,28 @@
           "path"
         ],
         "title": "ProfileAppEndpointHealth",
+        "type": "object"
+      },
+      "ProfileCapabilitySchema": {
+        "description": "Public-safe description of the profile capability classification contract.\n\nSurfaced through Core discovery so a cloud substrate can interpret\nper-profile capability payloads without Core embedding cloud product\npolicy. Carries no secrets.",
+        "properties": {
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
+          "rule_summary": {
+            "title": "Rule Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "flags",
+          "rule_summary"
+        ],
+        "title": "ProfileCapabilitySchema",
         "type": "object"
       },
       "ProfileCommand": {
