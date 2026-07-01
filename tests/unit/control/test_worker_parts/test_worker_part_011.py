@@ -1380,12 +1380,12 @@ class TestRunOnceExecutionPart004:
             original_finish = worker._finish_monitor_recovery_operation  # noqa: SLF001
             second_cancel_injected = False
 
-            async def _finish_with_second_cancel(*args: Any, **kwargs: Any) -> None:
+            async def _finish_with_second_cancel(*args: Any, **kwargs: Any) -> bool:
                 nonlocal second_cancel_injected
                 if not second_cancel_injected and monitor_task is not None:
                     second_cancel_injected = True
                     monitor_task.cancel()
-                await original_finish(*args, **kwargs)
+                return await original_finish(*args, **kwargs)
 
             worker._finish_monitor_recovery_operation = _finish_with_second_cancel  # type: ignore[method-assign]  # noqa: SLF001
 
