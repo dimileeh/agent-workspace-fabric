@@ -263,12 +263,13 @@ async def _path_exists_at_head(
     )
     if exists_result.returncode == 0:
         return True
-    # ``git cat-file -e HEAD:<path>`` exits 1 when the blob object is missing and
-    # 128 with ``fatal: path '<path>' does not exist in 'HEAD'`` when the path is
-    # not in the tree (the usual case for new CLI flag-capture residue such as
-    # ``--oneline``). Treat both as absent so residue proof does not fail closed
-    # on the real exit code (review thread ``PRRT_kwDOSJAM6s6Nf97O``).
-    if exists_result.returncode in (1, 128):
+    # ``git cat-file -e HEAD:<path>`` exits 128 with ``fatal: path '<path>' does not
+    # exist in 'HEAD'`` when the path is not in the tree (the usual case for new
+    # CLI flag-capture residue such as ``--oneline``). Exit 1 means the blob object
+    # is missing or corrupt even though the path may be tracked in HEAD; that must
+    # fail closed so residue proof cannot treat a staged tracked edit as deletable
+    # junk (review threads ``PRRT_kwDOSJAM6s6Nf97O``, ``PRRT_kwDOSJAM6s6NoS6x``).
+    if exists_result.returncode == 128:
         return False
     _log.warning(
         "monitor.pre_push_post_operation_residue_head_path_check_failed",

@@ -71,6 +71,38 @@ async def test_path_exists_at_head_treats_cat_file_128_as_absent(
 
 
 @pytest.mark.unit
+async def test_path_exists_at_head_fails_closed_on_missing_head_blob(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """``git cat-file -e HEAD:<path>`` exit 1 means a missing/corrupt blob, not absence.
+
+    Regression for review thread ``PRRT_kwDOSJAM6s6NoS6x``: a tracked repo-root
+    ``--oneline`` with a staged repair edit but a missing HEAD blob must not be
+    classified as new CLI junk.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stdout="", stderr="missing blob\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    result = await _path_exists_at_head(
+        runner,
+        worktree_path=worktree,
+        path="--oneline",
+    )
+
+    assert result is None
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_cleans_staged_oneline_residue_and_proceeds(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
