@@ -72,9 +72,10 @@ class _RecordingExecutor:
         del workspace_id
         return object()
 
-    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> bool:
         del handoff
         self.resume_calls.append(workspace_id)
+        return True
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
@@ -413,11 +414,12 @@ async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_w
             assert workspace_id == "ws_monitor"
             return handoff
 
-        async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+        async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> bool:
             nonlocal monitor_ran_after_finalize
             assert handoff_obj is handoff
             assert workspace_id == "ws_monitor"
             monitor_ran_after_finalize = succeed_attempt >= 2
+            return True
 
     worker = ControlWorker(
         session_factory=session_factory,
