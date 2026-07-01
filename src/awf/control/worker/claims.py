@@ -1019,15 +1019,6 @@ async def _cancel_monitor_claim_heartbeat(
         await heartbeat
 
 
-def _retain_monitor_claim_heartbeat(
-    self: Any,
-    workspace_id: str,
-    heartbeat: asyncio.Task[None],
-) -> None:
-    """Keep ``heartbeat`` registered while recovery finalize remains pending."""
-    self._monitor_claim_heartbeat_tasks[workspace_id] = heartbeat
-
-
 async def _workspace_is_monitoring_pr(self: Any, workspace_id: str) -> bool:
     """Return whether the workspace is still in ``monitoring_pr`` and claimable for retry."""
     try:
@@ -1122,7 +1113,11 @@ async def _safely_resume_claimed_pr_monitor(
             not recovery_finalize_pending or await _workspace_is_monitoring_pr(self, workspace_id)
         )
         if recovery_finalize_pending and can_retry_recovery_finalize:
-            _retain_monitor_claim_heartbeat(self, workspace_id, heartbeat)
+            # Release the claim so the monitor-resume scheduler can reclaim and
+            # retry the pending recovery operation; retaining a fresh heartbeat
+            # would keep the row unlisted until lease expiry.
+            await _cancel_monitor_claim_heartbeat(self, workspace_id, heartbeat=heartbeat)
+            await self._release_monitoring_pr_claim(workspace_id)
         else:
             if recovery_finalize_pending:
                 pending_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)

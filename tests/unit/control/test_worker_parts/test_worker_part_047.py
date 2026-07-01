@@ -553,9 +553,10 @@ async def test_safely_resume_pr_monitor_skips_monitor_when_finalize_never_succee
 
 
 @pytest.mark.unit
-async def test_safely_resume_claimed_pr_monitor_retains_claim_when_finalize_pending(
+async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pending(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Pending finalize on a still-monitoring workspace must drop the claim for retry."""
     async with session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.create(
@@ -617,17 +618,10 @@ async def test_safely_resume_claimed_pr_monitor_retains_claim_when_finalize_pend
         recovery_operation_id="op_finalize_pending",
     )
 
-    assert claim_released is False
+    assert claim_released is True
     assert prompt_released is False
     assert worker._monitor_recovery_operation_ids[workspace_id] == "op_finalize_pending"  # noqa: SLF001
-    retained_heartbeat = worker._monitor_claim_heartbeat_tasks.get(workspace_id)  # noqa: SLF001
-    assert retained_heartbeat is not None
-    assert not retained_heartbeat.done()
-    assert not retained_heartbeat.cancelled()
-    retained_heartbeat.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await retained_heartbeat
-    worker._monitor_claim_heartbeat_tasks.pop(workspace_id, None)  # noqa: SLF001
+    assert worker._monitor_claim_heartbeat_tasks.get(workspace_id) is None  # noqa: SLF001
 
 
 @pytest.mark.unit
