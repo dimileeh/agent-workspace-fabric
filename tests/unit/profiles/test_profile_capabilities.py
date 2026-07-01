@@ -49,6 +49,7 @@ def test_dind_mode_disqualifies_autopilot() -> None:
     capabilities = classify_profile_capabilities(profile)
 
     assert capabilities.docker_required is True
+    assert capabilities.privileged_required is True
     assert capabilities.unsupported_compose_feature is True
     assert capabilities.autopilot_supported is False
 

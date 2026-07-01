@@ -35,7 +35,8 @@ def classify_profile_capabilities(profile: WorkspaceProfile) -> ProfileCapabilit
     - ``docker_required`` is True when ``profile.docker.mode != none`` OR any
       service declares ``privileged`` OR any service declares host ``ports``.
     - ``privileged_required`` is True when any ``ProfileService.privileged`` is
-      True.
+      True OR ``profile.docker.mode == dind`` (the local runtime injects a
+      privileged managed Docker daemon service for DinD profiles).
     - ``unsupported_compose_feature`` is True when
       ``profile.docker.compose_files`` is non-empty OR any service declares
       host ``ports`` OR ``profile.docker.mode == dind``.
@@ -52,7 +53,7 @@ def classify_profile_capabilities(profile: WorkspaceProfile) -> ProfileCapabilit
     has_host_ports = any(bool(service.ports) for service in profile.services)
 
     docker_required = has_docker_mode or has_privileged_service or has_host_ports
-    privileged_required = has_privileged_service
+    privileged_required = has_privileged_service or has_dind_mode
     unsupported_compose_feature = has_compose_files or has_host_ports or has_dind_mode
     autopilot_supported = not (
         docker_required or privileged_required or unsupported_compose_feature
