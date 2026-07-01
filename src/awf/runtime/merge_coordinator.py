@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Protocol, cast
@@ -48,6 +48,17 @@ class _AdvisoryConnection(Protocol):
 
 
 _AdvisoryConnect = Callable[[str], Awaitable[_AdvisoryConnection]]
+_URLQueryValue = tuple[str, ...] | str
+
+_AWF_ENGINE_ONLY_QUERY_KEYS: frozenset[str] = frozenset(
+    {
+        "awf_search_path",
+        "awf_null_pool",
+        "awf_connect_timeout",
+        "awf_connect_attempts",
+        "awf_connect_retries",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -188,7 +199,46 @@ def _asyncpg_dsn_from_engine(engine: AsyncEngine) -> str:
     url = engine.url
     if "+" in url.drivername:
         url = url.set(drivername=url.drivername.split("+", 1)[0])
+    query = _advisory_asyncpg_query(url.query)
+    if query != dict(url.query):
+        url = url.set(query=query)
     return url.render_as_string(hide_password=False)
+
+
+def _advisory_asyncpg_query(query: Mapping[str, _URLQueryValue]) -> dict[str, _URLQueryValue]:
+    normalized: dict[str, _URLQueryValue] = {}
+    query_dict = dict(query or {})
+    has_sslmode = "sslmode" in query_dict
+    for key, value in query_dict.items():
+        if key in _AWF_ENGINE_ONLY_QUERY_KEYS:
+            continue
+        if key == "ssl":
+            if not has_sslmode:
+                sslmode = _ssl_query_value_to_sslmode(_single_query_value(value))
+                if sslmode is not None:
+                    normalized["sslmode"] = sslmode
+            continue
+        normalized[key] = value
+    return normalized
+
+
+def _single_query_value(value: _URLQueryValue) -> str | None:
+    if isinstance(value, tuple):
+        return value[0] if value else None
+    return value
+
+
+def _ssl_query_value_to_sslmode(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"0", "false", "no", "off", "disable", "disabled"}:
+        return "disable"
+    if normalized in {"1", "true", "yes", "on", "require", "required"}:
+        return "require"
+    if normalized in {"allow", "prefer", "verify-ca", "verify-full"}:
+        return normalized
+    return None
 
 
 DEFAULT_MERGE_COORDINATOR = InProcessMergeCoordinator()

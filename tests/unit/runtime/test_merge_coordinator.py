@@ -343,6 +343,28 @@ class TestPostgresAdvisoryMergeCoordinator:
             == "postgresql://awf:secret@db:5432/awf"
         )
 
+    @pytest.mark.unit
+    def test_asyncpg_dsn_from_engine_normalizes_cloud_sql_ssl_query(self) -> None:
+        engine = cast(
+            AsyncEngine,
+            SimpleNamespace(
+                url=make_url(
+                    "postgresql+asyncpg://awf:secret@db:5432/awf"
+                    "?ssl=require"
+                    "&awf_search_path=awf_core"
+                    "&awf_null_pool=1"
+                    "&awf_connect_timeout=5"
+                    "&awf_connect_attempts=3"
+                    "&awf_connect_retries=3"
+                )
+            ),
+        )
+
+        assert (
+            merge_coordinator_mod._asyncpg_dsn_from_engine(engine)
+            == "postgresql://awf:secret@db:5432/awf?sslmode=require"
+        )
+
 
 def _fake_engine() -> AsyncEngine:
     return cast(
