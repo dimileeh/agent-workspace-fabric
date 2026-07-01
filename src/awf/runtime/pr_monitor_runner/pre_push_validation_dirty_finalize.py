@@ -52,6 +52,106 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 
+def _is_git_cli_flag_capture_path(path: str) -> bool:
+    """Return True when ``path`` looks like a git CLI flag captured as a filename.
+
+    Regression ws_b35338c649554377bb59f0a6: a malformed ``git log`` invocation
+    created a staged file named ``--oneline``. Monitor repair output is not
+    expected to use flag-shaped basenames, so this is a narrow proof  for
+    provable post-operation CLI residue until attempted ``stage_paths`` can be
+    threaded to the gate (review thread ``PRRT_kwDOSJAM6s6NfrZb``).
+    """
+    return path.startswith("-")
+
+
+async def _worktree_unstaged_change_paths(
+    self: Any,
+    *,
+    worktree_path: Path,
+) -> set[str] | None:
+    """Return paths with unstaged working-tree edits relative to the index."""
+    unstaged_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "diff", "--name-status", "-z")
+    )
+    if not unstaged_result.ok:
+        _log.warning(
+            "monitor.pre_push_post_operation_residue_unstaged_delta_unavailable",
+            returncode=unstaged_result.returncode,
+            stderr=(unstaged_result.stderr or "")[:400],
+        )
+        return None
+    try:
+        return set(_changed_paths_from_name_status_z(unstaged_result.stdout or ""))
+    except ProtectedScopeDiffError:
+        _log.warning(
+            "monitor.pre_push_post_operation_residue_unstaged_delta_malformed",
+            source=(unstaged_result.stdout or "")[:400],
+        )
+        return None
+
+
+async def _path_exists_at_head(
+    self: Any,
+    *,
+    worktree_path: Path,
+    path: str,
+) -> bool | None:
+    """Return whether ``path`` is tracked in the current HEAD tree."""
+    exists_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "cat-file", "-e", f"HEAD:{path}")
+    )
+    if exists_result.returncode == 0:
+        return True
+    if exists_result.returncode == 1:
+        return False
+    _log.warning(
+        "monitor.pre_push_post_operation_residue_head_path_check_failed",
+        path=path,
+        returncode=exists_result.returncode,
+        stderr=(exists_result.stderr or "")[:400],
+    )
+    return None
+
+
+async def _dirty_paths_provable_as_post_operation_residue(
+    self: Any,
+    *,
+    worktree_path: Path,
+    dirty_paths: set[str],
+) -> bool:
+    """Return whether every dirty path is provable post-operation residue.
+
+    A non-empty committed delta alone cannot prove disjoint dirty paths are
+    residue rather than uncommitted repair edits left by a failed
+    ``git add -A`` / ``git commit`` (review threads ``PRRT_kwDOSJAM6s6KYd-r``,
+    ``PRRT_kwDOSJAM6s6KaUHP``, ``PRRT_kwDOSJAM6s6NfrZb``). Fail closed when
+    any dirty path has unstaged edits, already exists at HEAD (tracked
+    modification residue), or is a new path that does not match the narrow
+    git-CLI flag-capture proxy.
+    """
+    unstaged_paths = await _worktree_unstaged_change_paths(
+        self,
+        worktree_path=worktree_path,
+    )
+    if unstaged_paths is None:
+        return False
+    if dirty_paths & unstaged_paths:
+        return False
+    for path in dirty_paths:
+        exists_at_head = await _path_exists_at_head(
+            self,
+            worktree_path=worktree_path,
+            path=path,
+        )
+        if exists_at_head is None:
+            return False
+        if exists_at_head:
+            return False
+        if not _is_git_cli_flag_capture_path(path):
+            return False
+    return True
+
+
 async def _operation_owned_delta_paths(
     self: Any,
     *,
@@ -850,9 +950,10 @@ async def _try_cleanup_pre_push_post_operation_residue(
     ``operation_start_head..HEAD``), attempt a HEAD-preserving cleanup via
     ``git restore`` + ``git clean`` before failing closed with
     ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``. Only runs when the operation
-    has a non-empty committed delta (so dirty paths provably disjoint from
-    ownership are post-operation residue, not uncommitted repair edits) and
-    cleanup leaves HEAD unchanged with a clean worktree.
+    has a non-empty committed delta, every dirty path is disjoint from that
+    delta, and each dirty path is provably post-operation residue (not
+    uncommitted repair output — review thread ``PRRT_kwDOSJAM6s6NfrZb``).
+    Cleanup must leave HEAD unchanged with a clean worktree.
     """
     from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
 
@@ -883,6 +984,12 @@ async def _try_cleanup_pre_push_post_operation_residue(
     if not dirty_paths:
         return None
     if dirty_paths & owned_delta_paths:
+        return None
+    if not await _dirty_paths_provable_as_post_operation_residue(
+        self,
+        worktree_path=worktree_path,
+        dirty_paths=dirty_paths,
+    ):
         return None
 
     head_before = await self._rev_parse_head(worktree_path)
