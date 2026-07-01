@@ -689,6 +689,118 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
 
 
 @pytest.mark.unit
+async def test_workspace_is_monitoring_pr_returns_true_on_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient DB errors must not block recovery retry eligibility."""
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class FailingWorkspaceRepository:
+        def __init__(self, _session: FakeSession) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> None:
+            assert workspace_id == "ws_monitor"
+            raise _closed_connection_error()
+
+    monkeypatch.setattr(
+        "awf.control.worker.claims.WorkspaceRepository",
+        FailingWorkspaceRepository,
+    )
+    worker = ControlWorker(
+        session_factory=lambda: FakeSession(),  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    result = await worker_claims._workspace_is_monitoring_pr(worker, "ws_monitor")  # noqa: SLF001
+
+    assert result is True
+
+
+@pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pending_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pending finalize must drop the claim for retry when status lookup fails."""
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class FailingWorkspaceRepository:
+        def __init__(self, _session: FakeSession) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> None:
+            assert workspace_id == "ws_monitor"
+            raise _closed_connection_error()
+
+    monkeypatch.setattr(
+        "awf.control.worker.claims.WorkspaceRepository",
+        FailingWorkspaceRepository,
+    )
+    worker = ControlWorker(
+        session_factory=lambda: FakeSession(),  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    workspace_id = "ws_monitor"
+    claim_released = False
+    finalize_called = False
+
+    async def _resume(
+        resume_workspace_id: str,
+        *,
+        recovery_operation_id: str | None = None,
+    ) -> bool:
+        assert resume_workspace_id == workspace_id
+        assert recovery_operation_id == "op_finalize_pending_db_error"
+        return False
+
+    async def _release_monitor_claim(released_workspace_id: str) -> None:
+        nonlocal claim_released
+        assert released_workspace_id == workspace_id
+        claim_released = True
+
+    async def _finish_monitor_recovery_operation(
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        nonlocal finalize_called
+        finalize_called = True
+        return True
+
+    worker._monitor_recovery_operation_ids[workspace_id] = "op_finalize_pending_db_error"  # noqa: SLF001
+    worker._safely_resume_pr_monitor = _resume  # type: ignore[method-assign]
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    await worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+        workspace_id,
+        recovery_operation_id="op_finalize_pending_db_error",
+    )
+
+    assert claim_released is True
+    assert finalize_called is False
+    assert worker._monitor_recovery_operation_ids[workspace_id] == "op_finalize_pending_db_error"  # noqa: SLF001
+    assert worker._monitor_claim_heartbeat_tasks.get(workspace_id) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pending_but_terminal(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

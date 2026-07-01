@@ -1089,7 +1089,9 @@ async def _workspace_is_monitoring_pr(self: Any, workspace_id: str) -> bool:
             "worker.monitor_recovery_retry_eligibility_lookup_failed",
             workspace_id=workspace_id,
         )
-        return False
+        # Prefer releasing the claim for retry over terminal finalize when status
+        # is unknown due to a transient DB failure.
+        return True
 
 
 async def _monitor_recovery_terminal_finalize_status(
