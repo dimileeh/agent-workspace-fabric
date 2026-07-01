@@ -112,15 +112,15 @@ def _content_provable_as_git_oneline_capture(content: str) -> bool:
     own. Whitespace-only bytes (e.g. ``"\\n"``) are likewise insufficient
     (review thread ``PRRT_kwDOSJAM6s6NiUD7``). Blank ``splitlines()`` entries
     must not count as proof — ``git log --oneline`` never emits empty lines, so
-    newline-only residue must fail closed like empty content (review thread
-    ``PRRT_kwDOSJAM6s6NiYkc``).
+    newline-only residue must fail closed like empty content (review threads
+    ``PRRT_kwDOSJAM6s6NiYkc``, ``PRRT_kwDOSJAM6s6Ni8CP``).
     """
     if not content.strip():
         return False
-    lines = [line for line in content.splitlines() if line]
+    lines = content.splitlines()
     if not lines:
         return False
-    return all(_ONELINE_LOG_LINE_RE.match(line) for line in lines)
+    return all(line and _ONELINE_LOG_LINE_RE.match(line) for line in lines)
 
 
 async def _read_residue_path_content(
