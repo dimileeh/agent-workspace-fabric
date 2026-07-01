@@ -49,6 +49,7 @@ from awf.runtime.validation_worktree_constants import (
 if TYPE_CHECKING:
     from awf.runtime.validation_worktree import (
         ValidationWorktreeCheck,
+        ValidationWorktreeCleanup,
     )
 
 _log = get_logger(__name__)
@@ -945,6 +946,118 @@ async def _try_finalize_pre_push_dirty_repair_state(
     return verify
 
 
+async def _cleanup_proven_post_operation_residue_paths(
+    self: Any,
+    *,
+    worktree_path: Path,
+    restore_ref: str,
+    proven_paths: set[str],
+) -> ValidationWorktreeCleanup:
+    """Remove only proven post-operation residue paths, failing closed on extras.
+
+    The generic ``_pre_push_validation_cleanup`` re-runs worktree status and acts
+    on every current non-ignored dirty path. A path introduced after residue
+    proof but before cleanup could be restored/deleted even though it was never
+    proven safe (review thread ``PRRT_kwDOSJAM6s6Ngeu0``).
+    """
+    from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
+    from awf.runtime.validation_worktree import (
+        VALIDATION_WORKTREE_CLEANUP_FAILED,
+        VALIDATION_WORKTREE_STATUS_FAILED,
+        ValidationWorktreeCleanup,
+        _collapse_descendant_cleanup_paths,
+    )
+
+    _pre_push_validation_worktree_check = _ppv._pre_push_validation_worktree_check
+
+    snapshot = await _pre_push_validation_worktree_check(
+        self,
+        worktree_path=worktree_path,
+    )
+    if snapshot.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=snapshot,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+            message=snapshot.message,
+        )
+
+    snapshot_dirty = {*snapshot.paths, *snapshot.untracked_paths}
+    if snapshot_dirty != proven_paths:
+        _log.warning(
+            "monitor.pre_push_post_operation_residue_cleanup_snapshot_mismatch",
+            proven_paths=sorted(proven_paths),
+            snapshot_dirty=sorted(snapshot_dirty),
+        )
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=snapshot,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message=(
+                "Post-operation residue cleanup refused: worktree dirty snapshot "
+                "does not match proven residue paths."
+            ),
+        )
+
+    staged_paths = tuple(path for path in snapshot.tracked_paths if path in proven_paths)
+    untracked_paths = _collapse_descendant_cleanup_paths(
+        [path for path in proven_paths if path in snapshot.untracked_paths]
+    )
+
+    async def _run_git(args: list[str]) -> Any:
+        return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
+
+    cleaned_paths: list[str] = []
+
+    if staged_paths:
+        restore = await _run_git(
+            [
+                "--literal-pathspecs",
+                "restore",
+                "--source",
+                restore_ref,
+                "--staged",
+                "--worktree",
+                "--",
+                *staged_paths,
+            ]
+        )
+        if not restore.ok:
+            return ValidationWorktreeCleanup(
+                cleaned=False,
+                check=snapshot,
+                restore_ref=restore_ref,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                message=("Post-operation residue cleanup could not restore staged paths."),
+                cleanup_command="git restore",
+                cleanup_stderr=(restore.stderr or "")[:1000],
+            )
+        cleaned_paths.extend(staged_paths)
+
+    if untracked_paths:
+        clean = await _run_git(["--literal-pathspecs", "clean", "-ffd", "--", *untracked_paths])
+        if not clean.ok:
+            return ValidationWorktreeCleanup(
+                cleaned=False,
+                check=snapshot,
+                restore_ref=restore_ref,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                message=("Post-operation residue cleanup could not remove untracked paths."),
+                cleanup_command="git clean",
+                cleanup_stderr=(clean.stderr or "")[:1000],
+            )
+        cleaned_paths.extend(untracked_paths)
+
+    return ValidationWorktreeCleanup(
+        cleaned=True,
+        check=snapshot,
+        restore_ref=restore_ref,
+        cleaned_paths=tuple(dict.fromkeys(cleaned_paths)),
+    )
+
+
 async def _try_cleanup_pre_push_post_operation_residue(
     self: Any,
     *,
@@ -966,7 +1079,6 @@ async def _try_cleanup_pre_push_post_operation_residue(
     """
     from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
 
-    _pre_push_validation_cleanup = _ppv._pre_push_validation_cleanup
     _pre_push_validation_worktree_check = _ppv._pre_push_validation_worktree_check
 
     if check.clean or check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
@@ -1014,10 +1126,11 @@ async def _try_cleanup_pre_push_post_operation_residue(
     if head_before is None:
         return None
 
-    cleanup = await _pre_push_validation_cleanup(
+    cleanup = await _cleanup_proven_post_operation_residue_paths(
         self,
         worktree_path=worktree_path,
         restore_ref=head_before,
+        proven_paths=dirty_paths,
     )
     if not cleanup.ok:
         return None
