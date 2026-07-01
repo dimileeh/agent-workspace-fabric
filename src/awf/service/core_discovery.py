@@ -86,7 +86,7 @@ class CoreDiscoveryPayload:
             package_version=self.package_version,
             git_commit=self.git_commit,
             capabilities=list(self.capabilities),
-            profile_capability_schema=profile_capability_schema(),
+            profile_capability_schema=self.profile_capability_schema,
         )
 
 
