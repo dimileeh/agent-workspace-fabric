@@ -20,6 +20,7 @@ from awf.runtime.pr_monitor import (
 
 
 def _parse_marker_timestamp(state: MonitorState) -> datetime | None:
+    """Parse marker timestamp."""
     raw = state.threads_addressed_ids.get(_MERGE_BLOCK_ATTENTION_STATE_KEY)
     if raw is None or raw == "1":
         return None

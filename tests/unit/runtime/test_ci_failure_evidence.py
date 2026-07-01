@@ -184,6 +184,7 @@ def test_ci_failure_evidence_preserves_ruff_diagnostics_with_failing_command() -
 
 @pytest.mark.unit
 def test_ci_failure_evidence_rejects_glued_prefix_before_pytest_node() -> None:
+    """Verify ci failure evidence rejects glued prefix before pytest node."""
     valid_node_id = "tests/unit/test_example.py::test_valid_failure"
 
     evidence = ci_failure_evidence.extract_ci_failure_evidence(

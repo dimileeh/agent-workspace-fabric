@@ -658,6 +658,7 @@ class TestClaudeCodeAdapter:
 
     @pytest.mark.unit
     def test_effort_mapper_propagates_effort_unchanged_to_claude_cli(self) -> None:
+        """Verify effort mapper propagates effort unchanged to claude cli."""
         # The claude CLI accepts low/medium/high/xhigh/max natively, so AWF
         # propagates the requested effort as-is. xhigh must NOT collapse to max.
         assert _claude_effort_for_awf_effort("low") == "low"

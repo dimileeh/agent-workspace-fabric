@@ -443,6 +443,7 @@ class TestMiscMonitorHelpers:
 
     @pytest.mark.unit
     def test_merge_rejection_reason_and_service_work_dir_edges(self) -> None:
+        """Verify merge rejection reason and service work dir edges."""
         assert _merge_rejection_reason("") == "GitHub rejected the merge attempt"
         assert _merge_rejection_reason(" ! [rejected] main -> main ") == (
             "GitHub rejected the merge attempt: ! [rejected] main -> main"
@@ -452,6 +453,8 @@ class TestMiscMonitorHelpers:
 
     @pytest.mark.unit
     def test_target_reconcile_payload_accepts_dict_to_dict_and_fallback_objects(self) -> None:
+        """Verify target reconcile payload accepts dict, to_dict, and fallback objects."""
+
         class _DictResult:
             def to_dict(self) -> dict[str, object]:
                 return {"status": "clean"}
@@ -497,6 +500,8 @@ class TestMiscMonitorHelpers:
         self,
         tmp_path: Path,
     ) -> None:
+        """Verify write monitor log swallows sink failures."""
+
         class _FailingSink:
             async def write(self, _payload: str) -> None:
                 raise OSError("disk full")

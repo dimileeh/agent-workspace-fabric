@@ -1272,6 +1272,7 @@ def test_selected_opencode_preflight_suppresses_recovered_tags_fallback_logs(
 def test_selected_claude_preflight_requires_usable_non_secret_probe(
     tmp_path: Path,
 ) -> None:
+    """Verify selected claude preflight requires usable non secret probe."""
     home = tmp_path / "home"
     home.mkdir()
     (home / ".claude.json").write_text('{"oauth":"claude_file_secret"}')

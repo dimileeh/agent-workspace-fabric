@@ -105,6 +105,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_transient_failure_dispatches_rerun_before_agent_repair(self) -> None:
+        """Verify transient failure dispatches rerun before agent repair."""
         failure = CheckFailure(
             name="CI",
             conclusion="FAILURE",
@@ -541,6 +542,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_transient_tool_download_failure_dispatches_rerun(self) -> None:
+        """Verify transient tool download failure dispatches rerun."""
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
@@ -1310,6 +1312,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_timed_out_failure_without_logs_dispatches_rerun(self) -> None:
+        """Verify timed out failure without logs dispatches rerun."""
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="TIMED_OUT",
@@ -1419,6 +1422,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_tool_diagnostics_still_dispatch_agent_repair(self) -> None:
+        """Verify tool diagnostics still dispatch agent repair."""
         failure = CheckFailure(
             name="lint-and-type",
             conclusion="FAILURE",

@@ -26,6 +26,7 @@ from tests.unit.awf.service.gc_worktree_test_helpers import _write
 async def session_factory(
     engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a session factory bound to the test database engine."""
     yield make_session_factory(engine)
 
 
@@ -478,6 +479,7 @@ async def test_default_worktree_remover_skips_existing_plain_directory(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover skips existing plain directory."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -603,6 +605,7 @@ async def test_default_worktree_remover_removes_companion_when_primary_plain_dir
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover removes companion when primary plain directory."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(

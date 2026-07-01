@@ -97,6 +97,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_rerun_state_key_uses_structured_failure_signature(self) -> None:
+        """Verify rerun state key uses structured failure signature."""
         left = (
             CheckFailure(
                 name="lint:type",
@@ -148,6 +149,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_transient_failure_enters_infra_wait_after_rerun_budget(self) -> None:
+        """Verify transient failure enters infra wait after rerun budget."""
         failure = CheckFailure(
             name="CI",
             conclusion="FAILURE",
@@ -193,6 +195,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_transient_failure_with_disabled_rerun_budget_notifies_human(self) -> None:
+        """Verify transient failure with disabled rerun budget notifies human."""
         failure = CheckFailure(
             name="CI",
             conclusion="FAILURE",
@@ -359,6 +362,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_code_like_failure_still_dispatches_agent_repair(self) -> None:
+        """Verify code like failure still dispatches agent repair."""
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="FAILURE",
@@ -396,6 +400,7 @@ class TestCiFailure:
 
     @pytest.mark.unit
     def test_failure_with_per_check_details(self) -> None:
+        """Verify failure with per check details."""
         failure = CheckFailure(
             name="playwright", conclusion="FAILURE", log_excerpt="Error: timeout"
         )

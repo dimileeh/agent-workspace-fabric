@@ -395,6 +395,7 @@ def test_spec_round_trips_to_json_and_back(openapi_spec: dict) -> None:
 def test_api_token_routes_are_documented_as_bearer_authenticated(
     openapi_spec: dict,
 ) -> None:
+    """Verify api token routes are documented as bearer authenticated."""
     security_schemes = openapi_spec.get("components", {}).get("securitySchemes", {})
     assert security_schemes.get("bearerAuth") == {
         "scheme": "bearer",
@@ -460,6 +461,7 @@ def test_public_probe_and_discovery_routes_do_not_advertise_bearer_auth(
 
 @pytest.mark.unit
 def test_release_readiness_503_documents_failed_scorecard_body(openapi_spec: dict) -> None:
+    """Verify release readiness 503 documents failed scorecard body."""
     operation = openapi_spec["paths"]["/release-readiness"]["get"]
     response = operation["responses"]["503"]
 

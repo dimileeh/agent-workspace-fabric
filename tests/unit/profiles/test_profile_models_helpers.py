@@ -122,6 +122,7 @@ def test_runtime_browsers_schema_exposes_allowlist_and_count_bound() -> None:
 
 @pytest.mark.unit
 def test_runtime_toolchains_rejects_non_string_language_key() -> None:
+    """Verify runtime toolchains rejects non string language key."""
     with pytest.raises(ValidationError):
         ProfileRuntime.model_validate({"toolchains": {17: ["17"]}})
 

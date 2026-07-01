@@ -39,6 +39,7 @@ def _adoption_pr_payload(
     url: str = "https://github.com/dimileeh/aira-web/pull/277",
     title: str = "feature: ready",
 ) -> str:
+    """Build a GitHub adoption PR payload JSON string for test fixtures."""
     return json.dumps(
         {
             "number": number,
@@ -343,6 +344,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_extracts_full_nested_pytest_node_path(self) -> None:
+        """Verify extracts full nested pytest node path."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -699,6 +701,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_extracts_long_pytest_param_id_before_truncating_display_lines(self) -> None:
+        """Verify long pytest param IDs are preserved before display-line truncation."""
         param_id = "case-" + ("x" * 520)
         node_id = f"tests/unit/runtime/test_prompt.py::test_handles[{param_id}]"
         fake = FakeCommandRunner()
@@ -780,6 +783,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_redacts_secrets_before_log_and_evidence_are_stored(self) -> None:
+        """Verify redacts secrets before log and evidence are stored."""
         secret = "sk-proj-ci-failure-secret"
         fake = FakeCommandRunner()
         fake.queue_result(
@@ -951,6 +955,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_missing_run_database_id_and_name_uses_unknown_fallback(self) -> None:
+        """Verify missing run database id and name uses unknown fallback."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1057,6 +1062,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_empty_run_list_stdout_returns_no_failures_without_fetching_logs(self) -> None:
+        """Verify empty run list stdout returns no failures without fetching logs."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="")
         client = GitHubClient(fake)

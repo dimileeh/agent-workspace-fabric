@@ -89,6 +89,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify build worker runtime wires executor and feature monitor factory."""
     created: dict[str, Any] = {}
 
     class _Engine:

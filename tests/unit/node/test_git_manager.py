@@ -757,6 +757,7 @@ def test_mirror_path_for_worktree_handles_commondir_and_unreadable_commondir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify mirror path for worktree handles commondir and unreadable commondir."""
     mirror = tmp_path / "mirror.git"
     linked_git_dir = mirror / "worktrees" / "ws"
     linked_git_dir.mkdir(parents=True)
@@ -1411,6 +1412,7 @@ class TestRemoveWorktree:
 
     @pytest.mark.unit
     async def test_removes_existing_worktree(self, manager: GitManager, origin_repo: Path) -> None:
+        """Verify removes existing worktree."""
         layout = await manager.add_worktree(
             workspace_id="ws_rm",
             repo_url=str(origin_repo),
@@ -1433,6 +1435,7 @@ class TestRemoveWorktree:
     async def test_stale_metadata_worktree_remove_is_success(
         self, manager: GitManager, origin_repo: Path
     ) -> None:
+        """Verify stale metadata worktree remove is success."""
         # A directory exists at the worktree path but was never registered as a
         # git worktree, so ``git worktree remove`` emits
         # ``fatal: '<path>' is not a working tree``. Removal must be idempotent.
@@ -1504,6 +1507,7 @@ class TestRemoveWorktree:
     async def test_stale_dir_reclaim_failure_propagates(
         self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify stale dir reclaim failure propagates."""
         # ``git worktree remove`` reports the path is not a working tree, so the
         # rmtree fallback is responsible for reclaiming the directory. If that
         # deletion genuinely fails (e.g. a permission error), the failure must
@@ -1562,8 +1566,11 @@ class TestRemoveWorktree:
 
 
 class TestHeadSha:
+    """Tests for resolving the current HEAD SHA from a worktree."""
+
     @pytest.mark.unit
     async def test_returns_current_head(self, manager: GitManager, origin_repo: Path) -> None:
+        """Verify returns current head."""
         layout = await manager.add_worktree(
             workspace_id="ws_head",
             repo_url=str(origin_repo),

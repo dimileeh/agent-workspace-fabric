@@ -36,6 +36,7 @@ class TestRepairMirrorHooksPath:
     def _mirror_with_attached_worktree(
         tmp_path: Path, *, create_hooks_dir: bool
     ) -> tuple[Path, Path]:
+        """Create a mirror repository with an attached linked worktree."""
         repo = tmp_path / "origin"
         repo.mkdir()
         _git(["init", "-q", "-b", "main"], repo)
@@ -90,6 +91,7 @@ class TestRepairMirrorHooksPath:
     async def test_repair_waits_for_shared_mirror_lock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify repair waits for shared mirror lock."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -184,6 +186,7 @@ class TestRepairMirrorHooksPath:
     async def test_prunes_and_retries_when_linked_worktree_metadata_disappears(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify prunes and retries when linked worktree metadata disappears."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -273,6 +276,7 @@ class TestRepairMirrorHooksPath:
     async def test_fails_closed_when_worktrees_dir_is_unreadable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify repair fails closed when the mirror worktrees directory is unreadable."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -672,6 +676,7 @@ class TestRepairMirrorHooksPath:
     async def test_ignores_config_worktree_when_worktree_config_extension_is_disabled(
         self, tmp_path: Path
     ) -> None:
+        """Verify config worktree entries are ignored when worktreeConfig is disabled."""
         mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
         linked_git_dir = git_module.linked_worktree_git_dir(worktree)
         assert linked_git_dir is not None
@@ -826,6 +831,7 @@ class TestRepairMirrorHooksPath:
     async def test_removes_worktree_include_exposing_poisoned_hooks_path(
         self, tmp_path: Path
     ) -> None:
+        """Verify removes worktree include exposing poisoned hooks path."""
         mirror, worktree = self._mirror_with_attached_worktree(tmp_path, create_hooks_dir=False)
         subprocess.run(
             ["git", "-C", str(worktree), "config", "extensions.worktreeConfig", "true"],
@@ -1327,6 +1333,7 @@ class TestRepairMirrorHooksPath:
     async def test_treats_concurrent_hooks_path_cleanup_as_success(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify treats concurrent hooks path cleanup as success."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(

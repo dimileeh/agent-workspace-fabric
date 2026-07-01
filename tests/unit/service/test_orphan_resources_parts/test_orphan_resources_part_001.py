@@ -53,6 +53,7 @@ def _ok_view(
     terminal: set[str] | None = None,
     retained: set[str] | None = None,
 ) -> WorkspaceIdView:
+    """Build a workspace ID view with optional active, terminal, and retained sets."""
     return WorkspaceIdView(
         active_ids=frozenset(active or set()),
         terminal_ids=frozenset(terminal or set()),
@@ -71,6 +72,7 @@ def test_orphan_resources_reexports_classification_type() -> None:
 
 @pytest.mark.unit
 def test_orphan_resource_to_utc_accepts_naive_datetime() -> None:
+    """Verify orphan resource to utc accepts naive datetime."""
     naive = datetime(2026, 5, 7, 14, 15)
 
     assert orphan_resources._to_utc(naive) == naive.replace(tzinfo=orphan_resources.UTC)

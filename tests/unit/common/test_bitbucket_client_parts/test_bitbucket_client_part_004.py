@@ -74,6 +74,7 @@ async def test_failing_check_logs_pipeline_chain() -> None:
 
 
 async def test_failing_check_logs_no_failed_statuses_returns_empty() -> None:
+    """Verify failing check logs no failed statuses returns empty."""
     fake = FakeBitbucket()
     fake.page(
         "GET",
@@ -100,6 +101,7 @@ async def test_failing_check_logs_pending_status_marks_runs_in_progress_without_
 
 
 async def test_failing_check_logs_external_status_falls_back_to_pytest() -> None:
+    """Verify failing check logs external status falls back to pytest."""
     fake = FakeBitbucket()
     fake.page(
         "GET",
@@ -140,6 +142,7 @@ async def test_failing_external_status_does_not_wait_for_active_sibling() -> Non
 
 
 async def test_failing_check_logs_pipeline_without_failing_step_falls_back() -> None:
+    """Verify failing check logs pipeline without failing step falls back."""
     fake = FakeBitbucket()
     fake.page(
         "GET",

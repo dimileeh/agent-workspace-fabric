@@ -210,6 +210,7 @@ class TestFetchFailingCheckLogsRollupFallback:
 
     @pytest.mark.unit
     async def test_rollup_details_url_fetches_missing_actions_run(self) -> None:
+        """Verify rollup details url fetches missing actions run."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")
         fake.queue_result(
