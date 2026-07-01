@@ -1074,11 +1074,15 @@ def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
     assert _is_node_option_only_install_command(["yarn", "install"], 0, "yarn") is False
     assert _is_node_option_only_install_command(["yarn", "--help"], 0, "yarn") is False
     assert _is_node_option_only_install_command(["yarn", "--help;"], 0, "yarn") is False
+    assert _is_node_option_only_install_command(["yarn", "--frozen;"], 0, "yarn") is False
     assert (
         _is_node_option_only_install_command(shlex.split("yarn --immutable --cwd"), 0, "yarn")
         is False
     )
     assert _is_node_option_only_install_command(shlex.split("yarn --immutable;"), 0, "yarn") is True
+
+    cd_dir_named_pm = _profile({"phases": {"validate_commands": ["cd pnpm; pnpm install"]}})
+    assert _detected_node_package_manager(cd_dir_named_pm) == ("pnpm", None)
 
     bad_cd_profile = _profile(
         {"phases": {"setup": ["cd 'unclosed;"], "validate_commands": ["pnpm install"]}}

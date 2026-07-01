@@ -159,8 +159,11 @@ def _pm_invocation_tokens(tokens: list[str], pm_index: int) -> list[str]:
             break
         if token.endswith(";"):
             prefix = token[:-1]
-            if prefix:
-                invocation.append(prefix)
+            if (
+                not prefix
+            ):  # pragma: no cover — only ``";"`` strips empty; that token is a chain separator
+                break
+            invocation.append(prefix)
             break
         invocation.append(token)
         index += 1
@@ -210,17 +213,23 @@ def _collect_pm_scope_tokens(
                 if ends_chain:
                     break
                 continue
-            if option_name in value_flags:
-                if index + 1 >= len(tokens):
-                    break
-                next_token = tokens[index + 1]
-                if next_token.startswith("-"):
-                    index += 1
-                    if ends_chain:
-                        break
-                    continue
+            if (
+                option_name not in value_flags
+            ):  # pragma: no cover — scope flags partition boolean/value
                 index += 1
-                scope_tokens.append(next_token)
+                if ends_chain:
+                    break
+                continue
+            if index + 1 >= len(tokens):
+                break
+            next_token = tokens[index + 1]
+            if next_token.startswith("-"):
+                index += 1
+                if ends_chain:
+                    break
+                continue
+            index += 1
+            scope_tokens.append(next_token)
         index += 1
         if ends_chain:
             break
