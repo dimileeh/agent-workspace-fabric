@@ -1053,6 +1053,11 @@ async def _finish_monitor_recovery_operation(
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> bool:
+    """Persist terminal status for a worker restart ``remonitor`` recovery operation.
+
+    Returns ``True`` when the operation was absent, already terminal, or successfully
+    finished; ``False`` when the row could not be loaded or the write failed.
+    """
     if operation_id is None:
         return True
     try:

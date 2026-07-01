@@ -171,12 +171,14 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         )
 
     async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> Any:
+        """Prepare compose/monitor state for restart recovery; return handoff or ``None``."""
         return await _monitor_handoff.resume_pr_monitor_handoff(
             self,
             workspace_id=workspace_id,
         )
 
     async def run_resumed_pr_monitor(self: Any, workspace_id: str, handoff: Any) -> None:
+        """Run the long-lived PR monitor loop after a successful restart handoff."""
         return await _monitor_handoff.run_resumed_pr_monitor(
             self,
             workspace_id=workspace_id,

@@ -694,6 +694,7 @@ async def _monitor_recovery_handoff_failure_error(
 
 
 def _executor_supports_pr_monitor_handoff(executor: Any) -> bool:
+    """Return whether ``executor`` implements the two-phase monitor resume API."""
     return callable(getattr(executor, "resume_pr_monitor_handoff", None))
 
 
@@ -740,6 +741,12 @@ async def _safely_resume_pr_monitor(
     *,
     recovery_operation_id: str | None = None,
 ) -> bool:
+    """Hand off monitor recovery, finalize the remonitor op, then run the monitor loop.
+
+    Returns ``True`` when the worker should treat the recovery dispatch as complete
+    (handoff succeeded or post-handoff monitor errors that must not crash the worker).
+    Returns ``False`` when handoff failed before the monitor loop started.
+    """
     if self._executor is None:
         await self._finish_monitor_recovery_operation(
             workspace_id,
