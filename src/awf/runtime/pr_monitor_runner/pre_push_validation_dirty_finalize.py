@@ -16,6 +16,7 @@ monkeypatches still intercept them, mirroring ``pre_push_validation_fix_pass.py`
 from __future__ import annotations
 
 import posixpath
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -64,9 +65,12 @@ _KNOWN_GIT_CLI_FLAG_CAPTURE_BASENAMES = frozenset(
     }
 )
 
+# ``git log --oneline`` output lines: ``<hex-sha> [<subject>]``.
+_ONELINE_LOG_LINE_RE = re.compile(r"^[0-9a-f]{7,40}(?: .*)?$", re.IGNORECASE)
+
 
 def _is_git_cli_flag_capture_path(path: str) -> bool:
-    """Return True when ``path`` is a known git CLI flag-capture artifact.
+    """Return True when ``path`` has a known git CLI flag-capture basename.
 
     Regression ws_b35338c649554377bb59f0a6: a malformed ``git log`` invocation
     created a staged file named ``--oneline``. Monitor repair output may legitimately
@@ -75,9 +79,69 @@ def _is_git_cli_flag_capture_path(path: str) -> bool:
     can be threaded to the gate (review threads ``PRRT_kwDOSJAM6s6NfrZb``,
     ``PRRT_kwDOSJAM6s6NgvbL``). Match the basename only: subdirectory residue is
     reported as a repo-relative path such as ``apps/console/--oneline`` (review
-    thread ``PRRT_kwDOSJAM6s6NgSRm``).
+    thread ``PRRT_kwDOSJAM6s6NgSRm``). Basename alone is necessary but not
+    sufficient — callers must also prove content (review thread
+    ``PRRT_kwDOSJAM6s6Ng6Bh``).
     """
     return posixpath.basename(path) in _KNOWN_GIT_CLI_FLAG_CAPTURE_BASENAMES
+
+
+def _content_provable_as_git_oneline_capture(content: str) -> bool:
+    """Return True when ``content`` matches a ``git log --oneline`` accident artifact.
+
+    Malformed ``git log`` invocations either leave an empty flag-capture file or
+    redirect ``--oneline``-formatted log lines into the accidental path. Legitimate
+    repair output such as ``tests/fixtures/--oneline`` carries unrelated fixture
+    bytes and must not be deleted on basename alone (review thread
+    ``PRRT_kwDOSJAM6s6Ng6Bh``).
+    """
+    if content == "":
+        return True
+    return all(not line or _ONELINE_LOG_LINE_RE.match(line) for line in content.splitlines())
+
+
+async def _read_residue_path_content(
+    self: Any,
+    *,
+    worktree_path: Path,
+    path: str,
+) -> str | None:
+    """Return worktree or index content for ``path``, or ``None`` when unreadable."""
+    local_path = worktree_path / path
+    if local_path.is_file():
+        try:
+            return local_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            _log.warning(
+                "monitor.pre_push_post_operation_residue_content_read_failed",
+                path=path,
+            )
+            return None
+    show_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f":{path}")
+    )
+    if show_result.ok:
+        return show_result.stdout or ""
+    return None
+
+
+async def _path_provable_as_git_cli_flag_capture(
+    self: Any,
+    *,
+    worktree_path: Path,
+    path: str,
+) -> bool:
+    """Return True when ``path`` is provable git CLI flag-capture residue."""
+    if not _is_git_cli_flag_capture_path(path):
+        return False
+    content = await _read_residue_path_content(
+        self,
+        worktree_path=worktree_path,
+        path=path,
+    )
+    if content is None:
+        return False
+    return _content_provable_as_git_oneline_capture(content)
 
 
 async def _worktree_unstaged_change_paths(
@@ -168,7 +232,11 @@ async def _dirty_paths_provable_as_post_operation_residue(
             return False
         if exists_at_head:
             return False
-        if not _is_git_cli_flag_capture_path(path):
+        if not await _path_provable_as_git_cli_flag_capture(
+            self,
+            worktree_path=worktree_path,
+            path=path,
+        ):
             return False
     return True
 
