@@ -45,6 +45,7 @@ from awf.control.worker.constants import (
     QUEUE_DECISION_DEFERRED,
     QUEUE_DECISION_ORDERED,
 )
+from awf.control.worker.dispatch_methods import _monitor_recovery_handoff_failure_error
 from awf.control.worker.helpers import (
     _earliest_future_datetime,
     _latest_runtime_stranding_reason,
@@ -1083,6 +1084,12 @@ async def _monitor_recovery_terminal_finalize_status(
                 )
             if ws.status == WorkspaceStatus.completed.value:
                 return OperationStatus.succeeded, None, None
+            if ws.status == WorkspaceStatus.failed.value:
+                error_code, error_message = await _monitor_recovery_handoff_failure_error(
+                    self,
+                    workspace_id,
+                )
+                return OperationStatus.failed, error_code, error_message
     except Exception:
         _log.exception(
             "worker.monitor_recovery_terminal_finalize_status_lookup_failed",

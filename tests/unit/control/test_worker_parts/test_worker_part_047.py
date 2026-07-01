@@ -22,6 +22,7 @@ from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
 )
+from awf.control.worker import claims as worker_claims
 from awf.control.worker import dispatch_methods as worker_dispatch_methods
 from awf.control.worker import recovery_cooldown as worker_recovery_cooldown
 from awf.control.worker.types import (
@@ -650,6 +651,13 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
             to=WorkspaceStatus.monitoring_pr,
             reason_code="SEED",
         )
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_runtime_restart_failed",
+            reason_code="MONITOR_RECOVERY_METADATA_MISSING",
+            payload={"reason_code": "MONITOR_RECOVERY_METADATA_MISSING"},
+        )
+        ws.failure_message = "Monitor recovery metadata missing after handoff."
         await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="SEED")
         await session.commit()
 
@@ -709,6 +717,58 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
     assert len(finalize_calls) == 1
     assert finalize_calls[0]["status"] == OperationStatus.failed
     assert finalize_calls[0]["operation_id"] == "op_terminal_finalize_pending"
+    assert finalize_calls[0]["error_code"] == "MONITOR_RECOVERY_METADATA_MISSING"
+    assert finalize_calls[0]["error_message"] == "Monitor recovery metadata missing after handoff."
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_terminal_finalize_status_preserves_handoff_failure_reason(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Terminal finalize must not downgrade a specific handoff abort to generic failure."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-terminal-handoff-reason",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_runtime_restart_failed",
+            reason_code="UNSUPPORTED_TASK_KIND",
+            payload={"reason_code": "UNSUPPORTED_TASK_KIND"},
+        )
+        ws.failure_message = "Task kind is not supported for monitor recovery."
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="SEED")
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    (
+        status,
+        error_code,
+        error_message,
+    ) = await worker_claims._monitor_recovery_terminal_finalize_status(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert status == OperationStatus.failed
+    assert error_code == "UNSUPPORTED_TASK_KIND"
+    assert error_message == "Task kind is not supported for monitor recovery."
 
 
 @pytest.mark.unit
