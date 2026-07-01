@@ -559,6 +559,50 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
 
 
 @pytest.mark.unit
+async def test_safely_resume_pr_monitor_retains_handle_when_cancellation_finalize_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Failed shielded cancellation finalize must keep the recovery handle for finally."""
+    handoff_started = asyncio.Event()
+
+    class BlockingHandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_monitor"
+            handoff_started.set()
+            await asyncio.Event().wait()
+            return object()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=BlockingHandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_after_cancellation(*args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        return False
+
+    worker._finish_monitor_recovery_operation_after_cancellation = (  # type: ignore[method-assign]
+        _finish_after_cancellation
+    )
+    worker._monitor_recovery_operation_ids["ws_monitor"] = "op_cancel_finalize_failed"  # noqa: SLF001
+
+    resume_task = asyncio.create_task(
+        worker._safely_resume_pr_monitor(  # noqa: SLF001
+            "ws_monitor",
+            recovery_operation_id="op_cancel_finalize_failed",
+        )
+    )
+    await asyncio.wait_for(handoff_started.wait(), timeout=5.0)
+    resume_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await resume_task
+
+    assert worker._monitor_recovery_operation_ids["ws_monitor"] == "op_cancel_finalize_failed"  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_safely_resume_claimed_pr_monitor_releases_claim_after_cancellation_finalize(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

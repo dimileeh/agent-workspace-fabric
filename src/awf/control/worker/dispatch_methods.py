@@ -936,17 +936,15 @@ async def _safely_resume_pr_monitor(
                     finalize_status = OperationStatus.succeeded
                     finalize_error_code = None
                     finalize_error_message = None
-            await self._finish_monitor_recovery_operation_after_cancellation(
+            finalized = await self._finish_monitor_recovery_operation_after_cancellation(
                 workspace_id,
                 operation_id=recovery_operation_id,
                 status=finalize_status,
                 error_code=finalize_error_code,
                 error_message=finalize_error_message,
             )
-            # Drop the recovery handle once cancellation finalize was attempted so
-            # the caller's finally block does not re-finalize with a different
-            # terminal status when the write succeeded but returned falsy.
-            self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            if finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
         raise
     except Exception as exc:
         if not handoff_succeeded:
