@@ -67,12 +67,15 @@ def _agent_git_writability_preflight_script(workspace_id: str) -> str:
     return f"""
 set -eu
 workspace_id={quoted_workspace_id}
-git status --porcelain >/dev/null
-blob=$(printf 'awf git preflight %s\\n' "$workspace_id" | git hash-object -w --stdin)
-git cat-file -e "$blob^{{blob}}"
+git_awf() {{
+  git -c "safe.directory=$(pwd -P)" "$@"
+}}
+git_awf status --porcelain >/dev/null
+blob=$(printf 'awf git preflight %s\\n' "$workspace_id" | git_awf hash-object -w --stdin)
+git_awf cat-file -e "$blob^{{blob}}"
 ref="refs/awf/preflight/$workspace_id"
-git update-ref "$ref" HEAD
-git update-ref -d "$ref"
+git_awf update-ref "$ref" HEAD
+git_awf update-ref -d "$ref"
 """.strip()
 
 
@@ -206,7 +209,8 @@ async def _repair_agent_git_ownership(
 ) -> bool:
     _ = executor
     try:
-        await asyncio.to_thread(repair_agent_writable_worktree, None, worktree_path)
+        mirror_path = mirror_path_for_worktree(worktree_path)
+        await asyncio.to_thread(repair_agent_writable_worktree, mirror_path, worktree_path)
     except Exception:
         _log.exception(
             "executor.agent_git_ownership_repair_failed",
