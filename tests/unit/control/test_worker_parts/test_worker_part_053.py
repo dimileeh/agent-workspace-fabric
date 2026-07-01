@@ -559,6 +559,89 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
 
 
 @pytest.mark.unit
+async def test_safely_resume_pr_monitor_cancellation_during_finalize_preserves_completed_recovery(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Cancellation during succeed finalize must not downgrade a completed workspace."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-cancel-completed",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="SEED")
+        await session.commit()
+
+    handoff = object()
+    finish_calls: list[dict[str, object]] = []
+    after_cancellation_calls: list[dict[str, object]] = []
+    finalize_started = asyncio.Event()
+
+    class HandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
+            assert workspace_id_arg == workspace_id
+            return handoff
+
+        async def run_resumed_pr_monitor(self, workspace_id_arg: str, handoff_obj: object) -> None:
+            raise AssertionError("monitor run must not start when finalize is cancelled")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id_arg: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id_arg, **kwargs})
+        finalize_started.set()
+        await asyncio.Event().wait()
+        return True
+
+    async def _finish_after_cancellation(*args: object, **kwargs: object) -> None:
+        after_cancellation_calls.append(dict(kwargs))
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    worker._finish_monitor_recovery_operation_after_cancellation = (  # type: ignore[method-assign]
+        _finish_after_cancellation
+    )
+
+    resume_task = asyncio.create_task(
+        worker._safely_resume_pr_monitor(  # noqa: SLF001
+            workspace_id,
+            recovery_operation_id="op_completed_cancel_finalize",
+        )
+    )
+    await asyncio.wait_for(finalize_started.wait(), timeout=5.0)
+    resume_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await resume_task
+
+    assert len(after_cancellation_calls) == 1
+    assert after_cancellation_calls[0]["status"] == OperationStatus.succeeded
+    assert after_cancellation_calls[0]["operation_id"] == "op_completed_cancel_finalize"
+    assert after_cancellation_calls[0]["error_code"] is None
+    assert after_cancellation_calls[0]["error_message"] is None
+    assert len(finish_calls) == 1
+
+
+@pytest.mark.unit
 async def test_safely_resume_pr_monitor_retains_handle_when_cancellation_finalize_fails(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

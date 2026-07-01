@@ -932,7 +932,11 @@ async def _safely_resume_pr_monitor(
             )
             if handoff_succeeded:
                 ws_status = (await self._load_workspace_statuses([workspace_id])).get(workspace_id)
-                if ws_status is None or ws_status == WorkspaceStatus.monitoring_pr.value:
+                if (
+                    ws_status is None
+                    or ws_status == WorkspaceStatus.monitoring_pr.value
+                    or ws_status == WorkspaceStatus.completed.value
+                ):
                     finalize_status = OperationStatus.succeeded
                     finalize_error_code = None
                     finalize_error_message = None
