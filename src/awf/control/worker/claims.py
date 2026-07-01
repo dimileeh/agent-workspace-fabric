@@ -586,6 +586,7 @@ async def _record_monitor_recovery_deferred_active_execution_claim(
     fresh_execution_claim_owner_ids: set[str] | None = None,
     execution_claim_owner_id: str | None = None,
 ) -> None:
+    """Persist audit when monitor recovery defers reclaiming an active execution claim."""
     execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
         ws,
         claim_cutoff=claim_cutoff,
@@ -1335,6 +1336,8 @@ async def _finish_monitor_recovery_operation_after_cancellation(
 
 
 async def _refresh_monitoring_pr_claim(self: Any, workspace_id: str) -> bool:
+    """Extend the monitor claim lease for ``workspace_id``; return whether refresh succeeded."""
+
     async def _operation(session: AsyncSession) -> bool:
         lease_expires_at = datetime.now(UTC) + timedelta(
             seconds=self._config.monitor_claim_lease_seconds

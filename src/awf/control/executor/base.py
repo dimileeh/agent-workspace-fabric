@@ -196,6 +196,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
     # ── Internals ──────────────────────────────────────────────────────────
 
     def _defaults_for(self: Any, agent: AgentRuntime) -> AgentDefaults | None:
+        """Return configured agent defaults for ``agent``, including model overrides."""
         defaults = defaults_with_model_overrides(
             self._config.default_models,
             base=self._config.agent_defaults,

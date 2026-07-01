@@ -259,6 +259,7 @@ def _new_invocation_id() -> str:
 
 
 def _validate_invocation_id(invocation_id: str) -> None:
+    """Reject invocation ids that would be unsafe in the tracked exec wrapper shell."""
     if not _INVOCATION_ID_RE.fullmatch(invocation_id):
         raise ValueError("invocation_id contains unsupported shell characters")
 
@@ -277,6 +278,7 @@ def _unique_env_passthrough(env_passthrough: Sequence[str]) -> tuple[str, ...]:
 
 
 def _tracked_exec_wrapper_script(*, preserve_stdin: bool = False) -> str:
+    """Return the shell wrapper that runs compose exec with stable invocation tracking."""
     # Positional argv after ``sh -lc <script>`` is:
     #   $0=awf-exec, $1=<invocation_id>, $2...=<original command argv>
     # The real command is never shell-joined; ``shift`` leaves it as "$@".

@@ -99,6 +99,7 @@ def _monitor_recovery_handoff_failure_message(
 
 
 def _draining_execution_task_count(self: Any) -> int:
+    """Count in-flight monitor draining tasks tracked for slot-budget exclusion."""
     return sum(
         1
         for kind in self._execution_task_kinds.values()
@@ -659,6 +660,7 @@ async def _safely_execute(self: Any, workspace_id: str) -> None:
 
 
 async def _safely_execute_claimed(self: Any, workspace_id: str) -> None:
+    """Run executor for a claimed ready workspace while heartbeating the execution claim."""
     heartbeat = asyncio.create_task(
         self._refresh_execution_claim_loop(workspace_id),
         name=f"awf-execution-claim-{workspace_id}",

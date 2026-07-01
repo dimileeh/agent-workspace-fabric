@@ -48,6 +48,7 @@ def _remember_active_salvage_monitor_recovery_operation_id(self: Any, operation_
 
 
 def _forget_active_salvage_monitor_recovery_operation_id(self: Any, operation_id: str) -> None:
+    """Drop a salvage monitor recovery operation id from in-memory tracking."""
     self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
 
 
@@ -81,6 +82,7 @@ async def _active_salvage_monitor_resume_cooldown_blocks_claim(
     self: Any,
     workspace_id: str,
 ) -> bool:
+    """Return whether an active-salvage remonitor cooldown blocks claiming the workspace."""
     if self._active_salvage_monitor_resume_cooldown_active(workspace_id):
         return True
     return cast(
