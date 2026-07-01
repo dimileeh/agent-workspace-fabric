@@ -877,6 +877,101 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
 
 
 @pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pending_retry_lookup_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Still-monitoring workspace must retry when only retry-eligibility lookup fails."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-finalize-pending-retry-lookup-fails",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="SEED",
+        )
+        await session.commit()
+
+    lookup_calls = 0
+
+    class IntermittentWorkspaceRepository:
+        def __init__(self, session: AsyncSession) -> None:
+            self._session = session
+
+        async def get(self, workspace_id: str) -> object:
+            nonlocal lookup_calls
+            lookup_calls += 1
+            if lookup_calls == 1:
+                raise _closed_connection_error()
+            return await WorkspaceRepository(self._session).get(workspace_id)
+
+    monkeypatch.setattr(
+        "awf.control.worker.claims.WorkspaceRepository",
+        IntermittentWorkspaceRepository,
+    )
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    claim_released = False
+    finalize_called = False
+
+    async def _resume(
+        resume_workspace_id: str,
+        *,
+        recovery_operation_id: str | None = None,
+    ) -> bool:
+        assert resume_workspace_id == workspace_id
+        assert recovery_operation_id == "op_retry_lookup_failed"
+        return False
+
+    async def _release_monitor_claim(released_workspace_id: str) -> None:
+        nonlocal claim_released
+        assert released_workspace_id == workspace_id
+        claim_released = True
+
+    async def _finish_monitor_recovery_operation(
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        nonlocal finalize_called
+        finalize_called = True
+        return True
+
+    worker._monitor_recovery_operation_ids[workspace_id] = "op_retry_lookup_failed"  # noqa: SLF001
+    worker._safely_resume_pr_monitor = _resume  # type: ignore[method-assign]
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    await worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+        workspace_id,
+        recovery_operation_id="op_retry_lookup_failed",
+    )
+
+    assert claim_released is True
+    assert finalize_called is False
+    assert worker._monitor_recovery_operation_ids[workspace_id] == "op_retry_lookup_failed"  # noqa: SLF001
+    assert worker._monitor_claim_heartbeat_tasks.get(workspace_id) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_safely_resume_claimed_pr_monitor_finalizes_when_finalize_pending_db_error_but_terminal(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

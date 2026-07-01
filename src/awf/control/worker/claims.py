@@ -1078,6 +1078,10 @@ async def _cancel_monitor_claim_heartbeat(
         await heartbeat
 
 
+class _MonitorRecoveryStillMonitoringError(Exception):
+    """Workspace remains in ``monitoring_pr``; release the claim for retry instead."""
+
+
 async def _workspace_is_monitoring_pr(self: Any, workspace_id: str) -> bool:
     """Return whether the workspace is still in ``monitoring_pr`` and claimable for retry."""
     try:
@@ -1127,11 +1131,15 @@ async def _monitor_recovery_terminal_finalize_status(
                     workspace_id,
                 )
                 return OperationStatus.failed, error_code, error_message
+            if ws.status == WorkspaceStatus.monitoring_pr.value:
+                raise _MonitorRecoveryStillMonitoringError()
             return (
                 OperationStatus.cancelled,
                 "MONITOR_RECOVERY_CANCELLED",
                 "Monitor resume cancelled after workspace left monitoring_pr.",
             )
+    except _MonitorRecoveryStillMonitoringError:
+        raise
     except Exception:
         _log.exception(
             "worker.monitor_recovery_terminal_finalize_status_lookup_failed",
@@ -1196,11 +1204,20 @@ async def _safely_resume_claimed_pr_monitor(
             recovery_finalized = True
             if recovery_finalize_pending:
                 pending_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)
-                (
-                    terminal_status,
-                    terminal_error_code,
-                    terminal_error_message,
-                ) = await _monitor_recovery_terminal_finalize_status(self, workspace_id)
+                try:
+                    (
+                        terminal_status,
+                        terminal_error_code,
+                        terminal_error_message,
+                    ) = await _monitor_recovery_terminal_finalize_status(self, workspace_id)
+                except _MonitorRecoveryStillMonitoringError:
+                    await _cancel_monitor_claim_heartbeat(
+                        self,
+                        workspace_id,
+                        heartbeat=heartbeat,
+                    )
+                    await self._release_monitoring_pr_claim(workspace_id)
+                    return
                 recovery_finalized = await self._finish_monitor_recovery_operation(
                     workspace_id,
                     operation_id=pending_operation_id,
