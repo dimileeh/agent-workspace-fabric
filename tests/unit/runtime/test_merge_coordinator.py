@@ -365,6 +365,93 @@ class TestPostgresAdvisoryMergeCoordinator:
             == "postgresql://awf:secret@db:5432/awf?sslmode=require"
         )
 
+    @pytest.mark.unit
+    def test_asyncpg_dsn_from_engine_preserves_non_awf_query_params(self) -> None:
+        engine = cast(
+            AsyncEngine,
+            SimpleNamespace(
+                url=make_url(
+                    "postgresql+asyncpg://awf:secret@db:5432/awf?application_name=awf&ssl=true"
+                )
+            ),
+        )
+
+        assert (
+            merge_coordinator_mod._asyncpg_dsn_from_engine(engine)
+            == "postgresql://awf:secret@db:5432/awf?application_name=awf&sslmode=require"
+        )
+
+    @pytest.mark.unit
+    def test_asyncpg_dsn_from_engine_keeps_existing_sslmode_over_ssl(self) -> None:
+        engine = cast(
+            AsyncEngine,
+            SimpleNamespace(
+                url=make_url(
+                    "postgresql+asyncpg://awf:secret@db:5432/awf?sslmode=verify-full&ssl=require"
+                )
+            ),
+        )
+
+        assert (
+            merge_coordinator_mod._asyncpg_dsn_from_engine(engine)
+            == "postgresql://awf:secret@db:5432/awf?sslmode=verify-full"
+        )
+
+    @pytest.mark.unit
+    def test_asyncpg_dsn_from_engine_drops_unrecognized_ssl_value(self) -> None:
+        engine = cast(
+            AsyncEngine,
+            SimpleNamespace(url=make_url("postgresql+asyncpg://awf:secret@db:5432/awf?ssl=maybe")),
+        )
+
+        assert (
+            merge_coordinator_mod._asyncpg_dsn_from_engine(engine)
+            == "postgresql://awf:secret@db:5432/awf"
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("ssl_value", "expected_sslmode"),
+        [
+            ("false", "disable"),
+            ("0", "disable"),
+            ("no", "disable"),
+            ("true", "require"),
+            ("1", "require"),
+            ("require", "require"),
+            ("prefer", "prefer"),
+            ("allow", "allow"),
+            ("verify-ca", "verify-ca"),
+            ("verify-full", "verify-full"),
+        ],
+    )
+    def test_asyncpg_dsn_from_engine_maps_ssl_values_to_sslmode(
+        self,
+        ssl_value: str,
+        expected_sslmode: str,
+    ) -> None:
+        engine = cast(
+            AsyncEngine,
+            SimpleNamespace(
+                url=make_url(f"postgresql+asyncpg://awf:secret@db:5432/awf?ssl={ssl_value}")
+            ),
+        )
+
+        assert (
+            merge_coordinator_mod._asyncpg_dsn_from_engine(engine)
+            == f"postgresql://awf:secret@db:5432/awf?sslmode={expected_sslmode}"
+        )
+
+    @pytest.mark.unit
+    def test_advisory_asyncpg_query_reads_ssl_from_tuple_value(self) -> None:
+        assert merge_coordinator_mod._advisory_asyncpg_query({"ssl": ("require",)}) == {
+            "sslmode": "require"
+        }
+
+    @pytest.mark.unit
+    def test_advisory_asyncpg_query_drops_ssl_when_tuple_is_empty(self) -> None:
+        assert merge_coordinator_mod._advisory_asyncpg_query({"ssl": ()}) == {}
+
 
 def _fake_engine() -> AsyncEngine:
     return cast(
