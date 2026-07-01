@@ -116,6 +116,38 @@ def test_browser_install_ignores_node_manager_with_non_install_subcommand() -> N
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("setup_command", "expected_install_command"),
+    [
+        (
+            "npm run build && pnpm install",
+            "pnpm exec playwright install chromium",
+        ),
+        (
+            "npm --prefix apps/console run build && pnpm install",
+            "pnpm exec playwright install chromium",
+        ),
+        (
+            "yarn build; pnpm install",
+            "pnpm exec playwright install chromium",
+        ),
+    ],
+)
+def test_browser_install_detects_install_only_in_current_shell_segment(
+    setup_command: str, expected_install_command: str
+) -> None:
+    """Verify chained setup commands do not leak install subcommands across shell segments."""
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"setup": [setup_command]}}
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == expected_install_command
+
+
+@pytest.mark.unit
 def test_browser_install_skips_unparseable_commands_and_still_finds_python() -> None:
     # The malformed (unbalanced-quote) command is skipped by both the node-manager
     # scan and the python-interpreter scan; detection continues to ``uv run``.

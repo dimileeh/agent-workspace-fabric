@@ -90,6 +90,24 @@ _UV_RUN_BOOLEAN_FLAGS = frozenset(
 )
 
 
+def _pm_invocation_tokens(tokens: list[str], pm_index: int) -> list[str]:
+    """Return tokens after the PM executable until the next shell chain separator."""
+    invocation: list[str] = []
+    index = pm_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_CHAIN_SEPARATORS:
+            break
+        if token.endswith(";"):
+            prefix = token[:-1]
+            if prefix:
+                invocation.append(prefix)
+            break
+        invocation.append(token)
+        index += 1
+    return invocation
+
+
 def _collect_pm_scope_tokens(
     tokens: list[str], pm_index: int, *, require_consecutive: bool = True
 ) -> list[str]:
@@ -98,6 +116,12 @@ def _collect_pm_scope_tokens(
     index = pm_index + 1
     while index < len(tokens):
         token = tokens[index]
+        ends_chain = token in _SHELL_CHAIN_SEPARATORS
+        if token.endswith(";") and not ends_chain:
+            token = token[:-1]
+            ends_chain = True
+            if not token:
+                break
         if token == "--":
             break
         option_name = token.split("=", 1)[0]
@@ -105,11 +129,15 @@ def _collect_pm_scope_tokens(
             if require_consecutive:
                 break
             index += 1
+            if ends_chain:
+                break
             continue
         scope_tokens.append(token)
         if "=" not in token:
             if option_name in _NODE_PACKAGE_MANAGER_SCOPE_BOOLEAN_FLAGS:
                 index += 1
+                if ends_chain:
+                    break
                 continue
             if option_name in _NODE_PACKAGE_MANAGER_SCOPE_VALUE_FLAGS:
                 if index + 1 >= len(tokens):
@@ -117,10 +145,14 @@ def _collect_pm_scope_tokens(
                 next_token = tokens[index + 1]
                 if next_token.startswith("-"):
                     index += 1
+                    if ends_chain:
+                        break
                     continue
                 index += 1
                 scope_tokens.append(next_token)
         index += 1
+        if ends_chain:
+            break
     return scope_tokens
 
 
@@ -393,6 +425,20 @@ def _is_node_option_only_install_command(tokens: list[str], pm_index: int, base:
     index = pm_index + 1
     while index < len(tokens):
         token = tokens[index]
+        if token in _SHELL_CHAIN_SEPARATORS:
+            break
+        if token.endswith(";"):
+            token = token[:-1]
+            if not token:
+                break
+            if token == "--" or not token.startswith("-"):
+                return False
+            option_name = token.split("=", 1)[0]
+            if option_name in _NODE_NON_INSTALL_QUERY_FLAGS:
+                return False
+            if option_name in install_flags:
+                saw_install_flag = True
+            break
         if token == "--" or not token.startswith("-"):
             return False
         option_name = token.split("=", 1)[0]
@@ -423,7 +469,7 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
         for index, token in enumerate(tokens):
             base = token.rsplit("/", 1)[-1]
             if base in _NODE_PACKAGE_MANAGERS:
-                rest = tokens[index + 1 :]
+                rest = _pm_invocation_tokens(tokens, index)
                 if (
                     not rest
                     or any(sub in _NODE_INSTALL_SUBCOMMANDS for sub in rest)
