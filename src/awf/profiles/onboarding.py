@@ -475,7 +475,6 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
             fallback_validation=(),
             fallback_commands=(_playwright_command(inspection.package_manager or "npm"),),
             runtime=ProfileRuntime(browsers=["chromium"]),
-            script_command=_playwright_script_command,
         )
     elif template == "python-postgres":
         database_url = "postgresql+psycopg://awf:${POSTGRES_PASSWORD}@postgres:5432/awf"
@@ -893,20 +892,9 @@ def _playwright_validation_scripts(inspection: ProjectInspection) -> tuple[str, 
     return ()
 
 
-_PLAYWRIGHT_CHROMIUM_PROJECT_ARG = "--project=chromium"
-
-
-def _playwright_script_command(package_manager: str, script: str) -> str:
-    """Run a package script while constraining Playwright to the Chromium project."""
-    base = _script_command(package_manager, script)
-    if package_manager == "yarn":
-        return f"{base} {_PLAYWRIGHT_CHROMIUM_PROJECT_ARG}"
-    return f"{base} -- {_PLAYWRIGHT_CHROMIUM_PROJECT_ARG}"
-
-
 def _playwright_command(package_manager: str) -> str:
     """Build the package-manager-specific Playwright command for one-shot validation."""
-    return playwright_command(package_manager, "test", _PLAYWRIGHT_CHROMIUM_PROJECT_ARG)
+    return playwright_command(package_manager, "test")
 
 
 def _compose_ports(inspection: ProjectInspection) -> dict[str, str]:

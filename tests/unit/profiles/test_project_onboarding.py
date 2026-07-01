@@ -252,7 +252,7 @@ def test_detects_node_playwright_template(tmp_path: Path) -> None:
     assert preview.draft.profile.runtime.browsers == ["chromium"]
     assert "browsers:" in preview.draft.yaml
     assert "- chromium" in preview.draft.yaml
-    assert "npm run test:e2e -- --project=chromium" in [
+    assert "npm run test:e2e" in [
         command.command for command in preview.draft.profile.phases.validate_commands
     ]
     assert "browser" in preview.diagnostics.missing_services
@@ -577,21 +577,21 @@ def test_node_playwright_fallback_command_tracks_package_manager(tmp_path: Path)
     pnpm_preview = preview_project_onboarding(tmp_path)
     assert pnpm_preview.draft.template == "node-playwright"
     assert [command.command for command in pnpm_preview.draft.profile.phases.validate_commands] == [
-        "pnpm exec playwright test --project=chromium",
+        "pnpm exec playwright test",
     ]
 
     (tmp_path / "pnpm-lock.yaml").unlink()
     (tmp_path / "yarn.lock").write_text("", encoding="utf-8")
     yarn_preview = preview_project_onboarding(tmp_path)
     assert [command.command for command in yarn_preview.draft.profile.phases.validate_commands] == [
-        "yarn playwright test --project=chromium",
+        "yarn playwright test",
     ]
 
     (tmp_path / "yarn.lock").unlink()
     (tmp_path / "bun.lockb").write_text("", encoding="utf-8")
     bun_preview = preview_project_onboarding(tmp_path)
     assert [command.command for command in bun_preview.draft.profile.phases.validate_commands] == [
-        "bunx playwright test --project=chromium",
+        "bunx playwright test",
     ]
 
 
@@ -613,7 +613,7 @@ def test_playwright_script_detection_ignores_non_playwright_test_script(
 
     assert preview.draft.template == "node-playwright"
     assert [command.command for command in preview.draft.profile.phases.validate_commands] == [
-        "npx playwright test --project=chromium",
+        "npx playwright test",
     ]
 
 
