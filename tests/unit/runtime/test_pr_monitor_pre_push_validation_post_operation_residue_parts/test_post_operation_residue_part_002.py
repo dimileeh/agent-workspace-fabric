@@ -130,12 +130,13 @@ async def test_pre_push_validation_post_operation_residue_cleanup_fails_closed_w
         ("\n\n", False),
         ("  \n  ", False),
         ("abcdef0 Fix something\n1234567 Another commit\n", True),
+        ("abcdef0 Fix something\n\n", True),
         ('{"fixture": true}\n', False),
         ("not a git log line\n", False),
     ],
 )
 def test_content_provable_as_git_oneline_capture(content: str, expected: bool) -> None:
-    """Residue proof requires git-log-shaped content; emptiness alone is insufficient."""
+    """Residue proof requires git-log-shaped content; blank-only lines must fail closed."""
     assert _content_provable_as_git_oneline_capture(content) is expected
 
 
