@@ -326,10 +326,11 @@ async def test_safe_worker_paths_swallow_runtime_failures(
     failing_handoff_worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
         _finish_monitor_recovery_operation
     )
-    await failing_handoff_worker._safely_resume_pr_monitor(  # noqa: SLF001
+    result = await failing_handoff_worker._safely_resume_pr_monitor(  # noqa: SLF001
         "ws_monitor",
         recovery_operation_id="op_handoff_failed",
     )
+    assert result is False
     assert len(finish_calls) == 1
     assert finish_calls[0]["operation_id"] == "op_handoff_failed"
     assert finish_calls[0]["status"] == OperationStatus.failed
