@@ -843,7 +843,7 @@ async def _safely_resume_pr_monitor(
             )
             if finalized:
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
-            return True
+            return status != OperationStatus.failed
 
         handoff_succeeded = True
         handoff_finalized = await self._finish_monitor_recovery_operation(

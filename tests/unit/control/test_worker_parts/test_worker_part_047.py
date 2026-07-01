@@ -645,12 +645,75 @@ async def test_safely_resume_pr_monitor_fails_operation_when_start_recheck_bails
         recovery_operation_id="op_start_recheck_bailed",
     )
 
-    assert result is True
+    assert result is False
     assert monitor_ran is False
     assert len(finish_calls) == 1
     assert finish_calls[0]["operation_id"] == "op_start_recheck_bailed"
     assert finish_calls[0]["status"] == OperationStatus.failed
     assert finish_calls[0]["error_code"] == "MONITOR_RECOVERY_FAILED"
+
+
+@pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_start_recheck_bails(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Pre-finalize verify failure must not apply active-salvage monitor cooldown."""
+    handoff = object()
+    cooldown_recorded = False
+
+    class HandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def verify_resume_monitor_start(self, workspace_id: str) -> bool:
+            assert workspace_id == "ws_monitor"
+            return False
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01, monitor_claim_lease_seconds=30.0),
+    )
+    worker._remember_active_salvage_monitor_recovery_operation_id(  # noqa: SLF001
+        "op_start_recheck_bailed"
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        assert workspace_id == "ws_monitor"
+        return True
+
+    async def _record_cooldown(**kwargs: object) -> None:
+        nonlocal cooldown_recorded
+        cooldown_recorded = True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    worker._record_active_salvage_monitor_resume_cooldown = (  # type: ignore[method-assign]
+        _record_cooldown
+    )
+
+    async def _release_monitor_claim(workspace_id: str) -> None:
+        assert workspace_id == "ws_monitor"
+
+    async def _prompt_release(workspace_id: str) -> None:
+        assert workspace_id == "ws_monitor"
+
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._release_terminal_runtime_promptly = _prompt_release  # type: ignore[method-assign]
+
+    await worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_start_recheck_bailed",
+    )
+
+    assert cooldown_recorded is False
+    assert "ws_monitor" not in worker._active_salvage_monitor_resume_cooldowns  # noqa: SLF001
 
 
 @pytest.mark.unit
