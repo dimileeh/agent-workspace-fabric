@@ -196,6 +196,7 @@ async def _connect_asyncpg(dsn: str) -> _AdvisoryConnection:
 
 
 def _asyncpg_dsn_from_engine(engine: AsyncEngine) -> str:
+    """Render an asyncpg-compatible DSN from a SQLAlchemy async engine URL."""
     url = engine.url
     if "+" in url.drivername:
         url = url.set(drivername=url.drivername.split("+", 1)[0])
@@ -206,6 +207,7 @@ def _asyncpg_dsn_from_engine(engine: AsyncEngine) -> str:
 
 
 def _advisory_asyncpg_query(query: Mapping[str, _URLQueryValue]) -> dict[str, _URLQueryValue]:
+    """Strip AWF-only URL query keys and normalize ``ssl`` for asyncpg advisory locks."""
     normalized: dict[str, _URLQueryValue] = {}
     query_dict = dict(query or {})
     has_sslmode = "sslmode" in query_dict
@@ -223,12 +225,14 @@ def _advisory_asyncpg_query(query: Mapping[str, _URLQueryValue]) -> dict[str, _U
 
 
 def _single_query_value(value: _URLQueryValue) -> str | None:
+    """Return the first scalar from a SQLAlchemy URL query value."""
     if isinstance(value, tuple):
         return value[0] if value else None
     return value
 
 
 def _ssl_query_value_to_sslmode(value: str | None) -> str | None:
+    """Map SQLAlchemy/asyncpg ``ssl`` query values to an asyncpg ``sslmode`` string."""
     if value is None:
         return None
     normalized = value.strip().lower()

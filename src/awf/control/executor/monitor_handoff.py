@@ -1055,6 +1055,7 @@ async def _record_monitor_runtime_restart_failed(
     error: ComposeOperationError,
     event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
 ) -> None:
+    """Persist a non-terminal audit event when compose restart fails during monitor resume."""
     try:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)

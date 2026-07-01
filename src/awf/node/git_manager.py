@@ -1428,6 +1428,7 @@ def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = Fals
 
 
 def _ensure_owner_writable_dir(path: Path) -> None:
+    """Ensure ``path`` is owner-writable without changing unrelated permission bits."""
     mode = path.stat(follow_symlinks=False).st_mode
     desired_mode = stat.S_IMODE(mode | _OWNER_WRITABLE_DIR_MODE)
     if desired_mode != stat.S_IMODE(mode):

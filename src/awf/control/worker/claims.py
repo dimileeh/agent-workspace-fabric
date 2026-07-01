@@ -632,6 +632,7 @@ async def _record_monitor_recovery_deferred_active_execution_claim(
 
 
 async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
+    """Claim a ``monitoring_pr`` workspace lease and enqueue monitor recovery when needed."""
     now = datetime.now(UTC)
     lease_expires_at = now + timedelta(seconds=self._config.monitor_claim_lease_seconds)
     active_salvage_monitor_recovery_operation_id: str | None = None
@@ -1006,6 +1007,7 @@ async def _cancel_monitor_claim_heartbeat(
     *,
     heartbeat: asyncio.Task[None] | None = None,
 ) -> None:
+    """Stop and await the monitor-claim heartbeat task for ``workspace_id``."""
     if heartbeat is None:
         heartbeat = self._monitor_claim_heartbeat_tasks.pop(workspace_id, None)
     elif self._monitor_claim_heartbeat_tasks.get(workspace_id) is heartbeat:
@@ -1022,6 +1024,7 @@ def _retain_monitor_claim_heartbeat(
     workspace_id: str,
     heartbeat: asyncio.Task[None],
 ) -> None:
+    """Keep ``heartbeat`` registered while recovery finalize remains pending."""
     self._monitor_claim_heartbeat_tasks[workspace_id] = heartbeat
 
 
@@ -1082,6 +1085,7 @@ async def _safely_resume_claimed_pr_monitor(
     *,
     recovery_operation_id: str | None = None,
 ) -> None:
+    """Run monitor recovery under a refreshed claim lease and finalize bookkeeping."""
     await _cancel_monitor_claim_heartbeat(self, workspace_id)
     heartbeat = asyncio.create_task(
         self._refresh_monitoring_pr_claim_loop(workspace_id),
