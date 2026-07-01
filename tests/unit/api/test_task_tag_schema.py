@@ -31,6 +31,24 @@ def _create_request(task_tag: str | None | object = "__unset__") -> WorkspaceCre
 
 
 @pytest.mark.unit
+def test_workspace_task_accepts_entity_task_key() -> None:
+    task = WorkspaceTask(title="t", prompt="p", task_tag="AIRA-T299")
+    assert task.task_tag == "AIRA-T299"
+
+
+@pytest.mark.unit
+def test_workspace_task_rejects_feature_entity_key() -> None:
+    with pytest.raises(ValidationError, match="task tag"):
+        WorkspaceTask(title="t", prompt="p", task_tag="AIRA-F42")
+
+
+@pytest.mark.unit
+def test_adoption_request_accepts_entity_task_key() -> None:
+    request = PullRequestMonitorAdoptionRequest(pr_url="https://x/pr/1", task_tag="AIRA-T299")
+    assert request.task_tag == "AIRA-T299"
+
+
+@pytest.mark.unit
 def test_workspace_task_accepts_valid_tag() -> None:
     task = WorkspaceTask(title="t", prompt="p", task_tag="PROJ-123")
     assert task.task_tag == "PROJ-123"

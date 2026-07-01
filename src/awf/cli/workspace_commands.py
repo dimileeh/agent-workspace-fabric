@@ -55,7 +55,7 @@ def _option_value(value: Any) -> str:
 
 
 def _task_tag_callback(value: str | None) -> str | None:
-    """Validate ``--task-tag`` locally; reject malformed Jira keys with a clear error."""
+    """Validate ``--task-tag`` locally; reject malformed keys with a clear error."""
     try:
         return validate_task_tag(value)
     except ValueError as exc:
@@ -72,8 +72,10 @@ def workspace_create(
         "--task-tag",
         callback=_task_tag_callback,
         help=(
-            "Optional Jira issue key (e.g. PROJ-123) prepended to the branch, PR "
-            "title, and every AWF-authored commit message so work links to the issue."
+            "Optional task tag: Jira issue key (e.g. PROJ-123) or Aira task entity "
+            "key (e.g. PROJ-T123). Pass bare keys (AIRA-T299); bracketed [AIRA-T299] "
+            "is accepted. Entity keys appear bracketed on the PR title and AWF commits "
+            "but bare on the branch; Jira keys are bare everywhere."
         ),
     ),
     branch_base: str | None = typer.Option(
@@ -891,8 +893,10 @@ def workspace_adopt_pr(
         "--task-tag",
         callback=_task_tag_callback,
         help=(
-            "Optional Jira issue key (e.g. PROJ-123) prepended to every "
-            "AWF-authored monitor commit message so fixes link to the issue."
+            "Optional task tag: Jira issue key (e.g. PROJ-123) or Aira task entity "
+            "key (e.g. PROJ-T123). Pass bare keys (AIRA-T299); bracketed [AIRA-T299] "
+            "is accepted. Entity keys appear bracketed on AWF monitor commits; Jira "
+            "keys are bare."
         ),
     ),
     reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
