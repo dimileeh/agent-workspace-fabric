@@ -537,18 +537,16 @@ async def test_pre_push_validation_finalize_skips_unrelated_dirt_outside_operati
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Unrelated dirt outside the operation's committed and staged delta must stay fail-closed.
+    """Unrelated dirt outside the operation's committed delta must stay fail-closed.
 
     The pre-push dirty finalize must only commit dirt the current monitor
     operation owns — i.e. paths within its committed delta
-    (``operation_start_head..HEAD``) or its staged delta
-    (``git diff --name-status -z --cached operation_start_head``). Dirt on a path
-    that the operation never touched (introduced after the repair-start dirty
-    guard by a failed cleanup or another local process) must NOT be swept
-    into the PR via ``_commit_dirty_worktree``; the finalize must skip and
-    the push must fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``
-    (regression for review thread ``PRRT_kwDOSJAM6s6KXLaI``; the staged-delta
-    union was added in review thread ``PRRT_kwDOSJAM6s6KYd-r``).
+    (``operation_start_head..HEAD``). Dirt on a path that the operation never
+    touched must NOT be swept into the PR via ``_commit_dirty_worktree``; the
+    finalize must skip. Post-operation residue cleanup is attempted next, but
+    without a capturable HEAD anchor or successful cleanup it still fails closed
+    as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (regression for review thread
+    ``PRRT_kwDOSJAM6s6KXLaI``).
     """
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)

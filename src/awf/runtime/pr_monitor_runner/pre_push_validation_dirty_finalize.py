@@ -836,6 +836,78 @@ async def _try_finalize_pre_push_dirty_repair_state(
     return verify
 
 
+async def _try_cleanup_pre_push_post_operation_residue(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    check: ValidationWorktreeCheck,
+    operation_start_head: str | None,
+) -> ValidationWorktreeCheck | None:
+    """Remove provable post-operation residue unrelated to the committed delta.
+
+    When the dirty-finalize gate skips unrelated dirt (paths outside
+    ``operation_start_head..HEAD``), attempt a HEAD-preserving cleanup via
+    ``git restore`` + ``git clean`` before failing closed with
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``. Only runs when every dirty path
+    is disjoint from the operation-owned committed delta and cleanup leaves
+    HEAD unchanged with a clean worktree.
+    """
+    from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
+
+    _pre_push_validation_cleanup = _ppv._pre_push_validation_cleanup
+    _pre_push_validation_worktree_check = _ppv._pre_push_validation_worktree_check
+
+    if check.clean or check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+        return None
+    if operation_start_head is None:
+        return None
+    owned_delta_paths = await _operation_owned_delta_paths(
+        self,
+        worktree_path=worktree_path,
+        operation_start_head=operation_start_head,
+    )
+    if owned_delta_paths is None:
+        return None
+    dirty_paths = set(check.paths)
+    if not dirty_paths:
+        return None
+    if dirty_paths & owned_delta_paths:
+        return None
+
+    head_before = await self._rev_parse_head(worktree_path)
+    if head_before is None:
+        return None
+
+    cleanup = await _pre_push_validation_cleanup(
+        self,
+        worktree_path=worktree_path,
+        restore_ref=head_before,
+    )
+    if not cleanup.ok:
+        return None
+
+    head_after = await self._rev_parse_head(worktree_path)
+    if head_after != head_before:
+        return None
+
+    recheck = await _pre_push_validation_worktree_check(
+        self,
+        worktree_path=worktree_path,
+    )
+    if not recheck.clean:
+        return None
+
+    _log.info(
+        "monitor.pre_push_post_operation_residue_cleaned",
+        workspace_id=workspace_id,
+        residue_paths=sorted(dirty_paths),
+        cleaned_paths=list(cleanup.cleaned_paths),
+        head_sha=head_before,
+    )
+    return recheck
+
+
 async def _rollback_finalize_dirty_residue_before_provider_recovery(
     self: Any,
     *,

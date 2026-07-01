@@ -59,6 +59,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_dirty_finalize import (
     _committed_delta_paths,  # noqa: F401  (re-exported for tests)
     _operation_owned_delta_paths,  # noqa: F401  (re-exported for tests)
     _rollback_finalize_dirty_residue_before_provider_recovery,  # noqa: F401  (re-exported for tests)
+    _try_cleanup_pre_push_post_operation_residue,  # noqa: F401  (re-exported for tests)
     _try_finalize_pre_push_dirty_repair_state,  # noqa: F401  (re-exported for tests)
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_failures import (
@@ -951,6 +952,16 @@ async def _run_pre_push_validation(
         if finalized_check is not None:
             pre_validation_check = finalized_check
             workspace_head_sha = await self._rev_parse_head(worktree_path)
+    if not pre_validation_check.clean:
+        residue_cleaned_check = await _try_cleanup_pre_push_post_operation_residue(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            check=pre_validation_check,
+            operation_start_head=operation_start_head,
+        )
+        if residue_cleaned_check is not None:
+            pre_validation_check = residue_cleaned_check
     if not pre_validation_check.clean:
         return _pre_push_dirty_result(
             workspace_head_sha=workspace_head_sha,
