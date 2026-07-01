@@ -11,6 +11,20 @@ import pytest
 
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.node_playwright_setup import (
+    _cd_prefix_from_cd_only_segment,
+    _collect_pm_scope_tokens,
+    _collect_uv_global_scope_tokens,
+    _collect_uv_pip_scope_tokens,
+    _collect_uv_sync_scope_tokens,
+    _detected_node_package_manager,
+    _extract_cd_scope_prefix,
+    _has_pip_install_subcommand,
+    _is_node_option_only_install_command,
+    _pm_invocation_tokens,
+    _python_executable_from_commands,
+    _uv_pip_system_python_executable,
+    _uv_run_python_prefix,
+    _uv_setup_python_prefix,
     playwright_browser_install_command,
     playwright_command,
 )
@@ -756,3 +770,378 @@ def test_setup_plan_omits_browser_install_when_no_browsers_declared() -> None:
     plan = profile_phase_command_plan(profile, ["setup"])
 
     assert all("playwright install" not in step.command.command for step in plan)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        # A token after the PM ending with ``;`` contributes its non-empty prefix, then stops.
+        (["yarn", "install;", "test"], ["install"]),
+        # A bare ``;`` separator token just terminates scanning.
+        (["yarn", ";", "install"], []),
+    ],
+)
+def test_pm_invocation_tokens_handles_trailing_separator(
+    tokens: list[str], expected: list[str]
+) -> None:
+    """Verify invocation token collection stops at embedded shell separators."""
+    assert _pm_invocation_tokens(tokens, 0) == expected
+
+
+@pytest.mark.unit
+def test_collect_pm_scope_tokens_stops_at_shell_separator_token() -> None:
+    """Verify scope collection stops when a bare ``&&`` separator token appears."""
+    # ``-w`` is a pnpm boolean scope flag; ``&&`` terminates the PM invocation.
+    assert _collect_pm_scope_tokens(["pnpm", "-w", "&&", "install"], 0, pm_base="pnpm") == ["-w"]
+
+
+@pytest.mark.unit
+def test_collect_pm_scope_tokens_value_flag_followed_by_dash_keeps_only_flag() -> None:
+    """Verify a value flag whose next token is another option is kept alone (no value consumed)."""
+    # ``npm -w`` selects a workspace; the following ``-g`` is another option, so
+    # only ``-w`` is collected as scope and scanning continues.
+    assert _collect_pm_scope_tokens(["npm", "-w", "-g", "install"], 0, pm_base="npm") == ["-w"]
+
+
+@pytest.mark.unit
+def test_collect_pm_scope_tokens_value_flag_at_end_keeps_only_flag() -> None:
+    """Verify a trailing value flag with no following token is collected alone."""
+    assert _collect_pm_scope_tokens(["npm", "-w"], 0, pm_base="npm") == ["-w"]
+
+
+@pytest.mark.unit
+def test_collect_pm_scope_tokens_stops_at_double_dash() -> None:
+    """Verify ``--`` terminates scope collection without being collected."""
+    assert _collect_pm_scope_tokens(["npm", "--", "install"], 0, pm_base="npm") == []
+
+
+@pytest.mark.unit
+def test_collect_pm_scope_tokens_boolean_flag_with_trailing_semicolon_terminates() -> None:
+    """Verify a boolean scope flag carrying a trailing ``;`` is collected then scanning ends."""
+    # ``pnpm -w;`` — ``-w`` is a pnpm boolean scope flag; the ``;`` ends the chain.
+    assert _collect_pm_scope_tokens(["pnpm", "-w;", "install"], 0, pm_base="pnpm") == ["-w"]
+
+
+@pytest.mark.unit
+def test_collect_pm_scope_tokens_value_flag_consumes_trailing_semicolon_value() -> None:
+    """Verify a value flag consumes a following ``value;`` token (semicolon ends scanning)."""
+    # ``npm -w`` is a value flag; ``apps;`` is its value and the trailing ``;`` ends scanning.
+    assert _collect_pm_scope_tokens(["npm", "-w", "apps;", "install"], 0, pm_base="npm") == [
+        "-w",
+        "apps;",
+    ]
+
+
+@pytest.mark.unit
+def test_collect_pm_scope_tokens_empty_trailing_semicolon_breaks() -> None:
+    """Verify a bare ``;`` separator token ends scope collection."""
+    # ``pnpm -w`` is boolean scope; a bare ``;`` separator stops scanning.
+    assert _collect_pm_scope_tokens(["pnpm", "-w", ";", "install"], 0, pm_base="pnpm") == ["-w"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("terminator", "expected"),
+    [
+        (";", "cd apps; "),
+        ("&&", "cd apps && "),
+        ("||", "cd apps || "),
+    ],
+)
+def test_cd_prefix_from_cd_only_segment_builds_scoped_prefix(
+    terminator: str, expected: str
+) -> None:
+    """Verify a ``cd <dir>``-only segment yields a scoped cd prefix with its terminator."""
+    assert _cd_prefix_from_cd_only_segment("cd apps", terminator) == expected
+
+
+@pytest.mark.unit
+def test_cd_prefix_from_cd_only_segment_rejects_non_cd_and_empty() -> None:
+    """Verify non-cd segments, empty segments, and empty terminators are not cd-only."""
+    assert _cd_prefix_from_cd_only_segment("echo hi", ";") is None
+    assert _cd_prefix_from_cd_only_segment("cd apps", "") is None
+    assert _cd_prefix_from_cd_only_segment("", ";") is None
+    assert _cd_prefix_from_cd_only_segment("cd apps extra", ";") is None
+
+
+@pytest.mark.unit
+def test_cd_prefix_from_cd_only_segment_rejects_unparseable() -> None:
+    """Verify an unparseable cd segment (unbalanced quote) yields no prefix."""
+    assert _cd_prefix_from_cd_only_segment("cd 'unterminated", ";") is None
+
+
+@pytest.mark.unit
+def test_extract_cd_scope_prefix_skips_env_assignments_before_pm() -> None:
+    """Verify env assignments (FOO=bar) between ``cd`` and the PM are skipped."""
+    # Tokens: cd apps && FOO=bar pnpm install — pm_index points at pnpm.
+    assert _extract_cd_scope_prefix(["cd", "apps", "&&", "FOO=bar", "pnpm"], 4) == "cd apps && "
+
+
+@pytest.mark.unit
+def test_extract_cd_scope_prefix_returns_none_without_cd() -> None:
+    """Verify no ``cd`` preceding the PM yields no prefix."""
+    assert _extract_cd_scope_prefix(["npm", "install"], 1) is None
+
+
+@pytest.mark.unit
+def test_has_pip_install_subcommand_stops_at_double_dash() -> None:
+    """Verify ``--`` before ``install`` means no install subcommand is present."""
+    assert _has_pip_install_subcommand(["pip", "--", "install"], 0) is False
+    assert _has_pip_install_subcommand(["pip", "install", "--", "x"], 0) is True
+    assert _has_pip_install_subcommand(["pip", "run"], 0) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        # Trailing ``--immutable;`` (semicolon-terminated) still counts as install signal.
+        (["yarn", "--immutable;"], True),
+        # A ``--help;`` query after the PM is not an install signal.
+        (["yarn", "--help;"], False),
+        # A bare chain separator terminates scanning (install flag seen before it).
+        (["yarn", "--immutable", "&&", "build"], True),
+    ],
+)
+def test_is_node_option_only_install_command_handles_semicolons_and_separators(
+    tokens: list[str], expected: bool
+) -> None:
+    """Verify option-only install detection respects trailing separators and query flags."""
+    assert _is_node_option_only_install_command(tokens, 0, "yarn") is expected
+
+
+@pytest.mark.unit
+def test_is_node_option_only_install_command_returns_false_for_trailing_scope_value_flag() -> None:
+    """Verify a trailing scope value flag with no argument is not an install signal."""
+    # ``yarn --cwd`` (value flag, no following token) → no install flag seen → False.
+    assert _is_node_option_only_install_command(["yarn", "--cwd"], 0, "yarn") is False
+
+
+@pytest.mark.unit
+def test_is_node_option_only_install_command_returns_false_for_non_yarn_base() -> None:
+    """Verify only Yarn has option-only install flags; other PMs return False immediately."""
+    assert _is_node_option_only_install_command(["pnpm", "--immutable"], 0, "pnpm") is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        # Trailing value flag with no argument.
+        (["sync", "--python"], ["--python"]),
+        # Value flag followed by another option (kept alone).
+        (["sync", "--python", "--x"], ["--python"]),
+        # Unknown option consumes its value, then real scope flags follow.
+        (["sync", "--foo", "bar", "--extra", "dev"], ["--extra", "dev"]),
+    ],
+)
+def test_collect_uv_sync_scope_tokens_handles_value_and_unknown_options(
+    tokens: list[str], expected: list[str]
+) -> None:
+    """Verify ``uv sync`` scope collection handles trailing values and unknown options."""
+    assert _collect_uv_sync_scope_tokens(tokens, 0) == expected
+
+
+@pytest.mark.unit
+def test_collect_uv_pip_scope_tokens_stops_at_double_dash() -> None:
+    """Verify ``--`` terminates ``uv pip`` scope collection."""
+    assert _collect_uv_pip_scope_tokens(["install", "--", "--python"], 0) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        # Unknown option with ``=`` value, then ``--system`` → system python.
+        (["install", "--foo=bar", "--system"], "python"),
+        # Trailing unknown option with no value and no ``--system`` → None.
+        (["install", "--foo"], None),
+        # ``--system`` then a trailing ``--python`` value flag with no arg → bare python.
+        (["install", "--system", "--python"], "python"),
+    ],
+)
+def test_uv_pip_system_python_executable_edge_cases(
+    tokens: list[str], expected: str | None
+) -> None:
+    """Verify ``uv pip install --system`` resolves the python executable across option shapes."""
+    assert _uv_pip_system_python_executable(tokens, 0) == expected
+
+
+@pytest.mark.unit
+def test_uv_pip_system_python_executable_returns_path_for_python_equals_path() -> None:
+    """Verify ``--python=/usr/bin/python3.12 --system`` returns that absolute interpreter."""
+    assert (
+        _uv_pip_system_python_executable(["install", "--system", "--python=/usr/bin/python3.12"], 0)
+        == "/usr/bin/python3.12"
+    )
+
+
+@pytest.mark.unit
+def test_uv_setup_python_prefix_returns_none_for_unknown_pip_subcommand() -> None:
+    """Verify ``uv pip freeze`` (not install|sync) yields no python prefix."""
+    assert _uv_setup_python_prefix(["uv", "pip", "freeze"], 0) is None
+
+
+@pytest.mark.unit
+def test_python_executable_from_commands_skips_unparseable_command() -> None:
+    """Verify an unparseable command (unbalanced quote) is skipped without matching."""
+    # The unterminated quote fails shlex.split; the runnable ``uv run`` command wins.
+    result = _python_executable_from_commands(
+        ['echo "unterminated', "uv run pytest"], allow_pytest_playwright_shortcut=False
+    )
+    assert result is not None
+    assert result[0] == "uv run python"
+
+
+@pytest.mark.unit
+def test_uv_run_python_prefix_returns_none_when_run_missing_after_global_scope() -> None:
+    """Verify a uv invocation with global scope but no ``run`` subcommand yields no prefix."""
+    assert _uv_run_python_prefix(["uv", "--project", "apps"], 0) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        # ``--`` ends global options and invalidates the run prefix.
+        (["uv", "--", "run", "pytest"], None),
+        # A trailing global value flag with no argument invalidates the prefix.
+        (["uv", "--project"], None),
+    ],
+)
+def test_collect_uv_global_scope_tokens_invalidates_on_dash_and_trailing_value(
+    tokens: list[str], expected: tuple[list[str], int] | None
+) -> None:
+    """Verify ``--`` and a trailing value flag invalidate the uv global scope."""
+    assert _collect_uv_global_scope_tokens(tokens, 0) == expected
+
+
+@pytest.mark.unit
+def test_collect_uv_global_scope_tokens_keeps_value_flag_followed_by_option() -> None:
+    """Verify a global value flag whose next token is an option is kept without consuming it."""
+    # ``--project`` is followed by ``--x`` (another option): kept alone, scanning continues to ``run``.
+    assert _collect_uv_global_scope_tokens(["uv", "--project", "--x", "run", "pytest"], 0) == (
+        ["--project", "--x"],
+        3,
+    )
+
+
+@pytest.mark.unit
+def test_collect_uv_sync_scope_tokens_value_flag_followed_by_dash_keeps_only_flag() -> None:
+    """Verify a ``uv sync`` value flag followed by another option keeps only the flag."""
+    assert _collect_uv_sync_scope_tokens(["sync", "--python", "--x"], 0) == ["--python"]
+
+
+@pytest.mark.unit
+def test_collect_uv_sync_scope_tokens_stops_at_double_dash() -> None:
+    """Verify ``--`` terminates ``uv sync`` scope collection."""
+    assert _collect_uv_sync_scope_tokens(["sync", "--", "--extra"], 0) == []
+
+
+@pytest.mark.unit
+def test_collect_uv_pip_scope_tokens_breaks_on_non_scope_option() -> None:
+    """Verify an option not in the ``uv pip`` scope set terminates scope collection."""
+    assert _collect_uv_pip_scope_tokens(["install", "--unknown"], 0) == []
+
+
+@pytest.mark.unit
+def test_uv_pip_system_python_executable_returns_none_without_system_flag() -> None:
+    """Verify ``uv pip install`` without ``--system`` yields no system python."""
+    assert _uv_pip_system_python_executable(["install", "--python", "3.12"], 0) is None
+
+
+@pytest.mark.unit
+def test_uv_pip_system_python_executable_handles_unknown_equals_value_with_system() -> None:
+    """Verify an unknown ``--foo=bar`` option with ``--system`` still returns system python."""
+    assert _uv_pip_system_python_executable(["install", "--system", "--foo=bar"], 0) == "python"
+
+
+@pytest.mark.unit
+def test_uv_pip_system_python_executable_handles_trailing_unknown_option_with_system() -> None:
+    """Verify a trailing unknown option after ``--system`` still returns system python."""
+    assert _uv_pip_system_python_executable(["install", "--system", "--foo"], 0) == "python"
+
+
+@pytest.mark.unit
+def test_is_node_option_only_install_command_returns_false_for_trailing_double_dash_semicolon() -> (
+    None
+):
+    """Verify a ``--;`` token (strips to ``--``) is not an install signal."""
+    assert _is_node_option_only_install_command(["yarn", "--;"], 0, "yarn") is False
+
+
+@pytest.mark.unit
+def test_detected_node_package_manager_skips_empty_statements() -> None:
+    """Verify empty shell statements (e.g. trailing ``;;``) do not crash node detection."""
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"setup": ["pnpm install;;"]}}
+    )
+    package_manager, cd_prefix = _detected_node_package_manager(profile)
+    assert package_manager == "pnpm"
+    assert cd_prefix is None
+
+
+@pytest.mark.unit
+def test_uv_run_python_prefix_returns_none_when_global_scope_is_invalid() -> None:
+    """Verify a uv invocation whose global scope is invalid (``--``) yields no run prefix."""
+    assert _uv_run_python_prefix(["uv", "--", "run", "pytest"], 0) is None
+
+
+@pytest.mark.unit
+def test_uv_setup_python_prefix_returns_none_when_global_scope_exhausts_tokens() -> None:
+    """Verify a uv invocation whose global scope consumes all tokens yields no python prefix."""
+    # ``uv --project x`` — global scope consumes both flags; no subcommand remains.
+    assert _uv_setup_python_prefix(["uv", "--project", "x"], 0) is None
+
+
+@pytest.mark.unit
+def test_uv_setup_python_prefix_returns_none_without_subcommand() -> None:
+    """Verify a uv invocation with global scope but no subcommand yields no python prefix."""
+    assert _uv_setup_python_prefix(["uv", "--project", "x"], 0) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        (["install", "--system", "--python"], "python"),
+        (["install", "-p", "3.12", "--system"], "python3.12"),
+    ],
+)
+def test_uv_pip_system_python_executable_handles_python_value_flags(
+    tokens: list[str], expected: str
+) -> None:
+    """Verify ``uv pip install --system`` resolves ``--python``/``-p`` value flags."""
+    assert _uv_pip_system_python_executable(tokens, 0) == expected
+
+
+@pytest.mark.unit
+def test_detected_node_package_manager_skips_unparseable_cd_segment() -> None:
+    """Verify an unparseable cd-scoped command does not crash node-manager detection."""
+    # The unterminated quote makes the whole statement one segment; shlex fails so
+    # the node scan skips it and detection falls through (no node PM found).
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["cd 'unterminated && pnpm install"]},
+        }
+    )
+    assert _detected_node_package_manager(profile) == (None, None)
+
+
+@pytest.mark.unit
+def test_browser_install_detects_node_manager_from_database_generated_setup() -> None:
+    """Verify database-generated setup commands are scanned for the node package manager."""
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["echo ready"]},
+            "database": {"generated_setup": ["pnpm install"]},
+        }
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == "pnpm exec playwright install chromium"
