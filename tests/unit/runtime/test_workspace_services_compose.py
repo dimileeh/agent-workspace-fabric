@@ -14,6 +14,7 @@ from awf.node.git_manager import WorktreeLayout
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.compose import (
     AGENT_AUTH_ENV_VARS,
+    agent_environment_keys_from_compose_file,
     agent_environment_with_github_token,
     agent_environment_with_legacy_host_auth,
     agent_exec_env_passthrough,
@@ -277,6 +278,94 @@ def test_profile_ollama_host_suppresses_worker_base_url_exec_passthrough(
     assert "OLLAMA_HOST" in passthrough
     assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in passthrough
     assert "OPENAI_API_KEY" in passthrough
+
+
+@pytest.mark.unit
+def test_agent_environment_keys_from_compose_file_rejects_invalid_shapes(
+    tmp_path: Path,
+) -> None:
+    assert agent_environment_keys_from_compose_file(tmp_path / "missing.yml") == frozenset()
+
+    scalar = tmp_path / "scalar.yml"
+    scalar.write_text("not-a-mapping\n", encoding="utf-8")
+    assert agent_environment_keys_from_compose_file(scalar) == frozenset()
+
+    no_services = tmp_path / "no-services.yml"
+    no_services.write_text("version: '3'\n", encoding="utf-8")
+    assert agent_environment_keys_from_compose_file(no_services) == frozenset()
+
+    no_agent = tmp_path / "no-agent.yml"
+    no_agent.write_text(
+        yaml.safe_dump({"services": {"postgres": {"image": "postgres:16"}}}),
+        encoding="utf-8",
+    )
+    assert agent_environment_keys_from_compose_file(no_agent) == frozenset()
+
+    bad_yaml = tmp_path / "bad-yaml.yml"
+    bad_yaml.write_text("services:\n  agent:\n    - [\n", encoding="utf-8")
+    assert agent_environment_keys_from_compose_file(bad_yaml) == frozenset()
+
+    unsupported_env = tmp_path / "unsupported-env.yml"
+    unsupported_env.write_text(
+        yaml.safe_dump({"services": {"agent": {"environment": 123}}}),
+        encoding="utf-8",
+    )
+    assert agent_environment_keys_from_compose_file(unsupported_env) == frozenset()
+
+
+@pytest.mark.unit
+def test_agent_environment_keys_from_compose_file_parses_list_environment(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "environment": [
+                            "OLLAMA_HOST=http://ollama.profile:11434",
+                            "WORKSPACE_ID=ws_123",
+                            {"OPENAI_API_KEY": "${OPENAI_API_KEY}"},
+                            "=skip-empty-key",
+                            42,
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    keys = agent_environment_keys_from_compose_file(compose_file)
+
+    assert keys == frozenset({"OLLAMA_HOST", "WORKSPACE_ID", "OPENAI_API_KEY"})
+
+
+@pytest.mark.unit
+def test_agent_exec_env_passthrough_honors_list_format_compose_environment(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "environment": [
+                            "OLLAMA_HOST=http://ollama.profile:11434",
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    passthrough = agent_exec_env_passthrough(compose_file=compose_file)
+
+    assert "OLLAMA_HOST" in passthrough
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in passthrough
 
 
 @pytest.mark.unit
