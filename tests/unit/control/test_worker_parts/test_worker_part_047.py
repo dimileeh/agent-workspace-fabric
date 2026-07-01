@@ -394,11 +394,87 @@ async def test_safely_resume_pr_monitor_cancelled_handoff_skips_classifies_opera
         recovery_operation_id="op_cancelled_handoff",
     )
 
-    assert result is True
+    assert result is False
     assert len(finish_calls) == 1
     assert finish_calls[0]["operation_id"] == "op_cancelled_handoff"
     assert finish_calls[0]["status"] == OperationStatus.cancelled
     assert finish_calls[0]["error_code"] == "MONITOR_RECOVERY_CANCELLED"
+
+
+@pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_cancelled_handoff(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Cancelled pre-handoff skip must not apply active-salvage monitor cooldown."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-cancelled-cooldown",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.cancelled,
+            reason_code="TEST_OPERATOR",
+        )
+        await session.commit()
+
+    cooldown_recorded = False
+
+    class _CancelledHandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object | None:
+            assert handoff_workspace_id == workspace_id
+            return None
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=_CancelledHandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01, monitor_claim_lease_seconds=30.0),
+    )
+    worker._remember_active_salvage_monitor_recovery_operation_id(  # noqa: SLF001
+        "op_cancelled_handoff"
+    )
+
+    async def _finish_monitor_recovery_operation(
+        finish_workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        assert finish_workspace_id == workspace_id
+        return True
+
+    async def _record_cooldown(**kwargs: object) -> None:
+        nonlocal cooldown_recorded
+        cooldown_recorded = True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    worker._record_active_salvage_monitor_resume_cooldown = (  # type: ignore[method-assign]
+        _record_cooldown
+    )
+
+    async def _release_monitor_claim(release_workspace_id: str) -> None:
+        assert release_workspace_id == workspace_id
+
+    async def _prompt_release(release_workspace_id: str) -> None:
+        assert release_workspace_id == workspace_id
+
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._release_terminal_runtime_promptly = _prompt_release  # type: ignore[method-assign]
+
+    await worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+        workspace_id,
+        recovery_operation_id="op_cancelled_handoff",
+    )
+
+    assert cooldown_recorded is False
+    assert workspace_id not in worker._active_salvage_monitor_resume_cooldowns  # noqa: SLF001
 
 
 @pytest.mark.unit

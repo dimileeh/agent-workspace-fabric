@@ -854,7 +854,7 @@ async def _safely_resume_pr_monitor(
             )
             if finalized:
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
-            return status != OperationStatus.failed
+            return status == OperationStatus.succeeded
 
         verify_start = getattr(self._executor, "verify_resume_monitor_start", None)
         if verify_start is not None and not await verify_start(workspace_id):
@@ -875,7 +875,7 @@ async def _safely_resume_pr_monitor(
             )
             if finalized:
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
-            return status != OperationStatus.failed
+            return status == OperationStatus.succeeded
 
         handoff_succeeded = True
         handoff_finalized = await self._finish_monitor_recovery_operation(
