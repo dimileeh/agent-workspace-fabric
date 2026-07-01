@@ -598,8 +598,17 @@ class _RecordingExecutor:
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
         self.calls.append(workspace_id)
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        del handoff
         self.resume_calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _BlockingExecutor(_RecordingExecutor):
@@ -620,10 +629,19 @@ class _BlockingMonitorExecutor(_RecordingExecutor):
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        del handoff
         self.resume_calls.append(workspace_id)
         self.started.set()
         await self.release.wait()
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _RecordingRuntimeInspector:
@@ -1266,10 +1284,11 @@ class TestRunOnceExecutionPart004:
             ]
             assert len(remonitor_operations) == 1
             operation_id = remonitor_operations[0].id
-            assert remonitor_operations[0].status == OperationStatus.running.value
+            assert remonitor_operations[0].status == OperationStatus.succeeded.value
 
             # The workspace leaves monitoring_pr, so the resume is now stale and
-            # reconcile cancels it.
+            # reconcile cancels it. The recovery bookkeeping op already succeeded
+            # at handoff; cancellation applies only to the monitor run task.
             async with session_factory() as s:
                 await s.execute(
                     update(Workspace)
@@ -1285,13 +1304,11 @@ class TestRunOnceExecutionPart004:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
 
-            # The remonitor op is finalized as cancelled, not stuck in running.
+            # The remonitor op stays succeeded; only the monitor task was cancelled.
             async with session_factory() as s:
                 finalized = await OperationRepository(s).get(operation_id)
             assert finalized is not None
-            assert finalized.status == OperationStatus.cancelled.value
-            assert finalized.error_code == "MONITOR_RECOVERY_CANCELLED"
-            # The recovery handle is dropped only after the op is finalized.
+            assert finalized.status == OperationStatus.succeeded.value
             assert monitor_id not in worker._monitor_recovery_operation_ids  # noqa: SLF001
         finally:
             executor.release.set()
@@ -1303,21 +1320,31 @@ class TestRunOnceExecutionPart004:
             )
 
     @pytest.mark.unit
-    async def test_stale_monitor_cancellation_finalizes_despite_second_cancel(
+    async def test_stale_monitor_cancellation_before_handoff_finalizes_recovery_operation(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        # The CancelledError finalize is itself a cancellable DB write. If a
-        # second cancellation (e.g. worker shutdown cancelling outstanding tasks)
-        # lands mid-write, the remonitor op must still reach cancelled rather than
-        # stay stuck in running once the caller's finally drops the recovery
-        # handle. The finalize is shielded, so it runs to completion across the
-        # second cancel.
+        # Cancellation during handoff (before the recovery op is finalized as
+        # succeeded) must still mark the remonitor operation cancelled via the
+        # shielded finalize helper.
         monitor_id = await _create_monitoring_pr(
-            session_factory, origin_repo, "double-cancel-monitor"
+            session_factory, origin_repo, "cancel-before-handoff-monitor"
         )
-        executor = _BlockingMonitorExecutor()
+
+        class _HandoffBlockingMonitorExecutor(_RecordingExecutor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.handoff_started = asyncio.Event()
+                self.release_handoff = asyncio.Event()
+
+            async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+                self.resume_calls.append(workspace_id)
+                self.handoff_started.set()
+                await self.release_handoff.wait()
+                return object()
+
+        executor = _HandoffBlockingMonitorExecutor()
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -1334,7 +1361,9 @@ class TestRunOnceExecutionPart004:
             assert (
                 await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
             )
-            await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                executor.handoff_started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+            )
             monitor_task = worker._execution_tasks[monitor_id]  # noqa: SLF001
 
             async with session_factory() as s:
@@ -1348,9 +1377,6 @@ class TestRunOnceExecutionPart004:
             operation_id = remonitor_operations[0].id
             assert remonitor_operations[0].status == OperationStatus.running.value
 
-            # Inject a second cancellation the instant the finalize DB write
-            # begins, reproducing a shutdown cancel arriving mid-write. Without
-            # the shield this would abort the write and orphan the op in running.
             original_finish = worker._finish_monitor_recovery_operation  # noqa: SLF001
             second_cancel_injected = False
 
@@ -1363,8 +1389,6 @@ class TestRunOnceExecutionPart004:
 
             worker._finish_monitor_recovery_operation = _finish_with_second_cancel  # type: ignore[method-assign]  # noqa: SLF001
 
-            # Workspace leaves monitoring_pr, so the resume is stale and reconcile
-            # cancels it (the first cancellation).
             async with session_factory() as s:
                 await s.execute(
                     update(Workspace)
@@ -1375,12 +1399,10 @@ class TestRunOnceExecutionPart004:
             await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
             assert monitor_task.cancelling() > 0
 
-            executor.release.set()
+            executor.release_handoff.set()
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
 
-            # The second cancel fired during finalize, but the shielded write
-            # still completed: the op is cancelled, not stuck in running.
             assert second_cancel_injected
             async with session_factory() as s:
                 finalized = await OperationRepository(s).get(operation_id)
@@ -1389,7 +1411,7 @@ class TestRunOnceExecutionPart004:
             assert finalized.error_code == "MONITOR_RECOVERY_CANCELLED"
             assert monitor_id not in worker._monitor_recovery_operation_ids  # noqa: SLF001
         finally:
-            executor.release.set()
+            executor.release_handoff.set()
             if monitor_task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)

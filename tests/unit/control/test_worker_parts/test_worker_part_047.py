@@ -66,8 +66,17 @@ class _RecordingExecutor:
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
         self.calls.append(workspace_id)
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        del handoff
         self.resume_calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 def _closed_connection_error() -> InterfaceError:
@@ -232,7 +241,8 @@ async def test_safe_worker_paths_swallow_runtime_failures(
             raise RuntimeError("execute failed")
 
     class RaisingMonitorExecutor(_RecordingExecutor):
-        async def resume_pr_monitor(self, workspace_id: str) -> None:
+        async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+            del handoff
             assert workspace_id == "ws_monitor"
             raise RuntimeError("resume failed")
 
@@ -293,11 +303,34 @@ async def test_safe_worker_paths_swallow_runtime_failures(
         recovery_operation_id="op_resume_failed",
     )
 
+    assert len(finish_calls) == 1
     assert finish_calls[0]["workspace_id"] == "ws_monitor"
     assert finish_calls[0]["operation_id"] == "op_resume_failed"
+    assert finish_calls[0]["status"] == OperationStatus.succeeded
+
+    class _FailingHandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object | None:
+            del workspace_id
+            return None
+
+    failing_handoff_worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=_FailingHandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    finish_calls.clear()
+    failing_handoff_worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    await failing_handoff_worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_handoff_failed",
+    )
+    assert len(finish_calls) == 1
+    assert finish_calls[0]["operation_id"] == "op_handoff_failed"
     assert finish_calls[0]["status"] == OperationStatus.failed
     assert finish_calls[0]["error_code"] == "MONITOR_RECOVERY_FAILED"
-    assert "resume failed" in str(finish_calls[0]["error_message"])
 
 
 @pytest.mark.unit

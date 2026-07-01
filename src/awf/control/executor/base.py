@@ -170,6 +170,19 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
             workspace_id=workspace_id,
         )
 
+    async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> Any:
+        return await _monitor_handoff.resume_pr_monitor_handoff(
+            self,
+            workspace_id=workspace_id,
+        )
+
+    async def run_resumed_pr_monitor(self: Any, workspace_id: str, handoff: Any) -> None:
+        return await _monitor_handoff.run_resumed_pr_monitor(
+            self,
+            workspace_id=workspace_id,
+            handoff=handoff,
+        )
+
     # ── Internals ──────────────────────────────────────────────────────────
 
     def _defaults_for(self: Any, agent: AgentRuntime) -> AgentDefaults | None:

@@ -14,6 +14,7 @@ import shlex as shlex
 import time as time
 import traceback as traceback
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -94,6 +95,16 @@ _safe_dump_compose_payload_for_resume = _companion_env._safe_dump_compose_payloa
 _safe_load_compose_payload_for_resume = _companion_env._safe_load_compose_payload_for_resume
 
 
+@dataclass(frozen=True)
+class ResumeHandoff:
+    """Prepared PR monitor context between handoff prep and the long-lived run loop."""
+
+    monitor: _MonitorRunnerProto
+    compose_project: str
+    compose_file: Path
+    run_kwargs: dict[str, Any]
+
+
 class CompanionEnvSecretPrecheckError(ComposeOperationError):
     """Raised when monitor resume cannot satisfy required companion env secrets."""
 
@@ -111,7 +122,15 @@ class CompanionEnvSecretPrecheckError(ComposeOperationError):
 
 
 async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
-    """Resume the PR monitor for a workspace already in ``monitoring_pr``.
+    """Resume the PR monitor for a workspace already in ``monitoring_pr``."""
+    handoff = await resume_pr_monitor_handoff(self, workspace_id)
+    if handoff is None:
+        return
+    await run_resumed_pr_monitor(self, workspace_id, handoff)
+
+
+async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHandoff | None:
+    """Prepare monitor recovery through compose restart; return handoff or ``None`` on failure.
 
     The current monitor claim owner (``monitor_claimed_by`` on the row this worker
     reclaimed) is threaded into the runner so the protected-scope pause CAS can
@@ -124,7 +143,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
     ws = await self._load_workspace(workspace_id)
     if ws is None:
         _log.warning("executor.resume_skip_unknown", workspace_id=workspace_id)
-        return
+        return None
     monitor_owner_id = ws.monitor_claimed_by
     if ws.status != WorkspaceStatus.monitoring_pr.value:
         _log.info(
@@ -132,20 +151,20 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             workspace_id=workspace_id,
             status=ws.status,
         )
-        return
+        return None
     if not await self._recheck_status(
         workspace_id,
         expected=WorkspaceStatus.monitoring_pr,
         action="resume_pr_monitor",
     ):
-        return
+        return None
 
     if await self._reject_unsupported_task_kind(
         workspace_id=workspace_id,
         workspace=ws,
         from_status=WorkspaceStatus.monitoring_pr,
     ):
-        return
+        return None
 
     if not ws.remote_push_branch and ws.task_kind == "feature_branch_pr" and ws.branch_name:
         recovered_remote_push_branch = await self._recover_feature_branch_remote_push_branch(
@@ -166,7 +185,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             )[:2000],
             reason_code="MONITOR_RECOVERY_METADATA_MISSING",
         )
-        return
+        return None
 
     compose_project = ws.compose_project_name
     compose_file_path = ws.compose_file_path
@@ -217,7 +236,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         expected=WorkspaceStatus.monitoring_pr,
         action="resume_compose",
     ):
-        return
+        return None
 
     try:
         _precheck_required_companion_env_secrets_for_resume(
@@ -252,7 +271,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             error=exc,
             event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
         )
-        return
+        return None
     except ComposeOperationError as exc:
         _log.error(
             "executor.resume_compose_up_failed",
@@ -328,7 +347,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             message=f"monitor recovery: {exc.message}"[:2000],
             reason_code=exc.reason_code,
         )
-        return
+        return None
     except BitbucketClientError as exc:
         # The factory builds its forge client via ``make_forge_client``, so a
         # Bitbucket workspace missing BITBUCKET_API_TOKEN/BITBUCKET_EMAIL raises
@@ -352,7 +371,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             message=f"monitor recovery: {redact_audit_text(repr(exc), limit=1900)}"[:2000],
             reason_code=exc.reason_code,
         )
-        return
+        return None
     except Exception as exc:
         _log.exception("executor.pr_monitor_resume_build_failed", workspace_id=workspace_id)
         await self._mark_failed(
@@ -362,7 +381,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             message=f"monitor recovery: failed to build PR monitor: {exc!r}"[:2000],
             reason_code="MONITOR_RECOVERY_FAILED",
         )
-        return
+        return None
 
     if monitor is None:
         await self._mark_failed(
@@ -372,10 +391,10 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             message="monitor recovery: no PR monitor configured",
             reason_code="MONITOR_RECOVERY_FAILED",
         )
-        return
+        return None
 
     _log.info(
-        "executor.resume_pr_monitor",
+        "executor.resume_pr_monitor_handoff",
         workspace_id=workspace_id,
         pr_url=ws.pr_url,
         pr_number=ws.pr_number,
@@ -385,18 +404,38 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         expected=WorkspaceStatus.monitoring_pr,
         action="resume_monitor_run",
     ):
-        return
+        return None
     # Only forward ``monitor_owner_id`` when known so legacy/test monitor stubs
     # whose ``run`` predates the parameter keep working; the inline initial
     # handoff (under the execution claim, not a monitor claim) passes nothing.
     run_kwargs: dict[str, Any] = {}
     if monitor_owner_id is not None:
         run_kwargs["monitor_owner_id"] = monitor_owner_id
-    await monitor.run(
-        workspace_id=workspace_id,
+    return ResumeHandoff(
+        monitor=monitor,
         compose_project=compose_project,
         compose_file=Path(compose_file_path),
-        **run_kwargs,
+        run_kwargs=run_kwargs,
+    )
+
+
+async def run_resumed_pr_monitor(
+    self: Any,
+    workspace_id: str,
+    handoff: ResumeHandoff,
+) -> None:
+    """Run the long-lived PR monitor loop after a successful handoff."""
+    if not await self._recheck_status(
+        workspace_id,
+        expected=WorkspaceStatus.monitoring_pr,
+        action="resume_monitor_run",
+    ):
+        return
+    await handoff.monitor.run(
+        workspace_id=workspace_id,
+        compose_project=handoff.compose_project,
+        compose_file=handoff.compose_file,
+        **handoff.run_kwargs,
     )
 
 

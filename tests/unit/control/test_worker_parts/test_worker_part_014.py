@@ -597,8 +597,17 @@ class _RecordingExecutor:
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
         self.calls.append(workspace_id)
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        del handoff
         self.resume_calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _BlockingExecutor(_RecordingExecutor):
@@ -619,10 +628,19 @@ class _BlockingMonitorExecutor(_RecordingExecutor):
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        del handoff
         self.resume_calls.append(workspace_id)
         self.started.set()
         await self.release.wait()
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _RecordingRuntimeInspector:
@@ -999,6 +1017,58 @@ class TestRunOnceMonitorRecoveryPart002:
         }
 
     @pytest.mark.unit
+    async def test_recovery_operation_succeeds_on_handoff_while_monitor_still_running(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitor-handoff-succeeds-early",
+        )
+        executor = _BlockingMonitorExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
+        await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_claimed_by == worker._worker_id
+            assert ws.monitor_claim_expires_at is not None
+            operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
+
+        remonitor_operations = [
+            operation for operation in operations if operation.type == OperationType.remonitor.value
+        ]
+        assert len(remonitor_operations) == 1
+        assert remonitor_operations[0].status == OperationStatus.succeeded.value
+        assert monitor_id in worker._execution_tasks  # noqa: SLF001
+
+        executor.release.set()
+        await asyncio.wait_for(
+            worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.monitor_claimed_by is None
+            assert ws.monitor_claim_expires_at is None
+
+    @pytest.mark.unit
     async def test_restart_recovery_clears_dead_owner_execution_claim_and_records_monitor_claim_acquisition(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1086,7 +1156,7 @@ class TestRunOnceMonitorRecoveryPart002:
         ]
         assert len(remonitor_operations) == 1
         operation = remonitor_operations[0]
-        assert operation.status == OperationStatus.running.value
+        assert operation.status == OperationStatus.succeeded.value
         assert operation.payload is not None
         assert operation.payload["previous_claim"] == {
             "monitor_claimed_by": None,

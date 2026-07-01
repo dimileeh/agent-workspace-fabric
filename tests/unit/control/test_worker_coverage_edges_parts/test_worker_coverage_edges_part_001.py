@@ -92,10 +92,19 @@ class _RecordingExecutor:
         if self.fail:
             raise RuntimeError("executor crashed")
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        del handoff
         self.resumed.append(workspace_id)
         if self.fail:
             raise RuntimeError("monitor crashed")
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 @pytest.fixture
