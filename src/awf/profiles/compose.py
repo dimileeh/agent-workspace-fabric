@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlunsplit
 
+import yaml
+
 from awf.node.compose_manager import ComposeService
 from awf.profiles.lint import profile_service_volume_lint_errors
 from awf.profiles.models import (
@@ -419,3 +421,51 @@ def _shadowing_worker_ollama_keys(profile_keys: set[str]) -> frozenset[str]:
         return frozenset()
     top = min(declared)
     return frozenset(_OLLAMA_BASE_URL_ENV_KEYS[:top])
+
+
+def agent_environment_keys_from_compose_file(compose_file: Path) -> frozenset[str]:
+    """Return env var names declared on the agent service in a rendered compose file."""
+
+    try:
+        payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return frozenset()
+    if not isinstance(payload, Mapping):
+        return frozenset()
+    services = payload.get("services")
+    if not isinstance(services, Mapping):
+        return frozenset()
+    agent = services.get("agent")
+    if not isinstance(agent, Mapping):
+        return frozenset()
+    return _compose_environment_keys(agent.get("environment"))
+
+
+def agent_exec_env_passthrough(*, compose_file: Path) -> tuple[str, ...]:
+    """Return auth env var names safe to pass through on ``compose exec -e``.
+
+    Mirrors ``agent_environment_with_legacy_host_auth`` shadowing: when compose
+    generation omitted a higher-precedence worker Ollama key so a profile-owned
+    daemon wins, do not re-inject that key via exec-time ``-e`` passthrough.
+    """
+
+    shadowing = _shadowing_worker_ollama_keys(
+        set(agent_environment_keys_from_compose_file(compose_file))
+    )
+    return tuple(name for name in AGENT_AUTH_ENV_VARS if name not in shadowing)
+
+
+def _compose_environment_keys(environment: object) -> frozenset[str]:
+    if isinstance(environment, Mapping):
+        return frozenset(str(key) for key in environment)
+    if isinstance(environment, list):
+        keys: set[str] = set()
+        for item in environment:
+            if isinstance(item, str):
+                key, _, _ = item.partition("=")
+                if key:
+                    keys.add(key)
+            elif isinstance(item, Mapping):
+                keys.update(str(key) for key in item)
+        return frozenset(keys)
+    return frozenset()
