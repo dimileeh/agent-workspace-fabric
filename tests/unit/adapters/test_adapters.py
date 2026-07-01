@@ -36,6 +36,7 @@ from awf.adapters.opencode import OpenCodeAdapter
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
+from awf.profiles.compose import AGENT_AUTH_ENV_VARS
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
 _LONG_PROMPT = "Review this oversized PR comment.\n" + ("x" * 140_000)
@@ -351,6 +352,26 @@ class TestCodexAdapter:
         )
 
         _assert_prompt_sent_on_stdin(runner)
+
+    @pytest.mark.unit
+    async def test_passthroughs_provider_auth_env_names_to_exec_without_values(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        service_idx = args.index("agent")
+        env_slice = args[args.index("exec") + 4 : service_idx]
+
+        assert env_slice
+        for name in AGENT_AUTH_ENV_VARS:
+            assert ["-e", name] == env_slice[env_slice.index(name) - 1 : env_slice.index(name) + 1]
+        assert not any("sk-live-secret-value" in arg for arg in args)
 
     @pytest.mark.unit
     async def test_wall_timeout_raises_structured_error_and_closes_log_streams(self) -> None:
