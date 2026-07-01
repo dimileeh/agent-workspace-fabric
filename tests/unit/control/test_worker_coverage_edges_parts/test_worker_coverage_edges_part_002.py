@@ -255,6 +255,88 @@ def test_active_salvage_recovery_operation_id_cache_moves_recent_and_evicts_olde
 
 
 @pytest.mark.unit
+async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
+    worker = SimpleNamespace(
+        _active_salvage_monitor_recovery_operation_ids={"op-1": None},
+        _session_factory=lambda: (_ for _ in ()).throw(AssertionError("unused")),
+    )
+
+    assert not await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+        worker,
+        "ws-1",
+        resume_succeeded=False,
+        recovery_operation_id=None,
+    )
+    assert not await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+        worker,
+        "ws-1",
+        resume_succeeded=False,
+        recovery_operation_id="op-missing",
+    )
+    assert await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+        worker,
+        "ws-1",
+        resume_succeeded=True,
+        recovery_operation_id="op-1",
+    )
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class _Repo:
+        workspace: object | None = SimpleNamespace(status=WorkspaceStatus.monitoring_pr.value)
+
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, _workspace_id: str) -> object | None:
+            return self.workspace
+
+    worker._session_factory = lambda: _Session()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(worker_recovery_cooldown, "WorkspaceRepository", _Repo)
+    try:
+        assert await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+            worker,
+            "ws-1",
+            resume_succeeded=False,
+            recovery_operation_id="op-1",
+        )
+        _Repo.workspace = SimpleNamespace(status=WorkspaceStatus.failed.value)
+        assert (
+            not await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+                worker,
+                "ws-1",
+                resume_succeeded=False,
+                recovery_operation_id="op-1",
+            )
+        )
+
+        class _BoomSession:
+            async def __aenter__(self) -> _BoomSession:
+                raise RuntimeError("lookup failed")
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        worker._session_factory = lambda: _BoomSession()
+        assert (
+            not await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+                worker,
+                "ws-1",
+                resume_succeeded=False,
+                recovery_operation_id="op-1",
+            )
+        )
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.unit
 async def test_active_salvage_resume_cooldown_blocks_claim_uses_persisted_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

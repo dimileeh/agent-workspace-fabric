@@ -1043,23 +1043,26 @@ async def _safely_resume_claimed_pr_monitor(
             recovery_operation_id=recovery_operation_id,
         )
     finally:
+        recovery_finalize_pending = workspace_id in self._monitor_recovery_operation_ids
         if (
-            resume_succeeded
-            and recovery_operation_id is not None
-            and recovery_operation_id in self._active_salvage_monitor_recovery_operation_ids
+            not recovery_finalize_pending
+            and await self._should_apply_active_salvage_monitor_resume_cooldown(
+                workspace_id,
+                resume_succeeded=resume_succeeded,
+                recovery_operation_id=recovery_operation_id,
+            )
         ):
             cooldown_seconds = max(0.0, self._config.monitor_claim_lease_seconds)
             self._remember_active_salvage_monitor_resume_cooldown(
                 workspace_id,
                 monotonic() + cooldown_seconds,
             )
-            if cooldown_seconds > 0:
+            if cooldown_seconds > 0 and recovery_operation_id is not None:
                 await self._record_active_salvage_monitor_resume_cooldown(
                     workspace_id,
                     recovery_operation_id=recovery_operation_id,
                     cooldown_until=datetime.now(UTC) + timedelta(seconds=cooldown_seconds),
                 )
-        recovery_finalize_pending = workspace_id in self._monitor_recovery_operation_ids
         if recovery_finalize_pending:
             _retain_monitor_claim_heartbeat(self, workspace_id, heartbeat)
         else:

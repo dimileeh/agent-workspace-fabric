@@ -247,6 +247,9 @@ class WorkerDelegatesMixin:
     _active_salvage_monitor_resume_cooldown_active = (
         _recovery._active_salvage_monitor_resume_cooldown_active
     )
+    _should_apply_active_salvage_monitor_resume_cooldown = (
+        _recovery._should_apply_active_salvage_monitor_resume_cooldown
+    )
 
     _list_scheduler_dispatchable_ids = _scheduler_methods._list_scheduler_dispatchable_ids
     _list_scheduler_dispatchable_ids_from_pages = (

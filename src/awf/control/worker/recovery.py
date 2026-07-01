@@ -11,6 +11,7 @@ from awf.control.worker.recovery_cooldown import (
     _record_active_salvage_monitor_resume_cooldown,
     _remember_active_salvage_monitor_recovery_operation_id,
     _remember_active_salvage_monitor_resume_cooldown,
+    _should_apply_active_salvage_monitor_resume_cooldown,
 )
 from awf.control.worker.recovery_preserved import (
     _active_execution_preservation_event_floor,
@@ -114,4 +115,5 @@ __all__ = (
     "_remember_active_salvage_monitor_resume_cooldown",
     "_evict_expired_salvage_monitor_cooldowns",
     "_active_salvage_monitor_resume_cooldown_active",
+    "_should_apply_active_salvage_monitor_resume_cooldown",
 )

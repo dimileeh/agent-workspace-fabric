@@ -51,6 +51,32 @@ def _forget_active_salvage_monitor_recovery_operation_id(self: Any, operation_id
     self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
 
 
+async def _should_apply_active_salvage_monitor_resume_cooldown(
+    self: Any,
+    workspace_id: str,
+    *,
+    resume_succeeded: bool,
+    recovery_operation_id: str | None,
+) -> bool:
+    """Return whether active-salvage remonitor should cool down after recovery dispatch."""
+    if recovery_operation_id is None:
+        return False
+    if recovery_operation_id not in self._active_salvage_monitor_recovery_operation_ids:
+        return False
+    if resume_succeeded:
+        return True
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            return ws is not None and ws.status == WorkspaceStatus.monitoring_pr.value
+    except Exception:
+        _log.exception(
+            "worker.active_salvage_monitor_resume_cooldown_eligibility_lookup_failed",
+            workspace_id=workspace_id,
+        )
+        return False
+
+
 async def _active_salvage_monitor_resume_cooldown_blocks_claim(
     self: Any,
     workspace_id: str,
