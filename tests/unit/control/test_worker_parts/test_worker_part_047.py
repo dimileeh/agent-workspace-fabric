@@ -388,6 +388,114 @@ async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_w
 
 
 @pytest.mark.unit
+async def test_safely_resume_pr_monitor_post_handoff_runtime_error_does_not_fail_recovery_op(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    handoff = object()
+    finish_calls: list[dict[str, object]] = []
+
+    class HandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            assert handoff_obj is handoff
+            assert workspace_id == "ws_monitor"
+            raise RuntimeError("monitor run failed")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return kwargs.get("status") != OperationStatus.succeeded
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_post_handoff_runtime_error",
+    )
+
+    assert result is True
+    assert len(finish_calls) == 1
+    assert finish_calls[0]["status"] == OperationStatus.succeeded
+    assert finish_calls[0]["operation_id"] == "op_post_handoff_runtime_error"
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_post_handoff_cancellation_does_not_cancel_recovery_op(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    handoff = object()
+    finish_calls: list[dict[str, object]] = []
+    run_started = asyncio.Event()
+    after_cancellation_called = False
+
+    class BlockingRunExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            assert handoff_obj is handoff
+            assert workspace_id == "ws_monitor"
+            run_started.set()
+            await asyncio.Event().wait()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=BlockingRunExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return kwargs.get("status") != OperationStatus.succeeded
+
+    async def _finish_after_cancellation(*args: object, **kwargs: object) -> None:
+        nonlocal after_cancellation_called
+        after_cancellation_called = True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    worker._finish_monitor_recovery_operation_after_cancellation = (  # type: ignore[method-assign]
+        _finish_after_cancellation
+    )
+
+    resume_task = asyncio.create_task(
+        worker._safely_resume_pr_monitor(  # noqa: SLF001
+            "ws_monitor",
+            recovery_operation_id="op_post_handoff_cancel",
+        )
+    )
+    await asyncio.wait_for(run_started.wait(), timeout=5.0)
+    resume_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await resume_task
+
+    assert not after_cancellation_called
+    assert len(finish_calls) == 1
+    assert finish_calls[0]["status"] == OperationStatus.succeeded
+    assert finish_calls[0]["operation_id"] == "op_post_handoff_cancel"
+
+
+@pytest.mark.unit
 async def test_monitor_recovery_handoff_failure_error_skips_restart_start_event(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

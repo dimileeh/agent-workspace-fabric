@@ -708,6 +708,7 @@ async def _safely_resume_pr_monitor(
             error_message="Worker has no executor configured.",
         )
         return False
+    handoff_succeeded = False
     handoff_finalized = False
     try:
         handoff = await self._executor.resume_pr_monitor_handoff(workspace_id)
@@ -725,6 +726,7 @@ async def _safely_resume_pr_monitor(
             )
             return False
 
+        handoff_succeeded = True
         handoff_finalized = await self._finish_monitor_recovery_operation(
             workspace_id,
             operation_id=recovery_operation_id,
@@ -735,7 +737,7 @@ async def _safely_resume_pr_monitor(
 
         await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
     except asyncio.CancelledError:
-        if not handoff_finalized:
+        if not handoff_succeeded:
             # A stale-monitor reconcile cancels this task once its workspace has
             # left monitoring_pr. CancelledError is a BaseException, so it skips
             # the Exception handler below; without finalizing here the remonitor
@@ -753,7 +755,7 @@ async def _safely_resume_pr_monitor(
             )
         raise
     except Exception as exc:
-        if not handoff_finalized:
+        if not handoff_succeeded:
             _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
             await self._finish_monitor_recovery_operation(
                 workspace_id,
