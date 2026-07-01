@@ -608,6 +608,8 @@ class _RecordingExecutor:
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        if handoff is None:
+            return
         await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
@@ -641,6 +643,8 @@ class _BlockingMonitorExecutor(_RecordingExecutor):
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        if handoff is None:
+            return
         await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
