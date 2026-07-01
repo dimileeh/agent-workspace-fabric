@@ -172,7 +172,7 @@ class WorkspaceTask(BaseModel):
     @field_validator("task_tag")
     @classmethod
     def _validate_task_tag(cls, value: str | None) -> str | None:
-        """Normalize + validate the optional Jira issue key; ``None`` when absent."""
+        """Normalize + validate the optional task tag; ``None`` when absent."""
         return validate_task_tag(value)
 
     @field_validator("kind")
@@ -391,7 +391,7 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
     @field_validator("task_tag")
     @classmethod
     def _validate_task_tag(cls, value: str | None) -> str | None:
-        """Normalize + validate the optional Jira issue key; ``None`` when absent."""
+        """Normalize + validate the optional task tag; ``None`` when absent."""
         return validate_task_tag(value)
 
 
