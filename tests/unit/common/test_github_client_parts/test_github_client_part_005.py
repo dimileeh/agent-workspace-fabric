@@ -206,6 +206,8 @@ class TestFetchPrStatusCiSignal:
 
 
 class TestFetchFailingCheckLogsRollupFallback:
+    """Tests for FetchFailingCheckLogsRollupFallback."""
+
     @pytest.mark.unit
     async def test_rollup_details_url_fetches_missing_actions_run(self) -> None:
         fake = FakeCommandRunner()
@@ -244,6 +246,7 @@ class TestFetchFailingCheckLogsRollupFallback:
 
     @pytest.mark.unit
     async def test_rollup_fallback_dedupes_run_list_results(self) -> None:
+        """Verify rollup fallback dedupes run list results."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,

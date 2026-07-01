@@ -12,6 +12,8 @@ from awf.node.git_manager import GitManager
 
 
 class TestGitEnvironment:
+    """Tests for GitEnvironment."""
+
     @pytest.mark.unit
     async def test_run_uses_configured_environment(self, tmp_path: Path) -> None:
         """Verify run uses configured environment."""
@@ -28,6 +30,8 @@ class TestGitEnvironment:
 
 
 class TestAgentWritableWorktreeHelpers:
+    """Tests for AgentWritableWorktreeHelpers."""
+
     @pytest.mark.unit
     async def test_prepare_agent_writable_worktree_skips_chown_when_not_root(
         self,

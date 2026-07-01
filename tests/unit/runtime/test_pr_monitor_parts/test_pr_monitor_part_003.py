@@ -78,6 +78,7 @@ def _status(
     closed: bool = False,
     merged: bool = False,
 ) -> PRStatus:
+    """Build a PRStatus fixture for CI failure monitor tests."""
     return PRStatus(
         number=42,
         head_sha=head_sha,
@@ -100,6 +101,8 @@ def _status(
 
 
 class TestCiFailure:
+    """Tests for CiFailure."""
+
     @pytest.mark.unit
     def test_transient_failure_dispatches_rerun_before_agent_repair(self) -> None:
         failure = CheckFailure(

@@ -1094,6 +1094,7 @@ async def test_read_mirror_origin_url_returns_none_when_unset_or_empty(
 def test_linked_worktree_path_from_git_dir_rejects_invalid_back_reference(
     tmp_path: Path,
 ) -> None:
+    """Verify linked worktree path from git dir rejects invalid back reference."""
     linked_git_dir = tmp_path / "mirror.git" / "worktrees" / "ws"
     linked_git_dir.mkdir(parents=True)
     (linked_git_dir / "gitdir").write_text("\n", encoding="utf-8")
@@ -1110,6 +1111,7 @@ def test_linked_worktree_path_from_git_dir_rejects_invalid_back_reference(
 def test_linked_worktree_path_from_git_dir_resolves_relative_back_reference(
     tmp_path: Path,
 ) -> None:
+    """Verify linked worktree path from git dir resolves relative back reference."""
     linked_git_dir = tmp_path / "mirror.git" / "worktrees" / "ws"
     linked_git_dir.mkdir(parents=True)
     worktree = tmp_path / "worktree"
@@ -1128,6 +1130,7 @@ def test_linked_worktree_path_from_git_dir_wraps_metadata_read_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify linked worktree path from git dir wraps metadata read error."""
     linked_git_dir = tmp_path / "mirror.git" / "worktrees" / "ws"
     linked_git_dir.mkdir(parents=True)
     metadata_gitdir = linked_git_dir / "gitdir"
@@ -1157,6 +1160,7 @@ def test_linked_worktree_path_from_git_dir_wraps_resolution_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify linked worktree path from git dir wraps resolution error."""
     linked_git_dir = tmp_path / "mirror.git" / "worktrees" / "ws"
     linked_git_dir.mkdir(parents=True)
     (linked_git_dir / "gitdir").write_text("../../../worktree/.git\n", encoding="utf-8")
@@ -1403,6 +1407,8 @@ class TestAgentWorktreeWritable:
 
 
 class TestRemoveWorktree:
+    """Tests for RemoveWorktree."""
+
     @pytest.mark.unit
     async def test_removes_existing_worktree(self, manager: GitManager, origin_repo: Path) -> None:
         layout = await manager.add_worktree(

@@ -521,12 +521,18 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     created: dict[str, Any] = {}
 
     class _Engine:
+        """Test helper for Engine."""
+
         pass
 
     class _Runner:
+        """Test helper for Runner."""
+
         pass
 
     class _LogStore:
+        """Test helper for LogStore."""
+
         def __init__(self, *, root: Path, session_factory: object) -> None:
             """Test helper for  init  ."""
             created["log_store"] = self
@@ -534,6 +540,8 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
             created["log_session_factory"] = session_factory
 
     class _ValidationRunner:
+        """Test helper for ValidationRunner."""
+
         def __init__(self, *, runner: object, artifacts_dir: Path, log_store: object) -> None:
             """Test helper for  init  ."""
             created["validation"] = self
@@ -542,18 +550,24 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
             created["validation_log_store"] = log_store
 
     class _PullRequestCreator:
+        """Test helper for PullRequestCreator."""
+
         def __init__(self, runner: object) -> None:
             """Test helper for  init  ."""
             created["pr_creator"] = self
             created["pr_creator_runner"] = runner
 
     class _BranchOpenPullRequestResolver:
+        """Test helper for BranchOpenPullRequestResolver."""
+
         def __init__(self, runner: object) -> None:
             """Test helper for  init  ."""
             created["open_pr_resolver"] = self
             created["open_pr_resolver_runner"] = runner
 
     class _GitManager:
+        """Test helper for GitManager."""
+
         def __init__(self, work_dir: Path, **kwargs: object) -> None:
             """Test helper for  init  ."""
             created["git"] = self
@@ -561,6 +575,8 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
             created["git_kwargs"] = kwargs
 
     class _ComposeManager:
+        """Test helper for ComposeManager."""
+
         def __init__(self, *, work_dir: Path, template_path: Path) -> None:
             """Test helper for  init  ."""
             created["compose"] = self
@@ -568,6 +584,8 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
             created["compose_template_path"] = template_path
 
     class _WorkspaceCleaner:
+        """Test helper for WorkspaceCleaner."""
+
         def __init__(self, *, git: object, compose: object) -> None:
             """Test helper for  init  ."""
             created["runtime_cleaner"] = self
@@ -575,30 +593,40 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
             created["cleaner_compose"] = compose
 
     class _LocalSecretLeaseMountResolver:
+        """Test helper for LocalSecretLeaseMountResolver."""
+
         def __init__(self, **kwargs: object) -> None:
             """Test helper for  init  ."""
             created["secret_lease_resolver"] = self
             created["secret_lease_kwargs"] = kwargs
 
     class _ComposeStackLauncher:
+        """Test helper for ComposeStackLauncher."""
+
         def __init__(self, **kwargs: object) -> None:
             """Test helper for  init  ."""
             created["stack_launcher"] = self
             created["stack_launcher_kwargs"] = kwargs
 
     class _Provisioner:
+        """Test helper for Provisioner."""
+
         def __init__(self, **kwargs: object) -> None:
             """Test helper for  init  ."""
             created["provisioner"] = self
             created["provisioner_kwargs"] = kwargs
 
     class _WorkspaceExecutor:
+        """Test helper for WorkspaceExecutor."""
+
         def __init__(self, **kwargs: object) -> None:
             """Test helper for  init  ."""
             created["executor"] = self
             created["executor_kwargs"] = kwargs
 
     class _ControlWorker:
+        """Test helper for ControlWorker."""
+
         def __init__(self, **kwargs: object) -> None:
             """Test helper for  init  ."""
             created["worker"] = self

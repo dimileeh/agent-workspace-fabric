@@ -95,6 +95,7 @@ def test_require_ci_false_with_checks_present_still_waits() -> None:
 
 @pytest.mark.unit
 def test_require_ci_false_failure_still_reports() -> None:
+    """Verify require ci false failure still reports."""
     # The failure path is unaffected by the opt-out: a genuine FAILURE still
     # dispatches a CI repair (gate 5) regardless of ``require_ci``, which only
     # governs the PENDING wait (gate 6).

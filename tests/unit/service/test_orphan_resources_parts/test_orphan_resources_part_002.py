@@ -1240,6 +1240,8 @@ def test_build_orphan_compose_teardown_invokes_manager() -> None:
     from awf.service.orphan_resources import build_orphan_compose_teardown
 
     class _FakeManager:
+        """Test helper for FakeManager."""
+
         def __init__(self) -> None:
             """Test helper for  init  ."""
             self.calls: list[dict[str, object]] = []

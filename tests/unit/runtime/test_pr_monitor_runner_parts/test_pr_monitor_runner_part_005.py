@@ -439,6 +439,8 @@ async def _dispatch_merge_recovery(
 
 
 class TestMiscMonitorHelpers:
+    """Tests for MiscMonitorHelpers."""
+
     @pytest.mark.unit
     def test_merge_rejection_reason_and_service_work_dir_edges(self) -> None:
         assert _merge_rejection_reason("") == "GitHub rejected the merge attempt"
@@ -470,6 +472,7 @@ class TestMiscMonitorHelpers:
 
     @pytest.mark.unit
     def test_ci_failure_replacement_preserves_status_shape(self) -> None:
+        """Verify ci failure replacement preserves status shape."""
         failure = CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom")
         updated = _with_ci_failures(_status(), (failure,))
 

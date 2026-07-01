@@ -158,8 +158,11 @@ def _sample_pr_payload(
 
 
 class TestFetchFailingCheckLogs:
+    """Tests for FetchFailingCheckLogs."""
+
     @pytest.mark.unit
     async def test_extracts_single_pytest_failure_evidence_and_focused_command(self) -> None:
+        """Verify extracts single pytest failure evidence and focused command."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -734,6 +737,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_extracts_non_test_command_failure_evidence(self) -> None:
+        """Verify extracts non test command failure evidence."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1032,6 +1036,7 @@ class TestFetchFailingCheckLogs:
 
     @pytest.mark.unit
     async def test_ignores_non_failure_runs(self) -> None:
+        """Verify ignores non failure runs."""
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,

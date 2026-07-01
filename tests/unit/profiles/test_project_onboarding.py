@@ -234,6 +234,7 @@ def test_detects_python_postgres_template(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_detects_node_playwright_template(tmp_path: Path) -> None:
+    """Verify detects node playwright template."""
     (tmp_path / "package.json").write_text(
         json.dumps(
             {

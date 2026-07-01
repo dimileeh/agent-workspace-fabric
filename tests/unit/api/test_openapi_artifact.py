@@ -114,6 +114,7 @@ def test_spec_is_valid_openapi_3x(openapi_spec: dict) -> None:
 
 @pytest.mark.unit
 def test_all_route_prefixes_present(openapi_spec: dict) -> None:
+    """Verify all route prefixes present."""
     expected_prefixes = [
         "/.well-known/awf-core.json",
         "/healthz",
@@ -215,6 +216,7 @@ def test_workspace_validation_commands_are_non_empty_in_openapi(openapi_spec: di
 
 @pytest.mark.unit
 def test_key_endpoint_methods_exist(openapi_spec: dict) -> None:
+    """Verify key endpoint methods exist."""
     paths = openapi_spec.get("paths", {})
     expected_methods: list[tuple[str, str]] = [
         ("POST", "/v1/workspaces"),

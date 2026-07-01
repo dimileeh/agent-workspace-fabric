@@ -30,6 +30,8 @@ def _git(args: list[str], cwd: Path) -> None:
 
 
 class TestRepairMirrorHooksPath:
+    """Tests for RepairMirrorHooksPath."""
+
     @staticmethod
     def _mirror_with_attached_worktree(
         tmp_path: Path, *, create_hooks_dir: bool
@@ -311,6 +313,7 @@ class TestRepairMirrorHooksPath:
     async def test_propagates_non_stale_linked_worktree_probe_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify propagates non stale linked worktree probe error."""
         mirror = tmp_path / "mirror.git"
         mirror.mkdir()
         subprocess.run(
@@ -691,6 +694,7 @@ class TestRepairMirrorHooksPath:
     async def test_linked_worktree_config_probes_include_safe_directory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify linked worktree config probes include safe directory."""
         mirror = tmp_path / "mirror.git"
         linked_git_dir = mirror / "worktrees" / "workspace"
         linked_git_dir.mkdir(parents=True)

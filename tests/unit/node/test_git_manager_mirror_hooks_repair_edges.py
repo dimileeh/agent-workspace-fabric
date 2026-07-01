@@ -11,6 +11,8 @@ from awf.node import git_manager as git_module
 
 
 class TestRepairMirrorHooksPathFailureEdges:
+    """Tests for RepairMirrorHooksPathFailureEdges."""
+
     @pytest.mark.unit
     async def test_ignores_git_object_lookup_envs_for_config_repair(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -52,6 +52,8 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
     )
 
     class _Provisioner:
+        """Test helper for Provisioner."""
+
         async def provision(self, workspace_id: str) -> object:
             """Provision."""
             calls.append(("provision", {"workspace_id": workspace_id}))
@@ -75,6 +77,8 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
             return provision_result
 
     class _Executor:
+        """Test helper for Executor."""
+
         async def execute(
             self,
             workspace_id: str,
@@ -96,18 +100,24 @@ async def test_local_runtime_driver_delegates_to_local_collaborators(tmp_path: P
             return start_result
 
     class _Cleaner:
+        """Test helper for Cleaner."""
+
         async def cleanup(self, **kwargs: object) -> object:
             """Cleanup."""
             calls.append(("cleanup", dict(kwargs)))
             return stop_result
 
     class _Validation:
+        """Test helper for Validation."""
+
         async def run(self, **kwargs: object) -> object:
             """Run."""
             calls.append(("validate", dict(kwargs)))
             return validate_result
 
     class _Inspector:
+        """Test helper for Inspector."""
+
         async def inspect(self, compose_project_name: str | None) -> object:
             """Inspect."""
             calls.append(("inspect", {"compose_project_name": compose_project_name}))
@@ -219,6 +229,8 @@ async def test_local_runtime_driver_uses_legacy_provision_without_claim_epoch() 
     provision_result = object()
 
     class _Provisioner:
+        """Test helper for Provisioner."""
+
         async def provision(self, workspace_id: str) -> object:
             """Provision."""
             calls.append(("provision", workspace_id))

@@ -70,6 +70,7 @@ def _status(
     closed: bool = False,
     merged: bool = False,
 ) -> PRStatus:
+    """Build a PRStatus fixture for CI failure monitor tests."""
     return PRStatus(
         number=42,
         head_sha=head_sha,
@@ -92,6 +93,8 @@ def _status(
 
 
 class TestCiFailure:
+    """Tests for CiFailure."""
+
     @pytest.mark.unit
     def test_rerun_state_key_uses_structured_failure_signature(self) -> None:
         left = (

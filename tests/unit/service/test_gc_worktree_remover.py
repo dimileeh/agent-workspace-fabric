@@ -40,6 +40,7 @@ async def _workspace(
     pr_merge_sha: str | None = None,
     task_policy: dict[str, object] | None = None,
 ) -> str:
+    """Create a workspace row for GC worktree remover tests."""
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).create(
             repo_url=repo_url,
@@ -217,6 +218,7 @@ async def test_default_worktree_remover_continues_after_companion_failure(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover continues after companion failure."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
@@ -272,6 +274,7 @@ async def test_default_worktree_remover_continues_after_companion_failure(
     )
 
     async def _remove_worktree(*, workspace_id: str, repo_url: str) -> None:
+        """Test helper for remove worktree."""
         del repo_url
         if workspace_id.endswith("__companion__backend"):
             raise remove_error
@@ -328,6 +331,7 @@ async def test_default_worktree_remover_missing_companion_noop_does_not_make_par
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover missing companion noop does not make partial."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     primary_id = await _workspace(
@@ -388,6 +392,7 @@ async def test_default_worktree_remover_missing_companion_noop_does_not_make_par
     )
 
     async def _remove_worktree(*, workspace_id: str, repo_url: str) -> None:
+        """Test helper for remove worktree."""
         del repo_url
         if workspace_id == primary_id:
             raise remove_error
@@ -782,6 +787,7 @@ async def test_default_worktree_remover_handles_git_error(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Verify default worktree remover handles git error."""
     work_dir = tmp_path / "service"
     now = datetime(2026, 4, 26, 12, tzinfo=UTC)
     workspace_id = await _workspace(
