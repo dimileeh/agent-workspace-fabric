@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -451,6 +452,39 @@ class TestAddWorktree:
         assert layout.worktree_path in chowned
         assert mirror / "objects" in chowned
         assert protected_object not in chowned
+
+    @pytest.mark.unit
+    def test_repair_agent_writable_worktree_makes_object_dirs_owner_writable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        objects = mirror / "objects"
+        fanout = objects / "ab"
+        fanout.mkdir(parents=True)
+        loose_object = fanout / "cdef"
+        loose_object.write_text("object\n", encoding="utf-8")
+        pack = objects / "pack"
+        pack.mkdir()
+        worktree = tmp_path / "worktree"
+        linked_git_dir = mirror / "worktrees" / "ws"
+        linked_git_dir.mkdir(parents=True)
+        worktree.mkdir()
+        (worktree / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+        for directory in (objects, fanout, pack):
+            directory.chmod(0o500)
+        loose_object.chmod(0o400)
+
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.setattr(os, "chown", lambda *_args: None)
+        monkeypatch.setattr(os, "lchown", lambda *_args: None)
+
+        git_manager.repair_agent_writable_worktree(mirror, worktree)
+
+        for directory in (objects, fanout, pack):
+            assert directory.stat().st_mode & stat.S_IWUSR
+        assert not loose_object.stat().st_mode & stat.S_IWUSR
 
     @pytest.mark.unit
     async def test_agent_owner_preparation_skips_when_owner_or_root_is_absent(
