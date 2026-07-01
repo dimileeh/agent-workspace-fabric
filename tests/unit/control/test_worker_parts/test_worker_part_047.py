@@ -1023,10 +1023,10 @@ async def test_safely_resume_pr_monitor_none_return_does_not_refinish_succeeded_
 
 
 @pytest.mark.unit
-async def test_safely_resume_pr_monitor_corrects_operation_when_post_finalize_start_recheck_bails(
+async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_post_finalize_start_recheck_bails(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Post-handoff start recheck must not leave a succeeded remonitor op with no monitor."""
+    """Post-handoff start recheck bail must not downgrade a succeeded remonitor op."""
     handoff = object()
     finish_calls: list[dict[str, object]] = []
     verify_calls = 0
@@ -1074,12 +1074,9 @@ async def test_safely_resume_pr_monitor_corrects_operation_when_post_finalize_st
 
     assert result is True
     assert verify_calls == 2
-    assert len(finish_calls) == 2
+    assert len(finish_calls) == 1
     assert finish_calls[0]["operation_id"] == "op_post_finalize_recheck_bailed"
     assert finish_calls[0]["status"] == OperationStatus.succeeded
-    assert finish_calls[1]["operation_id"] == "op_post_finalize_recheck_bailed"
-    assert finish_calls[1]["status"] == OperationStatus.failed
-    assert finish_calls[1]["error_code"] == "MONITOR_RECOVERY_FAILED"
 
 
 @pytest.mark.unit

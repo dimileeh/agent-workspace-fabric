@@ -873,23 +873,13 @@ async def _safely_resume_pr_monitor(
 
         monitor_started = await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
         if monitor_started is False:
-            (
-                status,
-                error_code,
-                error_message,
-            ) = await _monitor_recovery_start_skipped_operation_status(
-                self,
-                workspace_id,
-            )
-            finalized = await self._finish_monitor_recovery_operation(
-                workspace_id,
+            # The remonitor bookkeeping op already succeeded at handoff; a
+            # post-handoff start recheck bail must not downgrade it.
+            _log.info(
+                "worker.monitor_recovery_start_skipped_after_handoff",
+                workspace_id=workspace_id,
                 operation_id=recovery_operation_id,
-                status=status,
-                error_code=error_code,
-                error_message=error_message,
             )
-            if finalized:
-                self._monitor_recovery_operation_ids.pop(workspace_id, None)
             return True
     except asyncio.CancelledError:
         if not handoff_finalized:
