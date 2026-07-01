@@ -419,17 +419,24 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     )
 
 
+async def verify_resume_monitor_start(self: Any, workspace_id: str) -> bool:
+    """Confirm the workspace is still eligible to enter the resumed monitor loop."""
+    return bool(
+        await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.monitoring_pr,
+            action="resume_monitor_start",
+        )
+    )
+
+
 async def run_resumed_pr_monitor(
     self: Any,
     workspace_id: str,
     handoff: ResumeHandoff,
 ) -> None:
     """Run the long-lived PR monitor loop after a successful handoff."""
-    if not await self._recheck_status(
-        workspace_id,
-        expected=WorkspaceStatus.monitoring_pr,
-        action="resume_monitor_start",
-    ):
+    if not await verify_resume_monitor_start(self, workspace_id):
         return
     await handoff.monitor.run(
         workspace_id=workspace_id,

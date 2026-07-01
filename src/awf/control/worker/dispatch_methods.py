@@ -693,6 +693,33 @@ async def _monitor_recovery_handoff_failure_error(
     return default_code, default_message
 
 
+async def _monitor_recovery_start_skipped_operation_status(
+    self: Any,
+    workspace_id: str,
+) -> tuple[OperationStatus, str, str]:
+    """Derive remonitor terminal status when start recheck bails after handoff."""
+    default_message = "Monitor resume skipped before monitor loop started."
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            if ws is not None and ws.status == WorkspaceStatus.cancelled.value:
+                return (
+                    OperationStatus.cancelled,
+                    "MONITOR_RECOVERY_CANCELLED",
+                    default_message,
+                )
+    except Exception:
+        _log.exception(
+            "worker.monitor_recovery_start_skip_status_lookup_failed",
+            workspace_id=workspace_id,
+        )
+    error_code, error_message = await _monitor_recovery_handoff_failure_error(
+        self,
+        workspace_id,
+    )
+    return OperationStatus.failed, error_code, error_message
+
+
 def _executor_supports_pr_monitor_handoff(executor: Any) -> bool:
     """Return whether ``executor`` implements the two-phase monitor resume API."""
     return callable(getattr(executor, "resume_pr_monitor_handoff", None))
@@ -779,6 +806,25 @@ async def _safely_resume_pr_monitor(
                 error_message=error_message,
             )
             return False
+
+        verify_start = getattr(self._executor, "verify_resume_monitor_start", None)
+        if verify_start is not None and not await verify_start(workspace_id):
+            (
+                status,
+                error_code,
+                error_message,
+            ) = await _monitor_recovery_start_skipped_operation_status(
+                self,
+                workspace_id,
+            )
+            await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+            )
+            return True
 
         handoff_succeeded = True
         handoff_finalized = await self._finish_monitor_recovery_operation(
