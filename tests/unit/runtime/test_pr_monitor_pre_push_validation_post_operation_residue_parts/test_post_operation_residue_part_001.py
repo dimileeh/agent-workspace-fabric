@@ -28,6 +28,7 @@ from tests.unit.runtime._post_operation_residue_test_helpers import (
     queue_post_operation_residue_proof_commands,
     queue_residue_cleanup_anchor_and_delta,
     queue_residue_cleanup_execution,
+    seed_oneline_capture_residue,
 )
 from tests.unit.runtime._pre_push_validation_helpers import (
     _FakeValidation,
@@ -160,16 +161,16 @@ async def test_pre_push_validation_cleans_staged_oneline_residue_and_proceeds(
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_cleans_subdirectory_oneline_residue_and_proceeds(
+async def test_pre_push_validation_post_operation_residue_skips_subdirectory_oneline_residue(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Flag-shaped residue below a subdirectory must match on basename, not full path.
+    """Subdirectory ``--oneline`` with log-shaped content must fail closed, not be deleted.
 
-    Regression for review thread ``PRRT_kwDOSJAM6s6NgSRm``: when a malformed
-    command runs from a subdirectory, git reports ``apps/console/--oneline``.
-    Checking ``path.startswith("-")`` rejected that case and skipped cleanup.
+    Basename matching alone is insufficient when content mimics ``git log --oneline``
+    output; only the repo-root artifact is provable without operation metadata
+    (review threads ``PRRT_kwDOSJAM6s6NgSRm``, ``PRRT_kwDOSJAM6s6Niv3K``).
     """
     residue_path = "apps/console/--oneline"
     workspace_id = await seed_monitoring_workspace(factory)
@@ -177,24 +178,23 @@ async def test_pre_push_validation_cleans_subdirectory_oneline_residue_and_proce
     worktree = tmp_path / "worktrees" / workspace_id
     _mark_git_worktree(worktree)
     head_sha = "a" * 40
+    seed_oneline_capture_residue(
+        worktree,
+        residue_path,
+        content="abcdef0 Fix something\n",
+    )
     dirty_check = ValidationWorktreeCheck(
         clean=False,
         paths=(residue_path,),
         reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     )
-    clean_check = ValidationWorktreeCheck(clean=True)
-    check_worktree_clean = AsyncMock(side_effect=[dirty_check, dirty_check, clean_check])
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
     monkeypatch.setattr(
         pre_push_validation_module,
         "_pre_push_validation_worktree_check",
         check_worktree_clean,
     )
-    post_validation_cleanup = ValidationWorktreeCleanup(
-        cleaned=False,
-        check=clean_check,
-        restore_ref=head_sha,
-    )
-    cleanup = AsyncMock(return_value=post_validation_cleanup)
+    cleanup = AsyncMock()
     monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
@@ -204,13 +204,8 @@ async def test_pre_push_validation_cleans_subdirectory_oneline_residue_and_proce
         head_sha=head_sha,
         owned_delta_z=_name_status_z("M\0src/fix.py\0"),
     )
-    queue_post_operation_residue_proof_commands(
-        cmd,
-        worktree=worktree,
-        residue_path=residue_path,
-        residue_content="abcdef0 Fix something\n",
-    )
-    queue_residue_cleanup_execution(cmd, head_sha=head_sha)
+    cmd.queue_result(returncode=0, stdout="")  # unstaged delta: staged-only residue
+    cmd.queue_result(returncode=128, stdout="")  # cat-file: residue absent at HEAD
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -222,35 +217,25 @@ async def test_pre_push_validation_cleans_subdirectory_oneline_residue_and_proce
     runner._deps.validation = validation  # type: ignore[assignment]
     commit_dirty = AsyncMock(return_value=True)
     monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
-    state = MonitorState()
-    operation_start_head = "0" * 40
 
-    with structlog.testing.capture_logs() as captured:
-        result = await pre_push_validation_module._run_pre_push_validation(
-            runner,
-            workspace_id=workspace_id,
-            worktree_path=worktree,
-            remote_branch=f"awf/{workspace_id}",
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            state=state,
-            operation_start_head=operation_start_head,
-        )
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=MonitorState(),
+        operation_start_head="0" * 40,
+    )
 
-    assert result.passed is True
-    assert result.workspace_head_sha == head_sha
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id is None
     commit_dirty.assert_not_awaited()
-    assert validation.calls
-    assert check_worktree_clean.await_count == 3
-    assert cleanup.await_count == 1
-    residue_logs = [
-        entry
-        for entry in captured
-        if entry.get("event") == "monitor.pre_push_post_operation_residue_cleaned"
-    ]
-    assert len(residue_logs) == 1
-    assert residue_path in residue_logs[0]["residue_paths"]
-    assert residue_path in residue_logs[0]["cleaned_paths"]
+    assert validation.calls == []
+    cleanup.assert_not_awaited()
+    assert check_worktree_clean.await_count == 1
 
 
 @pytest.mark.unit

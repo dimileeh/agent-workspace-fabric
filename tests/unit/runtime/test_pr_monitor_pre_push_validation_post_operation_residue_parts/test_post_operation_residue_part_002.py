@@ -196,6 +196,38 @@ async def test_path_provable_as_git_cli_flag_capture_empty_requires_repo_root(
 
 
 @pytest.mark.unit
+async def test_path_provable_as_git_cli_flag_capture_non_empty_requires_repo_root(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Subdirectory ``--oneline`` files with log-shaped content must not pass CLI residue proof."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    fixture_path = "tests/fixtures/--oneline"
+    seed_oneline_capture_residue(
+        worktree,
+        fixture_path,
+        content="abcdef0 Fix something\n1234567 Another commit\n",
+    )
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert (
+        await _path_provable_as_git_cli_flag_capture(
+            runner,
+            worktree_path=worktree,
+            path=fixture_path,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
@@ -312,6 +344,79 @@ async def test_pre_push_validation_post_operation_residue_skips_legitimate_oneli
         worktree,
         fixture_path,
         content='{"fixture": true}\n',
+    )
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=(fixture_path,),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cleanup = AsyncMock()
+    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
+    queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
+    cmd.queue_result(returncode=0, stdout="")  # unstaged delta: staged-only fixture
+    cmd.queue_result(returncode=128, stdout="")  # cat-file: fixture absent at HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner._deps.validation = validation  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=MonitorState(),
+        operation_start_head="0" * 40,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id is None
+    commit_dirty.assert_not_awaited()
+    assert validation.calls == []
+    cleanup.assert_not_awaited()
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_post_operation_residue_skips_oneline_shaped_legitimate_fixture_path(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Log-shaped ``tests/fixtures/--oneline`` repair output must not be deleted as CLI residue."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    head_sha = "a" * 40
+    fixture_path = "tests/fixtures/--oneline"
+    seed_oneline_capture_residue(
+        worktree,
+        fixture_path,
+        content="abcdef0 Fix something\n1234567 Another commit\n",
     )
     dirty_check = ValidationWorktreeCheck(
         clean=False,

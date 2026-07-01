@@ -102,17 +102,18 @@ def _content_provable_as_git_oneline_capture(content: str) -> bool:
     """Return True when ``content`` matches a ``git log --oneline`` accident artifact.
 
     Malformed ``git log`` invocations redirect ``--oneline``-formatted log lines
-    into the accidental path. Legitimate repair output such as
-    ``tests/fixtures/--oneline`` carries unrelated fixture bytes and must not be
-    deleted on basename alone (review thread ``PRRT_kwDOSJAM6s6Ng6Bh``). Empty
-    content is not sufficient proof — callers must also match
-    ``_empty_oneline_path_provable_as_cli_capture`` (review thread
-    ``PRRT_kwDOSJAM6s6NhRVJ``). Whitespace-only bytes (e.g. ``"\\n"``) are
-    likewise insufficient (review thread ``PRRT_kwDOSJAM6s6NiUD7``). Blank
-    ``splitlines()`` entries must not count as proof — ``git log --oneline``
-    never emits empty lines, so newline-only residue such as
-    ``tests/fixtures/--oneline`` containing ``"\\n"`` must fail closed like
-    empty content (review thread ``PRRT_kwDOSJAM6s6NiYkc``).
+    into the accidental repo-root path. Legitimate repair output such as
+    ``tests/fixtures/--oneline`` may carry sample log-shaped fixture bytes and
+    must not be deleted on content shape alone (review threads
+    ``PRRT_kwDOSJAM6s6Ng6Bh``, ``PRRT_kwDOSJAM6s6Niv3K``). Callers must also
+    match ``_empty_oneline_path_provable_as_cli_capture`` so only repo-root
+    ``--oneline`` paths accept content proof (review thread
+    ``PRRT_kwDOSJAM6s6NhRVJ``). Empty content is not sufficient proof on its
+    own. Whitespace-only bytes (e.g. ``"\\n"``) are likewise insufficient
+    (review thread ``PRRT_kwDOSJAM6s6NiUD7``). Blank ``splitlines()`` entries
+    must not count as proof — ``git log --oneline`` never emits empty lines, so
+    newline-only residue must fail closed like empty content (review thread
+    ``PRRT_kwDOSJAM6s6NiYkc``).
     """
     if not content.strip():
         return False
@@ -163,8 +164,14 @@ async def _path_provable_as_git_cli_flag_capture(
     )
     if content is None:
         return False
+    # Only the repo-root ``--oneline`` artifact is provable without operation
+    # metadata; subdirectory paths may be legitimate repair fixtures even when
+    # content mimics ``git log --oneline`` output (review thread
+    # ``PRRT_kwDOSJAM6s6Niv3K``).
+    if not _empty_oneline_path_provable_as_cli_capture(path):
+        return False
     if content == "":
-        return _empty_oneline_path_provable_as_cli_capture(path)
+        return True
     return _content_provable_as_git_oneline_capture(content)
 
 
