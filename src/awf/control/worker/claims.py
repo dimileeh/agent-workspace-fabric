@@ -631,6 +631,24 @@ async def _record_monitor_recovery_deferred_active_execution_claim(
     )
 
 
+async def _active_worker_restart_remonitor_operation_id(
+    session: AsyncSession,
+    workspace_id: str,
+) -> str | None:
+    """Return the id of an in-flight worker-restart remonitor recovery operation."""
+    operation = await OperationRepository(session).find_active_matching_payload(
+        workspace_id=workspace_id,
+        operation_type=OperationType.remonitor,
+        payload_identity={
+            "source": _MONITOR_RECOVERY_SOURCE,
+            "owner": _MONITOR_RECOVERY_OWNER,
+        },
+    )
+    if operation is None:
+        return None
+    return operation.id
+
+
 async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
     """Claim a ``monitoring_pr`` workspace lease and enqueue monitor recovery when needed."""
     now = datetime.now(UTC)
@@ -661,6 +679,13 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
         )
         if claimed:
             pending_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)
+            if pending_operation_id is None:
+                pending_operation_id = await _active_worker_restart_remonitor_operation_id(
+                    session,
+                    workspace_id,
+                )
+                if pending_operation_id is not None:
+                    self._monitor_recovery_operation_ids[workspace_id] = pending_operation_id
             if pending_operation_id is not None:
                 await session.commit()
                 return True

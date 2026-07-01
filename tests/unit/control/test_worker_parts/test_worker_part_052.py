@@ -360,3 +360,56 @@ async def test_claim_monitoring_pr_reuses_pending_recovery_operation_without_dup
     assert len(remonitor_operations) == 1
     assert remonitor_operations[0].id == first_operation_id
     assert remonitor_operations[0].status == OperationStatus.running.value
+
+
+@pytest.mark.unit
+async def test_claim_monitoring_pr_reuses_db_pending_recovery_without_in_memory_handle(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    monitor_id = await _create_monitoring_pr(
+        session_factory,
+        origin_repo,
+        "monitor-db-pending-recovery-reclaim",
+        pr_number=461,
+    )
+    worker_a = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+        executor=_RecordingExecutor(),
+        runtime_inspector=_HealthyRuntimeInspector(),
+        config=WorkerConfig(
+            poll_interval_seconds=0.01,
+            max_concurrent_executions=1,
+            node_id="worker-node-a",
+        ),
+    )
+    worker_b = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+        executor=_RecordingExecutor(),
+        runtime_inspector=_HealthyRuntimeInspector(),
+        config=WorkerConfig(
+            poll_interval_seconds=0.01,
+            max_concurrent_executions=1,
+            node_id="worker-node-b",
+        ),
+    )
+
+    assert await worker_a._claim_monitoring_pr(monitor_id) is True  # noqa: SLF001
+    first_operation_id = worker_a._monitor_recovery_operation_ids[monitor_id]  # noqa: SLF001
+
+    await worker_a._release_monitoring_pr_claim(monitor_id)  # noqa: SLF001
+    worker_b._monitor_recovery_operation_ids.pop(monitor_id, None)  # noqa: SLF001
+
+    assert await worker_b._claim_monitoring_pr(monitor_id) is True  # noqa: SLF001
+    assert worker_b._monitor_recovery_operation_ids[monitor_id] == first_operation_id  # noqa: SLF001
+
+    async with session_factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=monitor_id)
+    remonitor_operations = [
+        operation for operation in operations if operation.type == OperationType.remonitor.value
+    ]
+    assert len(remonitor_operations) == 1
+    assert remonitor_operations[0].id == first_operation_id
+    assert remonitor_operations[0].status == OperationStatus.running.value
