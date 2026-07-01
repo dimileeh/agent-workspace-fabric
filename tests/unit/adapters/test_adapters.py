@@ -355,6 +355,13 @@ class TestCodexAdapter:
 
     @pytest.mark.unit
     async def test_passthroughs_provider_auth_env_names_to_exec_without_values(self) -> None:
+        """Adapter exec argv mirrors ``agent_exec_env_passthrough`` and never passes values.
+
+        ``_COMPOSE_FILE`` is intentionally missing so adapter and expected helper share the
+        same unreadable-compose fallback. Compose-aware Ollama shadowing is covered in
+        ``test_workspace_services_compose`` and
+        ``test_profile_ollama_host_exec_passthrough_skips_worker_base_url``.
+        """
         runner = FakeCommandRunner()
         adapter = CodexAdapter(runner=runner)
 
