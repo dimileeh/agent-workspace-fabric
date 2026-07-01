@@ -138,6 +138,9 @@ class ControlWorker(WorkerDelegatesMixin):
         self._execution_claim_epochs: dict[str, int] = {}
         self._consecutive_saturated_cycles: int = 0
         self._monitor_recovery_operation_ids: dict[str, str] = {}
+        # Detached monitor-claim refresh loops kept alive while a remonitor
+        # recovery operation is still pending DB finalization.
+        self._monitor_claim_heartbeat_tasks: dict[str, asyncio.Task[None]] = {}
         # Session-local advisory state; reset on restart and bounded below.
         self._active_salvage_monitor_recovery_operation_ids: dict[str, None] = {}
         self._active_salvage_monitor_resume_cooldowns: dict[str, float] = {}

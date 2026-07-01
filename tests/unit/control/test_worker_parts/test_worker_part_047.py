@@ -597,6 +597,14 @@ async def test_safely_resume_claimed_pr_monitor_retains_claim_when_finalize_pend
     assert claim_released is False
     assert prompt_released is False
     assert worker._monitor_recovery_operation_ids["ws_monitor"] == "op_finalize_pending"  # noqa: SLF001
+    retained_heartbeat = worker._monitor_claim_heartbeat_tasks.get("ws_monitor")  # noqa: SLF001
+    assert retained_heartbeat is not None
+    assert not retained_heartbeat.done()
+    assert not retained_heartbeat.cancelled()
+    retained_heartbeat.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await retained_heartbeat
+    worker._monitor_claim_heartbeat_tasks.pop("ws_monitor", None)  # noqa: SLF001
 
 
 @pytest.mark.unit

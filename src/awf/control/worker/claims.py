@@ -1000,12 +1000,38 @@ async def _claim_recovering_resume_ids(
     return await _claim_paused_resume_ids(self, workspace_ids, limit=limit, reason="recovering")
 
 
+async def _cancel_monitor_claim_heartbeat(
+    self: Any,
+    workspace_id: str,
+    *,
+    heartbeat: asyncio.Task[None] | None = None,
+) -> None:
+    if heartbeat is None:
+        heartbeat = self._monitor_claim_heartbeat_tasks.pop(workspace_id, None)
+    elif self._monitor_claim_heartbeat_tasks.get(workspace_id) is heartbeat:
+        self._monitor_claim_heartbeat_tasks.pop(workspace_id, None)
+    if heartbeat is None:
+        return
+    heartbeat.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await heartbeat
+
+
+def _retain_monitor_claim_heartbeat(
+    self: Any,
+    workspace_id: str,
+    heartbeat: asyncio.Task[None],
+) -> None:
+    self._monitor_claim_heartbeat_tasks[workspace_id] = heartbeat
+
+
 async def _safely_resume_claimed_pr_monitor(
     self: Any,
     workspace_id: str,
     *,
     recovery_operation_id: str | None = None,
 ) -> None:
+    await _cancel_monitor_claim_heartbeat(self, workspace_id)
     heartbeat = asyncio.create_task(
         self._refresh_monitoring_pr_claim_loop(workspace_id),
         name=f"awf-monitor-claim-{workspace_id}",
@@ -1017,9 +1043,6 @@ async def _safely_resume_claimed_pr_monitor(
             recovery_operation_id=recovery_operation_id,
         )
     finally:
-        heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat
         if (
             resume_succeeded
             and recovery_operation_id is not None
@@ -1037,7 +1060,10 @@ async def _safely_resume_claimed_pr_monitor(
                     cooldown_until=datetime.now(UTC) + timedelta(seconds=cooldown_seconds),
                 )
         recovery_finalize_pending = workspace_id in self._monitor_recovery_operation_ids
-        if not recovery_finalize_pending:
+        if recovery_finalize_pending:
+            _retain_monitor_claim_heartbeat(self, workspace_id, heartbeat)
+        else:
+            await _cancel_monitor_claim_heartbeat(self, workspace_id, heartbeat=heartbeat)
             await self._release_monitoring_pr_claim(workspace_id)
             self._monitor_recovery_operation_ids.pop(workspace_id, None)
             if recovery_operation_id is not None:
