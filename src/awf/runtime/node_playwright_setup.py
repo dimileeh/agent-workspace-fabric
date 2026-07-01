@@ -67,6 +67,9 @@ _PIP_EXECUTABLE_RE = re.compile(r"^pip(\d+(?:\.\d+)*)?$")
 _SHELL_CHAIN_SEPARATORS = frozenset({"&&", ";", "||"})
 _UV_GLOBAL_SCOPE_VALUE_FLAGS = frozenset(
     {
+        "--allow-insecure-host",
+        "--cache-dir",
+        "--color",
         "--config-file",
         "--directory",
         "--project",

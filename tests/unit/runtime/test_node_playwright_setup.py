@@ -338,6 +338,14 @@ def test_browser_install_preserves_package_manager_scope(
             "uv run --index-url https://mirror/simple pytest",
             "uv run --index-url https://mirror/simple python",
         ),
+        (
+            "uv --cache-dir .uv-cache run pytest",
+            "uv --cache-dir .uv-cache run python",
+        ),
+        (
+            "uv --color never run pytest",
+            "uv --color never run python",
+        ),
     ],
 )
 def test_browser_install_preserves_uv_run_project_scope(
@@ -390,6 +398,14 @@ def test_browser_install_preserves_uv_run_project_scope(
         ('uv pip install -e ".[dev]"', "uv run python"),
         ("uv --directory apps/api pip install -e .", "uv --directory apps/api run python"),
         ("uv pip install --python 3.12 httpx", "uv run --python 3.12 python"),
+        (
+            "uv --cache-dir .uv-cache sync --extra dev",
+            "uv --cache-dir .uv-cache run --extra dev python",
+        ),
+        (
+            "uv --color never sync",
+            "uv --color never run python",
+        ),
     ],
 )
 def test_browser_install_preserves_uv_setup_project_scope(
