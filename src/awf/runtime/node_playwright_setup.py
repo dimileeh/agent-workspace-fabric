@@ -358,7 +358,7 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
     """Infer the Node package manager from an install command in the profile, if any.
 
     Returns ``(package_manager, cd_prefix)`` where ``cd_prefix`` is like
-    ``cd apps/console && `` for shell-scoped installs without PM scope flags.
+    ``cd apps && `` when the install command is shell-scoped via ``cd``.
     """
     for command in _profile_install_commands(profile):
         try:
@@ -373,9 +373,9 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
                     scope_tokens = _collect_pm_scope_tokens(
                         tokens, index, require_consecutive=False
                     )
-                    if scope_tokens:
-                        return shlex.join([token, *scope_tokens]), None
                     cd_prefix = _extract_cd_scope_prefix(tokens, index)
+                    if scope_tokens:
+                        return shlex.join([token, *scope_tokens]), cd_prefix
                     return base, cd_prefix
     return None, None
 
