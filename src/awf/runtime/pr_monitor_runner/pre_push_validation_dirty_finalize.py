@@ -15,6 +15,8 @@ monkeypatches still intercept them, mirroring ``pre_push_validation_fix_pass.py`
 
 from __future__ import annotations
 
+import posixpath
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,15 +43,284 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_worktree_constants import (
+    VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_STATUS_FAILED,
 )
 
 if TYPE_CHECKING:
     from awf.runtime.validation_worktree import (
         ValidationWorktreeCheck,
+        ValidationWorktreeCleanup,
     )
 
 _log = get_logger(__name__)
+
+# Exact basenames from git CLI flag-capture accidents (malformed invocations that
+# create files named after flags). Only these names are provable residue; arbitrary
+# flag-shaped basenames such as ``fixtures/--help`` are legitimate repair output
+# and must not be deleted (review thread ``PRRT_kwDOSJAM6s6NgvbL``).
+_KNOWN_GIT_CLI_FLAG_CAPTURE_BASENAMES = frozenset(
+    {
+        "--oneline",  # ws_b35338c649554377bb59f0a6: malformed ``git log`` invocation
+    }
+)
+
+# ``git log --oneline`` output lines: ``<hex-sha> [<subject>]``.
+_ONELINE_LOG_LINE_RE = re.compile(r"^[0-9a-f]{7,40}(?: .*)?$", re.IGNORECASE)
+
+
+def _is_git_cli_flag_capture_path(path: str) -> bool:
+    """Return True when ``path`` has a known git CLI flag-capture basename.
+
+    Regression ws_b35338c649554377bb59f0a6: a malformed ``git log`` invocation
+    created a staged file named ``--oneline``. Monitor repair output may legitimately
+    use other flag-shaped basenames (e.g. ``fixtures/--help``), so residue proof
+    whitelists only observed CLI-capture basenames until attempted ``stage_paths``
+    can be threaded to the gate (review threads ``PRRT_kwDOSJAM6s6NfrZb``,
+    ``PRRT_kwDOSJAM6s6NgvbL``). Match the basename only: subdirectory residue is
+    reported as a repo-relative path such as ``apps/console/--oneline`` (review
+    thread ``PRRT_kwDOSJAM6s6NgSRm``). Basename alone is necessary but not
+    sufficient — callers must also prove content (review thread
+    ``PRRT_kwDOSJAM6s6Ng6Bh``).
+    """
+    return posixpath.basename(path) in _KNOWN_GIT_CLI_FLAG_CAPTURE_BASENAMES
+
+
+def _empty_oneline_path_provable_as_cli_capture(path: str) -> bool:
+    """Return True when an empty ``--oneline`` path is provable CLI residue by location.
+
+    Malformed ``git log`` at the repo cwd creates an empty ``--oneline`` file
+    (ws_b35338c649554377bb59f0a6). Legitimate repair output may leave an empty
+    flag-shaped file under a subdirectory such as ``tests/fixtures/--oneline``;
+    emptiness alone must not prove those deletable (review threads
+    ``PRRT_kwDOSJAM6s6Ng6Bh``, ``PRRT_kwDOSJAM6s6NhRVJ``).
+    """
+    return path == "--oneline"
+
+
+def _content_provable_as_git_oneline_capture(content: str) -> bool:
+    """Return True when ``content`` matches a ``git log --oneline`` accident artifact.
+
+    Malformed ``git log`` invocations redirect ``--oneline``-formatted log lines
+    into the accidental repo-root path. Legitimate repair output such as
+    ``tests/fixtures/--oneline`` may carry sample log-shaped fixture bytes and
+    must not be deleted on content shape alone (review threads
+    ``PRRT_kwDOSJAM6s6Ng6Bh``, ``PRRT_kwDOSJAM6s6Niv3K``). Callers must also
+    match ``_empty_oneline_path_provable_as_cli_capture`` so only repo-root
+    ``--oneline`` paths accept content proof (review thread
+    ``PRRT_kwDOSJAM6s6NhRVJ``). Empty content is not sufficient proof on its
+    own. Whitespace-only bytes (e.g. ``"\\n"``) are likewise insufficient
+    (review thread ``PRRT_kwDOSJAM6s6NiUD7``). Blank ``splitlines()`` entries
+    must not count as proof — ``git log --oneline`` never emits empty lines, so
+    newline-only residue must fail closed like empty content (review threads
+    ``PRRT_kwDOSJAM6s6NiYkc``, ``PRRT_kwDOSJAM6s6Ni8CP``).
+    """
+    if not content.strip():
+        return False
+    lines = content.splitlines()
+    if not lines:  # pragma: no cover — unreachable on CPython 3.12 (NEL strips empty)
+        return False
+    return all(line and _ONELINE_LOG_LINE_RE.match(line) for line in lines)
+
+
+async def _path_is_symlink_in_index(
+    self: Any,
+    *,
+    worktree_path: Path,
+    path: str,
+) -> bool | None:
+    """Return whether ``path`` is staged as a symlink (mode ``120000``).
+
+    Returns ``None`` when the index entry cannot be inspected so callers can
+    fail closed before treating ``git show :path`` bytes as residue proof.
+    """
+    ls_result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "--literal-pathspecs",
+            "ls-files",
+            "--stage",
+            "-z",
+            "--",
+            path,
+        )
+    )
+    if not ls_result.ok:
+        _log.warning(
+            "monitor.pre_push_post_operation_residue_index_mode_unavailable",
+            path=path,
+            returncode=ls_result.returncode,
+            stderr=(ls_result.stderr or "")[:400],
+        )
+        return None
+    stdout = ls_result.stdout or ""
+    if not stdout.strip("\0"):
+        return False
+    mode = stdout.split(" ", 1)[0]
+    return mode == "120000"
+
+
+async def _read_residue_path_content(
+    self: Any,
+    *,
+    worktree_path: Path,
+    path: str,
+) -> str | None:
+    """Return worktree or index content for ``path``, or ``None`` when unreadable."""
+    local_path = worktree_path / path
+    # Known CLI-capture residue is a regular file; ``Path.is_file()`` follows
+    # symlinks and ``read_text()`` would read the target bytes, letting a
+    # same-named symlink pass proof and be deleted by scoped cleanup (review
+    # thread ``PRRT_kwDOSJAM6s6NmGN-``).
+    if local_path.is_symlink():
+        return None
+    if local_path.is_file():
+        try:
+            return local_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            _log.warning(
+                "monitor.pre_push_post_operation_residue_content_read_failed",
+                path=path,
+            )
+            return None
+    index_symlink = await _path_is_symlink_in_index(
+        self,
+        worktree_path=worktree_path,
+        path=path,
+    )
+    if index_symlink is not False:
+        return None
+    show_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "show", f":{path}")
+    )
+    if show_result.ok:
+        return show_result.stdout or ""
+    return None
+
+
+async def _path_provable_as_git_cli_flag_capture(
+    self: Any,
+    *,
+    worktree_path: Path,
+    path: str,
+) -> bool:
+    """Return True when ``path`` is provable git CLI flag-capture residue."""
+    if not _is_git_cli_flag_capture_path(path):
+        return False
+    content = await _read_residue_path_content(
+        self,
+        worktree_path=worktree_path,
+        path=path,
+    )
+    if content is None:
+        return False
+    # Only the repo-root ``--oneline`` artifact is provable without operation
+    # metadata; subdirectory paths may be legitimate repair fixtures even when
+    # content mimics ``git log --oneline`` output (review thread
+    # ``PRRT_kwDOSJAM6s6Niv3K``).
+    if not _empty_oneline_path_provable_as_cli_capture(path):
+        return False
+    if content == "":
+        return True
+    return _content_provable_as_git_oneline_capture(content)
+
+
+async def _worktree_unstaged_change_paths(
+    self: Any,
+    *,
+    worktree_path: Path,
+) -> set[str] | None:
+    """Return paths with unstaged working-tree edits relative to the index."""
+    unstaged_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "diff", "--name-status", "-z")
+    )
+    if not unstaged_result.ok:
+        _log.warning(
+            "monitor.pre_push_post_operation_residue_unstaged_delta_unavailable",
+            returncode=unstaged_result.returncode,
+            stderr=(unstaged_result.stderr or "")[:400],
+        )
+        return None
+    try:
+        return set(_changed_paths_from_name_status_z(unstaged_result.stdout or ""))
+    except ProtectedScopeDiffError:
+        _log.warning(
+            "monitor.pre_push_post_operation_residue_unstaged_delta_malformed",
+            source=(unstaged_result.stdout or "")[:400],
+        )
+        return None
+
+
+async def _path_exists_at_head(
+    self: Any,
+    *,
+    worktree_path: Path,
+    path: str,
+) -> bool | None:
+    """Return whether ``path`` is tracked in the current HEAD tree."""
+    exists_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "cat-file", "-e", f"HEAD:{path}")
+    )
+    if exists_result.returncode == 0:
+        return True
+    # ``git cat-file -e HEAD:<path>`` exits 128 with ``fatal: path '<path>' does not
+    # exist in 'HEAD'`` when the path is not in the tree (the usual case for new
+    # CLI flag-capture residue such as ``--oneline``). Exit 1 means the blob object
+    # is missing or corrupt even though the path may be tracked in HEAD; that must
+    # fail closed so residue proof cannot treat a staged tracked edit as deletable
+    # junk (review threads ``PRRT_kwDOSJAM6s6Nf97O``, ``PRRT_kwDOSJAM6s6NoS6x``).
+    if exists_result.returncode == 128:
+        return False
+    _log.warning(
+        "monitor.pre_push_post_operation_residue_head_path_check_failed",
+        path=path,
+        returncode=exists_result.returncode,
+        stderr=(exists_result.stderr or "")[:400],
+    )
+    return None
+
+
+async def _dirty_paths_provable_as_post_operation_residue(
+    self: Any,
+    *,
+    worktree_path: Path,
+    dirty_paths: set[str],
+) -> bool:
+    """Return whether every dirty path is provable post-operation residue.
+
+    A non-empty committed delta alone cannot prove disjoint dirty paths are
+    residue rather than uncommitted repair edits left by a failed
+    ``git add -A`` / ``git commit`` (review threads ``PRRT_kwDOSJAM6s6KYd-r``,
+    ``PRRT_kwDOSJAM6s6KaUHP``, ``PRRT_kwDOSJAM6s6NfrZb``). Fail closed when
+    any dirty path has unstaged edits, already exists at HEAD (tracked
+    modification residue), or is a new path that does not match the narrow
+    git-CLI flag-capture proxy.
+    """
+    unstaged_paths = await _worktree_unstaged_change_paths(
+        self,
+        worktree_path=worktree_path,
+    )
+    if unstaged_paths is None:
+        return False
+    if dirty_paths & unstaged_paths:
+        return False
+    for path in dirty_paths:
+        exists_at_head = await _path_exists_at_head(
+            self,
+            worktree_path=worktree_path,
+            path=path,
+        )
+        if exists_at_head is None:
+            return False
+        if exists_at_head:
+            return False
+        if not await _path_provable_as_git_cli_flag_capture(
+            self,
+            worktree_path=worktree_path,
+            path=path,
+        ):
+            return False
+    return True
 
 
 async def _operation_owned_delta_paths(
@@ -57,6 +328,7 @@ async def _operation_owned_delta_paths(
     *,
     worktree_path: Path,
     operation_start_head: str,
+    end_head: str | None = None,
 ) -> set[str] | None:
     """Return paths changed by the current operation's committed delta.
 
@@ -110,15 +382,21 @@ async def _operation_owned_delta_paths(
     output was malformed) so the caller can keep the fail-closed dirty path
     instead of committing unowned dirt.
     """
+    end_ref = end_head or "HEAD"
     committed_result = await self._deps.runner.run(
         git_worktree_command(
-            worktree_path, "diff", "--name-status", "-z", f"{operation_start_head}..HEAD"
+            worktree_path,
+            "diff",
+            "--name-status",
+            "-z",
+            f"{operation_start_head}..{end_ref}",
         )
     )
     if not committed_result.ok:
         _log.warning(
             "monitor.pre_push_dirty_finalize_delta_unavailable",
             operation_start_head=operation_start_head,
+            end_head=end_head,
             returncode=committed_result.returncode,
             stderr=(committed_result.stderr or "")[:400],
         )
@@ -834,6 +1112,254 @@ async def _try_finalize_pre_push_dirty_repair_state(
             paths=list(verify.paths),
         )
     return verify
+
+
+async def _cleanup_proven_post_operation_residue_paths(
+    self: Any,
+    *,
+    worktree_path: Path,
+    restore_ref: str,
+    proven_paths: set[str],
+) -> ValidationWorktreeCleanup:
+    """Remove only proven post-operation residue paths, failing closed on extras.
+
+    The generic ``_pre_push_validation_cleanup`` re-runs worktree status and acts
+    on every current non-ignored dirty path. A path introduced after residue
+    proof but before cleanup could be restored/deleted even though it was never
+    proven safe (review thread ``PRRT_kwDOSJAM6s6Ngeu0``). The snapshot must
+    also re-run residue proof on current content and staging state, not only
+    compare path names, so a same-path rewrite after proof cannot be swept
+    (review thread ``PRRT_kwDOSJAM6s6Nlpit``).
+    """
+    from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
+    from awf.runtime.validation_worktree import (
+        VALIDATION_WORKTREE_CLEANUP_FAILED,
+        VALIDATION_WORKTREE_STATUS_FAILED,
+        ValidationWorktreeCleanup,
+        _collapse_descendant_cleanup_paths,
+    )
+
+    _pre_push_validation_worktree_check = _ppv._pre_push_validation_worktree_check
+
+    snapshot = await _pre_push_validation_worktree_check(
+        self,
+        worktree_path=worktree_path,
+    )
+    if snapshot.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=snapshot,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+            message=snapshot.message,
+        )
+
+    snapshot_dirty = {*snapshot.paths, *snapshot.untracked_paths}
+    if snapshot_dirty != proven_paths:
+        _log.warning(
+            "monitor.pre_push_post_operation_residue_cleanup_snapshot_mismatch",
+            proven_paths=sorted(proven_paths),
+            snapshot_dirty=sorted(snapshot_dirty),
+        )
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=snapshot,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message=(
+                "Post-operation residue cleanup refused: worktree dirty snapshot "
+                "does not match proven residue paths."
+            ),
+        )
+
+    if not await _dirty_paths_provable_as_post_operation_residue(
+        self,
+        worktree_path=worktree_path,
+        dirty_paths=snapshot_dirty,
+    ):
+        _log.warning(
+            "monitor.pre_push_post_operation_residue_cleanup_snapshot_unprovable",
+            proven_paths=sorted(proven_paths),
+            snapshot_dirty=sorted(snapshot_dirty),
+        )
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=snapshot,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message=(
+                "Post-operation residue cleanup refused: worktree dirty snapshot "
+                "no longer matches proven residue content or staging state."
+            ),
+        )
+
+    staged_paths = tuple(path for path in snapshot.tracked_paths if path in proven_paths)
+    untracked_paths = _collapse_descendant_cleanup_paths(
+        [path for path in proven_paths if path in snapshot.untracked_paths]
+    )
+
+    async def _run_git(args: list[str]) -> Any:
+        return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
+
+    cleaned_paths: list[str] = []
+
+    if staged_paths:
+        restore = await _run_git(
+            [
+                "--literal-pathspecs",
+                "restore",
+                "--source",
+                restore_ref,
+                "--staged",
+                "--worktree",
+                "--",
+                *staged_paths,
+            ]
+        )
+        if not restore.ok:
+            return ValidationWorktreeCleanup(
+                cleaned=False,
+                check=snapshot,
+                restore_ref=restore_ref,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                message=("Post-operation residue cleanup could not restore staged paths."),
+                cleanup_command="git restore",
+                cleanup_stderr=(restore.stderr or "")[:1000],
+            )
+        cleaned_paths.extend(staged_paths)
+
+    if untracked_paths:
+        clean = await _run_git(["--literal-pathspecs", "clean", "-ffd", "--", *untracked_paths])
+        if not clean.ok:
+            return ValidationWorktreeCleanup(
+                cleaned=False,
+                check=snapshot,
+                restore_ref=restore_ref,
+                reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+                message=("Post-operation residue cleanup could not remove untracked paths."),
+                cleanup_command="git clean",
+                cleanup_stderr=(clean.stderr or "")[:1000],
+            )
+        cleaned_paths.extend(untracked_paths)
+
+    return ValidationWorktreeCleanup(
+        cleaned=True,
+        check=snapshot,
+        restore_ref=restore_ref,
+        cleaned_paths=tuple(dict.fromkeys(cleaned_paths)),
+    )
+
+
+async def _try_cleanup_pre_push_post_operation_residue(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    check: ValidationWorktreeCheck,
+    operation_start_head: str | None,
+) -> tuple[ValidationWorktreeCheck, str] | None:
+    """Remove provable post-operation residue unrelated to the committed delta.
+
+    When the dirty-finalize gate skips unrelated dirt (paths outside
+    ``operation_start_head..HEAD``), attempt a HEAD-preserving cleanup via
+    ``git restore`` + ``git clean`` before failing closed with
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``. Only runs when the operation
+    has a non-empty committed delta, every dirty path is disjoint from that
+    delta, and each dirty path is provably post-operation residue (not
+    uncommitted repair output — review thread ``PRRT_kwDOSJAM6s6NfrZb``).
+    HEAD is pinned before computing the committed delta and re-checked before
+    cleanup so an intervening local commit cannot become the cleanup anchor
+    without an owned-delta check (review thread ``PRRT_kwDOSJAM6s6NhEAw``).
+    Cleanup must leave HEAD unchanged with a clean worktree.
+    """
+    from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
+
+    _pre_push_validation_worktree_check = _ppv._pre_push_validation_worktree_check
+
+    if check.clean or check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+        return None
+    # Only actual pre-existing dirty worktree checks may be cleaned. Synthetic
+    # fail-closed checks from dirty-finalize (e.g.
+    # ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA``) carry committed-delta paths
+    # that may be absent at HEAD; residue proof would treat them as safe CLI
+    # junk, cleanup would be a no-op on an already-clean tree, and validation
+    # would proceed instead of preserving the finalize failure (review thread
+    # ``PRRT_kwDOSJAM6s6NgIAE``).
+    if check.reason_code not in (None, VALIDATION_WORKTREE_PRE_EXISTING_DIRTY):
+        return None
+    if operation_start_head is None:
+        return None
+    head_before = await self._rev_parse_head(worktree_path)
+    if head_before is None:
+        return None
+    owned_delta_paths = await _operation_owned_delta_paths(
+        self,
+        worktree_path=worktree_path,
+        operation_start_head=operation_start_head,
+        end_head=head_before,
+    )
+    if owned_delta_paths is None:
+        return None
+    if not owned_delta_paths:
+        # An empty committed delta cannot prove dirty paths are post-operation
+        # residue rather than operation-owned staged/uncommitted repair edits
+        # (``PRRT_kwDOSJAM6s6KYd-r`` / ``PRRT_kwDOSJAM6s6KaUHP``). Every dirty
+        # path is trivially disjoint from an empty owned set, so cleanup would
+        # ``git restore`` tracked edits the monitor never committed and proceed
+        # to validation without the intended repair changes (review thread
+        # ``PRRT_kwDOSJAM6s6Nfpvy``).
+        return None
+    dirty_paths = {*check.paths, *check.untracked_paths}
+    if not dirty_paths:
+        return None
+    if dirty_paths & owned_delta_paths:
+        return None
+    if not await _dirty_paths_provable_as_post_operation_residue(
+        self,
+        worktree_path=worktree_path,
+        dirty_paths=dirty_paths,
+    ):
+        return None
+
+    current_head = await self._rev_parse_head(worktree_path)
+    if current_head != head_before:
+        # Another local git process may advance HEAD after the pinned
+        # committed-delta/residue proofs but before cleanup. Accepting the new
+        # commit as the cleanup anchor would let validation/push proceed without
+        # checking its delta against the owned set (review thread
+        # ``PRRT_kwDOSJAM6s6NhEAw``).
+        return None
+
+    cleanup = await _cleanup_proven_post_operation_residue_paths(
+        self,
+        worktree_path=worktree_path,
+        restore_ref=head_before,
+        proven_paths=dirty_paths,
+    )
+    if not cleanup.ok:
+        return None
+
+    head_after = await self._rev_parse_head(worktree_path)
+    if head_after != head_before:
+        return None
+
+    recheck = await _pre_push_validation_worktree_check(
+        self,
+        worktree_path=worktree_path,
+    )
+    if not recheck.clean:
+        return None
+
+    _log.info(
+        "monitor.pre_push_post_operation_residue_cleaned",
+        workspace_id=workspace_id,
+        residue_paths=sorted(dirty_paths),
+        cleaned_paths=list(cleanup.cleaned_paths),
+        head_sha=head_before,
+        reason_code=check.reason_code,
+        **({"message": check.message} if check.message else {}),
+    )
+    return recheck, head_before
 
 
 async def _rollback_finalize_dirty_residue_before_provider_recovery(
