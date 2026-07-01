@@ -39,13 +39,39 @@ async def test_core_discovery_is_public_with_token_configured(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload == {
-        "package_name": "agent-workspace-fabric",
-        "package_version": __version__,
-        "git_commit": "abc1234",
-        "capabilities": ["workspace.execution.v1"],
-    }
+    assert payload["package_name"] == "agent-workspace-fabric"
+    assert payload["package_version"] == __version__
+    assert payload["git_commit"] == "abc1234"
+    assert payload["capabilities"] == ["workspace.execution.v1"]
     assert token not in response.text
+
+
+@pytest.mark.unit
+async def test_core_discovery_advertises_profile_capability_schema() -> None:
+    """Verify core discovery advertises the cloud-neutral profile capability schema."""
+    async with _client_without_database() as client:
+        response = await client.get(DISCOVERY_PATH)
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    schema = payload["profile_capability_schema"]
+    assert schema["flags"] == [
+        "autopilot_supported",
+        "docker_required",
+        "privileged_required",
+        "unsupported_compose_feature",
+    ]
+    # The rule summary is public-safe text describing which disqualifiers map
+    # to "not Autopilot-supported"; it must not embed cloud product policy.
+    rule_summary = schema["rule_summary"]
+    assert "autopilot_supported" in rule_summary
+    assert "privileged" in rule_summary
+    assert "host" in rule_summary.lower()
+    assert "compose" in rule_summary.lower()
+    # No secrets in the schema projection.
+    assert "token" not in response.text.lower()
+    assert "password" not in response.text.lower()
 
 
 async def test_core_discovery_and_health_do_not_require_database() -> None:
@@ -120,6 +146,7 @@ def test_core_discovery_payload_from_state_uses_default_when_cache_missing() -> 
 
     assert payload.git_commit == "unknown"
     assert payload.capabilities == ("workspace.execution.v1",)
+    assert payload.profile_capability_schema == core_discovery_service.profile_capability_schema()
 
 
 def test_git_rev_parse_head_returns_none_when_source_checkout_has_no_git_dir(

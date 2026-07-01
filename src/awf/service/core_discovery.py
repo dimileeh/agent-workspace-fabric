@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -16,6 +16,46 @@ PACKAGE_NAME = "agent-workspace-fabric"
 UNKNOWN_GIT_COMMIT = "unknown"
 CORE_DISCOVERY_STATE_ATTR = "core_discovery_payload"
 
+# Public-safe profile capability flag names exposed through Core discovery.
+# Ordering is the stable wire contract consumed by `awf-cloud`; do not reorder.
+PROFILE_CAPABILITY_FLAGS: tuple[str, ...] = (
+    "autopilot_supported",
+    "docker_required",
+    "privileged_required",
+    "unsupported_compose_feature",
+)
+
+# Cloud-neutral rule summary describing the classification contract. Core keeps
+# this text public-safe and free of cloud product policy; `awf-cloud` interprets
+# per-profile capability payloads against this contract.
+PROFILE_CAPABILITY_RULE_SUMMARY = (
+    "autopilot_supported is false when a profile requires a host Docker daemon "
+    "(docker.mode != none), declares any privileged service, binds any host "
+    "ports, or relies on Compose-only orchestration (compose_files non-empty) "
+    "or Docker-in-Docker (docker.mode == dind). Otherwise the profile is "
+    "Autopilot-supported."
+)
+
+
+class ProfileCapabilitySchema(BaseModel):
+    """Public-safe description of the profile capability classification contract.
+
+    Surfaced through Core discovery so a cloud substrate can interpret
+    per-profile capability payloads without Core embedding cloud product
+    policy. Carries no secrets.
+    """
+
+    flags: list[str]
+    rule_summary: str
+
+
+def profile_capability_schema() -> ProfileCapabilitySchema:
+    """Return the stable, cloud-neutral profile capability classification schema."""
+    return ProfileCapabilitySchema(
+        flags=list(PROFILE_CAPABILITY_FLAGS),
+        rule_summary=PROFILE_CAPABILITY_RULE_SUMMARY,
+    )
+
 
 class CoreDiscoveryResponse(BaseModel):
     """Public, secret-free Core discovery response."""
@@ -24,6 +64,7 @@ class CoreDiscoveryResponse(BaseModel):
     package_version: str
     git_commit: str
     capabilities: list[str]
+    profile_capability_schema: ProfileCapabilitySchema
 
 
 @dataclass(frozen=True)
@@ -34,6 +75,9 @@ class CoreDiscoveryPayload:
     package_version: str = __version__
     git_commit: str = UNKNOWN_GIT_COMMIT
     capabilities: tuple[str, ...] = (WORKSPACE_EXECUTION_V1,)
+    profile_capability_schema: ProfileCapabilitySchema = field(
+        default_factory=profile_capability_schema
+    )
 
     def to_response(self) -> CoreDiscoveryResponse:
         """Serialize this payload into the public API response model."""
@@ -42,6 +86,7 @@ class CoreDiscoveryPayload:
             package_version=self.package_version,
             git_commit=self.git_commit,
             capabilities=list(self.capabilities),
+            profile_capability_schema=profile_capability_schema(),
         )
 
 

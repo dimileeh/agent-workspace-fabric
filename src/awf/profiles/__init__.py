@@ -5,6 +5,10 @@ generic; profiles describe runtime services, Docker requirements, setup and
 validation phases, and project-specific environment.
 """
 
+from awf.profiles.capabilities import (
+    ProfileCapabilities,
+    classify_profile_capabilities,
+)
 from awf.profiles.models import (
     DockerMode,
     EndpointVisibility,
@@ -37,6 +41,7 @@ __all__ = [
     "PricingMetadata",
     "ProfileAppEndpoint",
     "ProfileAppEndpointHealth",
+    "ProfileCapabilities",
     "ProfileCommand",
     "ProfileCoverage",
     "ProfileDocker",
@@ -50,5 +55,6 @@ __all__ = [
     "ProfileResolver",
     "ProfileService",
     "WorkspaceProfile",
+    "classify_profile_capabilities",
     "resolve_workspace_profile",
 ]
