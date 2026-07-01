@@ -263,6 +263,7 @@ def _validate_invocation_id(invocation_id: str) -> None:
 
 
 def _unique_env_passthrough(env_passthrough: Sequence[str]) -> tuple[str, ...]:
+    """Validate and deduplicate compose exec env passthrough names."""
     names: list[str] = []
     seen: set[str] = set()
     for name in env_passthrough:
