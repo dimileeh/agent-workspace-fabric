@@ -118,7 +118,7 @@ def _content_provable_as_git_oneline_capture(content: str) -> bool:
     if not content.strip():
         return False
     lines = content.splitlines()
-    if not lines:
+    if not lines:  # pragma: no cover — unreachable on CPython 3.12 (NEL strips empty)
         return False
     return all(line and _ONELINE_LOG_LINE_RE.match(line) for line in lines)
 

@@ -17,6 +17,7 @@ from awf.runtime.node_playwright_setup import (
     _collect_pm_scope_tokens,
     _collect_uv_global_scope_tokens,
     _collect_uv_pip_scope_tokens,
+    _collect_uv_run_scope_tokens,
     _collect_uv_sync_scope_tokens,
     _detected_node_package_manager,
     _extract_cd_scope_prefix,
@@ -25,6 +26,7 @@ from awf.runtime.node_playwright_setup import (
     _pip_to_python_executable,
     _pm_invocation_tokens,
     _python_executable_from_commands,
+    _python_playwright_executable,
     _uv_pip_system_python_executable,
     _uv_run_python_prefix,
     _uv_setup_python_prefix,
@@ -984,3 +986,112 @@ def test_uv_setup_python_prefix_rejects_unknown_subcommands() -> None:
     """Only ``uv sync`` and ``uv pip install|sync`` may seed browser-install prefixes."""
     assert _uv_setup_python_prefix(shlex.split("uv pip wheel pkg"), 0) is None
     assert _uv_setup_python_prefix(shlex.split("uv cache prune"), 0) is None
+
+
+@pytest.mark.unit
+def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
+    """Cover fail-closed parser branches that browser-install planning relies on."""
+    assert _pm_invocation_tokens(["npm", ";"], 0) == []
+
+    assert _collect_pm_scope_tokens(["npm", ";"], 0) == []
+    assert _collect_pm_scope_tokens(["npm", "--", "install"], 0) == []
+    assert _collect_pm_scope_tokens(["npm", "leftover;", "-w"], 0, require_consecutive=False) == []
+    assert _collect_pm_scope_tokens(shlex.split("pnpm -w;"), 0) == ["-w"]
+    assert _collect_pm_scope_tokens(["npm", "-C;", "-w"], 0) == ["-C"]
+    assert _collect_pm_scope_tokens(["npm", "-C", "-w"], 0) == ["-C", "-w"]
+    assert _collect_pm_scope_tokens(shlex.split("pnpm -C apps;"), 0) == ["-C", "apps;"]
+
+    assert _collect_uv_global_scope_tokens(shlex.split("uv --"), 0) is None
+    assert _uv_run_python_prefix(shlex.split("uv --project apps"), 0) is None
+    assert _uv_run_python_prefix(shlex.split("uv --"), 0) is None
+
+    sync_unknown = shlex.split("uv sync --unknown-flag value --frozen")
+    sync_index = sync_unknown.index("sync")
+    assert _collect_uv_sync_scope_tokens(sync_unknown, sync_index) == ["--frozen"]
+    assert _collect_uv_sync_scope_tokens(["uv", "sync", "--python"], 1) == ["--python"]
+    assert _collect_uv_sync_scope_tokens(["uv", "sync", "--python", "-"], 1) == ["--python"]
+
+    pip_tokens = ["uv", "pip", "install", "--"]
+    assert _collect_uv_pip_scope_tokens(pip_tokens, 2) == []
+    assert _collect_uv_pip_scope_tokens(["uv", "pip", "install", "--python", "3.12"], 2) == [
+        "--python",
+        "3.12",
+    ]
+    assert _collect_uv_pip_scope_tokens(["uv", "pip", "install", "--python", "-"], 2) == [
+        "--python"
+    ]
+
+    pip_system = shlex.split("uv pip install --system --python=3.12 pkg")
+    assert _uv_pip_system_python_executable(pip_system, 2) == "python3.12"
+    pip_system_spaced = shlex.split("uv pip install --system --python 3.12 pkg")
+    assert _uv_pip_system_python_executable(pip_system_spaced, 2) == "python3.12"
+    pip_system_eq = shlex.split("uv pip install --system --python=3.12 --reinstall pkg")
+    assert _uv_pip_system_python_executable(pip_system_eq, 2) == "python3.12"
+    pip_system_unknown = shlex.split("uv pip install --system --reinstall pkg")
+    assert _uv_pip_system_python_executable(pip_system_unknown, 2) == "python"
+    assert _uv_pip_system_python_executable(["uv", "pip", "install", "--"], 2) is None
+
+    assert _cd_prefix_from_cd_only_segment("   ", "&&") is None
+
+    assert _uv_setup_python_prefix(shlex.split("uv --project apps"), 0) is None
+    assert _uv_setup_python_prefix(shlex.split("uv pip"), 0) is None
+    assert _uv_setup_python_prefix(shlex.split("uv --"), 0) is None
+
+    run_tokens = shlex.split("uv run --python 3.12 -- python -m playwright install")
+    run_index = run_tokens.index("run")
+    assert _collect_uv_run_scope_tokens(run_tokens, run_index) == ["--python", "3.12"]
+    assert _collect_uv_run_scope_tokens(["uv", "run", "--python"], 1) == ["--python"]
+    assert _collect_uv_run_scope_tokens(["uv", "run", "--python", "-"], 1) == ["--python", "-"]
+
+    assert _cd_prefix_from_cd_only_segment("cd 'unclosed", "&&") is None
+    assert _cd_prefix_from_cd_only_segment("cd apps extra", "&&") is None
+    assert _cd_prefix_from_cd_only_segment("cd apps;", ";") == "cd apps; "
+
+    env_scoped = shlex.split("FOO=bar cd apps && pnpm install")
+    assert _extract_cd_scope_prefix(env_scoped, env_scoped.index("pnpm")) == "cd apps && "
+
+    yarn_chain = shlex.split("yarn --immutable && npm test")
+    assert (
+        _is_node_option_only_install_command(yarn_chain, yarn_chain.index("yarn"), "yarn") is True
+    )
+    assert _is_node_option_only_install_command(["yarn", " ;"], 0, "yarn") is False
+    assert _is_node_option_only_install_command(["yarn", "install"], 0, "yarn") is False
+    assert _is_node_option_only_install_command(["yarn", "--help"], 0, "yarn") is False
+    assert _is_node_option_only_install_command(["yarn", "--help;"], 0, "yarn") is False
+    assert (
+        _is_node_option_only_install_command(shlex.split("yarn --immutable --cwd"), 0, "yarn")
+        is False
+    )
+    assert _is_node_option_only_install_command(shlex.split("yarn --immutable;"), 0, "yarn") is True
+
+    bad_cd_profile = _profile(
+        {"phases": {"setup": ["cd 'unclosed;"], "validate_commands": ["pnpm install"]}}
+    )
+    assert _detected_node_package_manager(bad_cd_profile) == ("pnpm", None)
+    cd_only_bad = _profile({"phases": {"validate_commands": ["cd apps/web; pnpm install"]}})
+    assert _detected_node_package_manager(cd_only_bad) == ("pnpm", "cd apps/web; ")
+
+    pip_with_separator = shlex.split("python -m pip -- install pkg")
+    assert _has_pip_install_subcommand(pip_with_separator, pip_with_separator.index("pip")) is False
+
+    assert (
+        _python_executable_from_commands(["notquoted"], allow_pytest_playwright_shortcut=False)
+        is None
+    )
+    assert (
+        _python_executable_from_commands(
+            ["npm install 'unclosed"],
+            allow_pytest_playwright_shortcut=False,
+        )
+        is None
+    )
+    assert _python_executable_from_commands(
+        ["uv sync --frozen"],
+        allow_pytest_playwright_shortcut=False,
+    ) == ("uv run --frozen python", None)
+    assert _python_executable_from_commands(
+        ["uv pip install --system --python 3.12 pkg"],
+        allow_pytest_playwright_shortcut=False,
+    ) == ("python3.12", None)
+    uv_sync_profile = _profile({"phases": {"setup": ["uv sync --frozen"]}})
+    assert _python_playwright_executable(uv_sync_profile) == ("uv run --frozen python", None)

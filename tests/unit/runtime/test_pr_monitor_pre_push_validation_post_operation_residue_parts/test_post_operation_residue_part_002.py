@@ -134,6 +134,7 @@ async def test_pre_push_validation_post_operation_residue_cleanup_fails_closed_w
         ("abcdef0 Fix something\n\n1234567 Another commit\n", False),
         ('{"fixture": true}\n', False),
         ("not a git log line\n", False),
+        ("\x85", False),
     ],
 )
 def test_content_provable_as_git_oneline_capture(content: str, expected: bool) -> None:
@@ -225,6 +226,20 @@ async def test_path_provable_as_git_cli_flag_capture_non_empty_requires_repo_roo
             path=fixture_path,
         )
         is False
+    )
+    root_path = "--oneline"
+    seed_oneline_capture_residue(
+        worktree,
+        root_path,
+        content="abcdef0 Fix something\n1234567 Another commit\n",
+    )
+    assert (
+        await _path_provable_as_git_cli_flag_capture(
+            runner,
+            worktree_path=worktree,
+            path=root_path,
+        )
+        is True
     )
 
 
@@ -927,9 +942,15 @@ async def test_try_cleanup_post_operation_residue_returns_none_when_dirty_paths_
     """A dirty check without paths must not attempt residue cleanup."""
     worktree = tmp_path / "worktree"
     worktree.mkdir()
+    head_sha = "b" * 40
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # pinned HEAD before owned delta
+    cmd.queue_result(
+        returncode=0, stdout=_name_status_z("M\0src/fix.py\0")
+    )  # non-empty owned delta
     runner = make_runner(
         factory=factory,
-        cmd=FakeCommandRunner(),
+        cmd=cmd,
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path,
