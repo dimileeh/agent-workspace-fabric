@@ -236,6 +236,7 @@ def _compose_exec_prefix(
     workdir: str,
     env_passthrough: Sequence[str] = (),
 ) -> list[str]:
+    """Build the ``docker compose exec`` argv prefix, including optional ``-e`` passthrough."""
     env_args = [arg for name in _unique_env_passthrough(env_passthrough) for arg in ("-e", name)]
     return [
         "docker",

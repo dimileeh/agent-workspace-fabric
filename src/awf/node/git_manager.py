@@ -1195,6 +1195,7 @@ def _is_stale_linked_worktree_metadata_error(exc: GitOperationError) -> bool:
 
 
 def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> None:
+    """Apply ``chown``/``lchown`` to deduplicated mirror/worktree ownership targets."""
     seen: set[tuple[Path, bool, bool]] = set()
     for target in targets:
         resolved = target.path.resolve()

@@ -103,6 +103,7 @@ class ControlWorker(WorkerDelegatesMixin):
         auth_overlay_work_dir: Path | None = None,
         config: WorkerConfig,
     ) -> None:
+        """Wire dependencies and initialize claim-tracking, dispatch, and cooldown state."""
         self._session_factory = session_factory
         self._provisioner = provisioner
         self._executor = executor
