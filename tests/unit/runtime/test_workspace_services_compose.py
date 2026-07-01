@@ -347,6 +347,10 @@ def test_agent_environment_keys_from_compose_file_rejects_invalid_shapes(
     bad_yaml.write_text("services:\n  agent:\n    - [\n", encoding="utf-8")
     assert agent_environment_keys_from_compose_file(bad_yaml) == frozenset()
 
+    invalid_utf8 = tmp_path / "invalid-utf8.yml"
+    invalid_utf8.write_bytes(b"services:\n  agent:\n    \xff\xfe\n")
+    assert agent_environment_keys_from_compose_file(invalid_utf8) == frozenset()
+
     unsupported_env = tmp_path / "unsupported-env.yml"
     unsupported_env.write_text(
         yaml.safe_dump({"services": {"agent": {"environment": 123}}}),

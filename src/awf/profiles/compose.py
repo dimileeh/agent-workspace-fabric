@@ -430,7 +430,7 @@ def _try_agent_environment_from_compose_file(
 
     try:
         payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
         return None
     if not isinstance(payload, Mapping):
         return None
