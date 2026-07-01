@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -30,6 +31,7 @@ future workdir change from silently regressing the #620 root cause."""
 
 EXEC_PROCESS_CLEANUP_FAILED = "EXEC_PROCESS_CLEANUP_FAILED"
 _INVOCATION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _log = get_logger(__name__)
 
 
@@ -83,6 +85,7 @@ def build_tracked_compose_exec(
     workdir: str = DEFAULT_AGENT_WORKDIR,
     invocation_id: str | None = None,
     preserve_stdin: bool = False,
+    env_passthrough: Sequence[str] = (),
 ) -> TrackedComposeExec:
     """Build a compose-exec argv that tags the in-container command."""
 
@@ -98,6 +101,7 @@ def build_tracked_compose_exec(
             compose_file=compose_file,
             service=service,
             workdir=workdir,
+            env_passthrough=env_passthrough,
         ),
         "sh",
         "-lc",
@@ -230,7 +234,9 @@ def _compose_exec_prefix(
     compose_file: Path,
     service: str,
     workdir: str,
+    env_passthrough: Sequence[str] = (),
 ) -> list[str]:
+    env_args = [arg for name in _unique_env_passthrough(env_passthrough) for arg in ("-e", name)]
     return [
         "docker",
         "compose",
@@ -242,6 +248,7 @@ def _compose_exec_prefix(
         "-T",
         "-w",
         workdir,
+        *env_args,
         service,
     ]
 
@@ -253,6 +260,18 @@ def _new_invocation_id() -> str:
 def _validate_invocation_id(invocation_id: str) -> None:
     if not _INVOCATION_ID_RE.fullmatch(invocation_id):
         raise ValueError("invocation_id contains unsupported shell characters")
+
+
+def _unique_env_passthrough(env_passthrough: Sequence[str]) -> tuple[str, ...]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for name in env_passthrough:
+        if not _ENV_NAME_RE.fullmatch(name):
+            raise ValueError("env_passthrough contains unsupported environment variable names")
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+    return tuple(names)
 
 
 def _tracked_exec_wrapper_script(*, preserve_stdin: bool = False) -> str:

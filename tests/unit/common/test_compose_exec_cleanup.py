@@ -116,6 +116,49 @@ def test_cleanup_command_bounds_integer_sleep_fallback_wait() -> None:
     assert "awf_cleanup_wait_limit=2" in script
 
 
+def test_agent_exec_can_passthrough_provider_auth_env_names_without_values() -> None:
+    invocation = build_tracked_compose_exec(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="agent",
+        label="codex",
+        invocation_id="awf_provider_env",
+        env_passthrough=[
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "OPENAI_API_KEY",
+        ],
+    )
+
+    args = invocation.args
+    exec_idx = args.index("exec")
+    service_idx = args.index("agent")
+
+    assert args[exec_idx : exec_idx + 4] == ["exec", "-T", "-w", "/workspace"]
+    assert args[service_idx - 4 : service_idx] == [
+        "-e",
+        "OPENAI_API_KEY",
+        "-e",
+        "CODEX_API_KEY",
+    ]
+    assert "sk-live-secret-value" not in " ".join(args)
+    assert args.count("OPENAI_API_KEY") == 1
+    assert args[service_idx + 1 : service_idx + 4] == ["sh", "-lc", invocation.wrapper_script]
+
+
+def test_rejects_unsafe_passthrough_env_names() -> None:
+    with pytest.raises(ValueError, match="env_passthrough"):
+        build_tracked_compose_exec(
+            compose_project="awf_ws_123",
+            compose_file=Path("/tmp/ws/compose.yml"),
+            cli_args=["codex"],
+            source="agent",
+            label="codex",
+            env_passthrough=["OPENAI_API_KEY=sk-live-secret-value"],
+        )
+
+
 def test_preserved_stdin_setsid_path_uses_open_fd_not_path_redirection() -> None:
     script = compose_exec._tracked_exec_wrapper_script(preserve_stdin=True)  # noqa: SLF001
     setsid_block = script[script.index("if command -v setsid") : script.index('wait "$child_pid"')]

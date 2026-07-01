@@ -31,6 +31,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
+from awf.profiles.compose import agent_exec_env_passthrough
 from awf.runtime.logs import LogStore
 
 _log = get_logger(__name__)
@@ -256,6 +257,7 @@ class AgentAdapter(ABC):
             source=log_source,
             label=self.name.value,
             preserve_stdin=True,
+            env_passthrough=agent_exec_env_passthrough(compose_file=compose_file),
         )
         args = invocation.args
         _log.info(
