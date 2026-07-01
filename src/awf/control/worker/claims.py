@@ -680,6 +680,23 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
         )
         if claimed:
             pending_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)
+            if pending_operation_id is not None:
+                cached_operation = await OperationRepository(session).get(pending_operation_id)
+                cached_payload = cached_operation.payload if cached_operation is not None else None
+                if (
+                    cached_operation is None
+                    or cached_operation.workspace_id != workspace_id
+                    or cached_operation.status
+                    not in (
+                        OperationStatus.pending.value,
+                        OperationStatus.running.value,
+                    )
+                    or not isinstance(cached_payload, dict)
+                    or cached_payload.get("source") != _MONITOR_RECOVERY_SOURCE
+                    or cached_payload.get("owner") != _MONITOR_RECOVERY_OWNER
+                ):
+                    self._monitor_recovery_operation_ids.pop(workspace_id, None)
+                    pending_operation_id = None
             if pending_operation_id is None:
                 pending_operation_id = await _active_worker_restart_remonitor_operation_id(
                     session,

@@ -413,3 +413,56 @@ async def test_claim_monitoring_pr_reuses_db_pending_recovery_without_in_memory_
     assert len(remonitor_operations) == 1
     assert remonitor_operations[0].id == first_operation_id
     assert remonitor_operations[0].status == OperationStatus.running.value
+
+
+@pytest.mark.unit
+async def test_claim_monitoring_pr_creates_fresh_recovery_when_cached_operation_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    """Stale in-memory recovery handles must not skip creating a fresh remonitor op."""
+    monitor_id = await _create_monitoring_pr(
+        session_factory,
+        origin_repo,
+        "monitor-stale-cached-recovery-reclaim",
+        pr_number=462,
+    )
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+        executor=_RecordingExecutor(),
+        runtime_inspector=_HealthyRuntimeInspector(),
+        config=WorkerConfig(
+            poll_interval_seconds=0.01,
+            max_concurrent_executions=1,
+            node_id="worker-node-a",
+        ),
+    )
+
+    assert await worker._claim_monitoring_pr(monitor_id) is True  # noqa: SLF001
+    first_operation_id = worker._monitor_recovery_operation_ids[monitor_id]  # noqa: SLF001
+
+    async with session_factory() as session:
+        operation_repo = OperationRepository(session)
+        operation = await operation_repo.get(first_operation_id)
+        assert operation is not None
+        await operation_repo.finish(
+            operation,
+            status=OperationStatus.succeeded,
+            result={"requested_action": OperationType.remonitor.value},
+        )
+        await session.commit()
+
+    assert await worker._claim_monitoring_pr(monitor_id) is True  # noqa: SLF001
+    second_operation_id = worker._monitor_recovery_operation_ids[monitor_id]  # noqa: SLF001
+    assert second_operation_id != first_operation_id
+
+    async with session_factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=monitor_id)
+    remonitor_operations = [
+        operation for operation in operations if operation.type == OperationType.remonitor.value
+    ]
+    assert len(remonitor_operations) == 2
+    remonitor_by_id = {operation.id: operation for operation in remonitor_operations}
+    assert remonitor_by_id[first_operation_id].status == OperationStatus.succeeded.value
+    assert remonitor_by_id[second_operation_id].status == OperationStatus.running.value
