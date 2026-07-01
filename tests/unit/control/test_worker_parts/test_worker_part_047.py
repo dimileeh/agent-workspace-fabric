@@ -919,6 +919,56 @@ async def test_safely_resume_claimed_pr_monitor_applies_cooldown_when_handoff_ab
 
 
 @pytest.mark.unit
+async def test_safely_resume_pr_monitor_none_return_does_not_refinish_succeeded_operation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Legacy void-return executors must not trigger the skipped-start correction path."""
+    handoff = object()
+    finish_calls: list[dict[str, object]] = []
+    monitor_ran = False
+
+    class LegacyVoidRunExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            nonlocal monitor_ran
+            assert handoff_obj is handoff
+            assert workspace_id == "ws_monitor"
+            monitor_ran = True
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=LegacyVoidRunExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_legacy_void_return",
+    )
+
+    assert result is True
+    assert monitor_ran is True
+    assert len(finish_calls) == 1
+    assert finish_calls[0]["operation_id"] == "op_legacy_void_return"
+    assert finish_calls[0]["status"] == OperationStatus.succeeded
+
+
+@pytest.mark.unit
 async def test_safely_resume_pr_monitor_corrects_operation_when_post_finalize_start_recheck_bails(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

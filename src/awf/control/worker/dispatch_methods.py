@@ -872,7 +872,7 @@ async def _safely_resume_pr_monitor(
             return False
 
         monitor_started = await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
-        if not monitor_started:
+        if monitor_started is False:
             (
                 status,
                 error_code,
