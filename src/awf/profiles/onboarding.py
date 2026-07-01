@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -475,6 +475,7 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
             fallback_validation=(),
             fallback_commands=(_playwright_command(inspection.package_manager or "npm"),),
             runtime=ProfileRuntime(browsers=["chromium"]),
+            script_command=_playwright_script_command,
         )
     elif template == "python-postgres":
         database_url = "postgresql+psycopg://awf:${POSTGRES_PASSWORD}@postgres:5432/awf"
@@ -558,12 +559,14 @@ def _node_profile(
     fallback_validation: tuple[str, ...],
     fallback_commands: tuple[str, ...] = (),
     runtime: ProfileRuntime | None = None,
+    script_command: Callable[[str, str], str] | None = None,
 ) -> WorkspaceProfile:
     """Build a node-based profile including install and validation command derivation."""
     package_manager = inspection.package_manager or "npm"
     scripts = inspection.scripts()
+    resolve_script_command = script_command or _script_command
     validate_commands = [
-        _script_command(package_manager, script)
+        resolve_script_command(package_manager, script)
         for script in validation_scripts
         if script in scripts
     ]
@@ -890,9 +893,20 @@ def _playwright_validation_scripts(inspection: ProjectInspection) -> tuple[str, 
     return ()
 
 
+_PLAYWRIGHT_CHROMIUM_PROJECT_ARG = "--project=chromium"
+
+
+def _playwright_script_command(package_manager: str, script: str) -> str:
+    """Run a package script while constraining Playwright to the Chromium project."""
+    base = _script_command(package_manager, script)
+    if package_manager == "yarn":
+        return f"{base} {_PLAYWRIGHT_CHROMIUM_PROJECT_ARG}"
+    return f"{base} -- {_PLAYWRIGHT_CHROMIUM_PROJECT_ARG}"
+
+
 def _playwright_command(package_manager: str) -> str:
     """Build the package-manager-specific Playwright command for one-shot validation."""
-    return playwright_command(package_manager, "test")
+    return playwright_command(package_manager, "test", _PLAYWRIGHT_CHROMIUM_PROJECT_ARG)
 
 
 def _compose_ports(inspection: ProjectInspection) -> dict[str, str]:
