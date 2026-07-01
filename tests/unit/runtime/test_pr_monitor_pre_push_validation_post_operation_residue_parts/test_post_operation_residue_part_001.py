@@ -158,6 +158,7 @@ async def test_pre_push_validation_cleans_staged_oneline_residue_and_proceeds(
     assert len(residue_logs) == 1
     assert "--oneline" in residue_logs[0]["residue_paths"]
     assert "--oneline" in residue_logs[0]["cleaned_paths"]
+    assert residue_logs[0]["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
 
 
 @pytest.mark.unit
@@ -325,6 +326,7 @@ async def test_pre_push_validation_cleans_untracked_oneline_residue_and_proceeds
     assert len(residue_logs) == 1
     assert "--oneline" in residue_logs[0]["residue_paths"]
     assert "--oneline" in residue_logs[0]["cleaned_paths"]
+    assert residue_logs[0]["reason_code"] == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
 
 
 @pytest.mark.unit

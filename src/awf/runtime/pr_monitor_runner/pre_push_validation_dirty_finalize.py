@@ -1305,6 +1305,8 @@ async def _try_cleanup_pre_push_post_operation_residue(
         residue_paths=sorted(dirty_paths),
         cleaned_paths=list(cleanup.cleaned_paths),
         head_sha=head_before,
+        reason_code=check.reason_code,
+        **({"message": check.message} if check.message else {}),
     )
     return recheck, head_before
 
