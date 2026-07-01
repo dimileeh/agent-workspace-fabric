@@ -246,8 +246,10 @@ def register_workspace_tools(
             default=None,
             max_length=64,
             description=(
-                "Optional Jira issue key (e.g. PROJ-123) prepended to the branch, PR "
-                "title, and every AWF-authored commit message so work links to the issue."
+                "Optional task tag: Jira issue key (e.g. PROJ-123) or Aira task "
+                "entity key (e.g. PROJ-T123). Pass bare keys; bracketed input is "
+                "accepted. Entity keys appear bracketed on the PR title and AWF "
+                "commits but bare on the branch."
             ),
         ),
         task_class: TaskClass | None = Field(
