@@ -285,7 +285,12 @@ async def test_pre_push_validation_cleans_untracked_oneline_residue_and_proceeds
         owned_delta_z=_name_status_z("M\0src/fix.py\0"),
     )
     queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
-    queue_residue_cleanup_execution(cmd, head_sha=head_sha)
+    queue_residue_cleanup_execution(
+        cmd,
+        head_sha=head_sha,
+        run_restore=False,
+        run_clean=True,
+    )
     runner = make_runner(
         factory=factory,
         cmd=cmd,

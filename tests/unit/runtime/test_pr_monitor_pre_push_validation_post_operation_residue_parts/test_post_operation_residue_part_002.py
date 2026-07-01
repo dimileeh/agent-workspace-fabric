@@ -41,7 +41,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 from tests.unit.runtime._post_operation_residue_test_helpers import (
     queue_post_operation_residue_proof_commands,
     queue_residue_cleanup_anchor_and_delta,
-    queue_snapshot_residue_reproof_commands,
+    queue_residue_cleanup_execution,
     seed_oneline_capture_residue,
 )
 from tests.unit.runtime._pre_push_validation_helpers import (
@@ -1334,10 +1334,14 @@ async def test_pre_push_validation_post_operation_residue_cleanup_fails_when_unt
         owned_delta_z=_name_status_z("M\0src/fix.py\0"),
     )
     queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # pre-cleanup HEAD verify
-    queue_snapshot_residue_reproof_commands(cmd)
-    cmd.queue_result(returncode=1, stdout="", stderr="clean failed\n")  # git clean failure
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_after
+    queue_residue_cleanup_execution(
+        cmd,
+        head_sha=head_sha,
+        run_restore=False,
+        run_clean=True,
+        clean_returncode=1,
+        clean_stderr="clean failed\n",
+    )
     runner = make_runner(
         factory=factory,
         cmd=cmd,

@@ -65,18 +65,35 @@ def queue_residue_cleanup_execution(
     *,
     head_sha: str,
     head_after: str | None = None,
+    run_restore: bool = True,
     restore_returncode: int = 0,
     restore_stderr: str = "",
+    run_clean: bool = False,
+    clean_returncode: int = 0,
+    clean_stderr: str = "",
     path_count: int = 1,
 ) -> None:
-    """Queue pre-cleanup HEAD verify, scoped restore/clean, and post-cleanup HEAD check."""
+    """Queue pre-cleanup HEAD verify, scoped restore/clean, and post-cleanup HEAD check.
+
+    Residue cleanup may invoke ``git restore`` for staged paths and ``git clean`` for
+    untracked paths independently. Queue a separate FakeCommandRunner result for each
+    command that the test scenario expects so missing or reordered cleanup calls fail
+    instead of accidentally consuming the wrong canned result.
+    """
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # pre-cleanup HEAD verify
     queue_snapshot_residue_reproof_commands(cmd, path_count=path_count)
-    cmd.queue_result(
-        returncode=restore_returncode,
-        stdout="",
-        stderr=restore_stderr,
-    )
+    if run_restore:
+        cmd.queue_result(
+            returncode=restore_returncode,
+            stdout="",
+            stderr=restore_stderr,
+        )
+    if run_clean:
+        cmd.queue_result(
+            returncode=clean_returncode,
+            stdout="",
+            stderr=clean_stderr,
+        )
     cmd.queue_result(
         returncode=0,
         stdout=f"{(head_after if head_after is not None else head_sha)}\n",
