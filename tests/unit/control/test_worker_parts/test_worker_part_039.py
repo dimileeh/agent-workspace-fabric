@@ -952,10 +952,13 @@ async def test_finish_monitor_recovery_operation_handles_missing_state(
         config=WorkerConfig(poll_interval_seconds=0.01),
     )
 
-    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
-        "ws_monitor",
-        operation_id=None,
-        status=OperationStatus.succeeded,
+    assert (
+        await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+            "ws_monitor",
+            operation_id=None,
+            status=OperationStatus.succeeded,
+        )
+        is True
     )
     assert empty_session.entered is False
 
@@ -963,10 +966,13 @@ async def test_finish_monitor_recovery_operation_handles_missing_state(
         "awf.control.worker.claims.OperationRepository",
         EmptyOperationRepository,
     )
-    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
-        "ws_monitor",
-        operation_id="missing-op",
-        status=OperationStatus.succeeded,
+    assert (
+        await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+            "ws_monitor",
+            operation_id="missing-op",
+            status=OperationStatus.succeeded,
+        )
+        is False
     )
     assert empty_session.entered is True
     assert empty_session.exited is True
@@ -993,10 +999,13 @@ async def test_finish_monitor_recovery_operation_handles_missing_state(
         config=WorkerConfig(poll_interval_seconds=0.01),
     )
 
-    await failing_worker._finish_monitor_recovery_operation(  # noqa: SLF001
-        "ws_monitor",
-        operation_id="op-session-failed",
-        status=OperationStatus.failed,
+    assert (
+        await failing_worker._finish_monitor_recovery_operation(  # noqa: SLF001
+            "ws_monitor",
+            operation_id="op-session-failed",
+            status=OperationStatus.failed,
+        )
+        is False
     )
     assert raising_session.entered is True
 

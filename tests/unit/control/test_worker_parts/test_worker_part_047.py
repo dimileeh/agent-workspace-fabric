@@ -258,8 +258,9 @@ async def test_safe_worker_paths_swallow_runtime_failures(
     async def _finish_monitor_recovery_operation(
         workspace_id: str,
         **kwargs: object,
-    ) -> None:
+    ) -> bool:
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
 
     worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
         _finish_monitor_recovery_operation
@@ -333,6 +334,57 @@ async def test_safe_worker_paths_swallow_runtime_failures(
     assert finish_calls[0]["operation_id"] == "op_handoff_failed"
     assert finish_calls[0]["status"] == OperationStatus.failed
     assert finish_calls[0]["error_code"] == "MONITOR_RECOVERY_FAILED"
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_write_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    handoff = object()
+    finish_calls: list[dict[str, object]] = []
+    succeed_attempt = 0
+
+    class HandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            assert handoff_obj is handoff
+            assert workspace_id == "ws_monitor"
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        if kwargs.get("status") == OperationStatus.succeeded:
+            nonlocal succeed_attempt
+            succeed_attempt += 1
+            return succeed_attempt > 1
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_retry_finalize",
+    )
+
+    assert result is True
+    assert len(finish_calls) == 2
+    assert all(call["status"] == OperationStatus.succeeded for call in finish_calls)
+    assert finish_calls[0]["operation_id"] == "op_retry_finalize"
+    assert finish_calls[1]["operation_id"] == "op_retry_finalize"
 
 
 @pytest.mark.unit

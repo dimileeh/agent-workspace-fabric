@@ -1052,15 +1052,15 @@ async def _finish_monitor_recovery_operation(
     status: OperationStatus,
     error_code: str | None = None,
     error_message: str | None = None,
-) -> None:
+) -> bool:
     if operation_id is None:
-        return
+        return True
     try:
         async with self._session_factory() as session:
             operation_repo = OperationRepository(session)
             operation = await operation_repo.get(operation_id)
             if operation is None or operation.workspace_id != workspace_id:
-                return
+                return False
             ws = await WorkspaceRepository(session).get(workspace_id)
             result: dict[str, Any] = {
                 "requested_action": OperationType.remonitor.value,
@@ -1082,6 +1082,7 @@ async def _finish_monitor_recovery_operation(
                 error_message=error_message,
             )
             await session.commit()
+            return True
     except Exception:
         _log.exception(
             "worker.monitor_recovery_operation_finish_failed",
@@ -1089,6 +1090,7 @@ async def _finish_monitor_recovery_operation(
             operation_id=operation_id,
             status=status.value,
         )
+        return False
 
 
 async def _finish_monitor_recovery_operation_after_cancellation(
