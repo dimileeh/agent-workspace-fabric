@@ -13,6 +13,7 @@ import re
 import shlex
 
 from awf.profiles.models import ProfileCommand, WorkspaceProfile
+from awf.runtime.validation_command_probe import _split_top_level_statements
 
 _PLAYWRIGHT_BROWSER_INSTALL_TIMEOUT_SECONDS = 900
 _NODE_PACKAGE_MANAGERS = ("pnpm", "yarn", "bun", "npm")
@@ -535,26 +536,30 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
     ``cd apps && `` when the install command is shell-scoped via ``cd``.
     """
     for command in _profile_install_commands(profile):
-        try:
-            tokens = shlex.split(command)
-        except ValueError:
-            continue
-        for index, token in enumerate(tokens):
-            base = token.rsplit("/", 1)[-1]
-            if base in _NODE_PACKAGE_MANAGERS:
-                rest = _pm_invocation_tokens(tokens, index)
-                if (
-                    not rest
-                    or any(sub in _NODE_INSTALL_SUBCOMMANDS for sub in rest)
-                    or _is_node_option_only_install_command(tokens, index, base)
-                ):
-                    scope_tokens = _collect_pm_scope_tokens(
-                        tokens, index, pm_base=base, require_consecutive=False
-                    )
-                    cd_prefix = _extract_cd_scope_prefix(tokens, index)
-                    if scope_tokens:
-                        return shlex.join([token, *scope_tokens]), cd_prefix
-                    return base, cd_prefix
+        for segment, _terminator in _split_top_level_statements(command):
+            stripped = segment.strip()
+            if not stripped:
+                continue
+            try:
+                tokens = shlex.split(stripped)
+            except ValueError:
+                continue
+            for index, token in enumerate(tokens):
+                base = token.rsplit("/", 1)[-1]
+                if base in _NODE_PACKAGE_MANAGERS:
+                    rest = _pm_invocation_tokens(tokens, index)
+                    if (
+                        not rest
+                        or any(sub in _NODE_INSTALL_SUBCOMMANDS for sub in rest)
+                        or _is_node_option_only_install_command(tokens, index, base)
+                    ):
+                        scope_tokens = _collect_pm_scope_tokens(
+                            tokens, index, pm_base=base, require_consecutive=False
+                        )
+                        cd_prefix = _extract_cd_scope_prefix(tokens, index)
+                        if scope_tokens:
+                            return shlex.join([token, *scope_tokens]), cd_prefix
+                        return base, cd_prefix
     return None, None
 
 

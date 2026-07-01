@@ -124,11 +124,23 @@ def test_browser_install_ignores_node_manager_with_non_install_subcommand() -> N
             "pnpm exec playwright install chromium",
         ),
         (
+            "npm run build&&pnpm install",
+            "pnpm exec playwright install chromium",
+        ),
+        (
             "npm --prefix apps/console run build && pnpm install",
             "pnpm exec playwright install chromium",
         ),
         (
+            "npm --prefix apps/console run build&&pnpm install",
+            "pnpm exec playwright install chromium",
+        ),
+        (
             "yarn build; pnpm install",
+            "pnpm exec playwright install chromium",
+        ),
+        (
+            "yarn build;pnpm install",
             "pnpm exec playwright install chromium",
         ),
     ],
