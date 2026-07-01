@@ -467,11 +467,12 @@ def agent_exec_env_passthrough(*, compose_file: Path) -> tuple[str, ...]:
     generation omitted a higher-precedence worker Ollama key so a profile-owned
     daemon wins, do not re-inject that key via exec-time ``-e`` passthrough.
 
-    Also skip keys already rendered into the agent service with a concrete value.
+    Also skip keys already rendered into the agent service environment block.
     ``docker compose exec -e NAME`` (no value) re-reads ``NAME`` from the worker
     shell and overrides the running container's env, clobbering profile-owned or
-    lease-resolved credentials/endpoints. Only legacy ``${NAME}`` placeholders —
-    intentionally host-owned — remain eligible for exec-time passthrough.
+    lease-resolved credentials/endpoints — including declared env leases that
+    render as same-name ``${NAME}`` placeholders. Only auth keys absent from the
+    compose environment remain eligible for exec-time passthrough.
     """
 
     compose_env = _try_agent_environment_from_compose_file(compose_file)
@@ -487,16 +488,8 @@ def agent_exec_env_passthrough(*, compose_file: Path) -> tuple[str, ...]:
     return tuple(name for name in AGENT_AUTH_ENV_VARS if name not in excluded)
 
 
-def _is_legacy_host_env_placeholder(key: str, value: str) -> bool:
-    return value == f"${{{key}}}"
-
-
 def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
-    return frozenset(
-        name
-        for name in AGENT_AUTH_ENV_VARS
-        if name in compose_env and not _is_legacy_host_env_placeholder(name, compose_env[name])
-    )
+    return frozenset(name for name in AGENT_AUTH_ENV_VARS if name in compose_env)
 
 
 def _compose_environment_mapping(environment: object) -> dict[str, str]:

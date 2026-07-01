@@ -427,7 +427,38 @@ def test_profile_owned_auth_env_literals_suppressed_from_exec_passthrough(
     assert "OPENAI_API_KEY" not in passthrough
     assert "OPENAI_BASE_URL" not in passthrough
     assert "ANTHROPIC_BASE_URL" not in passthrough
-    assert "CODEX_API_KEY" in passthrough
+    assert "CODEX_API_KEY" not in passthrough
+
+
+@pytest.mark.unit
+def test_declared_env_lease_same_name_placeholder_suppressed_from_exec_passthrough(
+    tmp_path: Path,
+) -> None:
+    """Env provider leases with target == source render ``${NAME}`` like legacy host auth.
+
+    Exec-time ``-e NAME`` must not re-inject worker env for keys already declared in
+    compose — Docker resolved them at stack launch and ``exec -e`` would override
+    with a potentially stale worker value.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "environment": {
+                            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    passthrough = agent_exec_env_passthrough(compose_file=compose_file)
+
+    assert "OPENAI_API_KEY" not in passthrough
 
 
 @pytest.mark.unit
