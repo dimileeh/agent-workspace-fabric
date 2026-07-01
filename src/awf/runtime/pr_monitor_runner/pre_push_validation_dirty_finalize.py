@@ -246,6 +246,7 @@ async def _operation_owned_delta_paths(
     *,
     worktree_path: Path,
     operation_start_head: str,
+    end_head: str | None = None,
 ) -> set[str] | None:
     """Return paths changed by the current operation's committed delta.
 
@@ -299,15 +300,21 @@ async def _operation_owned_delta_paths(
     output was malformed) so the caller can keep the fail-closed dirty path
     instead of committing unowned dirt.
     """
+    end_ref = end_head or "HEAD"
     committed_result = await self._deps.runner.run(
         git_worktree_command(
-            worktree_path, "diff", "--name-status", "-z", f"{operation_start_head}..HEAD"
+            worktree_path,
+            "diff",
+            "--name-status",
+            "-z",
+            f"{operation_start_head}..{end_ref}",
         )
     )
     if not committed_result.ok:
         _log.warning(
             "monitor.pre_push_dirty_finalize_delta_unavailable",
             operation_start_head=operation_start_head,
+            end_head=end_head,
             returncode=committed_result.returncode,
             stderr=(committed_result.stderr or "")[:400],
         )
@@ -1154,6 +1161,9 @@ async def _try_cleanup_pre_push_post_operation_residue(
     has a non-empty committed delta, every dirty path is disjoint from that
     delta, and each dirty path is provably post-operation residue (not
     uncommitted repair output — review thread ``PRRT_kwDOSJAM6s6NfrZb``).
+    HEAD is pinned before computing the committed delta and re-checked before
+    cleanup so an intervening local commit cannot become the cleanup anchor
+    without an owned-delta check (review thread ``PRRT_kwDOSJAM6s6NhEAw``).
     Cleanup must leave HEAD unchanged with a clean worktree.
     """
     from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
@@ -1173,10 +1183,14 @@ async def _try_cleanup_pre_push_post_operation_residue(
         return None
     if operation_start_head is None:
         return None
+    head_before = await self._rev_parse_head(worktree_path)
+    if head_before is None:
+        return None
     owned_delta_paths = await _operation_owned_delta_paths(
         self,
         worktree_path=worktree_path,
         operation_start_head=operation_start_head,
+        end_head=head_before,
     )
     if owned_delta_paths is None:
         return None
@@ -1201,8 +1215,13 @@ async def _try_cleanup_pre_push_post_operation_residue(
     ):
         return None
 
-    head_before = await self._rev_parse_head(worktree_path)
-    if head_before is None:
+    current_head = await self._rev_parse_head(worktree_path)
+    if current_head != head_before:
+        # Another local git process may advance HEAD after the pinned
+        # committed-delta/residue proofs but before cleanup. Accepting the new
+        # commit as the cleanup anchor would let validation/push proceed without
+        # checking its delta against the owned set (review thread
+        # ``PRRT_kwDOSJAM6s6NhEAw``).
         return None
 
     cleanup = await _cleanup_proven_post_operation_residue_paths(

@@ -72,6 +72,38 @@ def _queue_post_operation_residue_proof_commands(
     cmd.queue_result(returncode=128, stdout="")  # cat-file: path absent at HEAD
 
 
+def _queue_residue_cleanup_anchor_and_delta(
+    cmd: FakeCommandRunner,
+    *,
+    head_sha: str,
+    owned_delta_z: str,
+) -> None:
+    """Queue pinned cleanup-anchor HEAD and committed-delta diff for residue cleanup."""
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # pinned cleanup anchor HEAD
+    cmd.queue_result(returncode=0, stdout=owned_delta_z)  # residue gate committed delta
+
+
+def _queue_residue_cleanup_execution(
+    cmd: FakeCommandRunner,
+    *,
+    head_sha: str,
+    head_after: str | None = None,
+    restore_returncode: int = 0,
+    restore_stderr: str = "",
+) -> None:
+    """Queue pre-cleanup HEAD verify, scoped restore/clean, and post-cleanup HEAD check."""
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # pre-cleanup HEAD verify
+    cmd.queue_result(
+        returncode=restore_returncode,
+        stdout="",
+        stderr=restore_stderr,
+    )
+    cmd.queue_result(
+        returncode=0,
+        stdout=f"{(head_after if head_after is not None else head_sha)}\n",
+    )  # head_after
+
+
 @pytest.mark.unit
 async def test_path_exists_at_head_treats_cat_file_128_as_absent(
     factory: async_sessionmaker[AsyncSession],
@@ -144,12 +176,13 @@ async def test_pre_push_validation_cleans_staged_oneline_residue_and_proceeds(
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
     # Dirty-finalize ownership gate: committed delta owns src/fix.py only.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
-    # Post-operation residue gate re-checks the same committed delta.
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     _queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_before
-    cmd.queue_result(returncode=0, stdout="")  # scoped git restore for --oneline
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_after
+    _queue_residue_cleanup_execution(cmd, head_sha=head_sha)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -232,15 +265,17 @@ async def test_pre_push_validation_cleans_subdirectory_oneline_residue_and_proce
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     _queue_post_operation_residue_proof_commands(
         cmd,
         worktree=worktree,
         residue_path=residue_path,
     )
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_before
-    cmd.queue_result(returncode=0, stdout="")  # scoped git restore for residue path
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_after
+    _queue_residue_cleanup_execution(cmd, head_sha=head_sha)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -323,11 +358,13 @@ async def test_pre_push_validation_cleans_untracked_oneline_residue_and_proceeds
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     _queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_before
-    cmd.queue_result(returncode=0, stdout="")  # scoped git clean for --oneline
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_after
+    _queue_residue_cleanup_execution(cmd, head_sha=head_sha)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -410,11 +447,13 @@ async def test_pre_push_validation_reuses_verified_head_after_residue_cleanup_wh
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=1, stdout="")  # initial rev-parse HEAD: transient failure
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     _queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_before
-    cmd.queue_result(returncode=0, stdout="")  # scoped git restore for --oneline
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_after
+    _queue_residue_cleanup_execution(cmd, head_sha=head_sha)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -485,11 +524,13 @@ async def test_pre_push_validation_reuses_verified_head_after_residue_cleanup_wh
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     _queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_before
-    cmd.queue_result(returncode=0, stdout="")  # scoped git restore for --oneline
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_after
+    _queue_residue_cleanup_execution(cmd, head_sha=head_sha)
     cmd.queue_result(returncode=1, stdout="")  # would-be post-cleanup refresh: transient failure
     runner = make_runner(
         factory=factory,
@@ -550,10 +591,18 @@ async def test_pre_push_validation_post_operation_residue_cleanup_fails_closed_w
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_before}\n")  # initial rev-parse HEAD
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_before,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     _queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
-    cmd.queue_result(returncode=0, stdout=f"{head_before}\n")  # head_before
-    cmd.queue_result(returncode=1, stdout="", stderr="restore failed\n")  # scoped restore fails
+    _queue_residue_cleanup_execution(
+        cmd,
+        head_sha=head_before,
+        restore_returncode=1,
+        restore_stderr="restore failed\n",
+    )
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -615,11 +664,17 @@ async def test_pre_push_validation_post_operation_residue_cleanup_fails_closed_w
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_before}\n")  # initial rev-parse HEAD
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_before,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     _queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
-    cmd.queue_result(returncode=0, stdout=f"{head_before}\n")  # head_before
-    cmd.queue_result(returncode=0, stdout="")  # scoped git restore succeeds
-    cmd.queue_result(returncode=0, stdout=f"{head_after}\n")  # head_after: HEAD moved
+    _queue_residue_cleanup_execution(
+        cmd,
+        head_sha=head_before,
+        head_after=head_after,
+    )
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -685,11 +740,13 @@ async def test_pre_push_validation_post_operation_residue_cleanup_fails_closed_w
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     _queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_before
-    cmd.queue_result(returncode=0, stdout="")  # scoped git restore succeeds
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_after
+    _queue_residue_cleanup_execution(cmd, head_sha=head_sha)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -760,9 +817,13 @@ async def test_pre_push_validation_post_operation_residue_cleanup_fails_closed_o
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     _queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
-    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_before
+    cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # pre-cleanup HEAD verify
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -836,7 +897,7 @@ async def test_pre_push_validation_post_operation_residue_skips_when_committed_d
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
     cmd.queue_result(returncode=0, stdout="")  # finalize gate: empty committed delta
-    cmd.queue_result(returncode=0, stdout="")  # residue gate: empty committed delta
+    _queue_residue_cleanup_anchor_and_delta(cmd, head_sha=head_sha, owned_delta_z="")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -993,8 +1054,85 @@ async def test_pre_push_validation_post_operation_residue_skips_uncommitted_repa
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/other.py\0"))  # unstaged repair
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner._deps.validation = validation  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=MonitorState(),
+        operation_start_head="0" * 40,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id is None
+    commit_dirty.assert_not_awaited()
+    assert validation.calls == []
+    cleanup.assert_not_awaited()
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_post_operation_residue_cleanup_fails_closed_when_head_advances_after_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Residue cleanup must fail closed when HEAD advances after the pinned anchor.
+
+    Regression for review thread ``PRRT_kwDOSJAM6s6NhEAw``: capturing cleanup
+    HEAD only after the owned-delta/residue proofs let a concurrent local commit
+    become the cleanup anchor without an owned-delta check.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    pinned_head = "a" * 40
+    advanced_head = "b" * 40
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("--oneline",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cleanup = AsyncMock()
+    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{pinned_head}\n")  # initial rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=pinned_head,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
+    _queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
+    cmd.queue_result(returncode=0, stdout=f"{advanced_head}\n")  # pre-cleanup HEAD verify: moved
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1096,7 +1234,11 @@ async def test_pre_push_validation_post_operation_residue_skips_legitimate_flag_
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     cmd.queue_result(returncode=0, stdout="")  # unstaged delta: staged-only fixture
     cmd.queue_result(returncode=128, stdout="")  # cat-file: fixture absent at HEAD
     runner = make_runner(
@@ -1172,7 +1314,11 @@ async def test_pre_push_validation_post_operation_residue_skips_legitimate_oneli
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # initial rev-parse HEAD
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # finalize gate
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # residue gate
+    _queue_residue_cleanup_anchor_and_delta(
+        cmd,
+        head_sha=head_sha,
+        owned_delta_z=_name_status_z("M\0src/fix.py\0"),
+    )
     cmd.queue_result(returncode=0, stdout="")  # unstaged delta: staged-only fixture
     cmd.queue_result(returncode=128, stdout="")  # cat-file: fixture absent at HEAD
     runner = make_runner(
