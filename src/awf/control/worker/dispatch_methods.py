@@ -735,13 +735,15 @@ async def _safely_resume_pr_monitor_legacy(
     try:
         await self._executor.resume_pr_monitor(workspace_id)
     except asyncio.CancelledError:
-        await self._finish_monitor_recovery_operation_after_cancellation(
+        finalized = await self._finish_monitor_recovery_operation_after_cancellation(
             workspace_id,
             operation_id=recovery_operation_id,
             status=OperationStatus.cancelled,
             error_code="MONITOR_RECOVERY_CANCELLED",
             error_message="Monitor resume cancelled after workspace left monitoring_pr.",
         )
+        if finalized:
+            self._monitor_recovery_operation_ids.pop(workspace_id, None)
         raise
     except Exception as exc:
         _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)

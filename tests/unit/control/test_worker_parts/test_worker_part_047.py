@@ -845,6 +845,67 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_after_cancellatio
 
 
 @pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_legacy_releases_claim_after_cancellation_finalize(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Protocol-only legacy resume must clear recovery IDs after cancelled finalize."""
+    finish_calls: list[dict[str, object]] = []
+    resume_started = asyncio.Event()
+    claim_released = False
+
+    class BlockingLegacyExecutor:
+        async def resume_pr_monitor(self, workspace_id: str) -> None:
+            assert workspace_id == "ws_monitor"
+            resume_started.set()
+            await asyncio.Event().wait()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=BlockingLegacyExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
+
+    async def _release_monitor_claim(workspace_id: str) -> None:
+        nonlocal claim_released
+        assert workspace_id == "ws_monitor"
+        claim_released = True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._release_terminal_runtime_promptly = (  # type: ignore[method-assign]
+        lambda _workspace_id: asyncio.sleep(0)
+    )
+    worker._monitor_recovery_operation_ids["ws_monitor"] = "op_legacy_cancel_finalize"  # noqa: SLF001
+
+    resume_task = asyncio.create_task(
+        worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+            "ws_monitor",
+            recovery_operation_id="op_legacy_cancel_finalize",
+        )
+    )
+    await asyncio.wait_for(resume_started.wait(), timeout=5.0)
+    resume_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await resume_task
+
+    assert claim_released is True
+    assert "ws_monitor" not in worker._monitor_recovery_operation_ids  # noqa: SLF001
+    assert len(finish_calls) == 1
+    assert finish_calls[0]["status"] == OperationStatus.cancelled
+    assert finish_calls[0]["error_code"] == "MONITOR_RECOVERY_CANCELLED"
+
+
+@pytest.mark.unit
 async def test_safely_resume_pr_monitor_falls_back_to_protocol_resume(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
