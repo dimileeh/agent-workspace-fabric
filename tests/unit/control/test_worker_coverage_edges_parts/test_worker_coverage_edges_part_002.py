@@ -296,9 +296,19 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
         async def get(self, _workspace_id: str) -> object | None:
             return self.workspace
 
+    class _OpRepo:
+        operation: object | None = None
+
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, _operation_id: str) -> object | None:
+            return self.operation
+
     worker._session_factory = lambda: _Session()
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(worker_recovery_cooldown, "WorkspaceRepository", _Repo)
+    monkeypatch.setattr(worker_recovery_cooldown, "OperationRepository", _OpRepo)
     try:
         assert await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
             worker,
@@ -306,6 +316,19 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
             resume_succeeded=False,
             recovery_operation_id="op-1",
         )
+        _OpRepo.operation = SimpleNamespace(
+            workspace_id="ws-1",
+            status=OperationStatus.succeeded.value,
+        )
+        assert (
+            not await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+                worker,
+                "ws-1",
+                resume_succeeded=False,
+                recovery_operation_id="op-1",
+            )
+        )
+        _OpRepo.operation = None
         _Repo.workspace = SimpleNamespace(status=WorkspaceStatus.failed.value)
         assert (
             not await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001

@@ -31,9 +31,9 @@ from awf.control.worker.helpers import (
     _utc_datetime,
 )
 from awf.control.worker.logging import _log
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.db.models import WorkspaceEvent
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 
 
 def _remember_active_salvage_monitor_recovery_operation_id(self: Any, operation_id: str) -> None:
@@ -68,6 +68,15 @@ async def _should_apply_active_salvage_monitor_resume_cooldown(
         return True
     try:
         async with self._session_factory() as session:
+            operation = await OperationRepository(session).get(recovery_operation_id)
+            if (
+                operation is not None
+                and operation.workspace_id == workspace_id
+                and operation.status == OperationStatus.succeeded.value
+            ):
+                # Handoff already succeeded; cancellation during the post-handoff
+                # monitor loop must not be treated as a failed recovery dispatch.
+                return False
             ws = await WorkspaceRepository(session).get(workspace_id)
             return ws is not None and ws.status == WorkspaceStatus.monitoring_pr.value
     except Exception:

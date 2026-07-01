@@ -20,8 +20,8 @@ from awf.control.worker import (
 )
 from awf.control.worker import claims as worker_claims
 from awf.control.worker import dispatch_methods as worker_dispatch_methods
-from awf.db.enums import OperationStatus, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
@@ -326,6 +326,106 @@ async def test_safely_resume_claimed_pr_monitor_applies_cooldown_when_handoff_ab
 
     assert cooldown_recorded is True
     assert worker._active_salvage_monitor_resume_cooldown_active(workspace_id)  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_cancelled_after_succeeded_handoff(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Post-handoff cancellation must not apply failed-recovery salvage cooldown."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-post-handoff-cancel",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="SEED",
+        )
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.running,
+            payload={"source": "worker_restart"},
+        )
+        operation_id = operation.id
+        await session.commit()
+
+    handoff = object()
+    run_started = asyncio.Event()
+    cooldown_recorded = False
+
+    class BlockingRunExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object:
+            assert handoff_workspace_id == workspace_id
+            return handoff
+
+        async def run_resumed_pr_monitor(
+            self,
+            handoff_workspace_id: str,
+            handoff_obj: object,
+        ) -> None:
+            assert handoff_obj is handoff
+            assert handoff_workspace_id == workspace_id
+            run_started.set()
+            await asyncio.Event().wait()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=BlockingRunExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01, monitor_claim_lease_seconds=30.0),
+    )
+    worker._remember_active_salvage_monitor_recovery_operation_id(  # noqa: SLF001
+        operation_id
+    )
+
+    async def _record_cooldown(_record_workspace_id: str, **kwargs: object) -> None:
+        nonlocal cooldown_recorded
+        assert _record_workspace_id == workspace_id
+        cooldown_recorded = True
+
+    async def _release_monitor_claim(released_workspace_id: str) -> None:
+        assert released_workspace_id == workspace_id
+
+    async def _prompt_release(released_workspace_id: str) -> None:
+        assert released_workspace_id == workspace_id
+
+    worker._record_active_salvage_monitor_resume_cooldown = (  # type: ignore[method-assign]
+        _record_cooldown
+    )
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._release_terminal_runtime_promptly = _prompt_release  # type: ignore[method-assign]
+
+    resume_task = asyncio.create_task(
+        worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+            workspace_id,
+            recovery_operation_id=operation_id,
+        )
+    )
+    await asyncio.wait_for(run_started.wait(), timeout=5.0)
+    resume_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await resume_task
+
+    assert cooldown_recorded is False
+    assert workspace_id not in worker._active_salvage_monitor_resume_cooldowns  # noqa: SLF001
+    async with session_factory() as session:
+        finished = await OperationRepository(session).get(operation_id)
+        assert finished is not None
+        assert finished.status == OperationStatus.succeeded.value
 
 
 @pytest.mark.unit
