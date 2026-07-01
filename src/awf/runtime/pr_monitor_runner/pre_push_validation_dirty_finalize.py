@@ -107,9 +107,12 @@ def _content_provable_as_git_oneline_capture(content: str) -> bool:
     deleted on basename alone (review thread ``PRRT_kwDOSJAM6s6Ng6Bh``). Empty
     content is not sufficient proof — callers must also match
     ``_empty_oneline_path_provable_as_cli_capture`` (review thread
-    ``PRRT_kwDOSJAM6s6NhRVJ``).
+    ``PRRT_kwDOSJAM6s6NhRVJ``). Whitespace-only bytes (e.g. ``"\\n"``) are
+    likewise insufficient: ``splitlines()`` yields no lines and ``all(...)``
+    over an empty sequence is vacuously true (review thread
+    ``PRRT_kwDOSJAM6s6NiUD7``).
     """
-    if content == "":
+    if not content.strip():
         return False
     return all(not line or _ONELINE_LOG_LINE_RE.match(line) for line in content.splitlines())
 
