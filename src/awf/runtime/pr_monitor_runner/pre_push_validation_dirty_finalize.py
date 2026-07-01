@@ -54,19 +54,30 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
+# Exact basenames from git CLI flag-capture accidents (malformed invocations that
+# create files named after flags). Only these names are provable residue; arbitrary
+# flag-shaped basenames such as ``fixtures/--help`` are legitimate repair output
+# and must not be deleted (review thread ``PRRT_kwDOSJAM6s6NgvbL``).
+_KNOWN_GIT_CLI_FLAG_CAPTURE_BASENAMES = frozenset(
+    {
+        "--oneline",  # ws_b35338c649554377bb59f0a6: malformed ``git log`` invocation
+    }
+)
+
 
 def _is_git_cli_flag_capture_path(path: str) -> bool:
-    """Return True when ``path`` looks like a git CLI flag captured as a filename.
+    """Return True when ``path`` is a known git CLI flag-capture artifact.
 
     Regression ws_b35338c649554377bb59f0a6: a malformed ``git log`` invocation
-    created a staged file named ``--oneline``. Monitor repair output is not
-    expected to use flag-shaped basenames, so this is a narrow proof for
-    provable post-operation CLI residue until attempted ``stage_paths`` can be
-    threaded to the gate (review thread ``PRRT_kwDOSJAM6s6NfrZb``). Match the
-    basename only: subdirectory residue is reported as a repo-relative path such
-    as ``apps/console/--oneline`` (review thread ``PRRT_kwDOSJAM6s6NgSRm``).
+    created a staged file named ``--oneline``. Monitor repair output may legitimately
+    use other flag-shaped basenames (e.g. ``fixtures/--help``), so residue proof
+    whitelists only observed CLI-capture basenames until attempted ``stage_paths``
+    can be threaded to the gate (review threads ``PRRT_kwDOSJAM6s6NfrZb``,
+    ``PRRT_kwDOSJAM6s6NgvbL``). Match the basename only: subdirectory residue is
+    reported as a repo-relative path such as ``apps/console/--oneline`` (review
+    thread ``PRRT_kwDOSJAM6s6NgSRm``).
     """
-    return posixpath.basename(path).startswith("-")
+    return posixpath.basename(path) in _KNOWN_GIT_CLI_FLAG_CAPTURE_BASENAMES
 
 
 async def _worktree_unstaged_change_paths(
