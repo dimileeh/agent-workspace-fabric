@@ -36,6 +36,7 @@ from awf.adapters.opencode import OpenCodeAdapter
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
+from awf.profiles.compose import agent_exec_env_passthrough
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
 _LONG_PROMPT = "Review this oversized PR comment.\n" + ("x" * 140_000)
@@ -351,6 +352,76 @@ class TestCodexAdapter:
         )
 
         _assert_prompt_sent_on_stdin(runner)
+
+    @pytest.mark.unit
+    async def test_passthroughs_provider_auth_env_names_to_exec_without_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Adapter exec argv mirrors ``agent_exec_env_passthrough`` and never passes values.
+
+        ``_COMPOSE_FILE`` is intentionally missing so adapter and expected helper share the
+        same unreadable-compose fallback. Compose-aware Ollama shadowing is covered in
+        ``test_workspace_services_compose`` and
+        ``test_profile_ollama_host_exec_passthrough_skips_worker_base_url``.
+        """
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-worker")
+        monkeypatch.setenv("OLLAMA_HOST", "http://ollama.worker:11434")
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        service_idx = args.index("agent")
+        env_slice = args[args.index("exec") + 4 : service_idx]
+
+        assert env_slice
+        expected = agent_exec_env_passthrough(compose_file=_COMPOSE_FILE)
+        for name in expected:
+            assert ["-e", name] == env_slice[env_slice.index(name) - 1 : env_slice.index(name) + 1]
+        assert not any("sk-live-secret-value" in arg for arg in args)
+
+    @pytest.mark.unit
+    async def test_profile_ollama_host_exec_passthrough_skips_worker_base_url(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-worker")
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            """
+services:
+  agent:
+    environment:
+      OLLAMA_HOST: http://ollama.profile:11434
+""".strip(),
+            encoding="utf-8",
+        )
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=compose_file,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        service_idx = args.index("agent")
+        env_slice = args[args.index("exec") + 4 : service_idx]
+        passthrough_names = {
+            env_slice[index + 1] for index, flag in enumerate(env_slice) if flag == "-e"
+        }
+
+        assert "OLLAMA_HOST" not in passthrough_names
+        assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in passthrough_names
+        assert "OPENAI_API_KEY" in passthrough_names
 
     @pytest.mark.unit
     async def test_wall_timeout_raises_structured_error_and_closes_log_streams(self) -> None:
