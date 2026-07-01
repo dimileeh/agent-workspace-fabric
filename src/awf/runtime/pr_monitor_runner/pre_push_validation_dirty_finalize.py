@@ -86,17 +86,31 @@ def _is_git_cli_flag_capture_path(path: str) -> bool:
     return posixpath.basename(path) in _KNOWN_GIT_CLI_FLAG_CAPTURE_BASENAMES
 
 
+def _empty_oneline_path_provable_as_cli_capture(path: str) -> bool:
+    """Return True when an empty ``--oneline`` path is provable CLI residue by location.
+
+    Malformed ``git log`` at the repo cwd creates an empty ``--oneline`` file
+    (ws_b35338c649554377bb59f0a6). Legitimate repair output may leave an empty
+    flag-shaped file under a subdirectory such as ``tests/fixtures/--oneline``;
+    emptiness alone must not prove those deletable (review threads
+    ``PRRT_kwDOSJAM6s6Ng6Bh``, ``PRRT_kwDOSJAM6s6NhRVJ``).
+    """
+    return path == "--oneline"
+
+
 def _content_provable_as_git_oneline_capture(content: str) -> bool:
     """Return True when ``content`` matches a ``git log --oneline`` accident artifact.
 
-    Malformed ``git log`` invocations either leave an empty flag-capture file or
-    redirect ``--oneline``-formatted log lines into the accidental path. Legitimate
-    repair output such as ``tests/fixtures/--oneline`` carries unrelated fixture
-    bytes and must not be deleted on basename alone (review thread
-    ``PRRT_kwDOSJAM6s6Ng6Bh``).
+    Malformed ``git log`` invocations redirect ``--oneline``-formatted log lines
+    into the accidental path. Legitimate repair output such as
+    ``tests/fixtures/--oneline`` carries unrelated fixture bytes and must not be
+    deleted on basename alone (review thread ``PRRT_kwDOSJAM6s6Ng6Bh``). Empty
+    content is not sufficient proof — callers must also match
+    ``_empty_oneline_path_provable_as_cli_capture`` (review thread
+    ``PRRT_kwDOSJAM6s6NhRVJ``).
     """
     if content == "":
-        return True
+        return False
     return all(not line or _ONELINE_LOG_LINE_RE.match(line) for line in content.splitlines())
 
 
@@ -141,6 +155,8 @@ async def _path_provable_as_git_cli_flag_capture(
     )
     if content is None:
         return False
+    if content == "":
+        return _empty_oneline_path_provable_as_cli_capture(path)
     return _content_provable_as_git_oneline_capture(content)
 
 
