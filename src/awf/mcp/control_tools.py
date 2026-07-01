@@ -111,6 +111,7 @@ def register_control_tools(
     service: WorkspaceService,
     safe_result: SafeResult,
 ) -> None:
+    """Register AWF control MCP tools on the given FastMCP server."""
     _safe_result = safe_result
 
     @mcp.tool(name="awf_adopt_pull_request_monitor")
