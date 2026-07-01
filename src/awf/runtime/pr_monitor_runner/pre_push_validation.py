@@ -953,16 +953,15 @@ async def _run_pre_push_validation(
             pre_validation_check = finalized_check
             workspace_head_sha = await self._rev_parse_head(worktree_path)
     if not pre_validation_check.clean:
-        residue_cleaned_check = await _try_cleanup_pre_push_post_operation_residue(
+        residue_cleanup = await _try_cleanup_pre_push_post_operation_residue(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             check=pre_validation_check,
             operation_start_head=operation_start_head,
         )
-        if residue_cleaned_check is not None:
-            pre_validation_check = residue_cleaned_check
-            workspace_head_sha = await self._rev_parse_head(worktree_path)
+        if residue_cleanup is not None:
+            pre_validation_check, workspace_head_sha = residue_cleanup
     if not pre_validation_check.clean:
         return _pre_push_dirty_result(
             workspace_head_sha=workspace_head_sha,

@@ -1065,7 +1065,7 @@ async def _try_cleanup_pre_push_post_operation_residue(
     worktree_path: Path,
     check: ValidationWorktreeCheck,
     operation_start_head: str | None,
-) -> ValidationWorktreeCheck | None:
+) -> tuple[ValidationWorktreeCheck, str] | None:
     """Remove provable post-operation residue unrelated to the committed delta.
 
     When the dirty-finalize gate skips unrelated dirt (paths outside
@@ -1153,7 +1153,7 @@ async def _try_cleanup_pre_push_post_operation_residue(
         cleaned_paths=list(cleanup.cleaned_paths),
         head_sha=head_before,
     )
-    return recheck
+    return recheck, head_before
 
 
 async def _rollback_finalize_dirty_residue_before_provider_recovery(
