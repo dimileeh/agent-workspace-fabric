@@ -600,13 +600,17 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
     return None, None
 
 
-def _pip_to_python_executable(pip_base: str) -> str | None:
-    """Map ``pip`` / ``pip3`` / ``pip3.12`` to the matching ``python`` executable."""
+def _pip_to_python_executable(pip_token: str) -> str | None:
+    """Map ``pip`` / ``pip3`` / ``pip3.12`` (bare or path-qualified) to matching ``python``."""
+    pip_base = pip_token.rsplit("/", 1)[-1]
     match = _PIP_EXECUTABLE_RE.match(pip_base)
     if match is None:
         return None
     suffix = match.group(1)
-    return "python" if suffix is None else f"python{suffix}"
+    python_base = "python" if suffix is None else f"python{suffix}"
+    if "/" in pip_token:
+        return f"{pip_token[: pip_token.rfind('/') + 1]}{python_base}"
+    return python_base
 
 
 def _has_pip_install_subcommand(tokens: list[str], pip_index: int) -> bool:
@@ -639,7 +643,7 @@ def _python_executable_from_commands(
                 uv_prefix = _uv_setup_python_prefix(tokens, index)
                 if uv_prefix is not None:
                     return uv_prefix, _extract_cd_scope_prefix(tokens, index)
-            pip_python = _pip_to_python_executable(base)
+            pip_python = _pip_to_python_executable(token)
             if pip_python is not None and _has_pip_install_subcommand(tokens, index):
                 return pip_python, _extract_cd_scope_prefix(tokens, index)
             if allow_pytest_playwright_shortcut and base == "pytest" and "playwright" in command:

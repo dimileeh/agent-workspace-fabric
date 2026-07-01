@@ -550,13 +550,14 @@ def test_browser_install_uses_python_interpreter_when_no_node_manager() -> None:
         ("pip install -r requirements.txt", "python"),
         ("pip3 install playwright", "python3"),
         ("pip3.12 install -r requirements.txt", "python3.12"),
+        (".venv/bin/pip install -r requirements.txt", ".venv/bin/python"),
+        ("/opt/py/bin/pip3.12 install playwright", "/opt/py/bin/python3.12"),
         ("cd apps/api && pip install -e .", "python"),
+        ("cd apps/api && .venv/bin/pip install -e .", ".venv/bin/python"),
     ],
 )
-def test_browser_install_recognizes_bare_pip_setup(
-    setup_command: str, expected_executable: str
-) -> None:
-    """Verify browser install recognizes bare pip setup."""
+def test_browser_install_recognizes_pip_setup(setup_command: str, expected_executable: str) -> None:
+    """Verify browser install recognizes bare and path-qualified pip setup."""
     profile = _profile(
         {
             "runtime": {"browsers": ["chromium"]},
