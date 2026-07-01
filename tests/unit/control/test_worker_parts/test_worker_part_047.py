@@ -775,6 +775,76 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
 
 
 @pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_releases_claim_after_cancellation_finalize(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Shielded cancellation finalize must clear recovery IDs so the claim is released."""
+    handoff = object()
+    finish_calls: list[dict[str, object]] = []
+    finalize_started = asyncio.Event()
+    claim_released = False
+    finish_attempts = 0
+
+    class HandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            raise AssertionError("monitor run must not start when finalize is cancelled")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        nonlocal finish_attempts
+        finish_attempts += 1
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        if finish_attempts == 1:
+            finalize_started.set()
+            await asyncio.Event().wait()
+        return True
+
+    async def _release_monitor_claim(workspace_id: str) -> None:
+        nonlocal claim_released
+        assert workspace_id == "ws_monitor"
+        claim_released = True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._release_terminal_runtime_promptly = (  # type: ignore[method-assign]
+        lambda _workspace_id: asyncio.sleep(0)
+    )
+    worker._monitor_recovery_operation_ids["ws_monitor"] = "op_cancel_finalize"  # noqa: SLF001
+
+    resume_task = asyncio.create_task(
+        worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+            "ws_monitor",
+            recovery_operation_id="op_cancel_finalize",
+        )
+    )
+    await asyncio.wait_for(finalize_started.wait(), timeout=5.0)
+    resume_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await resume_task
+
+    assert claim_released is True
+    assert "ws_monitor" not in worker._monitor_recovery_operation_ids  # noqa: SLF001
+    assert finish_attempts == 2
+    assert finish_calls[0]["status"] == OperationStatus.succeeded
+    assert finish_calls[1]["status"] == OperationStatus.succeeded
+
+
+@pytest.mark.unit
 async def test_safely_resume_pr_monitor_falls_back_to_protocol_resume(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

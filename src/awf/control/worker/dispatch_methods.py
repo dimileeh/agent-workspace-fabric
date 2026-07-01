@@ -879,19 +879,21 @@ async def _safely_resume_pr_monitor(
             # (e.g. worker shutdown) landing mid-write cannot re-orphan it, then
             # re-raise so the task still ends cancelled and the slot drains.
             if handoff_succeeded:
-                await self._finish_monitor_recovery_operation_after_cancellation(
+                finalized = await self._finish_monitor_recovery_operation_after_cancellation(
                     workspace_id,
                     operation_id=recovery_operation_id,
                     status=OperationStatus.succeeded,
                 )
             else:
-                await self._finish_monitor_recovery_operation_after_cancellation(
+                finalized = await self._finish_monitor_recovery_operation_after_cancellation(
                     workspace_id,
                     operation_id=recovery_operation_id,
                     status=OperationStatus.cancelled,
                     error_code="MONITOR_RECOVERY_CANCELLED",
                     error_message="Monitor resume cancelled after workspace left monitoring_pr.",
                 )
+            if finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
         raise
     except Exception as exc:
         if not handoff_succeeded:

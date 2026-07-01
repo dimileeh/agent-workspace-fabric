@@ -1112,7 +1112,7 @@ async def _finish_monitor_recovery_operation_after_cancellation(
     status: OperationStatus,
     error_code: str | None = None,
     error_message: str | None = None,
-) -> None:
+) -> bool:
     """Finalize the recovery operation even if cancelled again mid-write.
 
     The CancelledError handler must persist this status before re-raising,
@@ -1136,11 +1136,10 @@ async def _finish_monitor_recovery_operation_after_cancellation(
     )
     while True:
         try:
-            await asyncio.shield(finalize_task)
-            return
+            return bool(await asyncio.shield(finalize_task))
         except asyncio.CancelledError:
             if finalize_task.done():
-                return
+                return bool(finalize_task.result())
 
 
 async def _refresh_monitoring_pr_claim(self: Any, workspace_id: str) -> bool:
