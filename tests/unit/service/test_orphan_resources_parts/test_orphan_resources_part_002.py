@@ -57,6 +57,8 @@ def _run_for(
     volumes: str = "",
     fail_networks: bool = False,
 ) -> Any:
+    """Return a fake Docker subprocess runner for orphan-resource scan tests."""
+
     def _run(args: list[str], **_kwargs: object) -> _Completed:
         """Return canned Docker inventory responses for orphan-resource scans."""
         if args[:3] == ["docker", "ps", "-a"]:

@@ -1244,6 +1244,7 @@ async def test_run_worker_forever_disposes_engine_on_exit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Dispose the SQLAlchemy engine after ``run_worker`` completes ``run_forever``."""
     calls: list[str] = []
 
     class _Worker:

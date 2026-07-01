@@ -49,6 +49,7 @@ class WorkspaceGCWorktreeRemoveTargetResult:
     error: str | None = None
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize this per-target worktree removal outcome for audit payloads."""
         payload: dict[str, object] = {
             "worktree_id": self.worktree_id,
             "status": self.status,
