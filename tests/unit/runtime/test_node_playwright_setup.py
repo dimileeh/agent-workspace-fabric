@@ -171,6 +171,14 @@ def test_browser_install_prefers_detected_node_package_manager() -> None:
             "cd apps/console; yarn install",
             "cd apps/console; yarn playwright install chromium",
         ),
+        (
+            "pnpm -C apps/console install",
+            "pnpm -C apps/console exec playwright install chromium",
+        ),
+        (
+            "pnpm -w install",
+            "pnpm -w exec playwright install chromium",
+        ),
     ],
 )
 def test_browser_install_preserves_package_manager_scope(

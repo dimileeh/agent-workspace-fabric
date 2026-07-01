@@ -17,7 +17,7 @@ from awf.profiles.models import ProfileCommand, WorkspaceProfile
 _PLAYWRIGHT_BROWSER_INSTALL_TIMEOUT_SECONDS = 900
 _NODE_PACKAGE_MANAGERS = ("pnpm", "yarn", "bun", "npm")
 _NODE_INSTALL_SUBCOMMANDS = frozenset({"add", "ci", "i", "install"})
-_NODE_PACKAGE_MANAGER_SCOPE_FLAGS = frozenset(
+_NODE_PACKAGE_MANAGER_SCOPE_VALUE_FLAGS = frozenset(
     {
         "--cwd",
         "--dir",
@@ -27,9 +27,18 @@ _NODE_PACKAGE_MANAGER_SCOPE_FLAGS = frozenset(
         "--project-dir",
         "--project-directory",
         "--workspace",
-        "-c",
+        "-C",
+        "-F",
+    }
+)
+_NODE_PACKAGE_MANAGER_SCOPE_BOOLEAN_FLAGS = frozenset(
+    {
+        "--workspace-root",
         "-w",
     }
+)
+_NODE_PACKAGE_MANAGER_SCOPE_FLAGS = (
+    _NODE_PACKAGE_MANAGER_SCOPE_VALUE_FLAGS | _NODE_PACKAGE_MANAGER_SCOPE_BOOLEAN_FLAGS
 )
 _PYTHON_EXECUTABLE_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
 _PIP_EXECUTABLE_RE = re.compile(r"^pip(\d+(?:\.\d+)*)?$")
@@ -81,14 +90,18 @@ def _collect_pm_scope_tokens(
             continue
         scope_tokens.append(token)
         if "=" not in token:
-            if index + 1 >= len(tokens):
-                break
-            next_token = tokens[index + 1]
-            if next_token.startswith("-"):
+            if option_name in _NODE_PACKAGE_MANAGER_SCOPE_BOOLEAN_FLAGS:
                 index += 1
                 continue
-            index += 1
-            scope_tokens.append(next_token)
+            if option_name in _NODE_PACKAGE_MANAGER_SCOPE_VALUE_FLAGS:
+                if index + 1 >= len(tokens):
+                    break
+                next_token = tokens[index + 1]
+                if next_token.startswith("-"):
+                    index += 1
+                    continue
+                index += 1
+                scope_tokens.append(next_token)
         index += 1
     return scope_tokens
 
