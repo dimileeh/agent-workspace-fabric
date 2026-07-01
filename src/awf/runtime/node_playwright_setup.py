@@ -427,6 +427,27 @@ def _collect_uv_run_scope_tokens(tokens: list[str], run_index: int) -> list[str]
     return scope_tokens
 
 
+def _cd_prefix_from_cd_only_segment(segment: str, terminator: str) -> str | None:
+    """Return ``cd <dir> <sep> `` when a shell segment is solely ``cd <path>``."""
+    if terminator not in _SHELL_CHAIN_SEPARATORS:
+        return None
+    stripped = segment.strip()
+    if not stripped:
+        return None
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError:
+        return None
+    if len(tokens) != 2 or tokens[0] != "cd":
+        return None
+    cd_path = tokens[1]
+    if cd_path.endswith(";"):
+        cd_path = cd_path[:-1]
+    if terminator == ";":
+        return f"cd {shlex.quote(cd_path)}; "
+    return f"cd {shlex.quote(cd_path)} {terminator} "
+
+
 def _extract_cd_scope_prefix(tokens: list[str], pm_index: int) -> str | None:
     """Return ``cd <dir> <sep> `` when the package manager follows a cd-scoped shell chain."""
     index = pm_index - 1
@@ -536,13 +557,27 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
     ``cd apps && `` when the install command is shell-scoped via ``cd``.
     """
     for command in _profile_install_commands(profile):
-        for segment, _terminator in _split_top_level_statements(command):
+        pending_cd_prefix: str | None = None
+        for segment, terminator in _split_top_level_statements(command):
             stripped = segment.strip()
             if not stripped:
                 continue
+            cd_only_prefix = _cd_prefix_from_cd_only_segment(segment, terminator)
+            if cd_only_prefix is not None:
+                try:
+                    cd_only_tokens = shlex.split(stripped)
+                except ValueError:
+                    pending_cd_prefix = None
+                    continue
+                if not any(
+                    token.rsplit("/", 1)[-1] in _NODE_PACKAGE_MANAGERS for token in cd_only_tokens
+                ):
+                    pending_cd_prefix = cd_only_prefix
+                    continue
             try:
                 tokens = shlex.split(stripped)
             except ValueError:
+                pending_cd_prefix = None
                 continue
             for index, token in enumerate(tokens):
                 base = token.rsplit("/", 1)[-1]
@@ -556,10 +591,12 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
                         scope_tokens = _collect_pm_scope_tokens(
                             tokens, index, pm_base=base, require_consecutive=False
                         )
-                        cd_prefix = _extract_cd_scope_prefix(tokens, index)
+                        cd_prefix = _extract_cd_scope_prefix(tokens, index) or pending_cd_prefix
+                        pending_cd_prefix = None
                         if scope_tokens:
                             return shlex.join([token, *scope_tokens]), cd_prefix
                         return base, cd_prefix
+            pending_cd_prefix = None
     return None, None
 
 
