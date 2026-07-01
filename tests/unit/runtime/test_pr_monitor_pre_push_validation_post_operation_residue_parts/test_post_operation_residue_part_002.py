@@ -24,6 +24,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_dirty_finalize import (
     _worktree_unstaged_change_paths,
 )
 from awf.runtime.validation_worktree import (
+    VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_STATUS_FAILED,
     ValidationWorktreeCheck,
@@ -37,6 +38,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 from tests.unit.runtime._post_operation_residue_test_helpers import (
     queue_post_operation_residue_proof_commands,
     queue_residue_cleanup_anchor_and_delta,
+    queue_snapshot_residue_reproof_commands,
     seed_oneline_capture_residue,
 )
 from tests.unit.runtime._pre_push_validation_helpers import (
@@ -1010,6 +1012,96 @@ async def test_cleanup_proven_post_operation_residue_paths_fails_on_status_faile
 
 
 @pytest.mark.unit
+async def test_cleanup_proven_post_operation_residue_paths_fails_when_snapshot_content_unprovable(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Residue cleanup must re-validate snapshot content, not only path names.
+
+    Regression for review thread ``PRRT_kwDOSJAM6s6Nlpit``: another process can
+    rewrite the same dirty path after residue proof but before cleanup; matching
+    path names alone must not authorize restore/clean of the new unproven edit.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    seed_oneline_capture_residue(worktree, "--oneline", content="unrelated repair edit\n")
+    snapshot = ValidationWorktreeCheck(
+        clean=False,
+        paths=("--oneline",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        AsyncMock(return_value=snapshot),
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # unstaged delta: staged-only residue
+    cmd.queue_result(returncode=128, stdout="")  # cat-file: path absent at HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    cleanup = await _cleanup_proven_post_operation_residue_paths(
+        runner,
+        worktree_path=worktree,
+        restore_ref="a" * 40,
+        proven_paths={"--oneline"},
+    )
+
+    assert cleanup.ok is False
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert "content or staging state" in (cleanup.message or "")
+
+
+@pytest.mark.unit
+async def test_cleanup_proven_post_operation_residue_paths_fails_when_snapshot_has_unstaged_edits(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Residue cleanup must fail when same-path snapshot gains unstaged edits."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    seed_oneline_capture_residue(worktree, "--oneline", content="")
+    snapshot = ValidationWorktreeCheck(
+        clean=False,
+        paths=("--oneline",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        AsyncMock(return_value=snapshot),
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="M\0--oneline\0")  # unstaged delta on proven path
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    cleanup = await _cleanup_proven_post_operation_residue_paths(
+        runner,
+        worktree_path=worktree,
+        restore_ref="a" * 40,
+        proven_paths={"--oneline"},
+    )
+
+    assert cleanup.ok is False
+    assert cleanup.reason_code == VALIDATION_WORKTREE_CLEANUP_FAILED
+    assert "content or staging state" in (cleanup.message or "")
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_post_operation_residue_cleanup_fails_when_owned_delta_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
@@ -1103,6 +1195,7 @@ async def test_pre_push_validation_post_operation_residue_cleanup_fails_when_unt
     )
     queue_post_operation_residue_proof_commands(cmd, worktree=worktree)
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # pre-cleanup HEAD verify
+    queue_snapshot_residue_reproof_commands(cmd)
     cmd.queue_result(returncode=1, stdout="", stderr="clean failed\n")  # git clean failure
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # head_after
     runner = make_runner(

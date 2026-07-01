@@ -1075,7 +1075,10 @@ async def _cleanup_proven_post_operation_residue_paths(
     The generic ``_pre_push_validation_cleanup`` re-runs worktree status and acts
     on every current non-ignored dirty path. A path introduced after residue
     proof but before cleanup could be restored/deleted even though it was never
-    proven safe (review thread ``PRRT_kwDOSJAM6s6Ngeu0``).
+    proven safe (review thread ``PRRT_kwDOSJAM6s6Ngeu0``). The snapshot must
+    also re-run residue proof on current content and staging state, not only
+    compare path names, so a same-path rewrite after proof cannot be swept
+    (review thread ``PRRT_kwDOSJAM6s6Nlpit``).
     """
     from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
     from awf.runtime.validation_worktree import (
@@ -1115,6 +1118,27 @@ async def _cleanup_proven_post_operation_residue_paths(
             message=(
                 "Post-operation residue cleanup refused: worktree dirty snapshot "
                 "does not match proven residue paths."
+            ),
+        )
+
+    if not await _dirty_paths_provable_as_post_operation_residue(
+        self,
+        worktree_path=worktree_path,
+        dirty_paths=snapshot_dirty,
+    ):
+        _log.warning(
+            "monitor.pre_push_post_operation_residue_cleanup_snapshot_unprovable",
+            proven_paths=sorted(proven_paths),
+            snapshot_dirty=sorted(snapshot_dirty),
+        )
+        return ValidationWorktreeCleanup(
+            cleaned=False,
+            check=snapshot,
+            restore_ref=restore_ref,
+            reason_code=VALIDATION_WORKTREE_CLEANUP_FAILED,
+            message=(
+                "Post-operation residue cleanup refused: worktree dirty snapshot "
+                "no longer matches proven residue content or staging state."
             ),
         )
 

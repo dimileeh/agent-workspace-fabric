@@ -43,6 +43,12 @@ def queue_residue_cleanup_anchor_and_delta(
     cmd.queue_result(returncode=0, stdout=owned_delta_z)  # residue gate committed delta
 
 
+def queue_snapshot_residue_reproof_commands(cmd: FakeCommandRunner) -> None:
+    """Queue git commands for snapshot residue re-proof during scoped cleanup."""
+    cmd.queue_result(returncode=0, stdout="")  # unstaged delta: staged-only residue
+    cmd.queue_result(returncode=128, stdout="")  # cat-file: path absent at HEAD
+
+
 def queue_residue_cleanup_execution(
     cmd: FakeCommandRunner,
     *,
@@ -53,6 +59,7 @@ def queue_residue_cleanup_execution(
 ) -> None:
     """Queue pre-cleanup HEAD verify, scoped restore/clean, and post-cleanup HEAD check."""
     cmd.queue_result(returncode=0, stdout=f"{head_sha}\n")  # pre-cleanup HEAD verify
+    queue_snapshot_residue_reproof_commands(cmd)
     cmd.queue_result(
         returncode=restore_returncode,
         stdout="",
