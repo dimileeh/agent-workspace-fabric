@@ -68,7 +68,7 @@ class _RecordingExecutor:
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
         self.calls.append(workspace_id)
 
-    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object | None:
         del workspace_id
         return object()
 
@@ -78,6 +78,8 @@ class _RecordingExecutor:
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        if handoff is None:
+            return
         await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
