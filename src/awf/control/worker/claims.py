@@ -1335,6 +1335,7 @@ async def _refresh_monitoring_pr_claim(self: Any, workspace_id: str) -> bool:
     """Extend the monitor claim lease for ``workspace_id``; return whether refresh succeeded."""
 
     async def _operation(session: AsyncSession) -> bool:
+        """Refresh the monitor claim lease inside a retried DB transaction."""
         lease_expires_at = datetime.now(UTC) + timedelta(
             seconds=self._config.monitor_claim_lease_seconds
         )

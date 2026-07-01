@@ -37,6 +37,7 @@ from awf.db.repositories import OperationRepository, WorkspaceRepository
 
 
 def _remember_active_salvage_monitor_recovery_operation_id(self: Any, operation_id: str) -> None:
+    """Track a salvage monitor recovery operation id with bounded in-memory retention."""
     self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
     self._active_salvage_monitor_recovery_operation_ids[operation_id] = None
     while (
