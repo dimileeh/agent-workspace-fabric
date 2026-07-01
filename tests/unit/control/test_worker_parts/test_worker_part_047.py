@@ -22,11 +22,13 @@ from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
 )
+from awf.control.worker import dispatch_methods as worker_dispatch_methods
 from awf.control.worker import recovery_cooldown as worker_recovery_cooldown
 from awf.control.worker.types import (
     _ActiveExecutionCandidate,
 )
 from awf.db.enums import OperationStatus, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
@@ -331,6 +333,64 @@ async def test_safe_worker_paths_swallow_runtime_failures(
     assert finish_calls[0]["operation_id"] == "op_handoff_failed"
     assert finish_calls[0]["status"] == OperationStatus.failed
     assert finish_calls[0]["error_code"] == "MONITOR_RECOVERY_FAILED"
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_handoff_failure_error_skips_restart_start_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Recovery start events must not mask the real handoff abort reason."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-handoff-failure",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_recovery_started",
+            reason_code="MONITOR_RECOVERY_AFTER_RESTART",
+            payload={"operation_id": "op-recovery"},
+        )
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    (
+        error_code,
+        error_message,
+    ) = await worker_dispatch_methods._monitor_recovery_handoff_failure_error(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert error_code == "MONITOR_RECOVERY_FAILED"
+    assert "failed" in error_message.lower()
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_runtime_restart_failed",
+            reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+            payload={"reason_code": "MONITOR_RECOVERY_COMPOSE_FAILED"},
+        )
+        await session.commit()
+
+    error_code, _ = await worker_dispatch_methods._monitor_recovery_handoff_failure_error(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert error_code == "MONITOR_RECOVERY_COMPOSE_FAILED"
 
 
 @pytest.mark.unit

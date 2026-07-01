@@ -56,6 +56,22 @@ _PAUSED_RESUME_SAFE_METHOD: dict[str, str] = {
     "recovering": "_safely_resume_recovering_claimed",
 }
 
+_MONITOR_RECOVERY_HANDOFF_FAILURE_REASON_CODES = frozenset(
+    {
+        "FORGE_NOT_SUPPORTED",
+        "BITBUCKET_AUTH_NOT_CONFIGURED",
+    }
+)
+
+
+def _is_monitor_recovery_handoff_failure_reason(reason_code: str) -> bool:
+    """Return whether ``reason_code`` reflects a monitor handoff abort cause."""
+    if reason_code in _MONITOR_RECOVERY_HANDOFF_FAILURE_REASON_CODES:
+        return True
+    if not reason_code.startswith("MONITOR_RECOVERY"):
+        return False
+    return reason_code.endswith("_FAILED") or reason_code.endswith("_MISSING")
+
 
 def _draining_execution_task_count(self: Any) -> int:
     return sum(
@@ -662,12 +678,10 @@ async def _monitor_recovery_handoff_failure_error(
                 reason_code = event.reason_code
                 if reason_code is None:
                     continue
-                if reason_code.startswith("MONITOR_RECOVERY") or reason_code in {
-                    "FORGE_NOT_SUPPORTED",
-                    "BITBUCKET_AUTH_NOT_CONFIGURED",
-                }:
-                    message = ws.failure_message or default_message
-                    return reason_code, message[:2000]
+                if not _is_monitor_recovery_handoff_failure_reason(reason_code):
+                    continue
+                message = ws.failure_message or default_message
+                return reason_code, message[:2000]
             if ws.status == WorkspaceStatus.failed.value and ws.failure_message:
                 return default_code, ws.failure_message[:2000]
     except Exception:
