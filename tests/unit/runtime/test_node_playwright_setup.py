@@ -63,6 +63,45 @@ def test_browser_install_detects_node_manager_from_bare_install_token() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("setup_command", "expected_command"),
+    [
+        ("yarn --immutable", "yarn playwright install chromium"),
+        ("yarn --immutable --immutable-cache", "yarn playwright install chromium"),
+        (
+            "yarn --cwd apps/console --immutable",
+            "yarn --cwd apps/console playwright install chromium",
+        ),
+    ],
+)
+def test_browser_install_detects_yarn_option_only_install_commands(
+    setup_command: str, expected_command: str
+) -> None:
+    """Verify browser install treats Yarn option-only CI installs as install signals."""
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"setup": [setup_command]}}
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == expected_command
+
+
+@pytest.mark.unit
+def test_browser_install_ignores_yarn_option_only_help_queries() -> None:
+    """Verify browser install ignores Yarn help/version queries without install subcommands."""
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"setup": ["yarn --immutable --help"]}}
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == "npx playwright install chromium"
+
+
+@pytest.mark.unit
 def test_browser_install_ignores_node_manager_with_non_install_subcommand() -> None:
     # ``pnpm run build`` is not an install signal, so detection falls through to npx.
     """Verify browser install ignores node manager with non install subcommand."""

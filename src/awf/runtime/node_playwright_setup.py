@@ -17,6 +17,10 @@ from awf.profiles.models import ProfileCommand, WorkspaceProfile
 _PLAYWRIGHT_BROWSER_INSTALL_TIMEOUT_SECONDS = 900
 _NODE_PACKAGE_MANAGERS = ("pnpm", "yarn", "bun", "npm")
 _NODE_INSTALL_SUBCOMMANDS = frozenset({"add", "ci", "i", "install"})
+_NODE_OPTION_ONLY_INSTALL_FLAGS: dict[str, frozenset[str]] = {
+    "yarn": frozenset({"--immutable", "--immutable-cache"}),
+}
+_NODE_NON_INSTALL_QUERY_FLAGS = frozenset({"--help", "--version", "-h", "-v"})
 _NODE_PACKAGE_MANAGER_SCOPE_VALUE_FLAGS = frozenset(
     {
         "--cwd",
@@ -376,6 +380,35 @@ def _profile_install_commands(profile: WorkspaceProfile) -> list[str]:
     return commands
 
 
+def _is_node_option_only_install_command(tokens: list[str], pm_index: int, base: str) -> bool:
+    """Return whether tokens after the PM executable are install-only flags (e.g. ``yarn --immutable``).
+
+    Mirrors ``validation_setup._option_only_dependency_install_command_match`` so Playwright
+    browser install uses the same package manager Yarn PnP/zero-install projects declare.
+    """
+    install_flags = _NODE_OPTION_ONLY_INSTALL_FLAGS.get(base)
+    if install_flags is None:
+        return False
+    saw_install_flag = False
+    index = pm_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--" or not token.startswith("-"):
+            return False
+        option_name = token.split("=", 1)[0]
+        if option_name in _NODE_NON_INSTALL_QUERY_FLAGS:
+            return False
+        if option_name in install_flags:
+            saw_install_flag = True
+        if option_name in _NODE_PACKAGE_MANAGER_SCOPE_VALUE_FLAGS and "=" not in token:
+            if index + 1 >= len(tokens):
+                return False
+            index += 2
+            continue
+        index += 1
+    return saw_install_flag
+
+
 def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | None, str | None]:
     """Infer the Node package manager from an install command in the profile, if any.
 
@@ -391,7 +424,11 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
             base = token.rsplit("/", 1)[-1]
             if base in _NODE_PACKAGE_MANAGERS:
                 rest = tokens[index + 1 :]
-                if not rest or any(sub in _NODE_INSTALL_SUBCOMMANDS for sub in rest):
+                if (
+                    not rest
+                    or any(sub in _NODE_INSTALL_SUBCOMMANDS for sub in rest)
+                    or _is_node_option_only_install_command(tokens, index, base)
+                ):
                     scope_tokens = _collect_pm_scope_tokens(
                         tokens, index, require_consecutive=False
                     )
