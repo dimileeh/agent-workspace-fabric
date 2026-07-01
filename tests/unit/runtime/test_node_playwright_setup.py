@@ -212,6 +212,48 @@ def test_setup_plan_runs_npx_browser_install_before_pre_agent_install() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("validate_command", "expected_command"),
+    [
+        ("pnpm install", "pnpm exec playwright install chromium"),
+        ("npm ci", "npx playwright install chromium"),
+        (
+            "cd apps/console && pnpm install",
+            "cd apps/console && pnpm exec playwright install chromium",
+        ),
+    ],
+)
+def test_browser_install_detects_node_manager_from_validate_only(
+    validate_command: str, expected_command: str
+) -> None:
+    """Verify browser install infers Node package manager from validate when setup has none."""
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"validate": [validate_command]}}
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == expected_command
+
+
+@pytest.mark.unit
+def test_browser_install_prefers_setup_node_manager_over_validate() -> None:
+    """Verify setup install commands win when both setup and validate declare a manager."""
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["pnpm install"], "validate": ["npm ci"]},
+        }
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == "pnpm exec playwright install chromium"
+
+
+@pytest.mark.unit
 def test_browser_install_prefers_detected_node_package_manager() -> None:
     """Verify browser install prefers detected node package manager."""
     profile = _profile(
