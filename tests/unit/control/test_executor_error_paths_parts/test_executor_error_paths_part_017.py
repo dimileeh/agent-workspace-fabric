@@ -212,7 +212,7 @@ class TestResumePrMonitorStatusRechecks:
         original_recheck = executor._recheck_status
 
         async def _recheck_status(workspace_id: str, *, expected: Any, action: str, **kw: Any):
-            if action == "resume_monitor_run":
+            if action == "resume_monitor_start":
                 async with factory() as s:
                     repo = WorkspaceRepository(s)
                     ws = await repo.get(workspace_id)

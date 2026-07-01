@@ -428,7 +428,7 @@ async def run_resumed_pr_monitor(
     if not await self._recheck_status(
         workspace_id,
         expected=WorkspaceStatus.monitoring_pr,
-        action="resume_monitor_run",
+        action="resume_monitor_start",
     ):
         return
     await handoff.monitor.run(
