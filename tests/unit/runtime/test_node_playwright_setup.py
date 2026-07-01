@@ -1002,6 +1002,7 @@ def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
     assert _collect_pm_scope_tokens(["npm", "-C", "-w"], 0) == ["-C", "-w"]
     assert _collect_pm_scope_tokens(shlex.split("pnpm -C apps;"), 0) == ["-C", "apps;"]
     assert _collect_pm_scope_tokens(["npm", "-C;", "apps"], 0) == ["-C", "apps"]
+    assert _collect_pm_scope_tokens(["npm", "-w", "-"], 0) == ["-w"]
     assert _collect_pm_scope_tokens(shlex.split("pnpm --filter pkg"), 0) == ["--filter", "pkg"]
     assert _pm_invocation_tokens(["npm", "run;", "build"], 0) == ["run"]
 
@@ -1026,6 +1027,9 @@ def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
     assert _collect_uv_pip_scope_tokens(["uv", "pip", "install", "--python", "-"], 2) == [
         "--python"
     ]
+    assert _collect_uv_pip_scope_tokens(shlex.split("uv pip install --python=3.12 pkg"), 2) == [
+        "--python=3.12"
+    ]
 
     pip_system = shlex.split("uv pip install --system --python=3.12 pkg")
     assert _uv_pip_system_python_executable(pip_system, 2) == "python3.12"
@@ -1040,6 +1044,8 @@ def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
     pip_system_no_value = shlex.split("uv pip install --system --reinstall")
     assert _uv_pip_system_python_executable(pip_system_no_value, 2) == "python"
     assert _uv_pip_system_python_executable(["uv", "pip", "install", "--"], 2) is None
+    pip_system_hyphen_python = shlex.split("uv pip install --system --python - pkg")
+    assert _uv_pip_system_python_executable(pip_system_hyphen_python, 2) == "python"
 
     assert _cd_prefix_from_cd_only_segment("   ", "&&") is None
 
@@ -1107,6 +1113,10 @@ def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
         ["uv pip install --system --python 3.12 pkg"],
         allow_pytest_playwright_shortcut=False,
     ) == ("python3.12", None)
+    assert _python_executable_from_commands(
+        ["uv cache dir", "uv sync --frozen"],
+        allow_pytest_playwright_shortcut=False,
+    ) == ("uv run --frozen python", None)
     uv_sync_profile = _profile({"phases": {"setup": ["uv sync --frozen"]}})
     assert _python_playwright_executable(uv_sync_profile) == ("uv run --frozen python", None)
 

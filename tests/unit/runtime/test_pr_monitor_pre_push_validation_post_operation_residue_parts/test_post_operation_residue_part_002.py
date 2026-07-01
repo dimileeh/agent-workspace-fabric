@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,6 +20,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_dirty_finalize import (
     _empty_oneline_path_provable_as_cli_capture,
     _is_git_cli_flag_capture_path,
     _path_exists_at_head,
+    _path_is_symlink_in_index,
     _path_provable_as_git_cli_flag_capture,
     _read_residue_path_content,
     _try_cleanup_pre_push_post_operation_residue,
@@ -746,6 +748,25 @@ async def test_read_residue_path_content_rejects_staged_index_symlink(
     assert [call.args[call.args.index("-C") + 2 :] for call in cmd.calls] == [
         ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", "--oneline"],
     ]
+
+
+@pytest.mark.unit
+async def test_path_is_symlink_in_index_fail_closed_when_ls_files_fails(
+    tmp_path: Path,
+) -> None:
+    """``git ls-files --stage`` failures must fail closed before symlink proof."""
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: not a git repository")
+    runner = SimpleNamespace(_deps=SimpleNamespace(runner=cmd))
+
+    assert (
+        await _path_is_symlink_in_index(
+            runner,
+            worktree_path=tmp_path,
+            path="--oneline",
+        )
+        is None
+    )
 
 
 @pytest.mark.unit

@@ -189,7 +189,9 @@ def _collect_pm_scope_tokens(
         if token.endswith(";") and not ends_chain:
             token = token[:-1]
             ends_chain = True
-            if not token:
+            if (
+                not token
+            ):  # pragma: no cover — only ``";"`` strips empty; that token is a chain separator
                 break
         if token == "--":
             break
@@ -524,7 +526,9 @@ def _is_node_option_only_install_command(tokens: list[str], pm_index: int, base:
             break
         if token.endswith(";"):
             token = token[:-1]
-            if not token:
+            if (
+                not token
+            ):  # pragma: no cover — only ``";"`` strips empty; that token is a chain separator
                 break
             if token == "--" or not token.startswith("-"):
                 return False
@@ -571,7 +575,9 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
                 if cd_only_prefix is not None:
                     try:
                         cd_only_tokens = shlex.split(stripped)
-                    except ValueError:
+                    except (
+                        ValueError
+                    ):  # pragma: no cover — cd_only_prefix implies shlex already succeeded
                         pending_cd_prefix = None
                         continue
                     if not any(
