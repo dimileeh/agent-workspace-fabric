@@ -485,14 +485,14 @@ def playwright_command(package_manager: str, *args: str) -> str:
     executable_path = package_manager_tokens[0]
     executable = executable_path.rsplit("/", 1)[-1]
     scope_tokens = _collect_pm_scope_tokens(package_manager_tokens, 0)
-    scope_prefix = shlex.join([executable_path, *scope_tokens]) if scope_tokens else executable
+    scope_prefix = shlex.join([executable_path, *scope_tokens])
 
     if executable == "pnpm":
         return f"{scope_prefix} exec playwright {escaped_args}"
     if executable == "yarn":
         return f"{scope_prefix} playwright {escaped_args}"
     if executable == "bun":
-        if scope_tokens:
+        if scope_tokens or executable_path != executable:
             return f"{scope_prefix} x playwright {escaped_args}"
         return f"bunx playwright {escaped_args}"
     if scope_tokens:
@@ -601,7 +601,7 @@ def _detected_node_package_manager(profile: WorkspaceProfile) -> tuple[str | Non
                             pending_cd_prefix = None
                             if scope_tokens:
                                 return shlex.join([token, *scope_tokens]), cd_prefix
-                            return base, cd_prefix
+                            return token, cd_prefix
                 pending_cd_prefix = None
     return None, None
 

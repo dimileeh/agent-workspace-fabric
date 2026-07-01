@@ -32,13 +32,30 @@ def _profile(payload: dict[str, object]) -> WorkspaceProfile:
         ("yarn", "yarn playwright install chromium"),
         ("bun", "bunx playwright install chromium"),
         ("npm", "npx playwright install chromium"),
-        ("/usr/local/bin/pnpm", "pnpm exec playwright install chromium"),
     ],
 )
 def test_playwright_command_is_package_manager_aware(package_manager: str, expected: str) -> None:
-    # A bare path-qualified manager still resolves by its leading token.
     """Verify playwright command is package manager aware."""
-    assert playwright_command(package_manager.rsplit("/", 1)[-1], "install", "chromium") == expected
+    assert playwright_command(package_manager, "install", "chromium") == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("package_manager", "expected"),
+    [
+        ("/opt/pnpm/bin/pnpm", "/opt/pnpm/bin/pnpm exec playwright install chromium"),
+        (
+            "/repo/.yarn/releases/yarn",
+            "/repo/.yarn/releases/yarn playwright install chromium",
+        ),
+        ("/opt/bun/bin/bun", "/opt/bun/bin/bun x playwright install chromium"),
+    ],
+)
+def test_playwright_command_preserves_path_qualified_manager(
+    package_manager: str, expected: str
+) -> None:
+    """Verify path-qualified package managers keep their executable prefix."""
+    assert playwright_command(package_manager, "install", "chromium") == expected
 
 
 @pytest.mark.unit
@@ -60,6 +77,31 @@ def test_browser_install_detects_node_manager_from_bare_install_token() -> None:
 
     assert command is not None
     assert command.command == "yarn playwright install chromium"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("setup_command", "expected_command"),
+    [
+        ("/opt/pnpm/bin/pnpm install", "/opt/pnpm/bin/pnpm exec playwright install chromium"),
+        (
+            "/repo/.yarn/releases/yarn install",
+            "/repo/.yarn/releases/yarn playwright install chromium",
+        ),
+    ],
+)
+def test_browser_install_preserves_path_qualified_node_manager(
+    setup_command: str, expected_command: str
+) -> None:
+    """Verify browser install keeps path-qualified package managers from setup."""
+    profile = _profile(
+        {"runtime": {"browsers": ["chromium"]}, "phases": {"setup": [setup_command]}}
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == expected_command
 
 
 @pytest.mark.unit
