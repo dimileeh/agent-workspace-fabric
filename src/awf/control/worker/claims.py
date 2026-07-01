@@ -1115,6 +1115,9 @@ async def _finish_monitor_recovery_operation_after_cancellation(
 ) -> bool:
     """Finalize the recovery operation even if cancelled again mid-write.
 
+    Returns ``True`` when the shielded finalize completed successfully; ``False``
+    when the underlying write could not finish.
+
     The CancelledError handler must persist this status before re-raising,
     but the finalize is itself a cancellable DB write. A second cancellation
     (e.g. worker shutdown cancelling outstanding tasks) landing mid-write

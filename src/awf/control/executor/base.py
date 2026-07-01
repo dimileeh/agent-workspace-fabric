@@ -165,6 +165,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         )
 
     async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
+        """Resume the PR monitor for a workspace already in ``monitoring_pr``."""
         return await _monitor_handoff.resume_pr_monitor(
             self,
             workspace_id=workspace_id,
