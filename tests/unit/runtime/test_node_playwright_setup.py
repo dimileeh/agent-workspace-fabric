@@ -7,10 +7,29 @@ package manager or the Python interpreter from the profile's existing commands.
 
 from __future__ import annotations
 
+import shlex
+
 import pytest
 
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.node_playwright_setup import (
+    _cd_prefix_from_cd_only_segment,
+    _collect_pm_scope_tokens,
+    _collect_uv_global_scope_tokens,
+    _collect_uv_pip_scope_tokens,
+    _collect_uv_run_scope_tokens,
+    _collect_uv_sync_scope_tokens,
+    _detected_node_package_manager,
+    _extract_cd_scope_prefix,
+    _has_pip_install_subcommand,
+    _is_node_option_only_install_command,
+    _pip_to_python_executable,
+    _pm_invocation_tokens,
+    _python_executable_from_commands,
+    _python_playwright_executable,
+    _uv_pip_system_python_executable,
+    _uv_run_python_prefix,
+    _uv_setup_python_prefix,
     playwright_browser_install_command,
     playwright_command,
 )
@@ -756,3 +775,352 @@ def test_setup_plan_omits_browser_install_when_no_browsers_declared() -> None:
     plan = profile_phase_command_plan(profile, ["setup"])
 
     assert all("playwright install" not in step.command.command for step in plan)
+
+
+@pytest.mark.unit
+def test_pm_invocation_tokens_stops_at_shell_chain_separators() -> None:
+    """PM invocation parsing must not bleed into chained shell segments."""
+    tokens = ["pnpm", "install", "&&", "npm", "test"]
+    assert _pm_invocation_tokens(tokens, 0) == ["install"]
+    assert _pm_invocation_tokens(["yarn", "add", "pkg;"], 0) == ["add", "pkg"]
+    assert _pm_invocation_tokens(["npm", "ci", ";"], 0) == ["ci"]
+
+
+@pytest.mark.unit
+def test_collect_pm_scope_tokens_handles_non_consecutive_and_terminators() -> None:
+    """Scope extraction must preserve cwd flags and stop at shell terminators."""
+    tokens = shlex.split("pnpm -C apps install --filter pkg && npm test")
+    pnpm_index = tokens.index("pnpm")
+    assert _collect_pm_scope_tokens(tokens, pnpm_index) == ["-C", "apps"]
+
+    yarn_tokens = shlex.split("yarn --cwd apps --immutable; echo done")
+    yarn_index = yarn_tokens.index("yarn")
+    assert _collect_pm_scope_tokens(yarn_tokens, yarn_index) == ["--cwd", "apps"]
+
+    npm_tokens = ["npm", "-w", "pkg", "install", "leftover"]
+    assert _collect_pm_scope_tokens(npm_tokens, 0, require_consecutive=False) == ["-w", "pkg"]
+
+    pnpm_boolean = shlex.split("pnpm -w install;")
+    assert _collect_pm_scope_tokens(pnpm_boolean, 0) == ["-w"]
+
+    npm_missing_value = ["npm", "-w"]
+    assert _collect_pm_scope_tokens(npm_missing_value, 0) == ["-w"]
+
+
+@pytest.mark.unit
+def test_collect_uv_helper_scope_parsers_cover_global_run_and_pip_paths() -> None:
+    """UV scope helpers must preserve project/python selectors for browser install."""
+    global_tokens = shlex.split("uv --project apps run --python 3.12 python -m playwright install")
+    uv_index = global_tokens.index("uv")
+    collected = _collect_uv_global_scope_tokens(global_tokens, uv_index)
+    assert collected == (["--project", "apps"], global_tokens.index("run"))
+
+    sync_tokens = shlex.split("uv sync --frozen --extra docs")
+    sync_index = sync_tokens.index("sync")
+    assert _collect_uv_sync_scope_tokens(sync_tokens, sync_index) == ["--frozen", "--extra", "docs"]
+
+    pip_tokens = shlex.split("uv pip install --python 3.12 --system requests")
+    pip_index = pip_tokens.index("pip") + 1
+    assert _collect_uv_pip_scope_tokens(pip_tokens, pip_index) == ["--python", "3.12"]
+    assert _uv_pip_system_python_executable(pip_tokens, pip_index) == "python3.12"
+
+    assert _uv_run_python_prefix(global_tokens, uv_index) == (
+        "uv --project apps run --python 3.12 python"
+    )
+    setup_tokens = shlex.split("uv --directory apps sync --frozen")
+    assert _uv_setup_python_prefix(setup_tokens, setup_tokens.index("uv")) == (
+        "uv --directory apps run --frozen python"
+    )
+
+
+@pytest.mark.unit
+def test_uv_helper_scope_parsers_fail_closed_on_invalid_tokens() -> None:
+    """Invalid UV token shapes must not invent browser-install prefixes."""
+    assert _collect_uv_global_scope_tokens(["node", "run", "app"], 0) is None
+    assert _collect_uv_global_scope_tokens(shlex.split("uv --"), 0) is None
+    assert _uv_run_python_prefix(shlex.split("uv pip install pkg"), 0) is None
+    assert _uv_setup_python_prefix(shlex.split("uv cache dir"), 0) is None
+    assert _uv_pip_system_python_executable(shlex.split("uv pip install pkg"), 1) is None
+
+
+@pytest.mark.unit
+def test_cd_prefix_helpers_extract_shell_scoped_install_commands() -> None:
+    """cd-only shell segments must preserve directory scope for browser install."""
+    assert _cd_prefix_from_cd_only_segment("cd apps/web", "&&") == "cd apps/web && "
+    assert _cd_prefix_from_cd_only_segment("cd apps/web", ";") == "cd apps/web; "
+    assert _cd_prefix_from_cd_only_segment("cd apps", "|") is None
+
+    tokens = shlex.split("cd apps && pnpm -C nested install")
+    pm_index = tokens.index("pnpm")
+    assert _extract_cd_scope_prefix(tokens, pm_index) == "cd apps && "
+
+
+@pytest.mark.unit
+def test_node_option_only_install_and_pip_helpers_cover_edge_paths() -> None:
+    """Yarn immutable installs and pip executables must be recognized narrowly."""
+    yarn_tokens = shlex.split("yarn --cwd apps --immutable")
+    assert (
+        _is_node_option_only_install_command(yarn_tokens, yarn_tokens.index("yarn"), "yarn") is True
+    )
+    assert _is_node_option_only_install_command(shlex.split("yarn --help"), 0, "yarn") is False
+    assert _is_node_option_only_install_command(shlex.split("yarn --immutable;"), 0, "yarn") is True
+
+    assert _pip_to_python_executable("pip3.12") == "python3.12"
+    assert _pip_to_python_executable("node") is None
+
+    pip_tokens = shlex.split("python -m pip install -r requirements.txt")
+    pip_index = pip_tokens.index("pip")
+    assert _has_pip_install_subcommand(pip_tokens, pip_index) is True
+    assert _has_pip_install_subcommand(shlex.split("python -m pip --version"), 2) is False
+
+
+@pytest.mark.unit
+def test_playwright_command_collects_scope_from_tokenized_package_manager() -> None:
+    """Path-qualified package managers must preserve scope flags in the emitted command."""
+    assert (
+        playwright_command("/opt/pnpm/bin/pnpm -C apps", "install", "chromium")
+        == "/opt/pnpm/bin/pnpm -C apps exec playwright install chromium"
+    )
+    assert playwright_command("'unclosed", "install", "chromium") == (
+        "npx playwright install chromium"
+    )
+
+
+@pytest.mark.unit
+def test_detected_node_package_manager_handles_cd_only_and_validate_fallback() -> None:
+    """cd-scoped installs and validate-only Node commands must be detected."""
+    profile = _profile(
+        {
+            "phases": {
+                "setup": ["cd apps/web;"],
+                "validate_commands": ["cd apps/web && pnpm install"],
+            }
+        }
+    )
+    package_manager, cd_prefix = _detected_node_package_manager(profile)
+    assert package_manager == "pnpm"
+    assert cd_prefix == "cd apps/web && "
+
+    pipe_scoped = _profile({"phases": {"setup": ["cd apps/web | pnpm install"]}})
+    assert _detected_node_package_manager(pipe_scoped) == ("pnpm", None)
+
+
+@pytest.mark.unit
+def test_python_executable_from_commands_handles_uv_setup_and_bad_commands() -> None:
+    """Python inference must skip unparseable commands and honor uv setup prefixes."""
+    commands = [
+        "notquoted",
+        "uv --project apps sync --frozen",
+        "cd svc && uv run --python 3.12 python -m playwright install",
+    ]
+    assert _python_executable_from_commands(commands, allow_pytest_playwright_shortcut=False) == (
+        "uv --project apps run --frozen python",
+        None,
+    )
+
+    pytest_shortcut = _python_executable_from_commands(
+        ["pytest -q tests/playwright"],
+        allow_pytest_playwright_shortcut=True,
+    )
+    assert pytest_shortcut == ("python", None)
+
+
+@pytest.mark.unit
+def test_extract_cd_scope_prefix_handles_inline_cd_and_chain_separators() -> None:
+    """Inline ``cd <dir> && <pm>`` segments must preserve directory scope."""
+    tokens = shlex.split("cd apps && pnpm install")
+    assert _extract_cd_scope_prefix(tokens, tokens.index("pnpm")) == "cd apps && "
+
+    semicolon_tokens = ["cd", "apps;", "pnpm", "install"]
+    assert _extract_cd_scope_prefix(semicolon_tokens, semicolon_tokens.index("pnpm")) == (
+        "cd apps; "
+    )
+
+
+@pytest.mark.unit
+def test_playwright_browser_install_command_applies_cd_prefix_for_node_manager() -> None:
+    """Generated browser install must keep cd scope from the detected install command."""
+    profile = _profile(
+        {
+            "runtime": {"browsers": ["chromium"]},
+            "phases": {"setup": ["cd apps/web && pnpm install"]},
+        }
+    )
+
+    command = playwright_browser_install_command(profile)
+
+    assert command is not None
+    assert command.command == "cd apps/web && pnpm exec playwright install chromium"
+
+
+@pytest.mark.unit
+def test_collect_pm_scope_tokens_skips_value_flag_without_following_token() -> None:
+    """Value flags without a trailing token must not consume unrelated argv."""
+    npm_tokens = ["npm", "--cwd"]
+    assert _collect_pm_scope_tokens(npm_tokens, 0) == ["--cwd"]
+
+    chained_scope = shlex.split("pnpm --filter pkg;")
+    assert _collect_pm_scope_tokens(chained_scope, 0) == ["--filter", "pkg;"]
+
+    skipped_value = ["npm", "-w", "-C", "apps", "install"]
+    assert _collect_pm_scope_tokens(skipped_value, 0, require_consecutive=False) == [
+        "-w",
+        "-C",
+        "apps",
+    ]
+
+
+@pytest.mark.unit
+def test_collect_uv_global_scope_tokens_requires_value_arguments() -> None:
+    """UV global flags with missing values must fail closed."""
+    tokens = shlex.split("uv --cache-dir")
+    assert _collect_uv_global_scope_tokens(tokens, 0) is None
+
+    hyphen_value = shlex.split("uv --cache-dir --project apps run python")
+    collected = _collect_uv_global_scope_tokens(hyphen_value, 0)
+    assert collected == (["--cache-dir", "--project", "apps"], hyphen_value.index("run"))
+
+
+@pytest.mark.unit
+def test_uv_setup_python_prefix_rejects_unknown_subcommands() -> None:
+    """Only ``uv sync`` and ``uv pip install|sync`` may seed browser-install prefixes."""
+    assert _uv_setup_python_prefix(shlex.split("uv pip wheel pkg"), 0) is None
+    assert _uv_setup_python_prefix(shlex.split("uv cache prune"), 0) is None
+
+
+@pytest.mark.unit
+def test_playwright_scope_helpers_cover_remaining_branch_edges() -> None:
+    """Cover fail-closed parser branches that browser-install planning relies on."""
+    assert _pm_invocation_tokens(["npm", ";"], 0) == []
+    assert _pm_invocation_tokens(["npm", "run;"], 0) == ["run"]
+
+    assert _collect_pm_scope_tokens(["npm", ";"], 0) == []
+    assert _collect_pm_scope_tokens(["npm", "--", "install"], 0) == []
+    assert _collect_pm_scope_tokens(["npm", "leftover;", "-w"], 0, require_consecutive=False) == []
+    assert _collect_pm_scope_tokens(shlex.split("pnpm -w;"), 0) == ["-w"]
+    assert _collect_pm_scope_tokens(["npm", "-C;", "-w"], 0) == ["-C"]
+    assert _collect_pm_scope_tokens(["npm", "-C", "-w"], 0) == ["-C", "-w"]
+    assert _collect_pm_scope_tokens(shlex.split("pnpm -C apps;"), 0) == ["-C", "apps;"]
+    assert _collect_pm_scope_tokens(["npm", "-C;", "apps"], 0) == ["-C", "apps"]
+    assert _collect_pm_scope_tokens(shlex.split("pnpm --filter pkg"), 0) == ["--filter", "pkg"]
+    assert _pm_invocation_tokens(["npm", "run;", "build"], 0) == ["run"]
+
+    assert _collect_uv_global_scope_tokens(shlex.split("uv --"), 0) is None
+    assert _uv_run_python_prefix(shlex.split("uv --project apps"), 0) is None
+    assert _uv_run_python_prefix(shlex.split("uv --"), 0) is None
+
+    sync_unknown = shlex.split("uv sync --unknown-flag value --frozen")
+    sync_index = sync_unknown.index("sync")
+    assert _collect_uv_sync_scope_tokens(sync_unknown, sync_index) == ["--frozen"]
+    assert _collect_uv_sync_scope_tokens(["uv", "sync", "--python"], 1) == ["--python"]
+    assert _collect_uv_sync_scope_tokens(["uv", "sync", "--python", "-"], 1) == ["--python"]
+    assert _collect_uv_sync_scope_tokens(["uv", "sync", "--"], 1) == []
+
+    pip_tokens = ["uv", "pip", "install", "--"]
+    assert _collect_uv_pip_scope_tokens(pip_tokens, 2) == []
+    assert _collect_uv_pip_scope_tokens(["uv", "pip", "install", "--python"], 2) == ["--python"]
+    assert _collect_uv_pip_scope_tokens(["uv", "pip", "install", "--python", "3.12"], 2) == [
+        "--python",
+        "3.12",
+    ]
+    assert _collect_uv_pip_scope_tokens(["uv", "pip", "install", "--python", "-"], 2) == [
+        "--python"
+    ]
+
+    pip_system = shlex.split("uv pip install --system --python=3.12 pkg")
+    assert _uv_pip_system_python_executable(pip_system, 2) == "python3.12"
+    pip_system_spaced = shlex.split("uv pip install --system --python 3.12 pkg")
+    assert _uv_pip_system_python_executable(pip_system_spaced, 2) == "python3.12"
+    pip_system_eq = shlex.split("uv pip install --system --python=3.12 --reinstall pkg")
+    assert _uv_pip_system_python_executable(pip_system_eq, 2) == "python3.12"
+    pip_system_unknown = shlex.split("uv pip install --system --reinstall pkg")
+    assert _uv_pip_system_python_executable(pip_system_unknown, 2) == "python"
+    pip_system_eq_flag = shlex.split("uv pip install --system --config-setting=a=b pkg")
+    assert _uv_pip_system_python_executable(pip_system_eq_flag, 2) == "python"
+    pip_system_no_value = shlex.split("uv pip install --system --reinstall")
+    assert _uv_pip_system_python_executable(pip_system_no_value, 2) == "python"
+    assert _uv_pip_system_python_executable(["uv", "pip", "install", "--"], 2) is None
+
+    assert _cd_prefix_from_cd_only_segment("   ", "&&") is None
+
+    assert _uv_setup_python_prefix(shlex.split("uv --project apps"), 0) is None
+    assert _uv_setup_python_prefix(shlex.split("uv pip"), 0) is None
+    assert _uv_setup_python_prefix(shlex.split("uv --"), 0) is None
+
+    run_tokens = shlex.split("uv run --python 3.12 -- python -m playwright install")
+    run_index = run_tokens.index("run")
+    assert _collect_uv_run_scope_tokens(run_tokens, run_index) == ["--python", "3.12"]
+    assert _collect_uv_run_scope_tokens(["uv", "run", "--python"], 1) == ["--python"]
+    assert _collect_uv_run_scope_tokens(["uv", "run", "--python", "-"], 1) == ["--python", "-"]
+
+    assert _cd_prefix_from_cd_only_segment("cd 'unclosed", "&&") is None
+    assert _cd_prefix_from_cd_only_segment("cd apps extra", "&&") is None
+    assert _cd_prefix_from_cd_only_segment("cd apps;", ";") == "cd apps; "
+
+    env_scoped = shlex.split("FOO=bar cd apps && pnpm install")
+    assert _extract_cd_scope_prefix(env_scoped, env_scoped.index("pnpm")) == "cd apps && "
+
+    yarn_chain = shlex.split("yarn --immutable && npm test")
+    assert (
+        _is_node_option_only_install_command(yarn_chain, yarn_chain.index("yarn"), "yarn") is True
+    )
+    assert _is_node_option_only_install_command(["yarn", " ;"], 0, "yarn") is False
+    assert _is_node_option_only_install_command(["yarn", "install"], 0, "yarn") is False
+    assert _is_node_option_only_install_command(["yarn", "--help"], 0, "yarn") is False
+    assert _is_node_option_only_install_command(["yarn", "--help;"], 0, "yarn") is False
+    assert (
+        _is_node_option_only_install_command(shlex.split("yarn --immutable --cwd"), 0, "yarn")
+        is False
+    )
+    assert _is_node_option_only_install_command(shlex.split("yarn --immutable;"), 0, "yarn") is True
+
+    bad_cd_profile = _profile(
+        {"phases": {"setup": ["cd 'unclosed;"], "validate_commands": ["pnpm install"]}}
+    )
+    assert _detected_node_package_manager(bad_cd_profile) == ("pnpm", None)
+    cd_only_bad = _profile({"phases": {"validate_commands": ["cd apps/web; pnpm install"]}})
+    assert _detected_node_package_manager(cd_only_bad) == ("pnpm", "cd apps/web; ")
+    cd_names_pm_profile = _profile({"phases": {"validate_commands": ["cd pnpm"]}})
+    assert _detected_node_package_manager(cd_names_pm_profile) == ("pnpm", None)
+
+    assert _pip_to_python_executable("/opt/venv/bin/pip3.12") == "/opt/venv/bin/python3.12"
+    pip_with_separator = shlex.split("python -m pip -- install pkg")
+    assert _has_pip_install_subcommand(shlex.split("pip wheel -- install"), 0) is False
+    assert _has_pip_install_subcommand(pip_with_separator, pip_with_separator.index("pip")) is False
+
+    assert (
+        _python_executable_from_commands(["notquoted"], allow_pytest_playwright_shortcut=False)
+        is None
+    )
+    assert (
+        _python_executable_from_commands(
+            ["npm install 'unclosed"],
+            allow_pytest_playwright_shortcut=False,
+        )
+        is None
+    )
+    assert _python_executable_from_commands(
+        ["uv sync --frozen"],
+        allow_pytest_playwright_shortcut=False,
+    ) == ("uv run --frozen python", None)
+    assert _python_executable_from_commands(
+        ["uv pip install --system --python 3.12 pkg"],
+        allow_pytest_playwright_shortcut=False,
+    ) == ("python3.12", None)
+    uv_sync_profile = _profile({"phases": {"setup": ["uv sync --frozen"]}})
+    assert _python_playwright_executable(uv_sync_profile) == ("uv run --frozen python", None)
+
+
+@pytest.mark.unit
+def test_node_option_only_install_rejects_bare_semicolon_terminator() -> None:
+    """A bare ``;`` after the PM token must not count as an install-only flag."""
+    assert _is_node_option_only_install_command(["yarn", ";"], 0, "yarn") is False
+
+
+@pytest.mark.unit
+def test_detected_node_package_manager_ignores_unparseable_cd_only_segment() -> None:
+    """Unparseable ``cd`` segments must not become a pending directory scope prefix."""
+    profile = _profile(
+        {"phases": {"setup": ["cd 'unclosed"], "validate_commands": ["pnpm install"]}}
+    )
+    assert _detected_node_package_manager(profile) == ("pnpm", None)

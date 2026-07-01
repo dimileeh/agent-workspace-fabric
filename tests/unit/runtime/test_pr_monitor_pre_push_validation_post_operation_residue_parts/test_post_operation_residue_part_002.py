@@ -749,6 +749,47 @@ async def test_read_residue_path_content_rejects_staged_index_symlink(
 
 
 @pytest.mark.unit
+async def test_read_residue_path_content_fails_closed_when_index_mode_unavailable(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """When ``git ls-files --stage`` fails, residue proof must fail closed."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: not a git repository")
+    cmd.queue_result(returncode=128, stderr="fatal: not a git repository")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    assert (
+        await _read_residue_path_content(
+            runner,
+            worktree_path=worktree,
+            path="--oneline",
+        )
+        is None
+    )
+    assert (
+        await _path_provable_as_git_cli_flag_capture(
+            runner,
+            worktree_path=worktree,
+            path="--oneline",
+        )
+        is False
+    )
+    assert [call.args[call.args.index("-C") + 2 :] for call in cmd.calls] == [
+        ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", "--oneline"],
+        ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", "--oneline"],
+    ]
+
+
+@pytest.mark.unit
 async def test_read_residue_path_content_reads_staged_index_when_file_missing_on_disk(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
