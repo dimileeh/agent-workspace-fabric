@@ -281,6 +281,37 @@ def test_profile_ollama_host_suppresses_worker_base_url_exec_passthrough(
 
 
 @pytest.mark.unit
+def test_agent_exec_env_passthrough_fails_closed_when_compose_unreadable(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing.yml"
+    assert not missing.exists()
+    passthrough = agent_exec_env_passthrough(compose_file=missing)
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in passthrough
+    assert "OLLAMA_HOST" in passthrough
+
+    bad_yaml = tmp_path / "bad-yaml.yml"
+    bad_yaml.write_text("services:\n  agent:\n    - [\n", encoding="utf-8")
+    passthrough = agent_exec_env_passthrough(compose_file=bad_yaml)
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in passthrough
+
+
+@pytest.mark.unit
+def test_agent_exec_env_passthrough_includes_worker_ollama_when_compose_has_no_env_keys(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump({"services": {"agent": {"image": "agent:latest"}}}),
+        encoding="utf-8",
+    )
+
+    passthrough = agent_exec_env_passthrough(compose_file=compose_file)
+
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" in passthrough
+
+
+@pytest.mark.unit
 def test_agent_environment_keys_from_compose_file_rejects_invalid_shapes(
     tmp_path: Path,
 ) -> None:

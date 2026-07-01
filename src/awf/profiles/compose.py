@@ -423,22 +423,30 @@ def _shadowing_worker_ollama_keys(profile_keys: set[str]) -> frozenset[str]:
     return frozenset(_OLLAMA_BASE_URL_ENV_KEYS[:top])
 
 
-def agent_environment_keys_from_compose_file(compose_file: Path) -> frozenset[str]:
-    """Return env var names declared on the agent service in a rendered compose file."""
+def _try_agent_environment_keys_from_compose_file(
+    compose_file: Path,
+) -> frozenset[str] | None:
+    """Return agent env keys from compose, or ``None`` when the file is unreadable."""
 
     try:
         payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
-        return frozenset()
+        return None
     if not isinstance(payload, Mapping):
-        return frozenset()
+        return None
     services = payload.get("services")
     if not isinstance(services, Mapping):
-        return frozenset()
+        return None
     agent = services.get("agent")
     if not isinstance(agent, Mapping):
-        return frozenset()
+        return None
     return _compose_environment_keys(agent.get("environment"))
+
+
+def agent_environment_keys_from_compose_file(compose_file: Path) -> frozenset[str]:
+    """Return env var names declared on the agent service in a rendered compose file."""
+
+    return _try_agent_environment_keys_from_compose_file(compose_file) or frozenset()
 
 
 def agent_exec_env_passthrough(*, compose_file: Path) -> tuple[str, ...]:
@@ -449,9 +457,13 @@ def agent_exec_env_passthrough(*, compose_file: Path) -> tuple[str, ...]:
     daemon wins, do not re-inject that key via exec-time ``-e`` passthrough.
     """
 
-    shadowing = _shadowing_worker_ollama_keys(
-        set(agent_environment_keys_from_compose_file(compose_file))
-    )
+    keys = _try_agent_environment_keys_from_compose_file(compose_file)
+    if keys is None:
+        # Unreadable compose: assume profile-owned OLLAMA_HOST would shadow the worker
+        # base URL rather than treat a parse failure as "no profile Ollama keys".
+        shadowing = _shadowing_worker_ollama_keys({"OLLAMA_HOST"})
+    else:
+        shadowing = _shadowing_worker_ollama_keys(set(keys))
     return tuple(name for name in AGENT_AUTH_ENV_VARS if name not in shadowing)
 
 
