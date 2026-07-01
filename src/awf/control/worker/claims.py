@@ -1025,6 +1025,57 @@ def _retain_monitor_claim_heartbeat(
     self._monitor_claim_heartbeat_tasks[workspace_id] = heartbeat
 
 
+async def _workspace_is_monitoring_pr(self: Any, workspace_id: str) -> bool:
+    """Return whether the workspace is still in ``monitoring_pr`` and claimable for retry."""
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            return ws is not None and ws.status == WorkspaceStatus.monitoring_pr.value
+    except Exception:
+        _log.exception(
+            "worker.monitor_recovery_retry_eligibility_lookup_failed",
+            workspace_id=workspace_id,
+        )
+        return False
+
+
+async def _monitor_recovery_terminal_finalize_status(
+    self: Any,
+    workspace_id: str,
+) -> tuple[OperationStatus, str | None, str | None]:
+    """Best-effort remonitor terminal status when recovery cannot retry."""
+    default_message = (
+        "Monitor recovery could not be finalized while the workspace remained claimable."
+    )
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            if ws is None:
+                return (
+                    OperationStatus.failed,
+                    "MONITOR_RECOVERY_FAILED",
+                    default_message,
+                )
+            if ws.status == WorkspaceStatus.cancelled.value:
+                return (
+                    OperationStatus.cancelled,
+                    "MONITOR_RECOVERY_CANCELLED",
+                    "Monitor recovery abandoned after workspace cancellation.",
+                )
+            if ws.status == WorkspaceStatus.completed.value:
+                return OperationStatus.succeeded, None, None
+    except Exception:
+        _log.exception(
+            "worker.monitor_recovery_terminal_finalize_status_lookup_failed",
+            workspace_id=workspace_id,
+        )
+    return (
+        OperationStatus.failed,
+        "MONITOR_RECOVERY_FAILED",
+        default_message,
+    )
+
+
 async def _safely_resume_claimed_pr_monitor(
     self: Any,
     workspace_id: str,
@@ -1063,9 +1114,26 @@ async def _safely_resume_claimed_pr_monitor(
                     recovery_operation_id=recovery_operation_id,
                     cooldown_until=datetime.now(UTC) + timedelta(seconds=cooldown_seconds),
                 )
-        if recovery_finalize_pending:
+        can_retry_recovery_finalize = (
+            not recovery_finalize_pending or await _workspace_is_monitoring_pr(self, workspace_id)
+        )
+        if recovery_finalize_pending and can_retry_recovery_finalize:
             _retain_monitor_claim_heartbeat(self, workspace_id, heartbeat)
         else:
+            if recovery_finalize_pending:
+                pending_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)
+                (
+                    terminal_status,
+                    terminal_error_code,
+                    terminal_error_message,
+                ) = await _monitor_recovery_terminal_finalize_status(self, workspace_id)
+                await self._finish_monitor_recovery_operation(
+                    workspace_id,
+                    operation_id=pending_operation_id,
+                    status=terminal_status,
+                    error_code=terminal_error_code,
+                    error_message=terminal_error_message,
+                )
             await _cancel_monitor_claim_heartbeat(self, workspace_id, heartbeat=heartbeat)
             await self._release_monitoring_pr_claim(workspace_id)
             self._monitor_recovery_operation_ids.pop(workspace_id, None)

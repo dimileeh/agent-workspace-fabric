@@ -556,6 +556,29 @@ async def test_safely_resume_pr_monitor_skips_monitor_when_finalize_never_succee
 async def test_safely_resume_claimed_pr_monitor_retains_claim_when_finalize_pending(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-finalize-pending",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="SEED",
+        )
+        await session.commit()
+
     worker = ControlWorker(
         session_factory=session_factory,
         provisioner=object(),  # type: ignore[arg-type]
@@ -566,45 +589,132 @@ async def test_safely_resume_claimed_pr_monitor_retains_claim_when_finalize_pend
     prompt_released = False
 
     async def _resume(
-        workspace_id: str,
+        resume_workspace_id: str,
         *,
         recovery_operation_id: str | None = None,
     ) -> bool:
-        assert workspace_id == "ws_monitor"
+        assert resume_workspace_id == workspace_id
         assert recovery_operation_id == "op_finalize_pending"
         return False
 
-    async def _release_monitor_claim(workspace_id: str) -> None:
+    async def _release_monitor_claim(released_workspace_id: str) -> None:
         nonlocal claim_released
-        assert workspace_id == "ws_monitor"
+        assert released_workspace_id == workspace_id
         claim_released = True
 
-    async def _prompt_release(workspace_id: str) -> None:
+    async def _prompt_release(released_workspace_id: str) -> None:
         nonlocal prompt_released
-        assert workspace_id == "ws_monitor"
+        assert released_workspace_id == workspace_id
         prompt_released = True
 
-    worker._monitor_recovery_operation_ids["ws_monitor"] = "op_finalize_pending"  # noqa: SLF001
+    worker._monitor_recovery_operation_ids[workspace_id] = "op_finalize_pending"  # noqa: SLF001
     worker._safely_resume_pr_monitor = _resume  # type: ignore[method-assign]
     worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
     worker._release_terminal_runtime_promptly = _prompt_release  # type: ignore[method-assign]
 
     await worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
-        "ws_monitor",
+        workspace_id,
         recovery_operation_id="op_finalize_pending",
     )
 
     assert claim_released is False
     assert prompt_released is False
-    assert worker._monitor_recovery_operation_ids["ws_monitor"] == "op_finalize_pending"  # noqa: SLF001
-    retained_heartbeat = worker._monitor_claim_heartbeat_tasks.get("ws_monitor")  # noqa: SLF001
+    assert worker._monitor_recovery_operation_ids[workspace_id] == "op_finalize_pending"  # noqa: SLF001
+    retained_heartbeat = worker._monitor_claim_heartbeat_tasks.get(workspace_id)  # noqa: SLF001
     assert retained_heartbeat is not None
     assert not retained_heartbeat.done()
     assert not retained_heartbeat.cancelled()
     retained_heartbeat.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await retained_heartbeat
-    worker._monitor_claim_heartbeat_tasks.pop("ws_monitor", None)  # noqa: SLF001
+    worker._monitor_claim_heartbeat_tasks.pop(workspace_id, None)  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pending_but_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Terminal workspaces must not retain a monitor claim with no retry path."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-terminal-finalize-pending",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="SEED",
+        )
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="SEED")
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    claim_released = False
+    prompt_released = False
+    finalize_calls: list[dict[str, object]] = []
+
+    async def _resume(
+        resume_workspace_id: str,
+        *,
+        recovery_operation_id: str | None = None,
+    ) -> bool:
+        assert resume_workspace_id == workspace_id
+        assert recovery_operation_id == "op_terminal_finalize_pending"
+        return False
+
+    async def _release_monitor_claim(released_workspace_id: str) -> None:
+        nonlocal claim_released
+        assert released_workspace_id == workspace_id
+        claim_released = True
+
+    async def _prompt_release(released_workspace_id: str) -> None:
+        nonlocal prompt_released
+        assert released_workspace_id == workspace_id
+        prompt_released = True
+
+    async def _finish_monitor_recovery_operation(
+        finish_workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finalize_calls.append({"workspace_id": finish_workspace_id, **kwargs})
+        return False
+
+    worker._monitor_recovery_operation_ids[workspace_id] = "op_terminal_finalize_pending"  # noqa: SLF001
+    worker._safely_resume_pr_monitor = _resume  # type: ignore[method-assign]
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._release_terminal_runtime_promptly = _prompt_release  # type: ignore[method-assign]
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    await worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+        workspace_id,
+        recovery_operation_id="op_terminal_finalize_pending",
+    )
+
+    assert claim_released is True
+    assert prompt_released is True
+    assert workspace_id not in worker._monitor_recovery_operation_ids  # noqa: SLF001
+    assert worker._monitor_claim_heartbeat_tasks.get(workspace_id) is None  # noqa: SLF001
+    assert len(finalize_calls) == 1
+    assert finalize_calls[0]["status"] == OperationStatus.failed
+    assert finalize_calls[0]["operation_id"] == "op_terminal_finalize_pending"
 
 
 @pytest.mark.unit
