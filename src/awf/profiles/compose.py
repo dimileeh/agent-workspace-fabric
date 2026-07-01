@@ -514,7 +514,3 @@ def _compose_environment_mapping(environment: object) -> dict[str, str]:
                 mapping.update({str(key): str(value) for key, value in item.items()})
         return mapping
     return {}
-
-
-def _compose_environment_keys(environment: object) -> frozenset[str]:
-    return frozenset(_compose_environment_mapping(environment))
