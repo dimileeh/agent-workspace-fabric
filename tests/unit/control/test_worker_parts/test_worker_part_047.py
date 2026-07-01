@@ -1651,6 +1651,64 @@ async def test_safely_resume_pr_monitor_falls_back_to_protocol_resume(
 
 
 @pytest.mark.unit
+async def test_safely_resume_pr_monitor_falls_back_when_handoff_api_incomplete(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Executors with only handoff (no run helper) resume via resume_pr_monitor."""
+    finish_calls: list[dict[str, object]] = []
+
+    class _PartialHandoffExecutor:
+        def __init__(self) -> None:
+            self.handoff_calls: list[str] = []
+            self.resume_calls: list[str] = []
+
+        async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+            del workspace_id
+
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            self.handoff_calls.append(workspace_id)
+            return object()
+
+        async def resume_pr_monitor(self, workspace_id: str) -> None:
+            self.resume_calls.append(workspace_id)
+
+    executor = _PartialHandoffExecutor()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_partial_handoff",
+        recovery_operation_id="op_partial_handoff",
+    )
+
+    assert result is True
+    assert executor.handoff_calls == []
+    assert executor.resume_calls == ["ws_partial_handoff"]
+    assert finish_calls == [
+        {
+            "workspace_id": "ws_partial_handoff",
+            "operation_id": "op_partial_handoff",
+            "status": OperationStatus.succeeded,
+        }
+    ]
+
+
+@pytest.mark.unit
 async def test_monitor_recovery_handoff_failure_error_skips_restart_start_event(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

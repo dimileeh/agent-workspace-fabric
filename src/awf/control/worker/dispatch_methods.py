@@ -753,8 +753,10 @@ async def _monitor_recovery_start_skipped_operation_status(
 
 
 def _executor_supports_pr_monitor_handoff(executor: Any) -> bool:
-    """Return whether ``executor`` implements the two-phase monitor resume API."""
-    return callable(getattr(executor, "resume_pr_monitor_handoff", None))
+    """Return whether ``executor`` implements the complete two-phase monitor resume API."""
+    return callable(getattr(executor, "resume_pr_monitor_handoff", None)) and callable(
+        getattr(executor, "run_resumed_pr_monitor", None)
+    )
 
 
 async def _safely_resume_pr_monitor_legacy(
