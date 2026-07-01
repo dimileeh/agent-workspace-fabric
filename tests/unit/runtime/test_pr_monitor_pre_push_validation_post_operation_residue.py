@@ -14,6 +14,9 @@ from awf.common.commands import FakeCommandRunner
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
+from awf.runtime.pr_monitor_runner.pre_push_validation_dirty_finalize import (
+    _path_exists_at_head,
+)
 from awf.runtime.validation_worktree import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
@@ -46,7 +49,38 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 def _queue_post_operation_residue_proof_commands(cmd: FakeCommandRunner) -> None:
     """Queue git commands proving ``--oneline`` is safe post-operation residue."""
     cmd.queue_result(returncode=0, stdout="")  # unstaged delta: staged-only residue
-    cmd.queue_result(returncode=1, stdout="")  # cat-file: path absent at HEAD
+    cmd.queue_result(returncode=128, stdout="")  # cat-file: path absent at HEAD
+
+
+@pytest.mark.unit
+async def test_path_exists_at_head_treats_cat_file_128_as_absent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """``git cat-file -e HEAD:<path>`` exits 128 when the path is not in the tree.
+
+      Regression for review thread ``PRRT_kwDOSJAM6s6Nf97O``: only mapping exit 1
+    to absent left real ``--oneline`` residue proof unknown and blocked cleanup.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stdout="", stderr="fatal: path does not exist\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    result = await _path_exists_at_head(
+        runner,
+        worktree_path=worktree,
+        path="--oneline",
+    )
+
+    assert result is False
 
 
 @pytest.mark.unit
