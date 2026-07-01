@@ -343,6 +343,7 @@ async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_w
     handoff = object()
     finish_calls: list[dict[str, object]] = []
     succeed_attempt = 0
+    monitor_ran_after_finalize = False
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
@@ -350,8 +351,10 @@ async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_w
             return handoff
 
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            nonlocal monitor_ran_after_finalize
             assert handoff_obj is handoff
             assert workspace_id == "ws_monitor"
+            monitor_ran_after_finalize = succeed_attempt >= 2
 
     worker = ControlWorker(
         session_factory=session_factory,
@@ -381,6 +384,7 @@ async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_w
     )
 
     assert result is True
+    assert monitor_ran_after_finalize is True
     assert len(finish_calls) == 2
     assert all(call["status"] == OperationStatus.succeeded for call in finish_calls)
     assert finish_calls[0]["operation_id"] == "op_retry_finalize"
@@ -416,7 +420,7 @@ async def test_safely_resume_pr_monitor_post_handoff_runtime_error_does_not_fail
         **kwargs: object,
     ) -> bool:
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
-        return kwargs.get("status") != OperationStatus.succeeded
+        return True
 
     worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
         _finish_monitor_recovery_operation
@@ -431,6 +435,54 @@ async def test_safely_resume_pr_monitor_post_handoff_runtime_error_does_not_fail
     assert len(finish_calls) == 1
     assert finish_calls[0]["status"] == OperationStatus.succeeded
     assert finish_calls[0]["operation_id"] == "op_post_handoff_runtime_error"
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_skips_monitor_when_finalize_never_succeeds(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    handoff = object()
+    finish_calls: list[dict[str, object]] = []
+    monitor_ran = False
+
+    class HandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            nonlocal monitor_ran
+            del handoff_obj
+            assert workspace_id == "ws_monitor"
+            monitor_ran = True
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return kwargs.get("status") != OperationStatus.succeeded
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_finalize_never_succeeds",
+    )
+
+    assert result is True
+    assert monitor_ran is False
+    assert len(finish_calls) == 2
+    assert all(call["status"] == OperationStatus.succeeded for call in finish_calls)
 
 
 @pytest.mark.unit
@@ -465,7 +517,7 @@ async def test_safely_resume_pr_monitor_post_handoff_cancellation_does_not_cance
         **kwargs: object,
     ) -> bool:
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
-        return kwargs.get("status") != OperationStatus.succeeded
+        return True
 
     async def _finish_after_cancellation(*args: object, **kwargs: object) -> None:
         nonlocal after_cancellation_called

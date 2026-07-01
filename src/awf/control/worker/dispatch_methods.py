@@ -735,6 +735,23 @@ async def _safely_resume_pr_monitor(
         if handoff_finalized:
             self._monitor_recovery_operation_ids.pop(workspace_id, None)
 
+        if not handoff_finalized:
+            handoff_finalized = await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=OperationStatus.succeeded,
+            )
+            if handoff_finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+
+        if not handoff_finalized:
+            _log.error(
+                "worker.monitor_recovery_finalize_failed_before_monitor",
+                workspace_id=workspace_id,
+                operation_id=recovery_operation_id,
+            )
+            return True
+
         await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
     except asyncio.CancelledError:
         if not handoff_succeeded:
@@ -770,13 +787,6 @@ async def _safely_resume_pr_monitor(
         # workspace hits an unexpected runtime error after handoff.
         _log.exception("worker.pr_monitor_run_failed", workspace_id=workspace_id)
         return True
-
-    if not handoff_finalized and await self._finish_monitor_recovery_operation(
-        workspace_id,
-        operation_id=recovery_operation_id,
-        status=OperationStatus.succeeded,
-    ):
-        self._monitor_recovery_operation_ids.pop(workspace_id, None)
 
     return True
 
