@@ -371,6 +371,50 @@ def test_resubmit_with_auth_evidence_but_no_ambiguous_context_is_permanent() -> 
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "HTTP 403: API rate limit exceeded for installation (https://api.github.com/graphql)",
+        "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes.",
+        "HTTP 403: You have triggered an abuse detection mechanism. Please retry your request.",
+    ],
+)
+def test_rate_limit_403_is_transient_not_permanent(stderr: str) -> None:
+    """GitHub reports primary/secondary rate-limit throttling as HTTP 403 while
+    also emitting a rate-limit marker. The generic ``http 403`` permanent marker
+    must NOT win over the recoverable rate-limit markers, or the monitor would
+    terminate instead of retrying a transient throttle."""
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(operation="gh api graphql", stderr=stderr)
+        == GitHubErrorDisposition.TRANSIENT
+    )
+    assert is_transient_github_error_text(operation="gh api graphql", stderr=stderr)
+
+
+@pytest.mark.unit
+def test_permission_denied_403_stays_permanent_despite_rate_limit_guard() -> None:
+    """A genuine permission 403 carries its own specific marker and no rate-limit
+    marker, so the rate-limit guard does not weaken it to transient."""
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(
+            operation="gh api graphql",
+            stderr="HTTP 403: Resource not accessible by integration",
+        )
+        == GitHubErrorDisposition.PERMANENT
+    )
+
+
+@pytest.mark.unit
 def test_ambiguous_auth_marker_without_context_is_permanent() -> None:
     """A 401 auth marker with no ambiguous-auth *context* is a deterministic auth
     fault (PERMANENT), not the #515 transient-401 case."""

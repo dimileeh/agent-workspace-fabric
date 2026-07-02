@@ -79,6 +79,17 @@ TRANSIENT_GITHUB_ERROR_MARKERS = (
     "could not resolve proxy",
 )
 
+RATE_LIMIT_GITHUB_ERROR_MARKERS = (
+    # GitHub reports primary/secondary rate-limit throttling as HTTP 403 while the
+    # body carries one of these recoverable markers. They must win over the generic
+    # "http 403"/"access denied" PERMANENT markers so the monitor retries the
+    # throttle instead of terminating; genuinely permanent 403s (permission denied,
+    # resource not accessible, sso required, ...) never mention a rate limit.
+    "rate limit",
+    "secondary rate limit",
+    "abuse detection",
+)
+
 AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = (
     # #515 symmetry with Bitbucket: 401 auth failures can be transient auth
     # blips and are bounded-retried; deterministic not-logged-in/not-configured
@@ -150,8 +161,12 @@ def github_error_disposition(*, operation: str, stderr: str) -> GitHubErrorDispo
     stderr_text = stderr.lower()
     text = f"{operation_text}\n{stderr_text}"
 
-    if "already exists" not in stderr_text and any(
-        marker in text for marker in PERMANENT_GITHUB_ERROR_MARKERS
+    has_rate_limit_marker = any(marker in text for marker in RATE_LIMIT_GITHUB_ERROR_MARKERS)
+
+    if (
+        not has_rate_limit_marker
+        and "already exists" not in stderr_text
+        and any(marker in text for marker in PERMANENT_GITHUB_ERROR_MARKERS)
     ):
         return GitHubErrorDisposition.PERMANENT
 
