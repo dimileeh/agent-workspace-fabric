@@ -936,6 +936,7 @@ async def _safely_resume_pr_monitor(
                     ws_status is None
                     or ws_status == WorkspaceStatus.monitoring_pr.value
                     or ws_status == WorkspaceStatus.completed.value
+                    or ws_status == WorkspaceStatus.failed.value
                 ):
                     finalize_status = OperationStatus.succeeded
                     finalize_error_code = None
