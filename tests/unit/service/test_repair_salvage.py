@@ -539,6 +539,30 @@ def test_run_git_bytes_timeout_raises_repair_salvage_error(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_run_git_bytes_failure_raises_repair_salvage_error(tmp_path: Path) -> None:
+    def _run_failure(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(
+            args,
+            returncode=128,
+            stdout=b"",
+            stderr=b"fatal: bad revision",
+        )
+
+    with pytest.raises(RepairSalvageError) as exc_info:
+        repair_salvage_mod._run_git_bytes(  # noqa: SLF001
+            tmp_path,
+            ["diff", "--binary", "HEAD"],
+            run=_run_failure,
+            env={},
+            failure_reason=REPAIR_SALVAGE_SOURCE_UNAVAILABLE,
+        )
+
+    assert exc_info.value.reason_code == REPAIR_SALVAGE_SOURCE_UNAVAILABLE
+    assert "failed" in str(exc_info.value)
+    assert exc_info.value.detail["stderr"] == "fatal: bad revision"
+
+
+@pytest.mark.unit
 def test_capture_only_agent_runtime_raises_no_diff(tmp_path: Path) -> None:
     _, base_commit = _seed_worktree(tmp_path, "ws_runtime_only")
     worktree = tmp_path / "git" / "worktrees" / "ws_runtime_only"

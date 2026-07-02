@@ -711,6 +711,100 @@ async def test_salvage_ci_repair_dirty_output_unexpected_exception_returns_salva
 
 
 @pytest.mark.unit
+async def test_salvage_ci_repair_dirty_output_repair_salvage_error_returns_salvage_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from awf.service.repair_salvage import REPAIR_SALVAGE_NO_DIFF, RepairSalvageError
+
+    worktrees_root = tmp_path / "worktrees"
+    worktrees_root.mkdir()
+    artifacts_root = tmp_path / "artifacts"
+    self = SimpleNamespace(_worktrees_root=worktrees_root, _artifacts_root=artifacts_root)
+
+    def _raising_capture(**kwargs: object) -> object:
+        del kwargs
+        raise RepairSalvageError(
+            reason_code=REPAIR_SALVAGE_NO_DIFF,
+            message="CI repair salvage found no salvageable diff.",
+        )
+
+    monkeypatch.setattr(
+        "awf.service.repair_salvage.capture_ci_repair_salvage",
+        _raising_capture,
+    )
+
+    result = await pr_ci_ops._salvage_ci_repair_dirty_output(
+        self,
+        workspace_id="ws-123",
+        operation_start_head="abc1234567890def",
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    assert result == {
+        "salvage_error": {
+            "reason_code": REPAIR_SALVAGE_NO_DIFF,
+            "message": "CI repair salvage found no salvageable diff.",
+        },
+    }
+
+
+@pytest.mark.unit
+async def test_salvage_ci_repair_dirty_output_success_returns_repair_salvage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from awf.service.repair_salvage import RepairSalvageCapture
+
+    worktrees_root = tmp_path / "worktrees"
+    worktrees_root.mkdir()
+    artifacts_root = tmp_path / "artifacts"
+    self = SimpleNamespace(_worktrees_root=worktrees_root, _artifacts_root=artifacts_root)
+    patch_path = artifacts_root / "salvage" / "ws-123.patch"
+    capture = RepairSalvageCapture(
+        workspace_id="ws-123",
+        operation_start_head="abc1234567890def",
+        salvage_diff_base="abc1234567890def",
+        patch_path=patch_path,
+        patch_sha256="d" * 64,
+        patch_bytes=12,
+        affected_paths=["src/fix.py"],
+        phase="ci_repair_commit_sink",
+        operation_type="ci_repair",
+        operation_id="op-1",
+        created_at="2026-07-02T00:00:00+00:00",
+    )
+
+    def _successful_capture(**kwargs: object) -> RepairSalvageCapture:
+        del kwargs
+        return capture
+
+    monkeypatch.setattr(
+        "awf.service.repair_salvage.capture_ci_repair_salvage",
+        _successful_capture,
+    )
+
+    result = await pr_ci_ops._salvage_ci_repair_dirty_output(
+        self,
+        workspace_id="ws-123",
+        operation_start_head="abc1234567890def",
+        operation_id="op-1",
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    assert "repair_salvage" in result
+    assert result["repair_salvage"]["patch_path"] == str(patch_path)
+    assert result["repair_salvage"]["affected_paths"] == ["src/fix.py"]
+
+
+@pytest.mark.unit
 async def test_ci_fix_provider_recovery_skips_rollback_when_salvage_raises_unexpectedly(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -910,3 +1004,52 @@ async def test_ci_fix_provider_recovery_salvage_uses_post_raise_head_as_diff_bas
 
     assert capture_kwargs["operation_start_head"] == operation_start_head
     assert capture_kwargs["salvage_diff_base"] == post_raise_head
+
+
+@pytest.mark.unit
+async def test_ci_fix_preserves_mirror_hooks_poisoned_commit_sink_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_REASON
+    from awf.runtime.pr_monitor_runner.types import _MonitorMirrorHooksPathRepairFailedError
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    adapter = FakeAdapter()
+    adapter.queue(returncode=0)
+    operation_start_head = "abc1234567890def"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_commit_dirty_worktree",
+        AsyncMock(
+            side_effect=_MonitorMirrorHooksPathRepairFailedError("hooks poisoned during ci fix")
+        ),
+    )
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.failed is True
+    assert push_result.reason_code == _MIRROR_HOOKS_PATH_POISONED_REASON
+    assert "hooks poisoned" in push_result.stderr

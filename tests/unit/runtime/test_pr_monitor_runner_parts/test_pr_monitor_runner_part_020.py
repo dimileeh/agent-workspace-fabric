@@ -754,3 +754,198 @@ async def test_comment_repair_provider_auth_exception_finishes_operation(
         "pushed": False,
     }
     assert operation.error_code == "PROVIDER_AUTH_FAILED"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error_cls", "outcome", "reason_code"),
+    [
+        (ProviderRecoveryRetryError, "provider_retry", "PROVIDER_OUTAGE"),
+        (ProviderRecoveryFallbackError, "provider_fallback", "PROVIDER_FALLBACK"),
+        (ProviderRecoveryAuthError, "provider_auth_failed", "PROVIDER_AUTH_FAILED"),
+    ],
+)
+async def test_operator_hint_provider_recovery_exceptions_finish_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    error_cls: type[Exception],
+    outcome: str,
+    reason_code: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    hint = OperatorHint(
+        reason="repair after operator guide",
+        directive="fix it",
+        operation_id="op_operator_hint",
+        requested_at="2026-06-27T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+
+    async def _raise_provider_error(**_kwargs: object) -> object:
+        raise error_cls()
+
+    mocker.patch.object(runner, "_run_operator_hint_cycle", _raise_provider_error)
+
+    with pytest.raises(error_cls):
+        await runner._execute(
+            action=AddressOperatorHint(hint=hint),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=_green_status(),
+            state=MonitorState(started_at=0.0, pending_operator_hint=hint),
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    operation = operations[0]
+    assert operation.type == "comment_repair"
+    assert operation.status == OperationStatus.failed.value
+    assert operation.result == {
+        "status": "failed",
+        "outcome": outcome,
+        "reason_code": reason_code,
+        "pushed": False,
+    }
+    assert operation.error_code == reason_code
+
+
+@pytest.mark.unit
+async def test_operator_hint_compose_cleanup_error_terminates_monitor(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
+    from awf.db.enums import WorkspaceStatus
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    hint = OperatorHint(
+        reason="repair after operator guide",
+        directive="fix it",
+        operation_id="op_operator_hint_cleanup",
+        requested_at="2026-06-27T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="awf-test-cleanup",
+        source="agent",
+        label="operator_hint",
+        message="process killed",
+        cleanup_result=CommandResult(
+            returncode=137,
+            stdout="",
+            stderr="process killed",
+        ),
+    )
+
+    async def _raise_cleanup_error(**_kwargs: object) -> object:
+        raise cleanup_error
+
+    mocker.patch.object(runner, "_run_operator_hint_cycle", _raise_cleanup_error)
+
+    terminated = await runner._execute(
+        action=AddressOperatorHint(hint=hint),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(started_at=0.0, pending_operator_hint=hint),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminated is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    operation = operations[0]
+    assert operation.status == OperationStatus.failed.value
+    assert operation.result is not None
+    assert operation.result["reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+
+
+@pytest.mark.unit
+async def test_operator_hint_non_terminal_push_failure_increments_iter_count(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    hint = OperatorHint(
+        reason="repair after operator guide",
+        directive="fix it",
+        operation_id="op_operator_hint_retry",
+        requested_at="2026-06-27T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(started_at=0.0, pending_operator_hint=hint, iter_count=2)
+
+    async def _return_non_terminal_failure(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="remote rejected the push",
+            reason_code="GIT_PUSH_FAILED",
+        )
+
+    mocker.patch.object(runner, "_run_operator_hint_cycle", _return_non_terminal_failure)
+
+    continue_monitoring = await runner._execute(
+        action=AddressOperatorHint(hint=hint),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert continue_monitoring is False
+    assert state.iter_count == 3
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    operation = operations[0]
+    assert operation.status == OperationStatus.failed.value
+    assert operation.result is not None
+    assert operation.result["outcome"] == "git_push_failed"
