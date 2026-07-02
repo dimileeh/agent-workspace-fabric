@@ -658,27 +658,16 @@ async def _run_ci_fix(
                 workspace_id=workspace_id,
                 reason_code=salvage_details["salvage_error"]["reason_code"],
             )
-        rollback_result = await _rollback_ci_fix_residue_before_provider_recovery(
-            self,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            restore_ref=post_agent_head,
-        )
-        recovery_details: dict[str, Any] = {
-            "phase": "ci_repair_commit_sink",
-            "operation_type": "ci_repair",
-            "pushed": False,
-            **salvage_details,
-        }
-        if not rollback_result.ok:
-            recovery_details["rollback_error"] = {
-                "message": rollback_result.message,
-                "cause": rollback_result.cause,
-            }
-        if agent_run_err is not None:
-            recovery_details["provider_error_stderr"] = agent_run_err.result.stderr[:400]
         provider_stderr = agent_run_err.result.stderr[:400] if agent_run_err is not None else ""
         if "salvage_error" in salvage_details:
+            recovery_details: dict[str, Any] = {
+                "phase": "ci_repair_commit_sink",
+                "operation_type": "ci_repair",
+                "pushed": False,
+                **salvage_details,
+            }
+            if agent_run_err is not None:
+                recovery_details["provider_error_stderr"] = agent_run_err.result.stderr[:400]
             _log.warning(
                 "monitor.ci_fix_dirty_commit_failed",
                 workspace_id=workspace_id,
@@ -696,6 +685,25 @@ async def _run_ci_fix(
                 reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
                 details=recovery_details,
             )
+        rollback_result = await _rollback_ci_fix_residue_before_provider_recovery(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=post_agent_head,
+        )
+        recovery_details = {
+            "phase": "ci_repair_commit_sink",
+            "operation_type": "ci_repair",
+            "pushed": False,
+            **salvage_details,
+        }
+        if not rollback_result.ok:
+            recovery_details["rollback_error"] = {
+                "message": rollback_result.message,
+                "cause": rollback_result.cause,
+            }
+        if agent_run_err is not None:
+            recovery_details["provider_error_stderr"] = agent_run_err.result.stderr[:400]
         if not rollback_result.ok:
             repair_salvage = salvage_details.get("repair_salvage")
             _log.warning(

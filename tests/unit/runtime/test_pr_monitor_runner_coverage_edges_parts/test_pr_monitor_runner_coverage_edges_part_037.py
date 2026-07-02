@@ -723,12 +723,16 @@ async def test_salvage_ci_repair_dirty_output_unexpected_exception_returns_salva
 
 
 @pytest.mark.unit
-async def test_ci_fix_provider_recovery_rollback_runs_when_salvage_raises_unexpectedly(
+async def test_ci_fix_provider_recovery_skips_rollback_when_salvage_raises_unexpectedly(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for PRRT_kwDOSJAM6s6N8a5t: salvage failures must stay terminal."""
+    """Regression for PRRT_kwDOSJAM6s6N8a5t / PRRT_kwDOSJAM6s6N8v2q.
+
+    Salvage failures must stay terminal without rolling back dirty repair output
+    that was never captured to a patch — mirroring the stranded commit-sink path.
+    """
     import subprocess
     from unittest.mock import AsyncMock
 
@@ -755,9 +759,6 @@ async def test_ci_fix_provider_recovery_rollback_runs_when_salvage_raises_unexpe
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # post-raise HEAD
-    cmd.queue_result(returncode=0, stdout="")  # rollback reset succeeds
-    cmd.queue_result(returncode=0, stdout="")  # cleanup restore
-    cmd.queue_result(returncode=0, stdout="")  # cleanup clean
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -833,7 +834,5 @@ async def test_ci_fix_provider_recovery_rollback_runs_when_salvage_raises_unexpe
         for event, fields in warnings
     ), warnings
     joined_calls = [" ".join(call.args) for call in cmd.calls]
-    assert any(
-        "reset" in call and "--hard" in call and operation_start_head in call
-        for call in joined_calls
-    ), joined_calls
+    assert not any("reset" in call and "--hard" in call for call in joined_calls), joined_calls
+    assert "rollback_error" not in (push_result.details or {})
