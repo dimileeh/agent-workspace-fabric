@@ -634,7 +634,10 @@ def test_capture_excludes_committed_plan_artifact_when_diff_base_behind_head(
 def test_capture_explicit_none_salvage_diff_base_raises_when_head_unavailable(
     tmp_path: Path,
 ) -> None:
-    """Regression for PRRT_kwDOSJAM6s6N_dRk — do not fall back to operation_start_head."""
+    """Regression for review comment 4620195202 — do not fall back to operation_start_head.
+
+    Also covers inline thread PRRT_kwDOSJAM6s6N_dRk.
+    """
     _, operation_start_head = _seed_worktree(tmp_path, "ws_no_anchor")
     worktree = tmp_path / "git" / "worktrees" / "ws_no_anchor"
     (worktree / "src/app.py").write_text("VALUE = 'committed'\n", encoding="utf-8")
