@@ -507,3 +507,47 @@ class TestMutations:
         assert secret not in exc.value.stderr
         assert secret not in str(exc.value)
         assert "[redacted]" in exc.value.stderr
+
+
+class TestBranchRulesAndTransportEdges:
+    """Coverage for branch-rules parsing and the transport exception wrapper."""
+
+    @pytest.mark.unit
+    async def test_branch_rules_non_list_payload_raises(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout='{"not": "a list"}')
+        client = GitHubClient(fake)
+        with pytest.raises(GitHubClientError, match="not a JSON array"):
+            await client.fetch_branch_pull_request_allowed_merge_methods(
+                repo=RepoRef(owner="o", name="r"), branch="main"
+            )
+
+    @pytest.mark.unit
+    async def test_branch_rules_skips_malformed_rule_entries(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    "not-a-dict",
+                    {"type": "pull_request", "parameters": "not-a-dict"},
+                    {"type": "pull_request", "parameters": {"allowed_merge_methods": "not-a-list"}},
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+        result = await client.fetch_branch_pull_request_allowed_merge_methods(
+            repo=RepoRef(owner="o", name="r"), branch="main"
+        )
+        assert result is None  # no rule constrained the merge method
+
+    @pytest.mark.unit
+    async def test_run_gh_command_wraps_unexpected_exception(self) -> None:
+        class _BoomRunner:
+            async def run(self, *args: object, **kwargs: object) -> object:
+                raise ValueError("boom from runner")
+
+        client = GitHubClient(_BoomRunner())  # type: ignore[arg-type]
+        with pytest.raises(GitHubClientError) as exc:
+            await client._gh_json(["gh", "api", "x"], operation="gh api")  # noqa: SLF001
+        assert "boom from runner" in exc.value.stderr

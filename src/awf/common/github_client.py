@@ -885,7 +885,9 @@ class GitHubClient:
         infrastructure rather than repository code.
         """
 
-        result = await self._run_gh_command(
+        # NEVER-retry: the centralized transport raises a ``GitHubClientError`` on a
+        # non-zero exit, so no separate ``result.ok`` re-check is needed here.
+        await self._run_gh_command(
             [
                 "gh",
                 "run",
@@ -898,12 +900,6 @@ class GitHubClient:
             operation="rerun_failed_workflow_jobs",
             retry_policy=RetryPolicy.NEVER,
         )
-        if not result.ok:
-            raise GitHubClientError(
-                operation="rerun_failed_workflow_jobs",
-                returncode=result.returncode,
-                stderr=result.stderr,
-            )
 
     async def resolve_thread(self, *, thread_id: str) -> None:
         """Resolve a GitHub review thread by node ID."""
@@ -1404,12 +1400,9 @@ class GitHubClient:
                 stdout="",
                 stderr=getattr(exc, "stderr", ""),
             )
-        if not result.ok and strict:
-            raise GitHubClientError(
-                operation=operation,
-                returncode=result.returncode,
-                stderr=result.stderr,
-            )
+        # ``result`` is only bound when ``_run_gh_command`` did not raise (i.e. it is
+        # ``ok``); the centralized transport raises on any non-zero exit, so a
+        # ``strict`` failure has already propagated above.
         return result
 
 
