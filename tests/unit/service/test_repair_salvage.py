@@ -601,6 +601,36 @@ def test_capture_salvage_diff_base_captures_residue_only_after_self_commit(
 
 
 @pytest.mark.unit
+def test_capture_excludes_committed_plan_artifact_when_diff_base_behind_head(
+    tmp_path: Path,
+) -> None:
+    """Committed excluded paths between diff_base and HEAD must not leak into the patch."""
+    _, operation_start_head = _seed_worktree(tmp_path, "ws_committed_plan")
+    worktree = tmp_path / "git" / "worktrees" / "ws_committed_plan"
+    plan_dir = worktree / "docs" / "awf-plans"
+    plan_dir.mkdir(parents=True)
+    (plan_dir / "plan.md").write_text("# plan\n", encoding="utf-8")
+    _git(["add", "docs/awf-plans/plan.md"], worktree)
+    _git(["commit", "-q", "-m", "self-commit plan artifact"], worktree)
+    (worktree / "src/app.py").write_text("VALUE = 'residue'\n", encoding="utf-8")
+
+    capture = capture_ci_repair_salvage(
+        worktrees_root=tmp_path / "git" / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_id="ws_committed_plan",
+        operation_start_head=operation_start_head,
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    assert capture.affected_paths == ["src/app.py"]
+    patch_text = capture.patch_path.read_text(encoding="utf-8")
+    assert "residue" in patch_text
+    assert "awf-plans" not in patch_text
+
+
+@pytest.mark.unit
 def test_capture_operation_start_head_includes_self_commits_when_no_salvage_diff_base(
     tmp_path: Path,
 ) -> None:

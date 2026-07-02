@@ -180,7 +180,7 @@ def capture_ci_repair_salvage(
             )
         pathspec_file = Path(tmp_dir) / "affected-pathspecs"
         _write_nul_delimited_pathspec_file(affected_paths, pathspec_file)
-        _run_git(worktree, ["read-tree", "HEAD"], run=run, env=git_env)
+        _run_git(worktree, ["read-tree", diff_base], run=run, env=git_env)
         _run_git(
             worktree,
             [
