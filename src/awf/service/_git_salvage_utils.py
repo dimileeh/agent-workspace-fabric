@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -66,14 +67,26 @@ def run_git(
     failure_context: str,
 ) -> CompletedProcessLike:
     """Run a git command for salvage with deterministic timeout and failure mapping."""
-    result = run(
-        ["git", *git_safe_directory_config_args(worktree), "-C", str(worktree), *args],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=GIT_TIMEOUT_SECONDS,
-        env=env,
-    )
+    try:
+        result = run(
+            ["git", *git_safe_directory_config_args(worktree), "-C", str(worktree), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        detail: dict[str, Any] = {"timeout_seconds": GIT_TIMEOUT_SECONDS}
+        if exc.stdout:
+            detail["stdout"] = exc.stdout[-2000:]
+        if exc.stderr:
+            detail["stderr"] = exc.stderr[-2000:]
+        raise raise_error(
+            reason_code=failure_reason,
+            message=f"git {' '.join(args)} timed out during {failure_context}.",
+            detail=detail,
+        ) from exc
     if result.returncode != 0:
         raise raise_error(
             reason_code=failure_reason,

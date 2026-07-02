@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from awf.service import repair_salvage as repair_salvage_mod
+from awf.service._git_salvage_utils import GIT_TIMEOUT_SECONDS
 from awf.service.repair_salvage import (
     REPAIR_SALVAGE_BASE_UNAVAILABLE,
     REPAIR_SALVAGE_NO_DIFF,
@@ -150,6 +152,25 @@ def test_capture_excludes_awf_plan_artifacts(tmp_path: Path) -> None:
 
     assert capture.affected_paths == ["src/app.py"]
     assert "awf-plans" not in capture.patch_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_run_git_timeout_raises_repair_salvage_error(tmp_path: Path) -> None:
+    def _run_timeout(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(args, timeout=GIT_TIMEOUT_SECONDS)
+
+    with pytest.raises(RepairSalvageError) as exc_info:
+        repair_salvage_mod._run_git(  # noqa: SLF001
+            tmp_path,
+            ["status"],
+            run=_run_timeout,
+            env={},
+            failure_reason=REPAIR_SALVAGE_SOURCE_UNAVAILABLE,
+        )
+
+    assert exc_info.value.reason_code == REPAIR_SALVAGE_SOURCE_UNAVAILABLE
+    assert "timed out" in str(exc_info.value)
+    assert exc_info.value.detail["timeout_seconds"] == GIT_TIMEOUT_SECONDS
 
 
 @pytest.mark.unit
