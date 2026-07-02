@@ -1362,7 +1362,15 @@ class GitHubClient:
             )
         except GitHubClientError:
             raise
-        except Exception as exc:
+        except (OSError, TimeoutError) as exc:
+            # Convert only genuine transport/subprocess faults — e.g. the ``gh``
+            # binary missing (``OSError``/``FileNotFoundError``) or a runner-level
+            # timeout — into the structured ``GitHubClientError`` callers expect. A
+            # bare ``except Exception`` here re-wrapped programming errors
+            # (``TypeError``/``AttributeError``/``ValueError``, or a
+            # ``response_validator`` bug) as generic ``returncode=1`` gh failures,
+            # masking real bugs as transport faults; those now surface unmasked
+            # (AGENTS.md: catch specific exceptions, not bare ``Exception``).
             raise GitHubClientError(
                 operation=operation,
                 returncode=1,

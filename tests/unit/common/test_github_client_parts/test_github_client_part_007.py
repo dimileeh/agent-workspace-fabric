@@ -566,12 +566,29 @@ class TestBranchRulesAndTransportEdges:
         assert result is None  # no rule constrained the merge method
 
     @pytest.mark.unit
-    async def test_run_gh_command_wraps_unexpected_exception(self) -> None:
-        class _BoomRunner:
+    async def test_run_gh_command_wraps_transport_fault(self) -> None:
+        # A genuine transport/subprocess fault (e.g. the gh binary missing raises
+        # OSError from create_subprocess_exec) is converted into the structured
+        # GitHubClientError callers expect.
+        class _TransportBoomRunner:
+            async def run(self, *args: object, **kwargs: object) -> object:
+                raise OSError("gh not found")
+
+        client = GitHubClient(_TransportBoomRunner())  # type: ignore[arg-type]
+        with pytest.raises(GitHubClientError) as exc:
+            await client._gh_json(["gh", "api", "x"], operation="gh api")  # noqa: SLF001
+        assert "gh not found" in exc.value.stderr
+
+    @pytest.mark.unit
+    async def test_run_gh_command_does_not_mask_programming_error(self) -> None:
+        # A programming error (ValueError/TypeError/AttributeError) is NOT a gh
+        # transport fault, so it must surface unmasked instead of being re-wrapped
+        # as a generic returncode=1 GitHubClientError (AGENTS.md: catch specific
+        # exceptions, not bare Exception).
+        class _BuggyRunner:
             async def run(self, *args: object, **kwargs: object) -> object:
                 raise ValueError("boom from runner")
 
-        client = GitHubClient(_BoomRunner())  # type: ignore[arg-type]
-        with pytest.raises(GitHubClientError) as exc:
+        client = GitHubClient(_BuggyRunner())  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="boom from runner"):
             await client._gh_json(["gh", "api", "x"], operation="gh api")  # noqa: SLF001
-        assert "boom from runner" in exc.value.stderr
