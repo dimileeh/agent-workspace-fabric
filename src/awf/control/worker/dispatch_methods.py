@@ -971,6 +971,7 @@ async def _safely_resume_pr_monitor(
         if monitor_started is False:
             # The remonitor bookkeeping op already succeeded at handoff; a
             # post-handoff start recheck bail must not downgrade it.
+            self._monitor_recovery_post_handoff_start_bailed_workspace_ids.add(workspace_id)
             _log.info(
                 "worker.monitor_recovery_start_skipped_after_handoff",
                 workspace_id=workspace_id,

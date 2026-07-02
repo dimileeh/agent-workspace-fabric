@@ -142,6 +142,9 @@ class ControlWorker(WorkerDelegatesMixin):
         # Workspaces whose two-phase monitor handoff succeeded but the remonitor
         # operation finalize write is still pending (see ``_safely_resume_pr_monitor``).
         self._monitor_recovery_handoff_succeeded_workspace_ids: set[str] = set()
+        # Workspaces whose post-finalize start recheck bailed after handoff finalize
+        # succeeded; used to skip active-salvage monitor cooldown on immediate reclaim.
+        self._monitor_recovery_post_handoff_start_bailed_workspace_ids: set[str] = set()
         # Detached monitor-claim refresh loops kept alive while a remonitor
         # recovery operation is still pending DB finalization.
         self._monitor_claim_heartbeat_tasks: dict[str, asyncio.Task[None]] = {}
