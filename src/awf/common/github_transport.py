@@ -84,7 +84,7 @@ async def execute_gh_with_retry(
     ``pr_create_transient_max_retries``); ``None`` uses the transport default.
     """
 
-    from awf.common.github_client import GitHubClientError
+    from awf.common.github_client import GITHUB_API_ERROR, GitHubClientError
 
     sleep_fn = sleep or asyncio.sleep
     ctx = github_retry_context.get()
@@ -129,6 +129,10 @@ async def execute_gh_with_retry(
             operation=operation,
             returncode=result.returncode,
             stderr=stderr,
+            # Preserve the runner's reason code (e.g. COMMAND_TIMEOUT) so the
+            # monitor records the timeout provenance instead of a generic
+            # GITHUB_API_ERROR once retries exhaust (AGENTS.md retry rule).
+            reason_code=result.reason_code or GITHUB_API_ERROR,
         )
         last_error = error
         duplicate = _is_duplicate_pull_request_error(error)

@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import COMMAND_TIMEOUT_REASON, FakeCommandRunner
 from awf.common.github_client import (
     GITHUB_API_ERROR,
     GitHubClient,
@@ -250,6 +250,28 @@ async def test_max_attempts_override_caps_in_transport_retry() -> None:
             max_attempts=1,
         )
     assert len(runner.calls) == 1  # a transient is NOT retried when max_attempts=1
+
+
+@pytest.mark.unit
+async def test_timeout_reason_code_preserved_on_exhaustion() -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=124,
+        stderr="gh api timed out after 30s",
+        reason_code=COMMAND_TIMEOUT_REASON,
+    )
+    with pytest.raises(GitHubClientError) as exc:
+        await _execute_gh_with_retry(
+            runner,
+            ["gh", "api", "x"],
+            operation="gh api",
+            retry_policy=RetryPolicy.READ,
+            sleep=_RecordedSleep(),
+            max_attempts=1,
+        )
+    # The COMMAND_TIMEOUT provenance must survive the wrapper, not collapse to
+    # a generic GITHUB_API_ERROR (AGENTS.md: retries preserve reason codes).
+    assert exc.value.reason_code == COMMAND_TIMEOUT_REASON
 
 
 @pytest.mark.unit
