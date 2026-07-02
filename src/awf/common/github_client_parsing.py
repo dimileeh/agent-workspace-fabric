@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from awf.runtime.pr_monitor import (
     CheckState,
@@ -18,6 +20,9 @@ from awf.runtime.pr_monitor import (
 
 if TYPE_CHECKING:
     from awf.common.github_client import _FetchedReview
+
+_ACTIONS_RUN_JOB_PATH_RE = re.compile(r"/actions/runs/(?P<run_id>\d+)/job/\d+")
+_FAILED_CHECK_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"})
 
 
 def _dig(obj: Any, *keys: Any) -> Any:
@@ -359,3 +364,56 @@ def _tail(text: str, n: int) -> str:
     if len(text) <= n:
         return text
     return "…[truncated]…\n" + text[-n:]
+
+
+def _flatten_branch_rules_pages(payload: list[Any]) -> list[Any]:
+    """Normalize ``gh api --paginate --slurp`` branch-rule pages."""
+    if not all(isinstance(page, list) for page in payload):
+        return payload
+    return [rule for page in payload for rule in page]
+
+
+def _rollup_check_failure_conclusion(check: CheckTiming) -> str | None:
+    """Return the terminal failure value carried by a rollup check/status."""
+    for value in (check.conclusion, check.status):
+        conclusion = (value or "").upper()
+        if conclusion == "ERROR":
+            return "FAILURE"
+        if conclusion in _FAILED_CHECK_CONCLUSIONS:
+            return conclusion
+    return None
+
+
+def _rollup_check_is_github_actions(check: CheckTiming) -> bool:
+    """Return whether a rollup check is owned by GitHub Actions (explicit or implicit)."""
+    app_slug = (check.app_slug or "").lower()
+    app_name = (check.app_name or "").lower()
+    return app_slug in {"", "github-actions"} or app_name == "github actions"
+
+
+def _rollup_check_is_explicit_github_actions(check: CheckTiming) -> bool:
+    """Return whether the rollup check is explicitly owned by GitHub Actions."""
+    app_slug = (check.app_slug or "").lower()
+    app_name = (check.app_name or "").lower()
+    return app_slug == "github-actions" or app_name == "github actions"
+
+
+def _rollup_check_has_external_details_url(check: CheckTiming) -> bool:
+    """Return whether the rollup check links to a non-GitHub details URL."""
+    details_url = check.details_url
+    if not details_url:
+        return False
+    return urlsplit(details_url).netloc.lower() != "github.com"
+
+
+def _actions_run_id_from_details_url(details_url: str | None) -> str | None:
+    """Extract a GitHub Actions run id from a github.com details URL, when present."""
+    if not details_url:
+        return None
+    parsed = urlsplit(details_url)
+    if parsed.netloc.lower() != "github.com":
+        return None
+    match = _ACTIONS_RUN_JOB_PATH_RE.search(parsed.path)
+    if match is None:
+        return None
+    return match.group("run_id")

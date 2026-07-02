@@ -89,6 +89,7 @@ from awf.common.bitbucket_client_parsing import (
     pipeline_targets_branch,
     pipeline_targets_pr,
 )
+from awf.common.bitbucket_client_paths import _BitbucketUrlsMixin
 from awf.common.github_client import RepoRef
 from awf.common.github_client_parsing import _quiet_period_anchor
 from awf.common.logging import get_logger
@@ -154,7 +155,7 @@ def _has_non_terminal_status(statuses: Sequence[Mapping[str, Any]]) -> bool:
     )
 
 
-class BitbucketClient:
+class BitbucketClient(_BitbucketUrlsMixin):
     """Stateful façade over Bitbucket Cloud REST v2.0. Re-entrant per repo."""
 
     def __init__(
@@ -1129,40 +1130,6 @@ class BitbucketClient:
                 reason_code=BITBUCKET_COMMIT_RESOLVE_FAILED,
             )
         return resolved
-
-    @staticmethod
-    def _pr_head_sha(pr: dict[str, Any]) -> str | None:
-        return _clean_optional_str(_as_dict(_as_dict(pr.get("source")).get("commit")).get("hash"))
-
-    # ── Path builders ──────────────────────────────────────────────────────
-
-    def _repo_path(self, repo: RepoRef) -> str:
-        return f"/2.0/repositories/{quote(repo.owner, safe='')}/{quote(repo.name, safe='')}"
-
-    def _pr_collection_path(self, repo: RepoRef) -> str:
-        return f"{self._repo_path(repo)}/pullrequests"
-
-    def _pr_path(self, repo: RepoRef, pr_number: int) -> str:
-        return f"{self._pr_collection_path(repo)}/{pr_number}"
-
-    def _issues_page_url(self, repo: RepoRef) -> str:
-        return f"https://bitbucket.org/{repo.owner}/{repo.name}/issues"
-
-    def _issue_url_from_id(self, data: Any, repo: RepoRef) -> str | None:
-        """Build the canonical issue URL from a created issue's numeric ``id``.
-
-        Bitbucket's create-issue response carries an integer ``id`` even when it
-        omits ``links.html.href``; deriving ``.../issues/{id}`` from it keeps the
-        tracking URL pointing at the specific filed issue instead of the generic
-        list. Returns ``None`` when ``data`` is not a dict or lacks a usable id.
-        """
-        issue_id = data.get("id") if isinstance(data, dict) else None
-        if isinstance(issue_id, int):
-            return f"{self._issues_page_url(repo)}/{issue_id}"
-        return None
-
-    def _pr_page_url(self, repo: RepoRef, pr_number: int) -> str:
-        return f"https://bitbucket.org/{repo.owner}/{repo.name}/pull-requests/{pr_number}"
 
     # ── HTTP core (D2) ─────────────────────────────────────────────────────
 

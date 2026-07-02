@@ -85,8 +85,6 @@ _log = get_logger(__name__)
 # PR-number extraction would otherwise silently yield ``None`` and break the
 # monitor handoff.
 _PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
-_ACTIONS_RUN_JOB_PATH_RE = re.compile(r"/actions/runs/(?P<run_id>\d+)/job/\d+")
-_FAILED_CHECK_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"})
 
 
 def _branch_open_pr_metadata(pr: BranchOpenPullRequest) -> dict[str, object]:
@@ -1434,68 +1432,18 @@ class GitHubClient:
         return result
 
 
-def _flatten_branch_rules_pages(payload: list[Any]) -> list[Any]:
-    """Normalize ``gh api --paginate --slurp`` branch-rule pages."""
-    if not all(isinstance(page, list) for page in payload):
-        return payload
-    return [rule for page in payload for rule in page]
-
-
-def _rollup_check_failure_conclusion(check: CheckTiming) -> str | None:
-    """Return the terminal failure value carried by a rollup check/status."""
-    for value in (check.conclusion, check.status):
-        conclusion = (value or "").upper()
-        if conclusion == "ERROR":
-            return "FAILURE"
-        if conclusion in _FAILED_CHECK_CONCLUSIONS:
-            return conclusion
-    return None
-
-
-def _rollup_check_is_github_actions(check: CheckTiming) -> bool:
-    """Return whether a rollup check is owned by GitHub Actions (explicit or implicit)."""
-    app_slug = (check.app_slug or "").lower()
-    app_name = (check.app_name or "").lower()
-    return app_slug in {"", "github-actions"} or app_name == "github actions"
-
-
-def _rollup_check_is_explicit_github_actions(check: CheckTiming) -> bool:
-    """Return whether the rollup check is explicitly owned by GitHub Actions."""
-    app_slug = (check.app_slug or "").lower()
-    app_name = (check.app_name or "").lower()
-    return app_slug == "github-actions" or app_name == "github actions"
-
-
-def _rollup_check_has_external_details_url(check: CheckTiming) -> bool:
-    """Return whether the rollup check links to a non-GitHub details URL."""
-    details_url = check.details_url
-    if not details_url:
-        return False
-    return urlsplit(details_url).netloc.lower() != "github.com"
-
-
-def _actions_run_id_from_details_url(details_url: str | None) -> str | None:
-    """Extract a GitHub Actions run id from a github.com details URL, when present."""
-    if not details_url:
-        return None
-    parsed = urlsplit(details_url)
-    if parsed.netloc.lower() != "github.com":
-        return None
-    match = _ACTIONS_RUN_JOB_PATH_RE.search(parsed.path)
-    if match is None:
-        return None
-    return match.group("run_id")
-
-
 # ── Tiny helpers kept private to avoid accidental imports ──────────────────
 
 
 from awf.common.github_client_parsing import (  # noqa: E402
+    _FAILED_CHECK_CONCLUSIONS,
+    _actions_run_id_from_details_url,
     _clean_optional_str,
     _connection_nodes,
     _dig,
     _effective_blocking_reviews,
     _extract_pr_file_paths,
+    _flatten_branch_rules_pages,
     _latest_activity_from_reviews,
     _latest_activity_from_thread_comments,
     _newer_activity,
@@ -1507,5 +1455,9 @@ from awf.common.github_client_parsing import (  # noqa: E402
     _parse_mergeable,
     _parse_review_thread_comments,
     _quiet_period_anchor,
+    _rollup_check_failure_conclusion,
+    _rollup_check_has_external_details_url,
+    _rollup_check_is_explicit_github_actions,
+    _rollup_check_is_github_actions,
     _tail,
 )
