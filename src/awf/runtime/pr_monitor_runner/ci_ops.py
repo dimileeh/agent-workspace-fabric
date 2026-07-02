@@ -328,8 +328,6 @@ async def _salvage_and_rollback_stranded_ci_repair_output(
             details=failure_details,
         )
     restore_ref = await self._rev_parse_head(worktree_path)
-    if restore_ref is None:
-        restore_ref = operation_start_head
     rollback_result = await _rollback_ci_fix_residue_before_provider_recovery(
         self,
         workspace_id=workspace_id,
