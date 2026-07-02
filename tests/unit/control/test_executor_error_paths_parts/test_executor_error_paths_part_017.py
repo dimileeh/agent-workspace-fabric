@@ -311,6 +311,7 @@ class TestResumePrMonitorStatusRechecks:
         # claim owner (``monitor_claimed_by`` on the reclaimed row) so the
         # protected-scope pause CAS can fence on it. A stale runner that later
         # finds the claim reassigned then loses the CAS instead of clobbering.
+        """Regression coverage for resume threads monitor claim owner into runner."""
         captured: list[str | None] = []
 
         class _Compose:
@@ -1386,6 +1387,7 @@ class TestSyncReleasePrHandoffRemainingBranches:
         # The monitor builds and the PR is adopted, but the workspace leaves
         # ``running`` before the adoption is persisted; the handoff records a
         # stale-action skip and never transitions the workspace to monitoring.
+        """Regression coverage for release handoff stale status after monitor built skips."""
         fake.queue_result(returncode=0)  # initial git fetch
         fake.queue_result(returncode=0, stdout="3\n")  # initial rev-list --count
         fake.queue_result(returncode=0)  # post-setup git fetch

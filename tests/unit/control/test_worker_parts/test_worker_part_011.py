@@ -599,6 +599,7 @@ class _RecordingExecutor:
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Test helper for execute."""
         self.calls.append(workspace_id)
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
@@ -899,6 +900,7 @@ class _HealthyRuntimeInspector:
         self.calls: list[str | None] = []
 
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        """Test helper for inspect."""
         self.calls.append(compose_project_name)
         return RuntimeSnapshot(
             stack_state="running",
@@ -954,6 +956,7 @@ class TestRunOnceExecutionPart004:
                 self.calls: list[str] = []
 
             async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+                """Test helper for execute."""
                 self.calls.append(workspace_id)
                 if workspace_id == first_id:
                     raise RuntimeError("boom")
@@ -1042,6 +1045,7 @@ class TestRunOnceExecutionPart004:
 
         class _ClaimingExecutor:
             async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+                """Test helper for execute."""
                 async with session_factory() as s:
                     repo = WorkspaceRepository(s)
                     ws = await repo.transition_if_current(

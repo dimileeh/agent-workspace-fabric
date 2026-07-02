@@ -593,6 +593,7 @@ class _RecordingExecutor:
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Test helper for execute."""
         self.calls.append(workspace_id)
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
@@ -613,6 +614,7 @@ class _RecordingExecutor:
 
 class _BlockingExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -625,6 +627,7 @@ class _BlockingExecutor(_RecordingExecutor):
 
 class _BlockingMonitorExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -649,6 +652,7 @@ class _BlockingMonitorExecutor(_RecordingExecutor):
 
 class _RecordingRuntimeInspector:
     def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
+        """Test helper for __init__."""
         self._snapshots = snapshots
         self.calls: list[str | None] = []
 
@@ -1331,6 +1335,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart020:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Regression coverage for stale active execution scan skips unexpired exited claim failure."""
         workspace_id = await _create_active_execution(
             session_factory,
             origin_repo,
@@ -1401,6 +1406,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart019Continued:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Regression coverage for operator refresh before first preservation preserves live runtime."""
         compose_project = "awf_refresh_before_preservation"
         workspace_id = await _create_active_execution(
             session_factory,

@@ -86,6 +86,7 @@ class _RecordingExecutor:
         execution_owner_id: str | None = None,
         execution_lease_expires_at: datetime | None = None,
     ) -> None:
+        """Test helper for execute."""
         del execution_owner_id, execution_lease_expires_at
         self.executed.append(workspace_id)
         if self.fail:
@@ -111,6 +112,7 @@ class _RecordingExecutor:
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Test helper for factory."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -1405,6 +1407,7 @@ async def test_record_preserved_active_execution_skips_missing_workspace(
 async def test_stale_active_execution_can_fail_rejects_preserved_runtime(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Regression coverage for stale active execution can fail rejects preserved runtime."""
     workspace_id = await _seed_status(factory, WorkspaceStatus.running, title="preserved")
     worker = _worker(factory)
     async with factory() as session:

@@ -595,6 +595,7 @@ class _RecordingExecutor:
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Test helper for execute."""
         self.calls.append(workspace_id)
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
@@ -615,6 +616,7 @@ class _RecordingExecutor:
 
 class _BlockingExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -627,6 +629,7 @@ class _BlockingExecutor(_RecordingExecutor):
 
 class _BlockingMonitorExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -651,6 +654,7 @@ class _BlockingMonitorExecutor(_RecordingExecutor):
 
 class _RecordingRuntimeInspector:
     def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
+        """Test helper for __init__."""
         self._snapshots = snapshots
         self.calls: list[str | None] = []
 
@@ -929,6 +933,7 @@ class TestRunOnceMonitorRecoveryPart002:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Regression coverage for fresh worker records recovery operation when resuming monitoring pr."""
         monitor_started_at = datetime.now(UTC) - timedelta(minutes=20)
         monitor_threads = {"thread-1": "fix_committed", "thread-2": "defer"}
         monitor_id = await _create_monitoring_pr(

@@ -290,6 +290,7 @@ async def test_execution_and_monitor_claim_helpers_skip_already_running_task(
 async def test_dispatchable_execution_ids_stops_after_limit(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Regression coverage for dispatchable execution ids stops after limit."""
     worker = _worker(factory)
 
     assert worker._dispatchable_execution_ids(["ws_one", "ws_two"], limit=1) == ["ws_one"]  # noqa: SLF001

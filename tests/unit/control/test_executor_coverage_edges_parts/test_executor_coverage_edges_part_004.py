@@ -172,6 +172,7 @@ async def test_repair_agent_git_ownership_reports_repair_exceptions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Regression coverage for repair agent git ownership reports repair exceptions."""
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
 
     def _raise(*_args: object, **_kwargs: object) -> None:
@@ -212,6 +213,7 @@ async def test_repair_agent_git_ownership_repairs_linked_mirror(
 
 @pytest.mark.unit
 def test_read_ref_sha_returns_none_for_missing_ref(tmp_path: Path) -> None:
+    """Regression coverage for read ref sha returns none for missing ref."""
     assert _read_ref_sha(tmp_path, "refs/heads/missing") is None
 
 

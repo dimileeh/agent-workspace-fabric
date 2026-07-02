@@ -567,6 +567,7 @@ class TestExecutorMonitorHandoffSetupSplit:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Regression coverage for sync feature pr handoff setup exception records named reason code."""
         monitor_runs: list[str] = []
         validation = _ExplodingSetupValidation()
         ws_id = await _seed_ready(

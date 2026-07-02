@@ -88,6 +88,7 @@ def _patch_compose_runtime_inspect(
 
 
 def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
+    """Test helper for _queue_validation_head."""
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
@@ -908,6 +909,7 @@ class TestExecutorCoverageEdgesPart002:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Regression coverage for persist pr records stale skip when status changed after push."""
         ws_id = await _seed_ready(factory)
         fake.queue_result(returncode=0)  # adapter
         fake.queue_result(returncode=0, stdout="awf/x\n")  # branch drift check

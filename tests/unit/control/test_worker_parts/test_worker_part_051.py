@@ -72,6 +72,7 @@ class _RecordingExecutor:
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Test helper for execute."""
         self.calls.append(workspace_id)
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
@@ -92,6 +93,7 @@ class _RecordingExecutor:
 
 class _RecordingRuntimeCleaner:
     def __init__(self, result: WorkspaceCleanupResult | None = None) -> None:
+        """Test helper for __init__."""
         self.result = result or WorkspaceCleanupResult.from_steps(
             [
                 WorkspaceCleanupStepResult(

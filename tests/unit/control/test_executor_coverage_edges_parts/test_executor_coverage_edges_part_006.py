@@ -826,6 +826,7 @@ async def test_auto_retry_planning_scope_failure_ignores_other_reason_codes(
 async def test_git_commit_count_since_handles_failed_and_invalid_output(
     tmp_path: Path,
 ) -> None:
+    """Regression coverage for git commit count since handles failed and invalid output."""
     failed_runner = FakeCommandRunner()
     failed_runner.queue_result(returncode=1, stderr="bad revision")
     failed_executor = _executor_with_runner(failed_runner, tmp_path)

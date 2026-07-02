@@ -57,6 +57,7 @@ class _NoopProvisioner:
         del workspace_id
 
     def get_worktree_path(self, workspace_id: str) -> Path | None:
+        """Test helper for get_worktree_path."""
         del workspace_id
         return None
 
@@ -75,6 +76,7 @@ class _RecordingExecutor:
         execution_owner_id: str | None = None,
         execution_lease_expires_at: datetime | None = None,
     ) -> None:
+        """Test helper for execute."""
         del execution_owner_id, execution_lease_expires_at
         self.executed.append(workspace_id)
         if self.fail:
@@ -102,6 +104,7 @@ class _RecordingExecutor:
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Test helper for factory."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -183,6 +186,7 @@ class _ExplodingSessionFactory:
     calls = 0
 
     def __call__(self) -> object:
+        """Test helper for __call__."""
         self.calls += 1
         raise AssertionError("session factory should not be opened for empty limits")
 
@@ -194,6 +198,7 @@ class _PublicWorktreePathProvisioner(_NoopProvisioner):
         self.requests: list[str] = []
 
     def get_worktree_path(self, workspace_id: str) -> Path:
+        """Test helper for get_worktree_path."""
         self.requests.append(workspace_id)
         return self.root / workspace_id
 
@@ -236,6 +241,7 @@ class _RefreshLoopWorker(ControlWorker):
 def test_active_salvage_recovery_operation_id_cache_moves_recent_and_evicts_oldest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Regression coverage for active salvage recovery operation id cache moves recent and evicts oldest."""
     worker = SimpleNamespace(
         _active_salvage_monitor_recovery_operation_ids={"op-old": None, "op-keep": None}
     )
@@ -437,6 +443,7 @@ async def test_active_salvage_resume_cooldown_blocks_claim_from_in_memory_cooldo
 async def test_active_salvage_resume_cooldown_blocks_claim_uses_persisted_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Regression coverage for active salvage resume cooldown blocks claim uses persisted fallback."""
     calls: list[str] = []
     worker = SimpleNamespace(
         _active_salvage_monitor_resume_cooldown_active=lambda _workspace_id: False,
@@ -457,6 +464,7 @@ async def test_active_salvage_resume_cooldown_blocks_claim_uses_persisted_fallba
 
 @pytest.mark.unit
 async def test_active_salvage_resume_cooldown_in_memory_blocks_claim() -> None:
+    """Regression coverage for active salvage resume cooldown in memory blocks claim."""
     worker = SimpleNamespace(
         _active_salvage_monitor_resume_cooldowns={"ws_hot": 1_000_000_000_000.0},
         _evict_expired_salvage_monitor_cooldowns=lambda: None,
@@ -486,6 +494,7 @@ async def test_persisted_active_salvage_resume_cooldown_handles_zero_lease_and_e
 
     class _Result:
         def scalar_one_or_none(self) -> object:
+            """Test helper for scalar_one_or_none."""
             return SimpleNamespace(
                 payload="not-a-mapping",
                 occurred_at=datetime.now(UTC) - timedelta(seconds=1),
@@ -501,6 +510,7 @@ async def test_persisted_active_salvage_resume_cooldown_handles_zero_lease_and_e
             return
 
         async def execute(self, _stmt: object) -> _Result:
+            """Test helper for execute."""
             return _Result()
 
     active = SimpleNamespace(
@@ -525,6 +535,7 @@ async def test_persisted_active_salvage_resume_cooldown_handles_missing_and_expi
             self.event = event
 
         def scalar_one_or_none(self) -> object | None:
+            """Test helper for scalar_one_or_none."""
             return self.event
 
     class _Session:
@@ -541,6 +552,7 @@ async def test_persisted_active_salvage_resume_cooldown_handles_missing_and_expi
             return
 
         async def execute(self, _stmt: object) -> _Result:
+            """Test helper for execute."""
             return _Result(self.event)
 
     missing = SimpleNamespace(
@@ -616,6 +628,7 @@ async def test_active_salvage_resume_cooldown_record_skips_missing_or_wrong_stat
             return
 
         async def commit(self) -> None:
+            """Test helper for commit."""
             self.committed = True
 
     class _Repo:
@@ -631,6 +644,7 @@ async def test_active_salvage_resume_cooldown_record_skips_missing_or_wrong_stat
             return self.workspace
 
         async def add_event(self, *_args: object, **_kwargs: object) -> None:
+            """Test helper for add_event."""
             self.events.append((_args, _kwargs))
 
     monkeypatch.setattr(worker_recovery_cooldown, "WorkspaceRepository", _Repo)
@@ -1013,6 +1027,7 @@ async def test_preserved_active_branch_lookup_reports_resolver_failures(
 async def test_preserved_active_branch_lookup_treats_invalid_repo_url_as_failure(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Regression coverage for preserved active branch lookup treats invalid repo url as failure."""
     worker = _worker(factory)
     fake = FakeCommandRunner()
     worker._open_pr_resolver = BranchOpenPullRequestResolver(fake)  # type: ignore[assignment]
@@ -1045,6 +1060,7 @@ async def test_preserved_active_branch_lookup_covers_invalid_empty_and_multiple_
             self.matches = matches
 
         async def resolve(self, **_kwargs: object) -> list[object]:
+            """Test helper for resolve."""
             return self.matches
 
     worker._open_pr_resolver = _StaticResolver([{"number": "bad"}])  # type: ignore[assignment]
@@ -1266,6 +1282,7 @@ async def test_salvage_monitor_cooldown_active_evicts_expired_entries(
 async def test_forget_execution_task_ignores_replaced_task(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Regression coverage for forget execution task ignores replaced task."""
     worker = _worker(factory)
 
     async def _pending() -> None:
