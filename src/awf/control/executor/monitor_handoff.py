@@ -285,9 +285,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             compose_file_path=compose_file_path,
             error=exc,
         )
-        # Compose restart failure is not terminal for monitor recovery: the
-        # prior project may still be live, and the monitor loop can still
-        # reconcile PR state or surface a terminal runtime failure.
+        return None
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
@@ -1055,7 +1053,7 @@ async def _record_monitor_runtime_restart_failed(
     error: ComposeOperationError,
     event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
 ) -> None:
-    """Persist a non-terminal audit event when compose restart fails during monitor resume."""
+    """Persist an audit event when compose restart fails during monitor resume handoff."""
     try:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)

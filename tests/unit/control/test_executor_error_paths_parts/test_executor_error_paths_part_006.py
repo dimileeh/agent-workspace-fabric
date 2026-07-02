@@ -926,7 +926,7 @@ class TestExecutorCoverageEdgesPart002:
             assert ws.events[-1].payload["action"] == "persist_pr"
 
     @pytest.mark.unit
-    async def test_resume_pr_monitor_compose_failure_records_warning_and_runs_monitor(
+    async def test_resume_pr_monitor_compose_failure_records_event_and_aborts_handoff(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -972,9 +972,10 @@ class TestExecutorCoverageEdgesPart002:
             pr_monitor_factory=lambda *_args: _Monitor(),
         )
 
-        await executor.resume_pr_monitor(ws_id)
+        handoff = await executor.resume_pr_monitor_handoff(ws_id)
 
-        assert monitor_calls == [ws_id]
+        assert handoff is None
+        assert monitor_calls == []
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
@@ -998,7 +999,7 @@ class TestExecutorCoverageEdgesPart002:
         }
 
     @pytest.mark.unit
-    async def test_resume_pr_monitor_compose_failure_continues_when_warning_record_fails(
+    async def test_resume_pr_monitor_compose_failure_aborts_handoff_when_event_record_fails(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -1059,9 +1060,10 @@ class TestExecutorCoverageEdgesPart002:
         )
 
         with structlog.testing.capture_logs() as captured:
-            await executor.resume_pr_monitor(ws_id)
+            handoff = await executor.resume_pr_monitor_handoff(ws_id)
 
-        assert monitor_calls == [ws_id]
+        assert handoff is None
+        assert monitor_calls == []
         assert any(
             entry["event"] == "executor.monitor_runtime_restart_failed_record_failed"
             for entry in captured
