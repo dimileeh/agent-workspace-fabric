@@ -1406,7 +1406,13 @@ class BitbucketClient:
                     attempt += 1
                     continue
                 break
-            await self._maybe_slow_for_near_limit(response)
+            # ``retry=False`` (the pre-merge recheck) must fail fast inside the
+            # merge critical section. The proactive near-limit slow-down is a
+            # sleep just like the 429 backoff, so gate it on ``retry`` too — a
+            # ``X-RateLimit-NearLimit`` header must not stall the request while
+            # the merge coordinator lock is held.
+            if retry:
+                await self._maybe_slow_for_near_limit(response)
             location = response.headers.get("Location")
             if not (response.is_redirect and location):
                 break
