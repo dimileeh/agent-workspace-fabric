@@ -17,6 +17,7 @@ from awf.control.worker.constants import (
     _BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE,
     _BLOCKED_RESUME_EXECUTION_FAILED_REASON_CODE,
     _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL,
+    _MONITOR_RECOVERY_START_SKIPPED_ERROR_CODE,
     _RECOVERING_RESUME_EXECUTION_CANCELLED_REASON_CODE,
     _RECOVERING_RESUME_EXECUTION_FAILED_REASON_CODE,
     _RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
@@ -757,6 +758,12 @@ async def _monitor_recovery_start_skipped_operation_status(
                     return OperationStatus.succeeded, None, None
                 if after_successful_handoff and ws.status == WorkspaceStatus.failed.value:
                     return OperationStatus.succeeded, None, None
+                if after_successful_handoff and ws.status == WorkspaceStatus.monitoring_pr.value:
+                    return (
+                        OperationStatus.failed,
+                        _MONITOR_RECOVERY_START_SKIPPED_ERROR_CODE,
+                        default_message,
+                    )
     except Exception:
         _log.exception(
             "worker.monitor_recovery_start_skip_status_lookup_failed",

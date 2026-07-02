@@ -353,6 +353,19 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
                 recovery_operation_id="op-1",
             )
         )
+        _OpRepo.operation = SimpleNamespace(
+            workspace_id="ws-1",
+            status=OperationStatus.failed.value,
+            error_code="MONITOR_RECOVERY_START_SKIPPED",
+        )
+        assert (
+            not await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+                worker,
+                "ws-1",
+                resume_succeeded=False,
+                recovery_operation_id="op-1",
+            )
+        )
         _OpRepo.operation = None
         _Repo.workspace = SimpleNamespace(status=WorkspaceStatus.failed.value)
         assert (

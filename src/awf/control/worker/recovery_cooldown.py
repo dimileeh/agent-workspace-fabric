@@ -24,6 +24,7 @@ from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_SOURCE,
     _ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT,
     _ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT,
+    _MONITOR_RECOVERY_START_SKIPPED_ERROR_CODE,
 )
 from awf.control.worker.helpers import (
     _datetime_from_json,
@@ -77,6 +78,14 @@ async def _should_apply_active_salvage_monitor_resume_cooldown(
             ):
                 # Handoff already succeeded; cancellation during the post-handoff
                 # monitor loop must not be treated as a failed recovery dispatch.
+                return False
+            if (
+                operation is not None
+                and operation.workspace_id == workspace_id
+                and operation.error_code == _MONITOR_RECOVERY_START_SKIPPED_ERROR_CODE
+            ):
+                # Pre-start verify bailed after handoff (e.g. monitor claim owner
+                # changed); do not suppress the next recovery attempt.
                 return False
             ws = await WorkspaceRepository(session).get(workspace_id)
             return ws is not None and ws.status == WorkspaceStatus.monitoring_pr.value
