@@ -33,6 +33,10 @@ from tests.unit.control.test_executor_error_paths_parts.test_executor_error_path
     factory,
     fake,
 )
+from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_017 import (
+    _PR_ADOPTION_POLICY,
+    _OkSetupValidation,
+)
 
 _IMPORTED_FIXTURES = (factory, fake)
 
@@ -607,3 +611,61 @@ class TestExecutorMonitorHandoffSetupSplit:
             assert "monitor handoff profile setup failed" in (ws.failure_message or "")
             assert "ghp_FAKESECRET0000000" not in (ws.failure_message or "")
             assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
+
+
+class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
+    @pytest.mark.unit
+    async def test_feature_handoff_stale_status_after_monitor_built_skips(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Mirror of the release case for the adopted-feature-PR handoff: the
+        # monitor builds, but the workspace leaves ``running`` before adoption is
+        # persisted, so the handoff records a stale-action skip and stops.
+        validation = _OkSetupValidation()
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy=_PR_ADOPTION_POLICY,
+        )
+
+        class _Monitor:
+            async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                raise AssertionError("monitor must not run after a stale-status skip")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
+        )
+
+        original_build = executor._build_handoff_pr_monitor
+
+        async def _build_handoff_pr_monitor(**kwargs: Any) -> Any:
+            monitor = await original_build(**kwargs)
+            async with factory() as s:
+                repo = WorkspaceRepository(s)
+                ws = await repo.get(ws_id)
+                assert ws is not None
+                await repo.transition(
+                    ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCELLED"
+                )
+                await s.commit()
+            return monitor
+
+        monkeypatch.setattr(executor, "_build_handoff_pr_monitor", _build_handoff_pr_monitor)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+            assert ws.events[-1].payload["action"] == "sync_feature_pr_handoff"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"

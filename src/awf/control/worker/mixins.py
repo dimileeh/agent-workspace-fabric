@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from awf.control.worker import claims as _claims
+from awf.control.worker import claims_execution as _claims_execution
 from awf.control.worker import cleanup as _cleanup
 from awf.control.worker import cleanup_auth_overlay as _cleanup_auth_overlay
 from awf.control.worker import cleanup_service_gc as _cleanup_service_gc
@@ -52,13 +53,13 @@ class WorkerDelegatesMixin:
         _claims._finish_monitor_recovery_operation_after_cancellation
     )
     _refresh_monitoring_pr_claim = _claims._refresh_monitoring_pr_claim
-    _read_execution_claim_epoch = _claims._read_execution_claim_epoch
-    _refresh_execution_claim = _claims._refresh_execution_claim
-    _release_execution_claim = _claims._release_execution_claim
+    _read_execution_claim_epoch = _claims_execution._read_execution_claim_epoch
+    _refresh_execution_claim = _claims_execution._refresh_execution_claim
+    _release_execution_claim = _claims_execution._release_execution_claim
     _release_execution_claim_after_cancellation = (
-        _claims._release_execution_claim_after_cancellation
+        _claims_execution._release_execution_claim_after_cancellation
     )
-    _release_monitoring_pr_claim = _claims._release_monitoring_pr_claim
+    _release_monitoring_pr_claim = _claims_execution._release_monitoring_pr_claim
 
     _maybe_expire_due_secret_leases = _cleanup._maybe_expire_due_secret_leases
     _expire_due_secret_leases = _cleanup._expire_due_secret_leases

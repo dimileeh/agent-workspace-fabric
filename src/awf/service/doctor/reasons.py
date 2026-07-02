@@ -1314,6 +1314,22 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("OLLAMA_MODEL_PULL_FAILED"),
     ),
+    "MONITOR_RECOVERY_SUPERSEDED": _ReasonText(
+        (
+            "AWF cancelled a PR-monitor recovery operation because another worker "
+            "claimed the monitor lease and started a replacement recovery operation."
+        ),
+        (
+            "No action is usually required if another recovery operation is already "
+            "running. If the workspace is stuck without an active monitor, remonitor it."
+        ),
+        (
+            "This worker lost the monitoring_pr claim to another worker that registered "
+            "a replacement remonitor recovery operation before this worker could finalize."
+        ),
+        "awf workspace show <workspace_id>",
+        _reason_catalog_link("MONITOR_RECOVERY_SUPERSEDED"),
+    ),
 }
 
 

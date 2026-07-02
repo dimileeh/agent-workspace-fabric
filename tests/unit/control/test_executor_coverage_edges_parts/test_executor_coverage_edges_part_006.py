@@ -851,9 +851,15 @@ async def test_workspace_executor_delegates_monitor_handoff_helpers(
         assert workspace_id == "ws_monitor"
         return handoff
 
-    async def _verify_start(self: object, *, workspace_id: str) -> bool:
+    async def _verify_start(
+        self: object,
+        *,
+        workspace_id: str,
+        monitor_owner_id: str | None = None,
+    ) -> bool:
         """Test helper for verify start."""
         assert workspace_id == "ws_monitor"
+        assert monitor_owner_id is None
         return True
 
     monkeypatch.setattr(
