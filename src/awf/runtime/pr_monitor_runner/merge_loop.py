@@ -13,6 +13,7 @@ from awf.common.github_client import GitHubClientError, RepoRef
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import _merge_method_blocked_key
 from awf.runtime.pr_monitor import (
+    _CI_MISSING_LOGS_HUMAN_MESSAGE,
     _MERGE_BLOCK_ATTENTION_STATE_KEY,
     Merge,
     MonitorAction,
@@ -338,6 +339,13 @@ async def handle_merge_action(
         initial_grace_recheck_wait_seconds = 0.0
         operator_state_refreshed = False
         pre_merge_status_refreshed = False
+        # The fail-fast pre-merge recheck (retry=False) deliberately skips the
+        # per-check log fetch, so ``ci_failures`` is always empty when it observes a
+        # CI FAILURE. ``decide`` then maps that to a missing-logs ``NotifyHuman``.
+        # Track that specific artifact so the dispatch below blocks the merge and
+        # re-polls instead of paging a human off logs we intentionally withheld
+        # (PRRT_kwDOSJAM6s6OBJeV).
+        pre_merge_recheck_ci_missing_logs = False
 
         async def _refresh_operator_state_for_merge(*, event_name: str) -> bool:
             nonlocal fresh_action, fresh_status, operator_state_refreshed
@@ -428,6 +436,9 @@ async def handle_merge_action(
                         pr_number=pr_number,
                         workspace_id=workspace_id,
                         base_branch=base_branch,
+                        # Inside the merge critical section: a single failure must
+                        # raise promptly to be classified, not retry under the lock.
+                        retry=False,
                     )
                 except ForgeClientError as exc:
                     # Both forges poll status through ``self._deps.gh``; either
@@ -487,6 +498,16 @@ async def handle_merge_action(
                     if not isinstance(checked_action, Merge):
                         fresh_action = checked_action
                         fresh_status = checked_status
+                        # A missing-logs ``NotifyHuman`` off an empty ``ci_failures``
+                        # here is the retry=False artifact, not a genuine
+                        # non-actionable CI failure (that shape carries populated
+                        # ``ci_failures``). Higher-priority gates — new comments,
+                        # blocking reviews, base sync — still dispatch normally.
+                        pre_merge_recheck_ci_missing_logs = (
+                            isinstance(checked_action, NotifyHuman)
+                            and checked_action.message == _CI_MISSING_LOGS_HUMAN_MESSAGE
+                            and not checked_status.ci_failures
+                        )
                         review_feedback = len(checked_status.unresolved_review_comments)
                         pending_review_feedback = _pending_review_feedback_count(
                             checked_status, state
@@ -795,6 +816,24 @@ async def handle_merge_action(
         if fresh_action is not None:
             if fresh_status is None:  # pragma: no cover - defensive invariant
                 raise RuntimeError("pre-merge recheck produced an action without status")
+            if pre_merge_recheck_ci_missing_logs:
+                # The recheck's ``retry=False`` fetch skipped the per-check log
+                # fetch, so the freshly flipped CI FAILURE has empty ``ci_failures``
+                # and ``decide`` returned a missing-logs ``NotifyHuman``. Dispatching
+                # it would page a human off logs we deliberately withheld under the
+                # merge lock; instead block the merge and re-poll so the next
+                # ordinary ``retry=True`` poll gathers the logs and produces the real
+                # ``ReportCiFailure`` (or clears if the failure was transient)
+                # (PRRT_kwDOSJAM6s6OBJeV).
+                _log.info(
+                    "monitor.pre_merge_recheck_ci_failure_defers_to_next_poll",
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    head_sha=fresh_status.head_sha[:10],
+                    check_state=fresh_status.check_state.value,
+                )
+                await self._deps.sleep(self._config.poll_interval_seconds)
+                return False
             # Re-enter the dispatcher for refreshed non-merge actions before
             # converting a simultaneous pre-merge recheck failure into retry or
             # terminal workspace state. Non-Merge actions do not perform this

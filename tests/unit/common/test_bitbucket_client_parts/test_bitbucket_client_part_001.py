@@ -171,6 +171,24 @@ async def test_near_limit_header_triggers_proactive_sleep() -> None:
     assert 2.5 in sleep.delays
 
 
+async def test_near_limit_slow_path_skipped_when_retry_disabled() -> None:
+    # ``retry=False`` (the pre-merge recheck) must fail fast inside the merge
+    # critical section: it suppresses the 429 backoff AND the proactive
+    # near-limit slow-down, so a ``X-RateLimit-NearLimit`` header cannot make
+    # ``_request`` sleep while the merge coordinator lock is held.
+    fake = FakeBitbucket()
+    fake.enqueue(
+        "GET",
+        "/x",
+        json={"v": 1},
+        headers={"X-RateLimit-NearLimit": "true"},
+    )
+    sleep = RecordingSleep()
+    client = make_client(fake, sleep=sleep, near_limit_delay_seconds=2.5)
+    await client._request_json("GET", "/x", operation="op", retry=False)
+    assert sleep.delays == []
+
+
 # ── ETag conditional requests + bounded cache (D2) ────────────────────────────
 
 

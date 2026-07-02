@@ -904,6 +904,69 @@ async def test_pre_merge_recheck_dispatches_refreshed_non_merge_action(
 
 
 @pytest.mark.unit
+async def test_pre_merge_recheck_ci_failure_blocks_merge_without_paging_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A CI flip to FAILURE during the pre-merge settle window must not page a human.
+
+    The recheck fetches status with ``retry=False`` and so deliberately skips the
+    per-check log fetch, leaving ``ci_failures`` empty. ``decide`` maps FAILURE +
+    empty failures to a missing-logs ``NotifyHuman``; dispatching it would page a
+    human (attention flag + PR comment) off logs AWF withheld under the merge lock.
+    Instead the merge is blocked and the monitor re-polls, so the next ordinary
+    ``retry=True`` poll gathers the logs for the real ``ReportCiFailure``
+    (PRRT_kwDOSJAM6s6OBJeV).
+    """
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0, stdout="0\n")  # rev-list HEAD..origin/base
+    cmd.queue_result(returncode=0, stdout=pr_payload(check_state="FAILURE"))  # recheck
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        pre_merge_settle_seconds=2,
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    # Settle wait, then a single poll-interval block wait — the monitor keeps
+    # polling rather than escalating.
+    assert sleep_fn.calls == [2, 60]
+    # No human-attention comment posted and no merge attempted off the artifact.
+    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    # No human-notification dedupe marker recorded in state.
+    assert not any(key.startswith("__awf_notify__") for key in state.threads_addressed_ids)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        # The withheld-logs artifact must not surface as awaiting human.
+        assert ws.awaiting_human_since is None
+
+
+@pytest.mark.unit
 async def test_merge_rejection_posts_human_notification_and_keeps_monitoring(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

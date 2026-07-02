@@ -18,6 +18,11 @@ from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from tests.postgres import create_postgres_test_engine
 
+
+async def _zero_sleep(_: float) -> None:
+    return None
+
+
 # ── github_client error paths ──────────────────────────────────────────────
 
 
@@ -27,11 +32,35 @@ class TestGhJsonErrorPaths:
         """Lines 409-413: when gh exits non-zero, _gh_json raises
         GitHubClientError instead of returning garbage."""
         runner = FakeCommandRunner()
-        runner.queue_result(returncode=1, stderr="rate limit exceeded")
+        runner.queue_result(returncode=1, stderr="not logged in to any GitHub hosts")
         client = GitHubClient(runner)
         with pytest.raises(GitHubClientError) as exc:
             await client._gh_json(["gh", "whatever"], operation="op")
+        assert "not logged in" in exc.value.stderr
+
+    @pytest.mark.unit
+    async def test_gh_json_read_transient_raises_without_in_transport_retry(self) -> None:
+        """Reads default to NEVER: a transient raises on the first attempt so the
+        caller (the monitor's poll loop / error classifier) handles it, rather than
+        retrying in-transport into a stale result. Mutations keep their explicit
+        retry policy; only the generic read helper stops retrying here."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="rate limit exceeded")
+        client = GitHubClient(runner, sleep=_zero_sleep)
+        with pytest.raises(GitHubClientError) as exc:
+            await client._gh_json(["gh", "whatever"], operation="op")
         assert "rate limit" in exc.value.stderr
+        assert len(runner.calls) == 1
+
+    @pytest.mark.unit
+    async def test_run_gh_strict_raises_on_failure(self) -> None:
+        """Lines 420-425: ``_run_gh(..., strict=True)`` must raise on
+        non-zero exit; non-strict just returns the result."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="not found")
+        client = GitHubClient(runner)
+        with pytest.raises(GitHubClientError):
+            await client._run_gh(["gh", "x"], operation="op", strict=True)
 
     @pytest.mark.unit
     async def test_gh_json_returns_none_for_empty_stdout(self) -> None:
@@ -43,16 +72,6 @@ class TestGhJsonErrorPaths:
         client = GitHubClient(runner)
         result = await client._gh_json(["gh", "whatever"], operation="op")
         assert result is None
-
-    @pytest.mark.unit
-    async def test_run_gh_strict_raises_on_failure(self) -> None:
-        """Lines 420-425: ``_run_gh(..., strict=True)`` must raise on
-        non-zero exit; non-strict just returns the result."""
-        runner = FakeCommandRunner()
-        runner.queue_result(returncode=1, stderr="boom")
-        client = GitHubClient(runner)
-        with pytest.raises(GitHubClientError):
-            await client._run_gh(["gh", "x"], operation="op", strict=True)
 
 
 class TestDigHelper:

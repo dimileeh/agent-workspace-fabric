@@ -172,8 +172,9 @@ class _GitRestoreFakeRunner(FakeCommandRunner):
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
-        result = await super().run(args, input_bytes=input_bytes, cwd=cwd)
+        result = await super().run(args, input_bytes=input_bytes, cwd=cwd, **kwargs)
         if not result.ok:
             return result
         if not (args and args[0] == "git" and "restore" in args and "--" in args):
@@ -822,8 +823,9 @@ async def test_satisfied_post_validation_conformance_report_restores_from_base_c
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
-        result = await real_run(args, input_bytes=input_bytes, cwd=cwd)
+        result = await real_run(args, input_bytes=input_bytes, cwd=cwd, **kwargs)
         if result.ok and args and args[0] == "git" and "restore" in args:
             if not report_file.exists():
                 return result

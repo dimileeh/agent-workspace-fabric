@@ -111,7 +111,7 @@ class TestMutations:
     @pytest.mark.unit
     async def test_merge_pr_squash_delete_branch_default(self) -> None:
         fake = FakeCommandRunner()
-        fake.queue_result(returncode=0)  # merge
+        fake.queue_result(returncode=0)  # merge (no pre-check: the monitor recheck owns state)
         fake.queue_result(returncode=0, stdout="MERGESHA123\n")  # sha fetch
         client = GitHubClient(fake)
         sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
@@ -124,8 +124,8 @@ class TestMutations:
     @pytest.mark.unit
     async def test_merge_pr_honors_method_and_omits_delete_branch_flag(self) -> None:
         fake = FakeCommandRunner()
-        fake.queue_result(returncode=0)
-        fake.queue_result(returncode=0, stdout="MERGESHA123\n")
+        fake.queue_result(returncode=0)  # merge
+        fake.queue_result(returncode=0, stdout="MERGESHA123\n")  # sha fetch
         client = GitHubClient(fake)
 
         sha = await client.merge_pr(
@@ -144,7 +144,7 @@ class TestMutations:
     @pytest.mark.unit
     async def test_merge_pr_error_raises(self) -> None:
         fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr="branch protection blocked merge")
+        fake.queue_result(returncode=1, stderr="branch protection blocked merge")  # merge fails
         client = GitHubClient(fake)
         with pytest.raises(GitHubClientError) as exc:
             await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=1)
@@ -156,10 +156,36 @@ class TestMutations:
         The SHA is optional metadata, not a functional gate."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0)  # merge ok
-        fake.queue_result(returncode=1, stderr="some api hiccup")  # sha fetch fails
-        client = GitHubClient(fake)
+        fake.queue_result(
+            returncode=1, stderr="not found"
+        )  # sha fetch fails (permanent, not retried)
+        client = GitHubClient(fake, sleep=lambda _: None)
         sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
         assert sha == ""
+
+    @pytest.mark.unit
+    async def test_merge_pr_sha_fetch_does_not_retry_transient_under_lock(self) -> None:
+        """The post-merge SHA read is fail-fast (NEVER), never retried.
+
+        ``merge_pr`` runs inside the monitor's serialized merge critical section,
+        so a transient blip on the best-effort SHA fetch must raise on the first
+        attempt (returning "") rather than sleep+retry while holding the merge
+        lock. A ``READ`` policy would issue further attempts on this transient
+        error; ``NEVER`` issues exactly one.
+        """
+        sleeps: list[float] = []
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0)  # merge ok
+        fake.queue_result(
+            returncode=1, stderr="http 503 service unavailable"
+        )  # transient sha fetch — would be retried under READ
+        client = GitHubClient(fake, sleep=lambda seconds: sleeps.append(seconds))
+        sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
+        assert sha == ""
+        # merge + exactly one SHA-fetch attempt: no retry storm under the lock.
+        sha_fetch_calls = [call for call in fake.calls if call.args[:3] == ["gh", "pr", "view"]]
+        assert len(sha_fetch_calls) == 1
+        assert sleeps == []
 
     @pytest.mark.unit
     async def test_fetch_repo_merge_methods_reads_repo_flags(self) -> None:
@@ -505,3 +531,64 @@ class TestMutations:
         assert secret not in exc.value.stderr
         assert secret not in str(exc.value)
         assert "[redacted]" in exc.value.stderr
+
+
+class TestBranchRulesAndTransportEdges:
+    """Coverage for branch-rules parsing and the transport exception wrapper."""
+
+    @pytest.mark.unit
+    async def test_branch_rules_non_list_payload_raises(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout='{"not": "a list"}')
+        client = GitHubClient(fake)
+        with pytest.raises(GitHubClientError, match="not a JSON array"):
+            await client.fetch_branch_pull_request_allowed_merge_methods(
+                repo=RepoRef(owner="o", name="r"), branch="main"
+            )
+
+    @pytest.mark.unit
+    async def test_branch_rules_skips_malformed_rule_entries(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    "not-a-dict",
+                    {"type": "pull_request", "parameters": "not-a-dict"},
+                    {"type": "pull_request", "parameters": {"allowed_merge_methods": "not-a-list"}},
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+        result = await client.fetch_branch_pull_request_allowed_merge_methods(
+            repo=RepoRef(owner="o", name="r"), branch="main"
+        )
+        assert result is None  # no rule constrained the merge method
+
+    @pytest.mark.unit
+    async def test_run_gh_command_wraps_transport_fault(self) -> None:
+        # A genuine transport/subprocess fault (e.g. the gh binary missing raises
+        # OSError from create_subprocess_exec) is converted into the structured
+        # GitHubClientError callers expect.
+        class _TransportBoomRunner:
+            async def run(self, *args: object, **kwargs: object) -> object:
+                raise OSError("gh not found")
+
+        client = GitHubClient(_TransportBoomRunner())  # type: ignore[arg-type]
+        with pytest.raises(GitHubClientError) as exc:
+            await client._gh_json(["gh", "api", "x"], operation="gh api")  # noqa: SLF001
+        assert "gh not found" in exc.value.stderr
+
+    @pytest.mark.unit
+    async def test_run_gh_command_does_not_mask_programming_error(self) -> None:
+        # A programming error (ValueError/TypeError/AttributeError) is NOT a gh
+        # transport fault, so it must surface unmasked instead of being re-wrapped
+        # as a generic returncode=1 GitHubClientError (AGENTS.md: catch specific
+        # exceptions, not bare Exception).
+        class _BuggyRunner:
+            async def run(self, *args: object, **kwargs: object) -> object:
+                raise ValueError("boom from runner")
+
+        client = GitHubClient(_BuggyRunner())  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="boom from runner"):
+            await client._gh_json(["gh", "api", "x"], operation="gh api")  # noqa: SLF001

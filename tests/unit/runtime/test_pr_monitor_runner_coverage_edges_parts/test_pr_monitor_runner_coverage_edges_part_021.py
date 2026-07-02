@@ -83,7 +83,7 @@ class _BitbucketSettlePollClient(DefaultMergeMethodGitHubClient):
         self._fetch_exc = exc
 
     async def fetch_pr_status(
-        self, *, repo: RepoRef, pr_number: int, base_behind_count: int
+        self, *, repo: RepoRef, pr_number: int, base_behind_count: int, retry: bool = True
     ) -> PRStatus:
         del repo, pr_number, base_behind_count
         raise self._fetch_exc

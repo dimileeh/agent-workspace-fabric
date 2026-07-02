@@ -125,7 +125,10 @@ class PersistCheckingCommandRunner(FakeCommandRunner):
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
+        # Forward extra kwargs (e.g. the transport's per-attempt ``timeout_seconds``)
+        # so this override tracks the runner protocol without a signature drift.
         if args[:3] == ["gh", "run", "rerun"]:
             async with self._factory() as session:
                 workspace = await WorkspaceRepository(session).get(self._workspace_id)
@@ -133,7 +136,7 @@ class PersistCheckingCommandRunner(FakeCommandRunner):
                 assert (
                     workspace.monitor_threads_addressed.get(self._state_key) == self._expected_value
                 )
-        return await super().run(args, input_bytes=input_bytes, cwd=cwd)
+        return await super().run(args, input_bytes=input_bytes, cwd=cwd, **kwargs)
 
 
 def _monitor_runner(
@@ -202,6 +205,7 @@ class _CapturingGH:
         repo: RepoRef,
         pr_number: int,
         base_behind_count: int,
+        retry: bool = True,
     ) -> PRStatus:
         del repo, pr_number
         self.base_behind_counts.append(base_behind_count)

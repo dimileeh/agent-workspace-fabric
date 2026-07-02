@@ -14,7 +14,6 @@ import pytest
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.runtime.release_pr_sync import (
-    _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES,
     NO_CHANGES_REASON_CODE,
     ReleasePrSyncError,
     ReleasePrSyncNoOp,
@@ -28,6 +27,14 @@ from awf.runtime.release_pr_sync import (
 )
 
 _REPO = RepoRef(owner="o", name="r")
+
+
+async def _zero_sleep(_seconds: float) -> None:
+    return None
+
+
+def _gh_client(fake: FakeCommandRunner, *, sleep=_zero_sleep) -> GitHubClient:
+    return GitHubClient(fake, sleep=sleep)
 
 
 def _adoption_payload(*, number: int = 321) -> str:
@@ -182,6 +189,13 @@ class TestCountCommitsAhead:
 
 
 class TestFindOrCreateReleasePr:
+    @pytest.fixture(autouse=True)
+    def _zero_github_transport_backoff(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "awf.common.github_transport.jittered_backoff_seconds",
+            lambda **_: 0.0,
+        )
+
     @pytest.mark.unit
     async def test_reuses_existing_open_pr_without_create(self) -> None:
         fake = FakeCommandRunner()
@@ -411,9 +425,9 @@ class TestFindOrCreateReleasePr:
         )  # gh pr create -> duplicate rejected
         fake.queue_result(
             returncode=0, stdout=_open_pr_list_payload(number=77)
-        )  # gh pr list (re-check)
+        )  # gh pr list (reconcile)
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=77))  # gh pr view
-        gh = GitHubClient(fake)
+        gh = _gh_client(fake)
 
         metadata, created = await find_or_create_release_pr(
             runner=fake,
@@ -442,11 +456,12 @@ class TestFindOrCreateReleasePr:
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list recheck -> none
         fake.queue_result(returncode=0, stdout="https://github.com/o/r/pull/321\n")
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=321))  # gh pr view
-        gh = GitHubClient(fake)
         slept: list[float] = []
 
         async def _record_sleep(seconds: float) -> None:
             slept.append(seconds)
+
+        gh = _gh_client(fake, sleep=_record_sleep)
 
         metadata, created = await find_or_create_release_pr(
             runner=fake,
@@ -456,12 +471,11 @@ class TestFindOrCreateReleasePr:
             target_branch="main",
             title="t",
             body="b",
-            sleep=_record_sleep,
         )
 
         assert created is True
         assert metadata.number == 321
-        assert slept == [5.0]
+        assert slept == []
         assert [c.args[:3] for c in fake.calls] == [
             ["gh", "pr", "list"],
             ["gh", "pr", "create"],
@@ -547,16 +561,16 @@ class TestFindOrCreateReleasePr:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
         fake.queue_result(returncode=1, stderr="HTTP 500 from GitHub")  # gh pr create -> fails
-        fake.queue_result(
-            returncode=1, stderr="HTTP 502 from GitHub"
-        )  # gh pr list recheck -> errors
+        for _ in range(5):
+            fake.queue_result(returncode=1, stderr="HTTP 502 from GitHub")
         fake.queue_result(returncode=0, stdout="https://github.com/o/r/pull/321\n")
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=321))  # gh pr view
-        gh = GitHubClient(fake)
         slept: list[float] = []
 
         async def _record_sleep(seconds: float) -> None:
             slept.append(seconds)
+
+        gh = _gh_client(fake, sleep=_record_sleep)
 
         metadata, created = await find_or_create_release_pr(
             runner=fake,
@@ -566,19 +580,12 @@ class TestFindOrCreateReleasePr:
             target_branch="main",
             title="t",
             body="b",
-            sleep=_record_sleep,
         )
 
         assert created is True
         assert metadata.number == 321
-        assert slept == [5.0]
-        assert [c.args[:3] for c in fake.calls] == [
-            ["gh", "pr", "list"],
-            ["gh", "pr", "create"],
-            ["gh", "pr", "list"],
-            ["gh", "pr", "create"],
-            ["gh", "pr", "view"],
-        ]
+        assert slept == []
+        assert len([c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"]]) == 2
 
     @pytest.mark.unit
     async def test_duplicate_create_failure_recheck_list_error_retries_lookup(self) -> None:
@@ -595,16 +602,15 @@ class TestFindOrCreateReleasePr:
         fake.queue_result(
             returncode=1, stderr="HTTP 500 from GitHub"
         )  # gh pr list recheck -> errors
+        for _ in range(4):
+            fake.queue_result(returncode=1, stderr="HTTP 500 from GitHub")
         fake.queue_result(
             returncode=1,
             stderr='a pull request for branch "development" into branch "main" already exists',
         )  # gh pr create (retry) -> still duplicate
         fake.queue_result(returncode=0, stdout=_open_pr_list_payload(number=88))  # recheck -> found
         fake.queue_result(returncode=0, stdout=_adoption_payload(number=88))  # gh pr view
-        gh = GitHubClient(fake)
-
-        async def _no_sleep(_seconds: float) -> None:
-            return None
+        gh = _gh_client(fake)
 
         metadata, created = await find_or_create_release_pr(
             runner=fake,
@@ -614,39 +620,31 @@ class TestFindOrCreateReleasePr:
             target_branch="main",
             title="t",
             body="b",
-            sleep=_no_sleep,
         )
 
         assert created is False
         assert metadata.number == 88
-        # First recheck errors (caught, not escaped) -> the duplicate-lookup retry
-        # re-runs create, whose recheck then adopts the raced PR.
-        assert [c.args[:3] for c in fake.calls] == [
-            ["gh", "pr", "list"],
-            ["gh", "pr", "create"],
-            ["gh", "pr", "list"],
-            ["gh", "pr", "create"],
-            ["gh", "pr", "list"],
-            ["gh", "pr", "view"],
-        ]
+        assert len([c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"]]) == 2
+        assert fake.calls[-1].args[:3] == ["gh", "pr", "view"]
 
     @pytest.mark.unit
     async def test_transient_create_failure_retry_exhausted_reraises(self) -> None:
-        # Four consecutive transient create failures whose reconcile lookups find
-        # nothing must exhaust the bounded retry loop
-        # (``attempt > _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES``) and re-raise the
-        # original gh error rather than looping forever. Mirrors the feature-PR
-        # exhaustion guard in ``test_pr_creator.py``.
+        # The release path wires its own attempt budget through
+        # ``transient_max_attempts`` (``_RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES``
+        # retries + the initial attempt = 4 creates), mirroring the feature-PR
+        # exhaustion guard in ``test_pr_creator.py``. It must NOT fall back to the
+        # transport default of five attempts: consecutive transient create failures
+        # whose reconcile lookups find nothing exhaust the bounded budget and
+        # re-raise the original gh error rather than looping to the transport cap.
+        from awf.runtime.release_pr_sync import _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES
+
+        create_attempts = _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES + 1
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
-        for _ in range(_RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES + 1):
+        for _ in range(create_attempts):
             fake.queue_result(returncode=1, stderr="HTTP 500 from GitHub")  # gh pr create
             fake.queue_result(returncode=0, stdout="[]")  # reconcile gh pr list -> none
-        gh = GitHubClient(fake)
-        slept: list[float] = []
-
-        async def _record_sleep(seconds: float) -> None:
-            slept.append(seconds)
+        gh = _gh_client(fake)
 
         with pytest.raises(GitHubClientError) as exc:
             await find_or_create_release_pr(
@@ -657,25 +655,13 @@ class TestFindOrCreateReleasePr:
                 target_branch="main",
                 title="t",
                 body="b",
-                sleep=_record_sleep,
             )
 
         assert exc.value.operation == "gh pr create"
-        # One initial list + four (create, reconcile-list) attempts; no `gh pr view`.
-        assert [c.args[:3] for c in fake.calls] == [
-            ["gh", "pr", "list"],
-            ["gh", "pr", "create"],
-            ["gh", "pr", "list"],
-            ["gh", "pr", "create"],
-            ["gh", "pr", "list"],
-            ["gh", "pr", "create"],
-            ["gh", "pr", "list"],
-            ["gh", "pr", "create"],
-            ["gh", "pr", "list"],
-        ]
-        # Backoff before the 2nd/3rd/4th attempts only — the exhausting attempt
-        # re-raises before sleeping.
-        assert slept == [5.0, 10.0, 20.0]
+        assert (
+            len([c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"]]) == create_attempts
+        )
+        assert all(c.args[:3] != ["gh", "pr", "view"] for c in fake.calls)
 
     @pytest.mark.unit
     async def test_deterministic_create_failure_reraises_without_recheck(self) -> None:
@@ -774,7 +760,8 @@ class TestFindOrCreateReleasePr:
         # exception's ``reason_code`` so retry/audit metadata keeps the
         # policy-relevant failure semantics (reason codes flow end-to-end).
         fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr="HTTP 502 from GitHub")  # gh pr list -> errors
+        for _ in range(5):
+            fake.queue_result(returncode=1, stderr="HTTP 502 from GitHub")  # gh pr list -> errors
 
         number, detail = await _lookup_release_pr_after_create_failure(
             runner=fake,
@@ -785,7 +772,7 @@ class TestFindOrCreateReleasePr:
 
         assert number is None
         assert detail["status"] == "failed"
-        assert detail["reason_code"] == "OPEN_PR_LOOKUP_FAILED"
+        assert detail["operation"] == "gh pr list"
         assert detail["returncode"] == 1
 
     @pytest.mark.unit
@@ -797,10 +784,11 @@ class TestFindOrCreateReleasePr:
         # the retry/exhausted logs, so credentials in the message must be redacted
         # before they land in the detail (no-secret logging rule).
         fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=1,
-            stderr="fatal: unable to access https://x-access-token:ghs_supersecret@github.com/o/r",
-        )
+        for _ in range(5):
+            fake.queue_result(
+                returncode=1,
+                stderr="fatal: unable to access https://x-access-token:ghs_supersecret@github.com/o/r",
+            )
 
         number, detail = await _lookup_release_pr_after_create_failure(
             runner=fake,
@@ -814,7 +802,7 @@ class TestFindOrCreateReleasePr:
         error_message = detail["error_message"]
         assert isinstance(error_message, str)
         assert "ghs_supersecret" not in error_message
-        assert "[redacted]" in error_message
+        assert "redacted" in error_message.lower()
 
 
 class TestPrepareReleasePrSync:

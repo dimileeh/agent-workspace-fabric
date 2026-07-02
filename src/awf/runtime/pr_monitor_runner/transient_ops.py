@@ -21,6 +21,7 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
 )
+from awf.common.github_retry import github_retry_context
 from awf.db.repositories import WorkspaceEventCreate
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
@@ -65,6 +66,7 @@ async def _fetch_status_for_decision(
     pr_number: int,
     workspace_id: str,
     base_branch: str,
+    retry: bool = True,
 ) -> PRStatus:
     """Fetch the full PR snapshot used by the decision core.
 
@@ -72,6 +74,20 @@ async def _fetch_status_for_decision(
     per-check logs. The same path is used for the main loop and the
     pre-merge recheck so the final merge gate cannot accidentally use
     weaker data than ordinary polling.
+
+    ``retry`` defaults to ``True`` (ordinary polling recovers a transient blip
+    in-cycle). The pre-merge recheck passes ``retry=False`` so a single failure
+    raises promptly and the merge critical section classifies it (transient ->
+    re-poll next cycle; unknown -> fail) instead of retrying under the merge lock.
+
+    Under ``retry=False`` the best-effort per-check log fetch is also skipped: it
+    is not part of the merge decision (``decide`` gates on ``check_state``, not on
+    the log text), and Bitbucket's ``fetch_failing_check_logs`` paginates
+    statuses/pipelines/steps with its default in-cycle retry, so a 429/near-limit
+    backoff there would sleep while the merge coordinator lock is held. A PR whose
+    checks flip green -> failing during the recheck still blocks the merge; the
+    next ordinary ``retry=True`` poll gathers the logs for the actual
+    ``ReportCiFailure``.
     """
     worktree_path = self._worktrees_root / workspace_id
     await self._fetch_base(
@@ -83,10 +99,28 @@ async def _fetch_status_for_decision(
         worktree_path=worktree_path,
         base_branch=base_branch,
     )
+    if retry:
+        # Start the gh transport cycle deadline *after* the local base refresh
+        # above. The runner establishes the deadline at cycle start so later
+        # actions share one budget, but ``_fetch_base``/``_count_base_behind``
+        # run before any gh call and, in a slow or large repo, can themselves
+        # outlast ``github_transport_cycle_deadline_seconds``. Left unrefreshed,
+        # the first retrying ``fetch_pr_status`` would see an already-expired
+        # deadline and raise a fabricated "cycle deadline exceeded" without ever
+        # contacting GitHub — which the monitor treats as a terminal UNKNOWN
+        # GITHUB_API_ERROR (PRRT_kwDOSJAM6s6OBcIY). Refresh it here, around the
+        # actual gh retry batch. The pre-merge recheck (``retry=False`` ->
+        # RetryPolicy.NEVER) is exempt from the deadline gate, so it is left
+        # untouched to preserve the merge critical section's shared budget.
+        ctx = github_retry_context.get()
+        if ctx is not None:
+            ctx.deadline = (
+                time.monotonic() + self._runner_config.github_transport_cycle_deadline_seconds
+            )
     status = await self._deps.gh.fetch_pr_status(
-        repo=repo, pr_number=pr_number, base_behind_count=base_behind
+        repo=repo, pr_number=pr_number, base_behind_count=base_behind, retry=retry
     )
-    if status.check_state.value == "FAILURE":
+    if status.check_state.value == "FAILURE" and retry:
         pytest_fallback_commands = await self._workspace_test_commands(workspace_id)
         failures = await self._deps.gh.fetch_failing_check_logs(
             repo=repo,

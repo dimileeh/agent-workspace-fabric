@@ -402,8 +402,11 @@ async def _run_fix_cycle(
         # 2) Settle window — small sleep, then re-poll for new activity.
         await self._deps.sleep(self._config.settle_interval_seconds)
         try:
+            # retry=False: the settle re-poll classifies a single failure itself
+            # (transient -> wait + break settle to push; permanent -> re-raise), so an
+            # in-cycle transport retry here would consume the next queued step.
             status = await self._deps.gh.fetch_pr_status(
-                repo=repo, pr_number=pr_number, base_behind_count=0
+                repo=repo, pr_number=pr_number, base_behind_count=0, retry=False
             )
         except ForgeClientError as exc:
             # Both forges re-poll the PR through ``self._deps.gh`` (a GitHub or

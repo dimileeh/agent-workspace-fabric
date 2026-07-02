@@ -46,3 +46,6 @@ class MonitorRunnerConfig:
     transient_forge_max_retries: int = 5
     transient_forge_initial_backoff_seconds: float = 5.0
     transient_forge_max_backoff_seconds: float = 120.0
+    # Per-monitor-cycle deadline for aggregate gh transport retry so many calls
+    # × per-call retry cannot stall a workspace for tens of minutes.
+    github_transport_cycle_deadline_seconds: float = 120.0

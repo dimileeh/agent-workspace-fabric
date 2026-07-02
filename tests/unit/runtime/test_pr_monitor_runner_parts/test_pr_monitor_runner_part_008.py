@@ -82,6 +82,7 @@ class _CapturingGH:
         repo: RepoRef,
         pr_number: int,
         base_behind_count: int,
+        retry: bool = True,
     ) -> PRStatus:
         del repo, pr_number
         self.base_behind_counts.append(base_behind_count)

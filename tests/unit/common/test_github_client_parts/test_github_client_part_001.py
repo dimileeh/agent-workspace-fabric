@@ -16,7 +16,7 @@ import json
 import pytest
 import structlog
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import COMMAND_TIMEOUT_REASON, FakeCommandRunner
 from awf.common.github_client import (
     BranchOpenPullRequestResolver,
     PullRequestMetadataError,
@@ -374,6 +374,28 @@ class TestFetchPullRequestAdoptionMetadata:
         assert excinfo.value.detail["returncode"] == 1
 
     @pytest.mark.unit
+    async def test_metadata_fetch_timeout_preserves_timeout_reason(self) -> None:
+        # A timed-out gh pr view carries the transport's COMMAND_TIMEOUT provenance;
+        # the adoption wrapper must thread that non-default reason code through rather
+        # than collapsing it to the generic PR_METADATA_FETCH_FAILED mapping.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=124,
+            stderr="gh pr view timed out",
+            reason_code=COMMAND_TIMEOUT_REASON,
+        )
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await fetch_pull_request_adoption_metadata(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+
+        assert excinfo.value.reason_code == COMMAND_TIMEOUT_REASON
+        assert excinfo.value.detail["returncode"] == 124
+
+    @pytest.mark.unit
     async def test_invalid_json_raises_invalid_metadata_reason(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="{not json")
@@ -589,6 +611,30 @@ class TestListOpenPullRequestsForBranch:
 
         assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_FAILED"
         assert excinfo.value.detail["base_branch"] == " main "
+
+    @pytest.mark.unit
+    async def test_gh_pr_list_timeout_preserves_timeout_reason(self) -> None:
+        # A timed-out gh pr list carries the transport's COMMAND_TIMEOUT provenance;
+        # the branch-open lookup wrapper must thread that non-default reason code
+        # through rather than collapsing it to the generic OPEN_PR_LOOKUP_FAILED
+        # mapping, matching the gh pr view adoption path.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=124,
+            stderr="gh pr list timed out",
+            reason_code=COMMAND_TIMEOUT_REASON,
+        )
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+                base_branch=" main ",
+            )
+
+        assert excinfo.value.reason_code == COMMAND_TIMEOUT_REASON
+        assert excinfo.value.detail["returncode"] == 124
 
     @pytest.mark.unit
     async def test_gh_pr_list_invalid_json_raises_lookup_invalid(self) -> None:
@@ -899,6 +945,27 @@ class TestBranchOpenPullRequestResolver:
 
         assert resolved == []
         assert fake.calls[0].args[:3] == ["gh", "pr", "list"]
+
+    @pytest.mark.unit
+    async def test_transient_failure_is_one_shot_no_retry(self) -> None:
+        # This resolver drives worker-recovery preserved-active open-PR lookups,
+        # NOT the create/release reconcile recheck. Per this PR's design (reads
+        # default to NEVER; only mutation-adjacent reconcile lookups retry) and
+        # the caller's own failure classification, a transient blip must surface
+        # on the first attempt without in-transport retry/backoff.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stdout="", stderr="HTTP 503 service unavailable")
+        resolver = BranchOpenPullRequestResolver(fake)
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await resolver.resolve(
+                repo_url="https://github.com/dimileeh/aira-web.git",
+                branch_name="feature/head",
+                base_branch="main",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_FAILED"
+        assert len(fake.calls) == 1
 
     @pytest.mark.unit
     async def test_invalid_repo_url_raises_lookup_invalid_and_warns(self) -> None:

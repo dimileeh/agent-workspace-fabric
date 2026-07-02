@@ -27,6 +27,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeClient
 from awf.common.github_client import (
+    GitHubClient,
     GitHubClientError,
     PullRequestAdoptionMetadata,
     PullRequestMetadataError,
@@ -35,7 +36,7 @@ from awf.common.github_client import (
     list_open_pull_requests_for_branch,
     parse_github_pull_request_url,
 )
-from awf.common.github_transient import is_transient_github_error_text
+from awf.common.github_retry import RetryPolicy
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
@@ -48,8 +49,6 @@ NO_CHANGES_REASON_CODE = "NO_CHANGES_TO_SYNC"
 # ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` and ``PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY``.
 RELEASE_SYNC_FORGE_NOT_SUPPORTED_REASON_CODE = "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
 _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES = 3
-_RELEASE_PR_CREATE_TRANSIENT_INITIAL_BACKOFF_SECONDS = 5.0
-_RELEASE_PR_CREATE_TRANSIENT_MAX_BACKOFF_SECONDS = 30.0
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -176,49 +175,13 @@ async def count_commits_ahead(
         ) from exc
 
 
-def _is_duplicate_pull_request_error(exc: GitHubClientError) -> bool:
-    """True when ``gh pr create`` failed because the PR already exists.
-
-    ``gh`` exits 1 with stderr like ``a pull request for branch "X" into
-    branch "Y" already exists`` when a concurrent run or a human opened the
-    source→target PR first. Only this signal is treated as a recoverable
-    TOCTOU race; auth/network/branch-protection failures must propagate.
-    """
-
-    return exc.returncode == 1 and "already exists" in exc.stderr.lower()
-
-
-def _release_pr_create_retry_wait_seconds(attempt: int) -> float:
-    wait_seconds = min(
-        _RELEASE_PR_CREATE_TRANSIENT_INITIAL_BACKOFF_SECONDS * (2 ** max(0, attempt - 1)),
-        _RELEASE_PR_CREATE_TRANSIENT_MAX_BACKOFF_SECONDS,
-    )
-    return float(wait_seconds)
-
-
-def _release_pr_create_failure_detail(
-    exc: GitHubClientError,
-    *,
-    attempt: int,
-    transient: bool,
-    duplicate: bool,
-) -> dict[str, object]:
-    return {
-        "operation": exc.operation,
-        "returncode": exc.returncode,
-        "attempt": attempt,
-        "transient": transient,
-        "duplicate": duplicate,
-        "error_message": exc.stderr.strip(),
-    }
-
-
 async def _find_open_same_repo_pr_number(
     *,
     runner: AsyncCommandRunner,
     repo: RepoRef,
     source_branch: str,
     target_branch: str,
+    retry: bool = False,
 ) -> int | None:
     """Number of an open same-repo ``source→target`` PR, or ``None`` if none.
 
@@ -226,6 +189,10 @@ async def _find_open_same_repo_pr_number(
     against this repo with an identically-named head branch can show up here.
     Only a PR whose head lives in the requested repo is eligible; fork
     collisions are ignored.
+
+    ``retry`` defaults to ``False``: the initial pre-check must surface a single
+    lookup failure cleanly. The post-create reconcile recheck passes ``retry=True``
+    so a transient blip there doesn't force a redundant second create.
     """
 
     repo_slug = repo.slug()
@@ -234,6 +201,7 @@ async def _find_open_same_repo_pr_number(
         repo=repo,
         branch_name=source_branch,
         base_branch=target_branch,
+        retry_policy=RetryPolicy.READ if retry else RetryPolicy.NEVER,
     )
     same_repo_existing = [pr for pr in existing if pr.head_repo_slug.lower() == repo_slug.lower()]
     return same_repo_existing[0].number if same_repo_existing else None
@@ -252,6 +220,8 @@ async def _lookup_release_pr_after_create_failure(
             repo=repo,
             source_branch=source_branch,
             target_branch=target_branch,
+            # Post-create reconcile recheck: retry a transient lookup.
+            retry=True,
         )
     except GitHubClientError as exc:
         return None, {
@@ -294,132 +264,78 @@ async def _create_release_pr_with_redundancy(
     body: str,
     sleep: SleepFn,
 ) -> tuple[int, bool]:
-    failures: list[dict[str, object]] = []
-    lookups: list[dict[str, object]] = []
-    attempt = 0
+    del runner, sleep
+    # Release-PR sync is GitHub-only — ``ensure_release_sync_forge_supported``
+    # fails closed upstream — so ``gh`` is always a ``GitHubClient`` here. Narrow
+    # it so the release path can wire its own transient-retry budget through
+    # ``transient_max_attempts`` (retries + the initial attempt), mirroring
+    # ``PullRequestCreator``. Without this, create silently falls back to the
+    # transport default of five attempts instead of
+    # ``_RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES``.
+    assert isinstance(gh, GitHubClient)
+    try:
+        pr_url = await gh.create_pull_request(
+            repo=repo,
+            base=target_branch,
+            head=source_branch,
+            title=title,
+            body=body,
+            transient_max_attempts=_RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES + 1,
+        )
+    except GitHubClientError as exc:
+        if exc.returncode == 0:
+            raise ReleasePrSyncError(
+                reason_code="RELEASE_SYNC_PR_URL_INVALID",
+                message=f"gh pr create returned no parseable PR URL: {exc.stderr!r}",
+                detail={"source_branch": source_branch, "target_branch": target_branch},
+            ) from exc
+        raise
 
-    while True:
-        attempt += 1
-        try:
-            pr_url = await gh.create_pull_request(
-                repo=repo,
-                base=target_branch,
-                head=source_branch,
-                title=title,
-                body=body,
-            )
-        except GitHubClientError as exc:
-            if exc.returncode == 0:
-                raise ReleasePrSyncError(
-                    reason_code="RELEASE_SYNC_PR_URL_INVALID",
-                    message=f"gh pr create returned no parseable PR URL: {exc.stderr!r}",
-                    detail={"source_branch": source_branch, "target_branch": target_branch},
-                ) from exc
-
-            duplicate = _is_duplicate_pull_request_error(exc)
-            transient = is_transient_github_error_text(
-                operation=exc.operation,
-                stderr=exc.stderr,
-            )
-            failure = _release_pr_create_failure_detail(
-                exc,
-                attempt=attempt,
-                transient=transient,
-                duplicate=duplicate,
-            )
-            failures.append(failure)
-            if not transient and not duplicate:
-                raise
-
-            existing_number, lookup_detail = await _lookup_release_pr_after_create_failure(
-                runner=runner,
-                repo=repo,
-                source_branch=source_branch,
-                target_branch=target_branch,
-            )
-            lookups.append(lookup_detail)
-            if existing_number is not None:
-                _log.info(
-                    "release_pr_sync.create_reconciled",
-                    repo=repo.slug(),
-                    source_branch=source_branch,
-                    target_branch=target_branch,
-                    attempt=attempt,
-                    pr_number=existing_number,
-                    transient=transient,
-                    duplicate=duplicate,
-                    failures=failures,
-                    reconcile_lookups=lookups,
-                )
-                return existing_number, False
-
-            retry_lookup_failure = duplicate and lookup_detail.get("status") == "failed"
-            if not transient and not retry_lookup_failure:
-                raise
-            if attempt > _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES:
-                _log.warning(
-                    "release_pr_sync.create_retry_exhausted",
-                    repo=repo.slug(),
-                    source_branch=source_branch,
-                    target_branch=target_branch,
-                    attempt=attempt,
-                    max_retries=_RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES,
-                    failures=failures,
-                    reconcile_lookups=lookups,
-                )
-                raise
-
-            wait_seconds = _release_pr_create_retry_wait_seconds(attempt)
-            failure["will_retry"] = True
-            failure["wait_seconds"] = wait_seconds
-            _log.warning(
-                "release_pr_sync.create_retrying",
+    try:
+        parsed_repo, pr_number = parse_github_pull_request_url(pr_url)
+    except ValueError as exc:
+        raise ReleasePrSyncError(
+            reason_code="RELEASE_SYNC_PR_URL_INVALID",
+            message=f"gh pr create returned an unparseable PR URL: {pr_url!r}",
+            detail={"source_branch": source_branch, "target_branch": target_branch},
+        ) from exc
+    if parsed_repo.slug().lower() != repo.slug().lower():
+        raise ReleasePrSyncError(
+            reason_code="RELEASE_SYNC_PR_REPO_MISMATCH",
+            message=f"gh pr create returned a PR URL for a different repository: {pr_url!r}",
+            detail={
+                "expected_repo": repo.slug(),
+                "parsed_repo": parsed_repo.slug(),
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+            },
+        )
+    if isinstance(gh, GitHubClient):
+        outcome = gh.last_pr_create_outcome
+        if outcome is not None and outcome.strategy.startswith("reconciled_"):
+            _log.info(
+                "release_pr_sync.create_reconciled",
                 repo=repo.slug(),
                 source_branch=source_branch,
                 target_branch=target_branch,
-                attempt=attempt,
-                max_retries=_RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES,
-                wait_seconds=wait_seconds,
-                transient=transient,
-                duplicate=duplicate,
-                failures=failures,
-                reconcile_lookups=lookups,
+                attempt=outcome.attempts,
+                pr_number=pr_number,
+                failures=outcome.failures,
+                reconcile_lookups=outcome.reconcile_lookups,
             )
-            if wait_seconds > 0:
-                await sleep(wait_seconds)
-            continue
-
-        try:
-            parsed_repo, pr_number = parse_github_pull_request_url(pr_url)
-        except ValueError as exc:
-            raise ReleasePrSyncError(
-                reason_code="RELEASE_SYNC_PR_URL_INVALID",
-                message=f"gh pr create returned an unparseable PR URL: {pr_url!r}",
-                detail={"source_branch": source_branch, "target_branch": target_branch},
-            ) from exc
-        if parsed_repo.slug().lower() != repo.slug().lower():
-            raise ReleasePrSyncError(
-                reason_code="RELEASE_SYNC_PR_REPO_MISMATCH",
-                message=f"gh pr create returned a PR URL for a different repository: {pr_url!r}",
-                detail={
-                    "expected_repo": repo.slug(),
-                    "parsed_repo": parsed_repo.slug(),
-                    "source_branch": source_branch,
-                    "target_branch": target_branch,
-                },
-            )
-        if failures:
+            return pr_number, False
+        if outcome is not None and outcome.failures:
             _log.info(
                 "release_pr_sync.create_succeeded_after_retry",
                 repo=repo.slug(),
                 source_branch=source_branch,
                 target_branch=target_branch,
-                attempt=attempt,
+                attempt=outcome.attempts,
                 pr_number=pr_number,
-                failures=failures,
-                reconcile_lookups=lookups,
+                failures=outcome.failures,
+                reconcile_lookups=outcome.reconcile_lookups,
             )
-        return pr_number, True
+    return pr_number, True
 
 
 async def find_or_create_release_pr(

@@ -96,7 +96,10 @@ def test_planning_max_iterations_default_flows_from_environment(
 
 @pytest.mark.unit
 def test_local_compose_default_api_token_flows_into_service_settings() -> None:
-    service_env = local_service_environ(environ={})
+    # env_file=None keeps this hermetic: without it the merged view reads the
+    # developer's local ``docker/compose/.env`` (which may set a real AWF_API_TOKEN),
+    # masking the default this test asserts. The default-token path is what matters.
+    service_env = local_service_environ(environ={}, env_file=None)
 
     settings = resolve_service_settings(Settings(_env_file=None), environ=service_env)
 

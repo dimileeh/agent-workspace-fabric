@@ -89,6 +89,7 @@ from awf.common.bitbucket_client_parsing import (
     pipeline_targets_branch,
     pipeline_targets_pr,
 )
+from awf.common.bitbucket_client_paths import _BitbucketUrlsMixin
 from awf.common.github_client import RepoRef
 from awf.common.github_client_parsing import _quiet_period_anchor
 from awf.common.logging import get_logger
@@ -154,7 +155,7 @@ def _has_non_terminal_status(statuses: Sequence[Mapping[str, Any]]) -> bool:
     )
 
 
-class BitbucketClient:
+class BitbucketClient(_BitbucketUrlsMixin):
     """Stateful façade over Bitbucket Cloud REST v2.0. Re-entrant per repo."""
 
     def __init__(
@@ -261,17 +262,25 @@ class BitbucketClient:
         repo: RepoRef,
         pr_number: int,
         base_behind_count: int,
+        retry: bool = True,
     ) -> PRStatus:
         """Assemble a ``PRStatus`` from the PR, commit statuses, and comments.
 
         ``base_behind_count`` is computed by the caller (local git), matching the
         GitHub contract — Bitbucket Cloud has no GitHub-style merge-state signal.
+        ``retry=False`` (the pre-merge recheck) must suppress the 429 backoff for
+        the WHOLE status snapshot, not just the initial PR GET: the commit-SHA
+        resolve, every paginated read (statuses, comments, diffstat, tasks), and
+        the account-id lookup all thread ``retry`` through, or a transient 429 on
+        a later request would still sleep on ``Retry-After`` while the merge
+        critical section is meant to fail fast (mirrors the GitHub contract).
         """
         pr = await self._request_json(
             "GET",
             self._pr_path(repo, pr_number),
             operation="bitbucket fetch_pr_status",
             cache=True,
+            retry=retry,
         )
         if not isinstance(pr, dict):
             raise BitbucketClientError(
@@ -293,7 +302,7 @@ class BitbucketClient:
         # escapes the adapter: it is what lands on ``PRStatus.head_sha``, keys the
         # commit-statuses fetch below, and is remembered as the rerun pipeline
         # target — all consistently full (the per-commit endpoint accepts both).
-        head_sha = await self._resolve_full_commit_sha(repo, head_sha)
+        head_sha = await self._resolve_full_commit_sha(repo, head_sha, retry=retry)
         self._remember_pr(repo, pr_number, pr, head_sha=head_sha)
         source_branch = _clean_optional_str(
             _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
@@ -302,15 +311,18 @@ class BitbucketClient:
             f"{self._repo_path(repo)}/commit/{quote(head_sha, safe='')}/statuses",
             operation="bitbucket fetch_pr_status statuses",
             params={"refname": source_branch} if source_branch else None,
+            retry=retry,
         )
         comments = await self._paginate(
             f"{self._pr_path(repo, pr_number)}/comments",
             operation="bitbucket fetch_pr_status comments",
             cache=True,
+            retry=retry,
         )
         diffstat = await self._paginate(
             f"{self._pr_path(repo, pr_number)}/diffstat",
             operation="bitbucket fetch_pr_status diffstat",
+            retry=retry,
         )
         # Reviewer tasks are exposed separately from comments; a PR with open tasks
         # but no comments would otherwise assemble empty feedback and reach Merge
@@ -319,8 +331,9 @@ class BitbucketClient:
             f"{self._pr_path(repo, pr_number)}/tasks",
             operation="bitbucket fetch_pr_status tasks",
             cache=True,
+            retry=retry,
         )
-        account_id = await self._current_account_id()
+        account_id = await self._current_account_id(retry=retry)
         merged, closed, merge_commit_sha = parse_pr_terminal_state(pr)
         latest_review_at, latest_review_source = latest_external_review_activity(
             comments, account_id=account_id, tasks=tasks
@@ -1021,7 +1034,7 @@ class BitbucketClient:
             raise
         return html_href(data) or self._pr_page_url(repo, ctx.pr_number)
 
-    async def _current_account_id(self) -> str | None:
+    async def _current_account_id(self, *, retry: bool = True) -> str | None:
         """Return the authenticated account id (cached) to filter own comments.
 
         Propagates ``BitbucketClientError`` instead of swallowing it. A silent
@@ -1032,11 +1045,15 @@ class BitbucketClient:
         (5xx/transport/rate-limit) through the monitor's retry path and fails
         auth/4xx faults fast. Only a successful lookup is cached, so a later poll
         retries after a transient blip.
+
+        ``retry`` is threaded through so a ``retry=False`` caller (the pre-merge
+        recheck) fails fast here too instead of running a 429 backoff inside the
+        merge critical section.
         """
         if self._account_id_fetched:
             return self._account_id
         data = await self._request_json(
-            "GET", "/2.0/user", operation="bitbucket current_user", cache=True
+            "GET", "/2.0/user", operation="bitbucket current_user", cache=True, retry=retry
         )
         if isinstance(data, dict):
             self._account_id = _clean_optional_str(data.get("account_id") or data.get("uuid"))
@@ -1070,7 +1087,7 @@ class BitbucketClient:
             default_merge_strategy=_clean_optional_str(dest_branch.get("default_merge_strategy")),
         )
 
-    async def _resolve_full_commit_sha(self, repo: RepoRef, sha: str) -> str:
+    async def _resolve_full_commit_sha(self, repo: RepoRef, sha: str, *, retry: bool = True) -> str:
         """Resolve an abbreviated Bitbucket commit hash to its full 40-char SHA.
 
         Bitbucket Cloud's PR GET serves ``source.commit.hash`` abbreviated (e.g.
@@ -1082,6 +1099,10 @@ class BitbucketClient:
         missing / too-short payload — or a full hash that does not extend the
         abbreviation we asked for — raises a deterministic reason-coded error
         rather than silently falling back to the abbreviated hash (#477).
+
+        ``retry`` is threaded through so a ``retry=False`` caller (the pre-merge
+        recheck) fails fast on this GET too instead of running a 429 backoff
+        inside the merge critical section.
         """
         if len(sha) >= 40:
             return sha
@@ -1090,6 +1111,7 @@ class BitbucketClient:
             f"{self._repo_path(repo)}/commit/{quote(sha, safe='')}",
             operation="bitbucket resolve_commit_sha",
             cache=True,
+            retry=retry,
         )
         resolved = _clean_optional_str(_as_dict(data).get("hash"))
         # The resolved full SHA must extend the abbreviation we asked for. A
@@ -1109,40 +1131,6 @@ class BitbucketClient:
             )
         return resolved
 
-    @staticmethod
-    def _pr_head_sha(pr: dict[str, Any]) -> str | None:
-        return _clean_optional_str(_as_dict(_as_dict(pr.get("source")).get("commit")).get("hash"))
-
-    # ── Path builders ──────────────────────────────────────────────────────
-
-    def _repo_path(self, repo: RepoRef) -> str:
-        return f"/2.0/repositories/{quote(repo.owner, safe='')}/{quote(repo.name, safe='')}"
-
-    def _pr_collection_path(self, repo: RepoRef) -> str:
-        return f"{self._repo_path(repo)}/pullrequests"
-
-    def _pr_path(self, repo: RepoRef, pr_number: int) -> str:
-        return f"{self._pr_collection_path(repo)}/{pr_number}"
-
-    def _issues_page_url(self, repo: RepoRef) -> str:
-        return f"https://bitbucket.org/{repo.owner}/{repo.name}/issues"
-
-    def _issue_url_from_id(self, data: Any, repo: RepoRef) -> str | None:
-        """Build the canonical issue URL from a created issue's numeric ``id``.
-
-        Bitbucket's create-issue response carries an integer ``id`` even when it
-        omits ``links.html.href``; deriving ``.../issues/{id}`` from it keeps the
-        tracking URL pointing at the specific filed issue instead of the generic
-        list. Returns ``None`` when ``data`` is not a dict or lacks a usable id.
-        """
-        issue_id = data.get("id") if isinstance(data, dict) else None
-        if isinstance(issue_id, int):
-            return f"{self._issues_page_url(repo)}/{issue_id}"
-        return None
-
-    def _pr_page_url(self, repo: RepoRef, pr_number: int) -> str:
-        return f"https://bitbucket.org/{repo.owner}/{repo.name}/pull-requests/{pr_number}"
-
     # ── HTTP core (D2) ─────────────────────────────────────────────────────
 
     async def _request_json(
@@ -1154,6 +1142,7 @@ class BitbucketClient:
         json_body: Any = None,
         params: Mapping[str, str] | None = None,
         cache: bool = False,
+        retry: bool = True,
     ) -> Any:
         """Send a request and decode JSON, honoring ETag conditional requests."""
         extra_headers: dict[str, str] = {}
@@ -1170,6 +1159,7 @@ class BitbucketClient:
             json_body=json_body,
             params=params,
             extra_headers=extra_headers or None,
+            retry=retry,
         )
         if response.status_code == 304:
             # Use the entry captured before the await: a concurrent task may have
@@ -1197,16 +1187,22 @@ class BitbucketClient:
         operation: str,
         params: Mapping[str, str] | None = None,
         cache: bool = False,
+        retry: bool = True,
     ) -> list[dict[str, Any]]:
         """Follow Bitbucket ``next`` cursor links, collecting all ``values``.
 
         The traversal is bounded two ways so a misbehaving or adversarial response
         cannot hang or redirect the monitor: a hard page cap (``max_pages``) and an
         origin check on each absolute ``next`` URL (see :meth:`_validate_next_url`).
+
+        ``retry`` propagates to every page, not just the first: a ``retry=False``
+        caller (the pre-merge recheck) must fail fast on page 2+ too, or a
+        transient 429 on a later page would run a backoff inside the merge
+        critical section (mirrors the GitHub pagination contract).
         """
         values: list[dict[str, Any]] = []
         page = await self._request_json(
-            "GET", path, operation=operation, params=params, cache=cache
+            "GET", path, operation=operation, params=params, cache=cache, retry=retry
         )
         pages = 1
         while isinstance(page, dict):
@@ -1231,8 +1227,11 @@ class BitbucketClient:
             # Propagate the caller's ``cache`` flag to every page, not just the
             # first: otherwise pages 2+ silently bypass the ETag/If-None-Match
             # optimization that ``cache=True`` callers (e.g. fetch_pr_status
-            # comments) asked for.
-            page = await self._request_json("GET", next_url, operation=operation, cache=cache)
+            # comments) asked for. ``retry`` propagates the same way so a
+            # pre-merge recheck fails fast on later pages instead of backing off.
+            page = await self._request_json(
+                "GET", next_url, operation=operation, cache=cache, retry=retry
+            )
         return values
 
     def _validate_next_url(self, next_url: str, operation: str) -> None:
@@ -1342,8 +1341,9 @@ class BitbucketClient:
         extra_headers: Mapping[str, str] | None = None,
         strict: bool = True,
         allow_log_redirect: bool = False,
+        retry: bool = True,
     ) -> httpx.Response:
-        """Single request with 429/Retry-After backoff and near-limit slow-down."""
+        """Single request; ``retry=False`` suppresses the 429/Retry-After backoff."""
         headers = {"Accept": "application/json", "Authorization": self._auth.header_value()}
         if extra_headers:
             headers.update(extra_headers)
@@ -1368,12 +1368,18 @@ class BitbucketClient:
                         body=self._redact(str(exc)),
                         reason_code=BITBUCKET_TRANSPORT_ERROR,
                     ) from exc
-                if response.status_code == 429 and attempt < self._max_retries:
+                if response.status_code == 429 and attempt < (self._max_retries if retry else 0):
                     await self._sleep(self._retry_after_seconds(response, attempt))
                     attempt += 1
                     continue
                 break
-            await self._maybe_slow_for_near_limit(response)
+            # ``retry=False`` (the pre-merge recheck) must fail fast inside the
+            # merge critical section. The proactive near-limit slow-down is a
+            # sleep just like the 429 backoff, so gate it on ``retry`` too — a
+            # ``X-RateLimit-NearLimit`` header must not stall the request while
+            # the merge coordinator lock is held.
+            if retry:
+                await self._maybe_slow_for_near_limit(response)
             location = response.headers.get("Location")
             if not (response.is_redirect and location):
                 break

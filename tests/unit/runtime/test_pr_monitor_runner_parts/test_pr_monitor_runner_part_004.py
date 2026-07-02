@@ -103,6 +103,7 @@ class PersistCheckingCommandRunner(FakeCommandRunner):
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         if args[:3] == ["gh", "run", "rerun"]:
             async with self._factory() as session:
@@ -111,7 +112,7 @@ class PersistCheckingCommandRunner(FakeCommandRunner):
                 assert (
                     workspace.monitor_threads_addressed.get(self._state_key) == self._expected_value
                 )
-        return await super().run(args, input_bytes=input_bytes, cwd=cwd)
+        return await super().run(args, input_bytes=input_bytes, cwd=cwd, **kwargs)
 
 
 def _monitor_runner(
@@ -167,6 +168,7 @@ class _CapturingGH:
         repo: RepoRef,
         pr_number: int,
         base_behind_count: int,
+        retry: bool = True,
     ) -> PRStatus:
         del repo, pr_number
         self.base_behind_counts.append(base_behind_count)
