@@ -327,9 +327,10 @@ class _RemoveWorktreeOnCall(FakeCommandRunner):
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         """Execute command and delete the worktree when the predicate fires."""
-        result = await super().run(args, input_bytes=input_bytes, cwd=cwd)
+        result = await super().run(args, input_bytes=input_bytes, cwd=cwd, **kwargs)
         if self._predicate(args, result):
             self._matches += 1
             if self._matches == self._occurrence and self._worktree_path.exists():
@@ -600,9 +601,10 @@ class _TerminalDuringCleanupCommandRunner(FakeCommandRunner):
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         """Propagate restore commands and then mark the workspace as terminal."""
-        result = await super().run(args, input_bytes=input_bytes, cwd=cwd)
+        result = await super().run(args, input_bytes=input_bytes, cwd=cwd, **kwargs)
         if self._triggered:
             return result
         if "restore" not in args:

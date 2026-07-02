@@ -172,6 +172,7 @@ class _RunOnlyRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         """Record one call and return legacy success output."""
         self.calls.append({"args": args, "input_bytes": input_bytes, "cwd": cwd})
@@ -191,6 +192,7 @@ class _CancellingStreamingRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         """Record cleanup call details and return success payload."""
         del input_bytes, cwd
@@ -222,6 +224,7 @@ class _SlowCleanupAfterCancelRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         """Capture cleanup-callback details before cancellation."""
         del input_bytes, cwd

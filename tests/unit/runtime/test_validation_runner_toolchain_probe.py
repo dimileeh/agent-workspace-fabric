@@ -49,6 +49,7 @@ class _WedgedProbeRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         self.calls.append(list(args))
         if "awf-cleanup" in args:
@@ -80,6 +81,7 @@ class _WedgedCleanupProbeRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         self.calls.append(list(args))
         if "awf-cleanup" in args:

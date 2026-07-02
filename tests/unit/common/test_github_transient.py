@@ -8,6 +8,117 @@ from awf.common.github_transient import is_transient_github_error_text
 
 
 @pytest.mark.unit
+def test_ws_88b71225_connection_error_is_transient() -> None:
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(
+            operation="gh api graphql",
+            stderr="gh api graphql failed (exit=1): error connecting to api.github.com",
+        )
+        == GitHubErrorDisposition.TRANSIENT
+    )
+
+
+@pytest.mark.unit
+def test_unknown_github_error_defaults_to_unknown() -> None:
+    """A gh failure matching no known marker is UNKNOWN, not TRANSIENT. The two
+    layers then treat it differently: the transport still retries UNKNOWN in-cycle
+    (allow-by-default), but the monitor's terminate-vs-keep-polling decision FAILS on
+    it rather than polling forever on a fault it cannot classify."""
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(
+            operation="gh api graphql",
+            stderr="something completely new from gh",
+        )
+        == GitHubErrorDisposition.UNKNOWN
+    )
+
+
+@pytest.mark.unit
+def test_already_exists_is_not_permanent() -> None:
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(
+            operation="gh pr create",
+            stderr='HTTP 422: A pull request already exists for "o:feature".',
+        )
+        != GitHubErrorDisposition.PERMANENT
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "not logged in to any GitHub hosts",
+        "HTTP 403: Resource not accessible by integration",
+        "SSO authorization required",
+        "repository is archived",
+        "Field 'missingField' doesn't exist on type 'PullRequest'",
+    ],
+)
+def test_permanent_markers_fast_fail(stderr: str) -> None:
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(operation="gh api graphql", stderr=stderr)
+        == GitHubErrorDisposition.PERMANENT
+    )
+
+
+@pytest.mark.unit
+def test_generic_malformed_http_400_without_resubmit_guidance_is_unknown() -> None:
+    """A bare HTTP 400 (not a 5xx / rate-limit / connection marker) is UNKNOWN:
+    the transport retries it in-cycle, but it is not a recognized transient."""
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(
+            operation="gh pr create",
+            stderr="HTTP 400: malformed request",
+        )
+        == GitHubErrorDisposition.UNKNOWN
+    )
+
+
+@pytest.mark.unit
+def test_resubmit_wording_without_github_api_context_is_unknown() -> None:
+    """``please try resubmitting`` only maps to TRANSIENT with GitHub API context;
+    without it (a local validator here) it is UNKNOWN."""
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(
+            operation="local validator",
+            stderr="malformed payload; please try resubmitting",
+        )
+        == GitHubErrorDisposition.UNKNOWN
+    )
+
+
+@pytest.mark.unit
 def test_malformed_graphql_resubmit_error_is_transient() -> None:
     assert is_transient_github_error_text(
         operation="gh pr create",
@@ -17,14 +128,6 @@ def test_malformed_graphql_resubmit_error_is_transient() -> None:
             "request and contact us if the problem persists. "
             "(https://api.github.com/graphql)"
         ),
-    )
-
-
-@pytest.mark.unit
-def test_generic_malformed_http_400_without_resubmit_guidance_is_not_transient() -> None:
-    assert not is_transient_github_error_text(
-        operation="gh pr create",
-        stderr="HTTP 400: malformed request",
     )
 
 
@@ -41,14 +144,6 @@ def test_github_server_and_network_markers_are_transient(stderr: str) -> None:
     assert is_transient_github_error_text(
         operation="gh api graphql",
         stderr=stderr,
-    )
-
-
-@pytest.mark.unit
-def test_resubmit_wording_without_github_api_context_is_not_transient() -> None:
-    assert not is_transient_github_error_text(
-        operation="local validator",
-        stderr="malformed payload; please try resubmitting",
     )
 
 

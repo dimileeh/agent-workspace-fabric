@@ -849,6 +849,13 @@ class TestFailurePaths:
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
+        # This test asserts redaction of a single create failure, not retry: pin the
+        # create to one attempt so the queued failure is the one surfaced/audited.
+        executor._pr_creator = PullRequestCreator(  # noqa: SLF001
+            fake,
+            pr_create_transient_max_retries=0,
+            pr_create_transient_initial_backoff_seconds=0,
+        )
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")

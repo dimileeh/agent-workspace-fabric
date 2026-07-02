@@ -28,7 +28,8 @@ from awf.common.bitbucket_client import (
 from awf.common.github_client import GitHubClientError
 from awf.common.github_transient import (
     GITHUB_AUTH_TRANSIENT_EVIDENCE_MARKERS,
-    is_transient_github_error_text,
+    GitHubErrorDisposition,
+    github_error_disposition,
 )
 from awf.control.quality_gates import QualityGateViolation
 from awf.control.state_machine import WorkspaceStateMachine
@@ -808,7 +809,11 @@ def _redact_and_truncate_forge_error(value: str, *, limit: int = 400) -> str:
 def _is_transient_github_client_error(exc: GitHubClientError) -> bool:
     """Classify GitHub/gh failures that should keep the monitor polling."""
 
-    return is_transient_github_error_text(operation=exc.operation, stderr=exc.stderr)
+    disposition = github_error_disposition(operation=exc.operation, stderr=exc.stderr)
+    return disposition in {
+        GitHubErrorDisposition.TRANSIENT,
+        GitHubErrorDisposition.AMBIGUOUS_AUTH,
+    }
 
 
 def _is_transient_bitbucket_client_error(exc: BitbucketClientError) -> bool:

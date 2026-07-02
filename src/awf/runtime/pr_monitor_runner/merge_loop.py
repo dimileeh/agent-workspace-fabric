@@ -428,6 +428,9 @@ async def handle_merge_action(
                         pr_number=pr_number,
                         workspace_id=workspace_id,
                         base_branch=base_branch,
+                        # Inside the merge critical section: a single failure must
+                        # raise promptly to be classified, not retry under the lock.
+                        retry=False,
                     )
                 except ForgeClientError as exc:
                     # Both forges poll status through ``self._deps.gh``; either

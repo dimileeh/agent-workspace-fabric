@@ -114,8 +114,14 @@ class ForgeClient(Protocol):
         repo: RepoRef,
         pr_number: int,
         base_behind_count: int,
+        retry: bool = True,
     ) -> PRStatus:
-        """Return the fully assembled PR status snapshot."""
+        """Return the fully assembled PR status snapshot.
+
+        ``retry=True`` (ordinary polling) recovers a transient blip in-cycle;
+        ``retry=False`` (pre-merge recheck) surfaces a single failure promptly so
+        the merge critical section classifies it instead of retrying under the lock.
+        """
         ...
 
     async def fetch_failing_check_logs(

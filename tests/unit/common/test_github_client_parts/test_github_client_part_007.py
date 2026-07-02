@@ -111,7 +111,7 @@ class TestMutations:
     @pytest.mark.unit
     async def test_merge_pr_squash_delete_branch_default(self) -> None:
         fake = FakeCommandRunner()
-        fake.queue_result(returncode=0)  # merge
+        fake.queue_result(returncode=0)  # merge (no pre-check: the monitor recheck owns state)
         fake.queue_result(returncode=0, stdout="MERGESHA123\n")  # sha fetch
         client = GitHubClient(fake)
         sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
@@ -124,8 +124,8 @@ class TestMutations:
     @pytest.mark.unit
     async def test_merge_pr_honors_method_and_omits_delete_branch_flag(self) -> None:
         fake = FakeCommandRunner()
-        fake.queue_result(returncode=0)
-        fake.queue_result(returncode=0, stdout="MERGESHA123\n")
+        fake.queue_result(returncode=0)  # merge
+        fake.queue_result(returncode=0, stdout="MERGESHA123\n")  # sha fetch
         client = GitHubClient(fake)
 
         sha = await client.merge_pr(
@@ -144,7 +144,7 @@ class TestMutations:
     @pytest.mark.unit
     async def test_merge_pr_error_raises(self) -> None:
         fake = FakeCommandRunner()
-        fake.queue_result(returncode=1, stderr="branch protection blocked merge")
+        fake.queue_result(returncode=1, stderr="branch protection blocked merge")  # merge fails
         client = GitHubClient(fake)
         with pytest.raises(GitHubClientError) as exc:
             await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=1)
@@ -156,8 +156,10 @@ class TestMutations:
         The SHA is optional metadata, not a functional gate."""
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0)  # merge ok
-        fake.queue_result(returncode=1, stderr="some api hiccup")  # sha fetch fails
-        client = GitHubClient(fake)
+        fake.queue_result(
+            returncode=1, stderr="not found"
+        )  # sha fetch fails (permanent, not retried)
+        client = GitHubClient(fake, sleep=lambda _: None)
         sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
         assert sha == ""
 

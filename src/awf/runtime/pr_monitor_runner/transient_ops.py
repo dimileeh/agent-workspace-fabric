@@ -65,6 +65,7 @@ async def _fetch_status_for_decision(
     pr_number: int,
     workspace_id: str,
     base_branch: str,
+    retry: bool = True,
 ) -> PRStatus:
     """Fetch the full PR snapshot used by the decision core.
 
@@ -72,6 +73,11 @@ async def _fetch_status_for_decision(
     per-check logs. The same path is used for the main loop and the
     pre-merge recheck so the final merge gate cannot accidentally use
     weaker data than ordinary polling.
+
+    ``retry`` defaults to ``True`` (ordinary polling recovers a transient blip
+    in-cycle). The pre-merge recheck passes ``retry=False`` so a single failure
+    raises promptly and the merge critical section classifies it (transient ->
+    re-poll next cycle; unknown -> fail) instead of retrying under the merge lock.
     """
     worktree_path = self._worktrees_root / workspace_id
     await self._fetch_base(
@@ -84,7 +90,7 @@ async def _fetch_status_for_decision(
         base_branch=base_branch,
     )
     status = await self._deps.gh.fetch_pr_status(
-        repo=repo, pr_number=pr_number, base_behind_count=base_behind
+        repo=repo, pr_number=pr_number, base_behind_count=base_behind, retry=retry
     )
     if status.check_state.value == "FAILURE":
         pytest_fallback_commands = await self._workspace_test_commands(workspace_id)

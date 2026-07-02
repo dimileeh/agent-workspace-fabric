@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
+
+from awf.common.audit import redact_audit_text
+from awf.common.commands import AsyncCommandRunner
+from awf.common.github_retry import RetryPolicy
+from awf.common.github_transport import execute_gh_with_retry
+from awf.common.logging import get_logger
 
 if TYPE_CHECKING:
     from awf.common.github_client import (
@@ -10,6 +17,277 @@ if TYPE_CHECKING:
         PullRequestAdoptionMetadata,
         RepoRef,
     )
+
+_log = get_logger(__name__)
+
+_PR_ADOPTION_VIEW_JSON_FIELDS = (
+    "number,headRefName,headRepository,isCrossRepository,baseRefName,"
+    "headRefOid,baseRefOid,state,isDraft,author,url,title"
+)
+_BRANCH_OPEN_PR_LIST_JSON_FIELDS = (
+    "number,url,headRefName,headRefOid,headRepository,headRepositoryOwner"
+)
+_BRANCH_OPEN_PR_LIST_LIMIT = 1000
+
+
+async def fetch_pull_request_adoption_metadata(
+    *,
+    runner: AsyncCommandRunner,
+    repo: RepoRef,
+    pr_number: int,
+) -> PullRequestAdoptionMetadata:
+    """Fetch one-shot metadata for adopting an existing GitHub PR."""
+    from awf.common.github_client import GitHubClientError, PullRequestMetadataError
+
+    # NEVER-retry: this one-shot read classifies its own failure into a stable
+    # reason code (not-found vs fetch-failed). The transport retry would consume the
+    # single failure and could return a stale/empty follow-up result, so we take the
+    # raise on the first attempt and map it here.
+    try:
+        result = await execute_gh_with_retry(
+            runner,
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--repo",
+                repo.slug(),
+                "--json",
+                _PR_ADOPTION_VIEW_JSON_FIELDS,
+            ],
+            operation="gh pr view adoption metadata",
+            retry_policy=RetryPolicy.NEVER,
+        )
+    except GitHubClientError as exc:
+        reason = (
+            "PR_NOT_FOUND"
+            if _looks_like_missing_pr_error(exc.stderr)
+            else "PR_METADATA_FETCH_FAILED"
+        )
+        raise PullRequestMetadataError(
+            reason_code=reason,
+            message=(exc.stderr or f"gh pr view exited {exc.returncode}").strip(),
+            detail={
+                "repo_slug": repo.slug(),
+                "pr_number": pr_number,
+                "returncode": exc.returncode,
+            },
+        ) from exc
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise PullRequestMetadataError(
+            reason_code="PR_METADATA_INVALID",
+            message=f"failed to parse gh pr view JSON: {exc}",
+            detail={"repo_slug": repo.slug(), "pr_number": pr_number},
+        ) from exc
+
+    return _parse_pull_request_adoption_metadata(payload, repo=repo, pr_number=pr_number)
+
+
+async def list_open_pull_requests_for_branch(
+    *,
+    runner: AsyncCommandRunner,
+    repo: RepoRef,
+    branch_name: str,
+    base_branch: str | None = None,
+    retry_policy: RetryPolicy = RetryPolicy.NEVER,
+) -> list[BranchOpenPullRequest]:
+    """List open GitHub PRs whose head branch matches ``branch_name``.
+
+    Defaults to ``NEVER`` for the one-shot adoption lookup (classify a single
+    failure). The create-PR reconcile path passes a retrying policy, because there
+    the lookup is a mutation-adjacent recheck that should survive a transient blip.
+    """
+    from awf.common.github_client import GitHubClientError, PullRequestMetadataError
+
+    stripped_branch = branch_name.strip()
+    if not stripped_branch:
+        return []
+    command = [
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        repo.slug(),
+        "--head",
+        stripped_branch,
+        "--state",
+        "open",
+        "--limit",
+        str(_BRANCH_OPEN_PR_LIST_LIMIT),
+    ]
+    if base_branch is not None and base_branch.strip():
+        command.extend(["--base", base_branch.strip()])
+    command.extend(["--json", _BRANCH_OPEN_PR_LIST_JSON_FIELDS])
+    # The caller picks the policy: NEVER for one-shot adoption (classify the single
+    # failure), a retrying policy for the create-reconcile recheck.
+    try:
+        result = await execute_gh_with_retry(
+            runner,
+            command,
+            operation="gh pr list",
+            retry_policy=retry_policy,
+        )
+    except GitHubClientError as exc:
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_FAILED",
+            message=(exc.stderr or f"gh pr list exited {exc.returncode}").strip(),
+            detail={
+                "repo_slug": repo.slug(),
+                "branch_name": stripped_branch,
+                "base_branch": base_branch,
+                "returncode": exc.returncode,
+            },
+        ) from exc
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message=f"failed to parse gh pr list JSON: {exc}",
+            detail={
+                "repo_slug": repo.slug(),
+                "branch_name": stripped_branch,
+                "base_branch": base_branch,
+            },
+        ) from exc
+    if not isinstance(payload, list):
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message="gh pr list returned non-list JSON.",
+            detail={
+                "repo_slug": repo.slug(),
+                "branch_name": stripped_branch,
+                "base_branch": base_branch,
+            },
+        )
+    results: list[BranchOpenPullRequest] = []
+    parse_failures: list[tuple[int, PullRequestMetadataError]] = []
+    for index, item in enumerate(payload):
+        try:
+            results.append(
+                _parse_branch_open_pull_request(item, repo=repo, branch_name=stripped_branch)
+            )
+        except PullRequestMetadataError as exc:
+            parse_failures.append((index, exc))
+
+    failure_summaries: list[dict[str, object]] = []
+    for index, parse_error in parse_failures:
+        error = redact_audit_text(parse_error.message)
+        failure_summaries.append(
+            {
+                "item_index": index,
+                "reason_code": parse_error.reason_code,
+                "error": error,
+            }
+        )
+        _log.warning(
+            "github.open_pr_item_parse_failed",
+            repo_slug=repo.slug(),
+            branch_name=stripped_branch,
+            item_index=index,
+            reason_code=parse_error.reason_code,
+            error=error,
+        )
+    if parse_failures and not results:
+        failure_count = len(parse_failures)
+        item_label = "item" if failure_count == 1 else "items"
+        _log.warning(
+            "github.open_pr_batch_parse_failed",
+            repo_slug=repo.slug(),
+            branch_name=stripped_branch,
+            base_branch=base_branch,
+            failure_count=failure_count,
+            failures=failure_summaries,
+        )
+        if failure_count == 1:
+            raise parse_failures[0][1]
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message=f"failed to parse {failure_count} gh pr list {item_label}.",
+            detail={
+                "repo_slug": repo.slug(),
+                "branch_name": stripped_branch,
+                "base_branch": base_branch,
+                "failure_count": failure_count,
+                "failures": failure_summaries,
+            },
+        ) from parse_failures[0][1]
+    return results
+
+
+def parse_github_pull_request_url(pr_url: str) -> tuple[RepoRef, int]:
+    """Parse a canonical GitHub PR URL into ``(repo, number)``."""
+    from urllib.parse import urlsplit
+
+    from awf.common.github_client import RepoRef
+
+    parsed = urlsplit(pr_url.strip())
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != "github.com":
+        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}")
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) < 4 or parts[2] != "pull":
+        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}")
+    try:
+        number = int(parts[3])
+    except ValueError as exc:
+        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}") from exc
+    if number <= 0:
+        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}")
+    return RepoRef(owner=parts[0], name=parts[1]), number
+
+
+class BranchOpenPullRequestResolver:
+    """Resolve open PRs for a branch using the GitHub CLI."""
+
+    def __init__(self, runner: AsyncCommandRunner) -> None:
+        """Store the command runner used for GH CLI queries."""
+        self._runner = runner
+
+    async def resolve(
+        self,
+        *,
+        repo_url: str,
+        branch_name: str,
+        base_branch: str | None,
+    ) -> list[BranchOpenPullRequest]:
+        """Resolve open PRs for a branch, optionally scoped by base branch."""
+        from awf.common.github_client import PullRequestMetadataError, RepoRef
+
+        try:
+            repo = RepoRef.from_url(repo_url)
+        except ValueError as exc:
+            redacted_repo_url = redact_audit_text(repo_url)
+            redacted_error = redact_audit_text(str(exc))
+            _log.warning(
+                "github.open_pr_lookup_skipped_invalid_repo_url",
+                repo_url=redacted_repo_url,
+                branch_name=branch_name,
+                base_branch=base_branch,
+                error=redacted_error,
+            )
+            raise PullRequestMetadataError(
+                reason_code="OPEN_PR_LOOKUP_INVALID",
+                message=f"cannot parse repo_url for open PR lookup: {redacted_error}",
+                detail={
+                    "repo_url": redacted_repo_url,
+                    "branch_name": branch_name,
+                    "base_branch": base_branch,
+                },
+            ) from exc
+        return await list_open_pull_requests_for_branch(
+            runner=self._runner,
+            # Reconcile recheck (after a create failure): retry a transient lookup so
+            # a blip doesn't force an unnecessary second create attempt.
+            retry_policy=RetryPolicy.READ,
+            repo=repo,
+            branch_name=branch_name,
+            base_branch=base_branch,
+        )
 
 
 def _parse_pull_request_adoption_metadata(

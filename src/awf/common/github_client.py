@@ -23,17 +23,30 @@ stateless and thread-safe.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 from awf.common.audit import redact_audit_text
-from awf.common.commands import AsyncCommandRunner
+from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.forge_errors import ForgeClientError
+from awf.common.github_client_adoption import (
+    BranchOpenPullRequestResolver as BranchOpenPullRequestResolver,
+)
+from awf.common.github_client_adoption import (
+    fetch_pull_request_adoption_metadata as fetch_pull_request_adoption_metadata,
+)
+from awf.common.github_client_adoption import (
+    list_open_pull_requests_for_branch as list_open_pull_requests_for_branch,
+)
+from awf.common.github_client_adoption import (
+    parse_github_pull_request_url as parse_github_pull_request_url,
+)
 from awf.common.github_graphql import (
     _GQL_PR_FILES_PAGE,
     _GQL_PR_ISSUE_COMMENTS_PAGE,
@@ -43,6 +56,14 @@ from awf.common.github_graphql import (
     _GQL_RESOLVE_THREAD,
     _GQL_REVIEW_THREAD_COMMENTS_PAGE,
 )
+from awf.common.github_retry import (
+    GITHUB_TRANSPORT_MAX_ATTEMPTS,  # noqa: F401
+    GITHUB_TRANSPORT_PER_ATTEMPT_TIMEOUT_SECONDS,  # noqa: F401
+    PullRequestCreateTransportOutcome,
+    Reconciler,
+    RetryPolicy,
+)
+from awf.common.github_transport import execute_gh_with_retry as _execute_gh_with_retry
 from awf.common.logging import get_logger
 from awf.db.enums import ForgeKind
 from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
@@ -66,6 +87,18 @@ _log = get_logger(__name__)
 _PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
 _ACTIONS_RUN_JOB_PATH_RE = re.compile(r"/actions/runs/(?P<run_id>\d+)/job/\d+")
 _FAILED_CHECK_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"})
+
+
+def _branch_open_pr_metadata(pr: BranchOpenPullRequest) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "number": pr.number,
+        "url": pr.url,
+        "head_ref": pr.head_ref,
+        "head_repo_slug": pr.head_repo_slug,
+    }
+    if pr.head_sha is not None:
+        metadata["head_sha"] = pr.head_sha
+    return metadata
 
 
 # GitHub shells ``gh`` and carries no HTTP status, so it has no native per-fault
@@ -320,250 +353,25 @@ class BranchOpenPullRequest:
     head_sha: str | None = None
 
 
-_PR_ADOPTION_VIEW_JSON_FIELDS = (
-    "number,headRefName,headRepository,isCrossRepository,baseRefName,"
-    "headRefOid,baseRefOid,state,isDraft,author,url,title"
-)
-_BRANCH_OPEN_PR_LIST_JSON_FIELDS = (
-    "number,url,headRefName,headRefOid,headRepository,headRepositoryOwner"
-)
-_BRANCH_OPEN_PR_LIST_LIMIT = 1000
-
-
-def parse_github_pull_request_url(pr_url: str) -> tuple[RepoRef, int]:
-    """Parse a canonical GitHub PR URL into ``(repo, number)``."""
-
-    parsed = urlsplit(pr_url.strip())
-    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != "github.com":
-        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}")
-    parts = [part for part in parsed.path.strip("/").split("/") if part]
-    if len(parts) < 4 or parts[2] != "pull":
-        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}")
-    try:
-        number = int(parts[3])
-    except ValueError as exc:
-        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}") from exc
-    if number <= 0:
-        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}")
-    return RepoRef(owner=parts[0], name=parts[1]), number
-
-
-async def fetch_pull_request_adoption_metadata(
-    *,
-    runner: AsyncCommandRunner,
-    repo: RepoRef,
-    pr_number: int,
-) -> PullRequestAdoptionMetadata:
-    """Fetch one-shot metadata for adopting an existing GitHub PR."""
-
-    result = await runner.run(
-        [
-            "gh",
-            "pr",
-            "view",
-            str(pr_number),
-            "--repo",
-            repo.slug(),
-            "--json",
-            _PR_ADOPTION_VIEW_JSON_FIELDS,
-        ]
-    )
-    if result.returncode != 0:
-        reason = (
-            "PR_NOT_FOUND"
-            if _looks_like_missing_pr_error(result.stderr)
-            else "PR_METADATA_FETCH_FAILED"
-        )
-        raise PullRequestMetadataError(
-            reason_code=reason,
-            message=(result.stderr or f"gh pr view exited {result.returncode}").strip(),
-            detail={
-                "repo_slug": repo.slug(),
-                "pr_number": pr_number,
-                "returncode": result.returncode,
-            },
-        )
-
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise PullRequestMetadataError(
-            reason_code="PR_METADATA_INVALID",
-            message=f"failed to parse gh pr view JSON: {exc}",
-            detail={"repo_slug": repo.slug(), "pr_number": pr_number},
-        ) from exc
-
-    return _parse_pull_request_adoption_metadata(payload, repo=repo, pr_number=pr_number)
-
-
-async def list_open_pull_requests_for_branch(
-    *,
-    runner: AsyncCommandRunner,
-    repo: RepoRef,
-    branch_name: str,
-    base_branch: str | None = None,
-) -> list[BranchOpenPullRequest]:
-    """List open GitHub PRs whose head branch matches ``branch_name``."""
-
-    stripped_branch = branch_name.strip()
-    if not stripped_branch:
-        return []
-    command = [
-        "gh",
-        "pr",
-        "list",
-        "--repo",
-        repo.slug(),
-        "--head",
-        stripped_branch,
-        "--state",
-        "open",
-        "--limit",
-        str(_BRANCH_OPEN_PR_LIST_LIMIT),
-    ]
-    if base_branch is not None and base_branch.strip():
-        command.extend(["--base", base_branch.strip()])
-    command.extend(["--json", _BRANCH_OPEN_PR_LIST_JSON_FIELDS])
-    result = await runner.run(command)
-    if result.returncode != 0:
-        raise PullRequestMetadataError(
-            reason_code="OPEN_PR_LOOKUP_FAILED",
-            message=(result.stderr or f"gh pr list exited {result.returncode}").strip(),
-            detail={
-                "repo_slug": repo.slug(),
-                "branch_name": stripped_branch,
-                "base_branch": base_branch,
-                "returncode": result.returncode,
-            },
-        )
-
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise PullRequestMetadataError(
-            reason_code="OPEN_PR_LOOKUP_INVALID",
-            message=f"failed to parse gh pr list JSON: {exc}",
-            detail={
-                "repo_slug": repo.slug(),
-                "branch_name": stripped_branch,
-                "base_branch": base_branch,
-            },
-        ) from exc
-    if not isinstance(payload, list):
-        raise PullRequestMetadataError(
-            reason_code="OPEN_PR_LOOKUP_INVALID",
-            message="gh pr list returned non-list JSON.",
-            detail={
-                "repo_slug": repo.slug(),
-                "branch_name": stripped_branch,
-                "base_branch": base_branch,
-            },
-        )
-    results: list[BranchOpenPullRequest] = []
-    parse_failures: list[tuple[int, PullRequestMetadataError]] = []
-    for index, item in enumerate(payload):
-        try:
-            results.append(
-                _parse_branch_open_pull_request(item, repo=repo, branch_name=stripped_branch)
-            )
-        except PullRequestMetadataError as exc:
-            parse_failures.append((index, exc))
-
-    failure_summaries: list[dict[str, object]] = []
-    for index, parse_error in parse_failures:
-        error = redact_audit_text(parse_error.message)
-        failure_summaries.append(
-            {
-                "item_index": index,
-                "reason_code": parse_error.reason_code,
-                "error": error,
-            }
-        )
-        _log.warning(
-            "github.open_pr_item_parse_failed",
-            repo_slug=repo.slug(),
-            branch_name=stripped_branch,
-            item_index=index,
-            reason_code=parse_error.reason_code,
-            error=error,
-        )
-    if parse_failures and not results:
-        failure_count = len(parse_failures)
-        item_label = "item" if failure_count == 1 else "items"
-        _log.warning(
-            "github.open_pr_batch_parse_failed",
-            repo_slug=repo.slug(),
-            branch_name=stripped_branch,
-            base_branch=base_branch,
-            failure_count=failure_count,
-            failures=failure_summaries,
-        )
-        if failure_count == 1:
-            raise parse_failures[0][1]
-        raise PullRequestMetadataError(
-            reason_code="OPEN_PR_LOOKUP_INVALID",
-            message=f"failed to parse {failure_count} gh pr list {item_label}.",
-            detail={
-                "repo_slug": repo.slug(),
-                "branch_name": stripped_branch,
-                "base_branch": base_branch,
-                "failure_count": failure_count,
-                "failures": failure_summaries,
-            },
-        ) from parse_failures[0][1]
-    return results
-
-
-class BranchOpenPullRequestResolver:
-    """Resolve open PRs for a branch using the GitHub CLI."""
-
-    def __init__(self, runner: AsyncCommandRunner) -> None:
-        """Store the command runner used for GH CLI queries."""
-        self._runner = runner
-
-    async def resolve(
-        self,
-        *,
-        repo_url: str,
-        branch_name: str,
-        base_branch: str | None,
-    ) -> list[BranchOpenPullRequest]:
-        """Resolve open PRs for a branch, optionally scoped by base branch."""
-        try:
-            repo = RepoRef.from_url(repo_url)
-        except ValueError as exc:
-            redacted_repo_url = redact_audit_text(repo_url)
-            redacted_error = redact_audit_text(str(exc))
-            _log.warning(
-                "github.open_pr_lookup_skipped_invalid_repo_url",
-                repo_url=redacted_repo_url,
-                branch_name=branch_name,
-                base_branch=base_branch,
-                error=redacted_error,
-            )
-            raise PullRequestMetadataError(
-                reason_code="OPEN_PR_LOOKUP_INVALID",
-                message=f"cannot parse repo_url for open PR lookup: {redacted_error}",
-                detail={
-                    "repo_url": redacted_repo_url,
-                    "branch_name": branch_name,
-                    "base_branch": base_branch,
-                },
-            ) from exc
-        return await list_open_pull_requests_for_branch(
-            runner=self._runner,
-            repo=repo,
-            branch_name=branch_name,
-            base_branch=base_branch,
-        )
-
-
 class GitHubClient:
     """Stateless façade over ``gh`` CLI + GraphQL. Re-entrant."""
 
-    def __init__(self, runner: AsyncCommandRunner) -> None:
+    def __init__(
+        self,
+        runner: AsyncCommandRunner,
+        *,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+    ) -> None:
         """Store the shared command runner for all GitHub operations."""
         self._runner = runner
+        self._sleep = sleep or asyncio.sleep
+        self._last_pr_create_outcome: PullRequestCreateTransportOutcome | None = None
+
+    @property
+    def last_pr_create_outcome(self) -> PullRequestCreateTransportOutcome | None:
+        """Transport audit metadata from the most recent ``create_pull_request`` call."""
+
+        return self._last_pr_create_outcome
 
     async def aclose(self) -> None:
         """No-op: a ``GitHubClient`` owns no closable resource.
@@ -588,6 +396,7 @@ class GitHubClient:
         repo: RepoRef,
         pr_number: int,
         base_behind_count: int,
+        retry: bool = True,
     ) -> PRStatus:
         """Single GraphQL round-trip; assembles a ``PRStatus``.
 
@@ -595,6 +404,12 @@ class GitHubClient:
         (``git rev-list --count HEAD..origin/<base>``). GitHub's
         ``mergeable`` field tells us *whether* there's a conflict but not
         the count of commits behind, so we pass it in.
+
+        ``retry`` defaults to ``True`` for ordinary polling, where a transient
+        blip recovers in-cycle (allow-by-default). The pre-merge recheck passes
+        ``retry=False`` so a single failure raises promptly and the merge critical
+        section classifies it (transient -> re-poll next cycle; unknown -> fail)
+        rather than holding the merge lock across in-cycle backoffs.
         """
         payload = await self._graphql(
             query=_GQL_PR_STATE,
@@ -603,6 +418,7 @@ class GitHubClient:
                 "repo": repo.name,
                 "number": pr_number,
             },
+            retry_policy=RetryPolicy.READ if retry else RetryPolicy.NEVER,
         )
         pr = payload["data"]["repository"]["pullRequest"]
         if pr is None:
@@ -1069,7 +885,7 @@ class GitHubClient:
         infrastructure rather than repository code.
         """
 
-        result = await self._runner.run(
+        result = await self._run_gh_command(
             [
                 "gh",
                 "run",
@@ -1078,7 +894,9 @@ class GitHubClient:
                 "--repo",
                 repo.slug(),
                 "--failed",
-            ]
+            ],
+            operation="rerun_failed_workflow_jobs",
+            retry_policy=RetryPolicy.NEVER,
         )
         if not result.ok:
             raise GitHubClientError(
@@ -1092,11 +910,12 @@ class GitHubClient:
         await self._graphql(
             query=_GQL_RESOLVE_THREAD,
             variables={"threadId": thread_id},
+            retry_policy=RetryPolicy.NEVER,
         )
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         """Post a top-level PR comment (not a reply to a thread)."""
-        result = await self._runner.run(
+        await self._run_gh_command(
             [
                 "gh",
                 "pr",
@@ -1107,13 +926,9 @@ class GitHubClient:
                 "--body",
                 body,
             ],
+            operation="gh pr comment",
+            retry_policy=RetryPolicy.NEVER,
         )
-        if not result.ok:
-            raise GitHubClientError(
-                operation="gh pr comment",
-                returncode=result.returncode,
-                stderr=result.stderr,
-            )
 
     async def create_issue(self, *, repo: RepoRef, title: str, body: str) -> str:
         """Open a tracking issue and return its URL.
@@ -1124,7 +939,7 @@ class GitHubClient:
         as a capture failure and leaves the thread unresolved so the merge gate
         keeps blocking (fail safe).
         """
-        result = await self._runner.run(
+        result = await self._run_gh_command(
             [
                 "gh",
                 "issue",
@@ -1136,13 +951,9 @@ class GitHubClient:
                 "--body",
                 body,
             ],
+            operation="gh issue create",
+            retry_policy=RetryPolicy.NEVER,
         )
-        if not result.ok:
-            raise GitHubClientError(
-                operation="gh issue create",
-                returncode=result.returncode,
-                stderr=result.stderr,
-            )
         return result.stdout.strip()
 
     async def create_pull_request(
@@ -1153,46 +964,151 @@ class GitHubClient:
         head: str,
         title: str,
         body: str,
+        transient_max_attempts: int | None = None,
     ) -> str:
         """Open a PR for an existing ``head`` branch against ``base``.
+
+        ``transient_max_attempts`` bounds the in-transport reconcile+retry budget
+        (the caller derives it from ``pr_create_transient_max_retries``); ``None``
+        uses the transport default.
 
         Both branches already exist on origin (no worktree push), so this is
         a plain ``gh pr create`` and returns the new PR URL printed on stdout.
         """
-        result = await self._runner.run(
-            [
-                "gh",
-                "pr",
-                "create",
-                "--repo",
-                repo.slug(),
-                "--base",
-                base,
-                "--head",
-                head,
-                "--title",
-                title,
-                "--body",
-                body,
-            ],
-        )
-        if not result.ok:
-            raise GitHubClientError(
+        failures: list[dict[str, object]] = []
+        reconcile_lookups: list[dict[str, object]] = []
+        reconciled_match: BranchOpenPullRequest | None = None
+        duplicate_lookup_failed = False
+
+        async def _reconcile_create_pr() -> str | None:
+            nonlocal reconciled_match, duplicate_lookup_failed
+            try:
+                candidates = await list_open_pull_requests_for_branch(
+                    runner=self._runner,
+                    repo=repo,
+                    branch_name=head,
+                    base_branch=base,
+                    # Reconcile recheck after a create failure: retry a transient
+                    # lookup so a blip doesn't wedge dedupe into a redundant create.
+                    retry_policy=RetryPolicy.READ,
+                )
+            except (PullRequestMetadataError, GitHubClientError) as exc:
+                duplicate_lookup_failed = True
+                if isinstance(exc, PullRequestMetadataError):
+                    reconcile_lookups.append(
+                        {
+                            "status": "failed",
+                            "reason_code": exc.reason_code,
+                            "message": exc.message[:500],
+                        }
+                    )
+                else:
+                    reconcile_lookups.append(
+                        {
+                            "status": "failed",
+                            "reason_code": "OPEN_PR_LOOKUP_FAILED",
+                            "operation": exc.operation,
+                            "returncode": exc.returncode,
+                            "error_message": exc.stderr[:500],
+                        }
+                    )
+                return None
+
+            repo_slug = repo.slug().lower()
+            same_repo = [
+                candidate
+                for candidate in candidates
+                if candidate.head_repo_slug.lower() == repo_slug
+            ]
+            lookup_detail: dict[str, object] = {
+                "status": "found" if same_repo else "not_found",
+                "candidate_count": len(candidates),
+                "same_repo_count": len(same_repo),
+                "fork_collision_count": len(candidates) - len(same_repo),
+            }
+            if not same_repo:
+                reconcile_lookups.append(lookup_detail)
+                return None
+            match = same_repo[0]
+            reconciled_match = match
+            lookup_detail["matched_pr"] = _branch_open_pr_metadata(match)
+            reconcile_lookups.append(lookup_detail)
+            return match.url
+
+        try:
+            result = await self._run_gh_command(
+                [
+                    "gh",
+                    "pr",
+                    "create",
+                    "--repo",
+                    repo.slug(),
+                    "--base",
+                    base,
+                    "--head",
+                    head,
+                    "--title",
+                    title,
+                    "--body",
+                    body,
+                ],
                 operation="gh pr create",
-                returncode=result.returncode,
-                stderr=result.stderr,
+                retry_policy=RetryPolicy.RECONCILABLE_MUTATION,
+                reconciler=_reconcile_create_pr,
+                on_failure=lambda detail: failures.append(detail),
+                allow_duplicate_retry=lambda: duplicate_lookup_failed,
+                max_attempts=transient_max_attempts,
             )
+        except GitHubClientError:
+            self._last_pr_create_outcome = PullRequestCreateTransportOutcome(
+                strategy="failed",
+                attempts=len(failures) or 1,
+                failures=failures,
+                reconcile_lookups=reconcile_lookups,
+            )
+            raise
+
         match = _PR_URL_PATTERN.search(result.stdout)
         if match is None:
-            # gh exited 0 but printed status/warning text rather than a PR URL.
-            # Returning that verbatim would persist a non-URL ``pr_url`` and the
-            # subsequent PR-number extraction would yield ``None``, breaking the
-            # monitor handoff — fail loudly with the structured error instead.
+            self._last_pr_create_outcome = PullRequestCreateTransportOutcome(
+                strategy="failed",
+                attempts=len(failures) + 1 if failures else 1,
+                failures=failures,
+                reconcile_lookups=reconcile_lookups,
+            )
             raise GitHubClientError(
                 operation="gh pr create (no URL in stdout)",
                 returncode=0,
                 stderr=f"unexpected gh output: {result.stdout.strip()[:500]}",
             )
+
+        duplicate_seen = any(bool(item.get("duplicate")) for item in failures)
+        if failures and reconciled_match is not None:
+            strategy = (
+                "reconciled_after_duplicate" if duplicate_seen else "reconciled_after_transient"
+            )
+            matched_pr = _branch_open_pr_metadata(reconciled_match)
+            attempts = len(failures)
+        elif failures:
+            strategy = "created_after_retry"
+            matched_pr = None
+            attempts = len(failures) + 1
+        else:
+            strategy = "direct"
+            matched_pr = None
+            attempts = 1
+
+        if failures or reconciled_match is not None:
+            self._last_pr_create_outcome = PullRequestCreateTransportOutcome(
+                strategy=strategy,
+                attempts=attempts,
+                failures=failures,
+                reconcile_lookups=reconcile_lookups,
+                matched_pr=matched_pr,
+            )
+        else:
+            self._last_pr_create_outcome = None
+
         return match.group(0)
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
@@ -1311,39 +1227,89 @@ class GitHubClient:
         Method-specific rejections are classified by the merge loop to retry with
         an alternative or escalate to NotifyHuman.
         """
+        # No pre-merge state check here: the monitor's pre-merge recheck
+        # (``_fetch_status_for_decision``) already refreshes mergeability + head-SHA
+        # immediately before calling this, so a duplicate ``gh pr view`` would only add
+        # a redundant round-trip (and, being a read, a retry point that misclassifies a
+        # merge rejection as a transient). ``merge_pr`` just executes the merge; an
+        # already-merged/out-of-band PR surfaces as a ``gh pr merge`` error the merge
+        # loop classifies.
         args = ["gh", "pr", "merge", str(pr_number), "--repo", repo.slug(), f"--{method}"]
         if delete_branch:
             args.append("--delete-branch")
-        result = await self._runner.run(args)
-        if not result.ok:
-            raise GitHubClientError(
-                operation="gh pr merge",
-                returncode=result.returncode,
-                stderr=result.stderr,
-            )
-        # Merge commit SHA via a follow-up query (merge output is free-form).
-        sha_result = await self._runner.run(
-            [
-                "gh",
-                "pr",
-                "view",
-                str(pr_number),
-                "--repo",
-                repo.slug(),
-                "--json",
-                "mergeCommit",
-                "--jq",
-                ".mergeCommit.oid // empty",
-            ],
+        # NEVER-retry: a merge failure is usually semantic (branch protection,
+        # required approvals, behind-base, head changed — Codex #7), not a network
+        # transient, and the unknown->TRANSIENT default would otherwise retry a
+        # rejection. The monitor re-runs its full merge gate (fresh mergeability +
+        # head-SHA) on the next cycle, so a genuinely transient merge blip is retried
+        # at the cycle level with fresh state rather than blindly in-cycle.
+        await self._run_gh_command(
+            args,
+            operation="gh pr merge",
+            retry_policy=RetryPolicy.NEVER,
         )
-        if not sha_result.ok:
-            # Merge succeeded; the SHA fetch is best-effort for logging.
+        try:
+            sha_result = await self._run_gh_command(
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--repo",
+                    repo.slug(),
+                    "--json",
+                    "mergeCommit",
+                    "--jq",
+                    ".mergeCommit.oid // empty",
+                ],
+                operation="gh pr view merge commit",
+                retry_policy=RetryPolicy.READ,
+            )
+        except GitHubClientError:
             return ""
         return sha_result.stdout.strip()
 
+    async def _run_gh_command(
+        self,
+        args: list[str],
+        *,
+        operation: str,
+        retry_policy: RetryPolicy,
+        reconciler: Reconciler | None = None,
+        on_failure: Callable[[dict[str, object]], None] | None = None,
+        allow_duplicate_retry: Callable[[], bool] | None = None,
+        max_attempts: int | None = None,
+    ) -> CommandResult:
+        try:
+            return await _execute_gh_with_retry(
+                self._runner,
+                args,
+                operation=operation,
+                retry_policy=retry_policy,
+                reconciler=reconciler,
+                on_failure=on_failure,
+                sleep=self._sleep,
+                allow_duplicate_retry=allow_duplicate_retry,
+                max_attempts=max_attempts,
+            )
+        except GitHubClientError:
+            raise
+        except Exception as exc:
+            raise GitHubClientError(
+                operation=operation,
+                returncode=1,
+                stderr=str(exc),
+            ) from exc
+
     # ── Internals ──────────────────────────────────────────────────────────
 
-    async def _graphql(self, *, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+    async def _graphql(
+        self,
+        *,
+        query: str,
+        variables: dict[str, Any],
+        retry_policy: RetryPolicy = RetryPolicy.READ,
+    ) -> dict[str, Any]:
         """Run a GraphQL query/mutation via ``gh api graphql``.
 
         ``gh api graphql --raw-field query=… -F owner=… -F repo=… -F number=…``
@@ -1355,13 +1321,11 @@ class GitHubClient:
         for key, value in variables.items():
             flag = "-F" if isinstance(value, int) else "-f"
             args.extend([flag, f"{key}={value}"])
-        result = await self._runner.run(args)
-        if not result.ok:
-            raise GitHubClientError(
-                operation="gh api graphql",
-                returncode=result.returncode,
-                stderr=result.stderr,
-            )
+        result = await self._run_gh_command(
+            args,
+            operation="gh api graphql",
+            retry_policy=retry_policy,
+        )
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
@@ -1376,17 +1340,28 @@ class GitHubClient:
                 returncode=0,
                 stderr=json.dumps(payload["errors"])[:1000],
             )
-        return payload  # type: ignore[no-any-return]  # json.loads returns Any; the explicit dict type is the caller's contract
+        return payload  # type: ignore[no-any-return]
 
-    async def _gh_json(self, args: list[str], *, operation: str) -> Any:
-        """Run a GH CLI JSON command and decode the stdout body."""
-        result = await self._runner.run(args)
-        if not result.ok:
-            raise GitHubClientError(
-                operation=operation,
-                returncode=result.returncode,
-                stderr=result.stderr,
-            )
+    async def _gh_json(
+        self,
+        args: list[str],
+        *,
+        operation: str,
+        retry_policy: RetryPolicy = RetryPolicy.NEVER,
+    ) -> Any:
+        """Run a GH CLI JSON command and decode the stdout body.
+
+        Reads default to ``NEVER``: the transport's allow-by-default retry is for
+        one-shot mutations (create/reconcile). Monitor reads run in a poll loop that
+        re-polls on failure, and one-shot reads either classify their own error or
+        surface it to the user, so an in-cycle retry here would be redundant and would
+        retry into a stale result. Callers pass an explicit policy to opt in.
+        """
+        result = await self._run_gh_command(
+            args,
+            operation=operation,
+            retry_policy=retry_policy,
+        )
         if not result.stdout.strip():
             return None
         try:
@@ -1398,9 +1373,37 @@ class GitHubClient:
                 stderr=f"{exc}; stdout was: {result.stdout[:400]}",
             ) from exc
 
-    async def _run_gh(self, args: list[str], *, operation: str, strict: bool) -> Any:
-        """Execute a GH CLI command, optionally enforcing success."""
-        result = await self._runner.run(args)
+    async def _run_gh(
+        self,
+        args: list[str],
+        *,
+        operation: str,
+        strict: bool,
+        retry_policy: RetryPolicy = RetryPolicy.NEVER,
+    ) -> Any:
+        """Execute a GH CLI command, optionally enforcing success.
+
+        Reads default to ``NEVER`` (see ``_gh_json``); the transport's retry is for
+        one-shot mutations. Callers pass an explicit policy to opt into retry.
+        """
+        try:
+            result = await self._run_gh_command(
+                args,
+                operation=operation,
+                retry_policy=retry_policy,
+            )
+        except GitHubClientError as exc:
+            if strict:
+                raise
+            # ``strict=False`` callers (best-effort fetches such as purged CI logs)
+            # tolerate failure and read an empty result. The centralized transport
+            # raises on a permanent / retry-exhausted fault, so translate it back into
+            # a non-ok CommandResult here instead of aborting the caller.
+            return CommandResult(
+                returncode=exc.returncode or 1,
+                stdout="",
+                stderr=getattr(exc, "stderr", ""),
+            )
         if not result.ok and strict:
             raise GitHubClientError(
                 operation=operation,
@@ -1466,11 +1469,6 @@ def _actions_run_id_from_details_url(details_url: str | None) -> str | None:
 # ── Tiny helpers kept private to avoid accidental imports ──────────────────
 
 
-from awf.common.github_client_adoption import (  # noqa: E402
-    _looks_like_missing_pr_error,
-    _parse_branch_open_pull_request,
-    _parse_pull_request_adoption_metadata,
-)
 from awf.common.github_client_parsing import (  # noqa: E402
     _clean_optional_str,
     _connection_nodes,

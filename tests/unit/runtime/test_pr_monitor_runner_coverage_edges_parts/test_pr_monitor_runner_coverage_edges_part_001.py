@@ -209,7 +209,7 @@ async def test_monitor_run_terminates_on_github_status_error(
     workspace_id = await seed_monitoring_workspace(factory)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="0\n")
-    cmd.queue_result(returncode=1, stderr="gh auth failed")
+    cmd.queue_result(returncode=1, stderr="not logged in to any GitHub hosts")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -229,7 +229,7 @@ async def test_monitor_run_terminates_on_github_status_error(
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert "github error" in (ws.failure_message or "")
-        assert "gh auth failed" in (ws.failure_message or "")
+        assert "not logged in" in (ws.failure_message or "")
         # The fetch_pr_status GitHub termination records the forge reason_code
         # (GITHUB_API_ERROR), matching the _execute path so both GitHub
         # termination paths write identical DB state rather than the
@@ -458,7 +458,9 @@ async def test_transient_bitbucket_execute_error_discards_unconfirmed_addressed_
 async def test_monitor_run_transient_status_fetch_preserves_state_operations_and_lifecycle(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("awf.common.github_transport.GITHUB_TRANSPORT_MAX_ATTEMPTS", 1)
     cmd = FakeCommandRunner()
     sleep_fn = _StopAfterRetrySleep()
     workspace_id = await seed_monitoring_workspace(factory)
@@ -559,9 +561,8 @@ async def test_monitor_run_retries_transient_github_status_error(
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="0\n")
     cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
-    cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout="0\n")
     cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+    cmd.queue_result(returncode=0, stdout="0\n")
     cmd.queue_result(returncode=0)
     runner = make_runner(
         factory=factory,
@@ -577,7 +578,7 @@ async def test_monitor_run_retries_transient_github_status_error(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert sleep_fn.calls == [5]
+    assert sleep_fn.calls == []
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None

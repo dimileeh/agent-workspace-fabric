@@ -879,8 +879,11 @@ class TestFetchPrStatusPart002:
         fake.queue_result(returncode=1, stderr="rate limited")
         client = GitHubClient(fake)
         with pytest.raises(GitHubClientError) as exc:
+            # retry=False (the pre-merge-recheck contract) surfaces the single
+            # failure directly; with the polling default the transport would retry
+            # this transient in-cycle rather than raise on the first attempt.
             await client.fetch_pr_status(
-                repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+                repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0, retry=False
             )
         assert "rate limited" in str(exc.value)
 
