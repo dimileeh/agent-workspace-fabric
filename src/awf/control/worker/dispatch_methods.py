@@ -12,6 +12,7 @@ from functools import partial
 from typing import Any, cast
 
 from awf.common.redaction import redact_secrets
+from awf.control.executor.monitor_handoff import MonitorResumePreStartError
 from awf.control.executor.types import PauseResumeReason
 from awf.control.worker.constants import (
     _BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE,
@@ -1027,6 +1028,22 @@ async def _safely_resume_pr_monitor(
                 else:
                     self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
         raise
+    except MonitorResumePreStartError:
+        if not handoff_succeeded:
+            _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
+            finalized = await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=OperationStatus.failed,
+                error_code="MONITOR_RECOVERY_FAILED",
+                error_message="Monitor resume failed before monitor loop started.",
+            )
+            if finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+            return False
+        _log.exception("worker.pr_monitor_pre_start_failed", workspace_id=workspace_id)
+        return False
     except Exception as exc:
         if not handoff_succeeded:
             _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)

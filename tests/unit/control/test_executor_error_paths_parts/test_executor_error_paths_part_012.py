@@ -411,3 +411,46 @@ async def test_run_resumed_pr_monitor_enters_monitor_loop_when_start_recheck_pas
 
     assert result is True
     assert monitor_ran is True
+
+
+@pytest.mark.unit
+async def test_run_resumed_pr_monitor_raises_pre_start_error_when_verify_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify failures before monitor.run surface as MonitorResumePreStartError."""
+    monitor_ran = False
+
+    class _Monitor:
+        """Monitor stub for resumed-run and handoff tests."""
+
+        async def run(self, **_kwargs: object) -> None:
+            """Test helper for run."""
+            nonlocal monitor_ran
+            monitor_ran = True
+
+    async def _verify_start(_self: object, workspace_id: str, **_kwargs: object) -> bool:
+        """Test helper for verify start."""
+        assert workspace_id == "ws_monitor"
+        raise RuntimeError("db recheck failed")
+
+    monkeypatch.setattr(executor_monitor_handoff, "verify_resume_monitor_start", _verify_start)
+
+    handoff = executor_monitor_handoff.ResumeHandoff(
+        monitor=_Monitor(),
+        compose_project="proj",
+        compose_file=Path("/tmp/compose.yml"),
+        run_kwargs={},
+    )
+    executor = object()
+
+    with pytest.raises(
+        executor_monitor_handoff.MonitorResumePreStartError,
+        match="db recheck failed",
+    ):
+        await executor_monitor_handoff.run_resumed_pr_monitor(
+            executor,
+            "ws_monitor",
+            handoff,
+        )
+
+    assert monitor_ran is False

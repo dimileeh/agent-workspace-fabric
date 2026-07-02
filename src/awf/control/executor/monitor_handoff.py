@@ -106,6 +106,10 @@ class ResumeHandoff:
     run_kwargs: dict[str, Any]
 
 
+class MonitorResumePreStartError(Exception):
+    """Raised when resumed monitor setup fails before entering the monitor loop."""
+
+
 class CompanionEnvSecretPrecheckError(ComposeOperationError):
     """Raised when monitor resume cannot satisfy required companion env secrets."""
 
@@ -455,11 +459,15 @@ async def run_resumed_pr_monitor(
     loop entry).
     """
     monitor_owner_id = handoff.run_kwargs.get("monitor_owner_id")
-    if not await verify_resume_monitor_start(
-        self,
-        workspace_id,
-        monitor_owner_id=monitor_owner_id,
-    ):
+    try:
+        start_ok = await verify_resume_monitor_start(
+            self,
+            workspace_id,
+            monitor_owner_id=monitor_owner_id,
+        )
+    except Exception as exc:
+        raise MonitorResumePreStartError(str(exc)) from exc
+    if not start_ok:
         return False
     await handoff.monitor.run(
         workspace_id=workspace_id,
