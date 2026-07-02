@@ -106,6 +106,30 @@ def _timeout_output_text(output: str | bytes | None) -> str:
     return output
 
 
+def _timeout_detail(
+    timeout_seconds: float,
+    stdout: str | bytes | None,
+    stderr: str | bytes | None,
+) -> dict[str, Any]:
+    """Build structured detail for a git subprocess timeout."""
+    detail: dict[str, Any] = {"timeout_seconds": timeout_seconds}
+    out = _timeout_output_text(stdout)
+    if out:
+        detail["stdout"] = out[-2000:]
+    err = _timeout_output_text(stderr)
+    if err:
+        detail["stderr"] = err[-2000:]
+    return detail
+
+
+def _failure_detail(stdout: str | bytes, stderr: str | bytes) -> dict[str, Any]:
+    """Build structured detail for a git subprocess nonzero exit."""
+    return {
+        "stdout": _timeout_output_text(stdout)[-2000:],
+        "stderr": _timeout_output_text(stderr)[-2000:],
+    }
+
+
 def run_git(
     worktree: Path,
     args: list[str],
@@ -127,26 +151,16 @@ def run_git(
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
-        detail: dict[str, Any] = {"timeout_seconds": GIT_TIMEOUT_SECONDS}
-        stdout = _timeout_output_text(exc.stdout)
-        if stdout:
-            detail["stdout"] = stdout[-2000:]
-        stderr = _timeout_output_text(exc.stderr)
-        if stderr:
-            detail["stderr"] = stderr[-2000:]
         raise raise_error(
             reason_code=failure_reason,
             message=f"git {' '.join(args)} timed out during {failure_context}.",
-            detail=detail,
+            detail=_timeout_detail(GIT_TIMEOUT_SECONDS, exc.stdout, exc.stderr),
         ) from exc
     if result.returncode != 0:
         raise raise_error(
             reason_code=failure_reason,
             message=f"git {' '.join(args)} failed during {failure_context}.",
-            detail={
-                "stdout": result.stdout[-2000:],
-                "stderr": result.stderr[-2000:],
-            },
+            detail=_failure_detail(result.stdout, result.stderr),
         )
     return result
 
@@ -172,25 +186,15 @@ def run_git_bytes(
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
-        detail: dict[str, Any] = {"timeout_seconds": GIT_TIMEOUT_SECONDS}
-        stdout = _timeout_output_text(exc.stdout)
-        if stdout:
-            detail["stdout"] = stdout[-2000:]
-        stderr = _timeout_output_text(exc.stderr)
-        if stderr:
-            detail["stderr"] = stderr[-2000:]
         raise raise_error(
             reason_code=failure_reason,
             message=f"git {' '.join(args)} timed out during {failure_context}.",
-            detail=detail,
+            detail=_timeout_detail(GIT_TIMEOUT_SECONDS, exc.stdout, exc.stderr),
         ) from exc
     if result.returncode != 0:
         raise raise_error(
             reason_code=failure_reason,
             message=f"git {' '.join(args)} failed during {failure_context}.",
-            detail={
-                "stdout": _timeout_output_text(result.stdout)[-2000:],
-                "stderr": _timeout_output_text(result.stderr)[-2000:],
-            },
+            detail=_failure_detail(result.stdout, result.stderr),
         )
     return result
