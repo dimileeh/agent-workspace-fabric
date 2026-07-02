@@ -232,7 +232,7 @@ async def _salvage_ci_repair_dirty_output(
     try:
         capture = await asyncio.to_thread(
             capture_ci_repair_salvage,
-            work_dir=self._work_dir,
+            worktrees_root=self._worktrees_root,
             artifacts_root=self._artifacts_root,
             workspace_id=workspace_id,
             operation_start_head=operation_start_head,

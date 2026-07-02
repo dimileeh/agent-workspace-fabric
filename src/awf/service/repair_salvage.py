@@ -82,7 +82,7 @@ def as_repair_salvage_details(capture: RepairSalvageCapture) -> dict[str, Any]:
 
 def capture_ci_repair_salvage(
     *,
-    work_dir: str | Path,
+    worktrees_root: str | Path,
     artifacts_root: str | Path,
     workspace_id: str,
     operation_start_head: str | None,
@@ -98,8 +98,7 @@ def capture_ci_repair_salvage(
             message="CI repair salvage requires operation_start_head.",
         )
 
-    root = Path(work_dir)
-    worktree = root / "git" / "worktrees" / workspace_id
+    worktree = Path(worktrees_root) / workspace_id
     if not worktree.is_dir():
         raise RepairSalvageError(
             reason_code=REPAIR_SALVAGE_SOURCE_UNAVAILABLE,

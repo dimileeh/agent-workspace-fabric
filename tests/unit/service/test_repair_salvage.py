@@ -46,6 +46,37 @@ def _seed_worktree(work_dir: Path, workspace_id: str) -> tuple[Path, str]:
 
 
 @pytest.mark.unit
+def test_capture_uses_worktrees_root_not_work_dir_layout(tmp_path: Path) -> None:
+    """Salvage must resolve the worktree via worktrees_root, not work_dir/git/worktrees."""
+    custom_root = tmp_path / "custom-worktrees"
+    workspace_id = "ws_custom_root"
+    worktree = custom_root / workspace_id
+    worktree.mkdir(parents=True)
+    _git(["init", "-q"], worktree)
+    _git(["config", "user.name", "AWF Test"], worktree)
+    _git(["config", "user.email", "awf@test.local"], worktree)
+    (worktree / "src").mkdir()
+    (worktree / "src/app.py").write_text("VALUE = 'old'\n", encoding="utf-8")
+    _git(["add", "."], worktree)
+    _git(["commit", "-q", "-m", "base"], worktree)
+    base_commit = _git(["rev-parse", "HEAD"], worktree)
+    (worktree / "src/app.py").write_text("VALUE = 'custom'\n", encoding="utf-8")
+
+    capture = capture_ci_repair_salvage(
+        worktrees_root=custom_root,
+        artifacts_root=tmp_path / "artifacts",
+        workspace_id=workspace_id,
+        operation_start_head=base_commit,
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    assert capture.affected_paths == ["src/app.py"]
+    assert "custom" in capture.patch_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
 def test_capture_staged_only_tracked_changes(tmp_path: Path) -> None:
     _, base_commit = _seed_worktree(tmp_path, "ws_staged")
     worktree = tmp_path / "git" / "worktrees" / "ws_staged"
@@ -53,7 +84,7 @@ def test_capture_staged_only_tracked_changes(tmp_path: Path) -> None:
     _git(["add", "src/app.py"], worktree)
 
     capture = capture_ci_repair_salvage(
-        work_dir=tmp_path,
+        worktrees_root=tmp_path / "git" / "worktrees",
         artifacts_root=tmp_path / "artifacts",
         workspace_id="ws_staged",
         operation_start_head=base_commit,
@@ -75,7 +106,7 @@ def test_capture_unstaged_tracked_changes(tmp_path: Path) -> None:
     (worktree / "src/app.py").write_text("VALUE = 'unstaged'\n", encoding="utf-8")
 
     capture = capture_ci_repair_salvage(
-        work_dir=tmp_path,
+        worktrees_root=tmp_path / "git" / "worktrees",
         artifacts_root=tmp_path / "artifacts",
         workspace_id="ws_unstaged",
         operation_start_head=base_commit,
@@ -95,7 +126,7 @@ def test_capture_untracked_files(tmp_path: Path) -> None:
     (worktree / "src/new.py").write_text("print('new')\n", encoding="utf-8")
 
     capture = capture_ci_repair_salvage(
-        work_dir=tmp_path,
+        worktrees_root=tmp_path / "git" / "worktrees",
         artifacts_root=tmp_path / "artifacts",
         workspace_id="ws_untracked",
         operation_start_head=base_commit,
@@ -123,7 +154,7 @@ def test_capture_includes_tracked_file_named_exactly_agent_memory(tmp_path: Path
     agent_memory_file.write_text("modified knowledge\n", encoding="utf-8")
 
     capture = capture_ci_repair_salvage(
-        work_dir=tmp_path,
+        worktrees_root=tmp_path / "git" / "worktrees",
         artifacts_root=tmp_path / "artifacts",
         workspace_id="ws_exact_memory_file",
         operation_start_head=base_commit,
@@ -146,7 +177,7 @@ def test_capture_excludes_agent_runtime_memory_paths(tmp_path: Path) -> None:
     (memory_dir / "notes.md").write_text("memory only\n", encoding="utf-8")
 
     capture = capture_ci_repair_salvage(
-        work_dir=tmp_path,
+        worktrees_root=tmp_path / "git" / "worktrees",
         artifacts_root=tmp_path / "artifacts",
         workspace_id="ws_runtime",
         operation_start_head=base_commit,
@@ -170,7 +201,7 @@ def test_capture_excludes_awf_plan_artifacts(tmp_path: Path) -> None:
     (plan_dir / "ws_plan.md").write_text("# plan\n", encoding="utf-8")
 
     capture = capture_ci_repair_salvage(
-        work_dir=tmp_path,
+        worktrees_root=tmp_path / "git" / "worktrees",
         artifacts_root=tmp_path / "artifacts",
         workspace_id="ws_plan",
         operation_start_head=base_commit,
@@ -231,7 +262,7 @@ def test_run_git_timeout_decodes_byte_output_for_json_safe_detail(tmp_path: Path
 def test_capture_missing_operation_start_head_raises(tmp_path: Path) -> None:
     with pytest.raises(RepairSalvageError) as exc_info:
         capture_ci_repair_salvage(
-            work_dir=tmp_path,
+            worktrees_root=tmp_path / "git" / "worktrees",
             artifacts_root=tmp_path / "artifacts",
             workspace_id="ws_missing_base",
             operation_start_head=None,
@@ -247,7 +278,7 @@ def test_capture_missing_operation_start_head_raises(tmp_path: Path) -> None:
 def test_capture_missing_worktree_raises(tmp_path: Path) -> None:
     with pytest.raises(RepairSalvageError) as exc_info:
         capture_ci_repair_salvage(
-            work_dir=tmp_path,
+            worktrees_root=tmp_path / "git" / "worktrees",
             artifacts_root=tmp_path / "artifacts",
             workspace_id="ws_missing",
             operation_start_head="a" * 40,
@@ -266,7 +297,7 @@ def test_capture_metadata_includes_digest_and_paths(tmp_path: Path) -> None:
     (worktree / "src/app.py").write_text("VALUE = 'meta'\n", encoding="utf-8")
 
     capture = capture_ci_repair_salvage(
-        work_dir=tmp_path,
+        worktrees_root=tmp_path / "git" / "worktrees",
         artifacts_root=tmp_path / "artifacts",
         workspace_id="ws_meta",
         operation_start_head=base_commit,
@@ -297,7 +328,7 @@ def test_capture_only_agent_runtime_raises_no_diff(tmp_path: Path) -> None:
 
     with pytest.raises(RepairSalvageError) as exc_info:
         capture_ci_repair_salvage(
-            work_dir=tmp_path,
+            worktrees_root=tmp_path / "git" / "worktrees",
             artifacts_root=tmp_path / "artifacts",
             workspace_id="ws_runtime_only",
             operation_start_head=base_commit,
