@@ -825,7 +825,7 @@ async def test_satisfied_post_validation_conformance_report_restores_from_base_c
         cwd: str | None = None,
         **kwargs: object,
     ) -> CommandResult:
-        result = await real_run(args, input_bytes=input_bytes, cwd=cwd)
+        result = await real_run(args, input_bytes=input_bytes, cwd=cwd, **kwargs)
         if result.ok and args and args[0] == "git" and "restore" in args:
             if not report_file.exists():
                 return result
