@@ -713,6 +713,24 @@ async def _run_ci_fix(
                 await self._handle_provider_agent_run_error(
                     workspace_id, agent_run_err, state=state
                 )
+                # Salvage and rollback succeeded, but provider recovery returned
+                # terminal/deterministic instead of raising a retry/fallback/auth
+                # control-flow exception. Do not fall through to the clean-commit
+                # handler call or push path — the commit sink failed and the worktree
+                # was rolled back with no new CI-fix commit (PRRT_kwDOSJAM6s6N5986).
+                _log.warning(
+                    "monitor.ci_fix_cli_failed",
+                    workspace_id=workspace_id,
+                    stderr=agent_run_err.result.stderr[:400],
+                )
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=agent_run_err.result.returncode or 1,
+                    stderr=agent_run_err.result.stderr,
+                    reason_code=agent_run_err.reason_code,
+                    details=failure_details,
+                )
         # ``_commit_dirty_worktree`` returned ``True``: the CI-repair output
         # was committed successfully and the worktree is clean, so there is NO
         # stranded residue to roll back here. The pre-existing-dirty guard

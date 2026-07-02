@@ -622,6 +622,113 @@ async def test_ci_fix_commit_sink_salvage_and_rollback_allows_provider_recovery(
 
 
 @pytest.mark.unit
+async def test_ci_fix_commit_sink_salvage_ok_terminal_provider_skips_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6N5986: salvage+rollback must not fall through to push.
+
+    When provider recovery returns terminal/deterministic (instead of raising a
+    recovery control-flow exception) after salvage and rollback, the clean-commit
+    handler and push finalizer must not run — the commit sink failed and the
+    rolled-back worktree has no new CI-fix commit.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    operation_start_head = "abc1234567890def"
+    expected_stderr = "MODEL_CAPACITY_EXHAUSTED"
+    adapter = FakeAdapter()
+    _queue_agent_capacity_exhausted(adapter, stderr=expected_stderr)
+    cmd = FakeCommandRunner()
+    _queue_ci_fix_dirty_commit_sink_failure(cmd, operation_start_head)
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # rollback HEAD
+    cmd.queue_result(returncode=0)  # git reset --hard
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+
+    async def _repair_agent_runtime_ownership(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    repair_salvage = {
+        "patch_path": str(tmp_path / "artifacts/salvage/ws.patch"),
+        "patch_sha256": "c" * 64,
+        "patch_bytes": 10,
+        "affected_paths": ["src/fix.py"],
+        "phase": "ci_repair_commit_sink",
+        "operation_type": "ci_repair",
+        "operation_id": None,
+        "operation_start_head": operation_start_head,
+        "created_at": "2026-07-02T00:00:00+00:00",
+    }
+
+    async def _mock_salvage_success(self: object, **kwargs: object) -> dict[str, object]:
+        del self, kwargs
+        return {"repair_salvage": repair_salvage}
+
+    monkeypatch.setattr(pr_ci_ops, "_salvage_ci_repair_dirty_output", _mock_salvage_success)
+
+    handle_calls = 0
+
+    async def _terminal_handle_provider_agent_run_error(
+        workspace_id_arg: str,
+        exc: AgentRunError,
+        *,
+        state: object = None,
+    ) -> str:
+        nonlocal handle_calls
+        del workspace_id_arg, exc, state
+        handle_calls += 1
+        return "deterministic"
+
+    monkeypatch.setattr(
+        runner,
+        "_handle_provider_agent_run_error",
+        _terminal_handle_provider_agent_run_error,
+    )
+
+    push_attempted = False
+
+    async def _spy_validated_git_push_result(*_args: object, **_kwargs: object) -> object:
+        nonlocal push_attempted
+        push_attempted = True
+        raise AssertionError("push must not run after salvaged terminal provider recovery")
+
+    monkeypatch.setattr(runner, "_validated_git_push_result", _spy_validated_git_push_result)
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert handle_calls == 2
+    assert push_attempted is False
+    assert push_result.pushed is False
+    assert push_result.failed is True
+    assert push_result.reason_code == AGENT_PROVIDER_CAPACITY_EXHAUSTED
+    assert push_result.details is not None
+    assert push_result.details["repair_salvage"] == repair_salvage
+    assert push_result.details["stranded_paths"] == ["src/fix.py"]
+
+
+@pytest.mark.unit
 async def test_ci_fix_commit_sink_salvage_ok_rollback_failed_stays_terminal_with_salvage(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
