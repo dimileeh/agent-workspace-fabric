@@ -46,6 +46,7 @@ class RepairSalvageCapture:
 
     workspace_id: str
     operation_start_head: str
+    salvage_diff_base: str
     patch_path: Path
     patch_sha256: str
     patch_bytes: int
@@ -83,6 +84,7 @@ def as_repair_salvage_details(capture: RepairSalvageCapture) -> dict[str, Any]:
         "operation_type": capture.operation_type,
         "operation_id": capture.operation_id,
         "operation_start_head": capture.operation_start_head,
+        "salvage_diff_base": capture.salvage_diff_base,
         "created_at": capture.created_at,
     }
 
@@ -96,6 +98,7 @@ def capture_ci_repair_salvage(
     operation_id: str | None,
     operation_type: str,
     phase: str,
+    salvage_diff_base: str | None = None,
     run_subprocess: SubprocessRun | None = None,
 ) -> RepairSalvageCapture:
     """Capture a binary patch and metadata for dirty CI-repair output."""
@@ -104,6 +107,7 @@ def capture_ci_repair_salvage(
             reason_code=REPAIR_SALVAGE_BASE_UNAVAILABLE,
             message="CI repair salvage requires operation_start_head.",
         )
+    diff_base = salvage_diff_base or operation_start_head
 
     worktree = Path(worktrees_root) / workspace_id
     if not worktree.is_dir():
@@ -118,7 +122,7 @@ def capture_ci_repair_salvage(
 
     _run_git(
         worktree,
-        ["cat-file", "-e", f"{operation_start_head}^{{commit}}"],
+        ["cat-file", "-e", f"{diff_base}^{{commit}}"],
         run=run,
         env=env_base,
         failure_reason=REPAIR_SALVAGE_BASE_UNAVAILABLE,
@@ -152,7 +156,7 @@ def capture_ci_repair_salvage(
                     "--cached",
                     "--name-status",
                     "-z",
-                    operation_start_head,
+                    diff_base,
                     "--",
                     ".",
                     *exclude_pathspecs,
@@ -178,7 +182,7 @@ def capture_ci_repair_salvage(
                 "diff",
                 "--cached",
                 "--binary",
-                operation_start_head,
+                diff_base,
                 "--",
                 *affected_paths,
             ],
@@ -194,6 +198,7 @@ def capture_ci_repair_salvage(
     capture = RepairSalvageCapture(
         workspace_id=workspace_id,
         operation_start_head=operation_start_head,
+        salvage_diff_base=diff_base,
         patch_path=patch_path,
         patch_sha256=patch_sha256,
         patch_bytes=len(patch),

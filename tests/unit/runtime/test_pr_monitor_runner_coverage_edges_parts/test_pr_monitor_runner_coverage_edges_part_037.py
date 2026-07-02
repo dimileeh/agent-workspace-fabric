@@ -824,3 +824,89 @@ async def test_ci_fix_provider_recovery_skips_rollback_when_salvage_raises_unexp
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert not any("reset" in call and "--hard" in call for call in joined_calls), joined_calls
     assert "rollback_error" not in (push_result.details or {})
+
+
+@pytest.mark.unit
+async def test_ci_fix_provider_recovery_salvage_uses_post_raise_head_as_diff_base(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6N-pNp — residue-only salvage patch base."""
+    from unittest.mock import AsyncMock
+
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr="MODEL_CAPACITY_EXHAUSTED",
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    operation_start_head = "abc1234567890def"
+    post_raise_head = "1111122222333344"
+    capture_kwargs: dict[str, object] = {}
+
+    async def _mock_salvage(self: object, **kwargs: object) -> dict[str, object]:
+        del self
+        capture_kwargs.update(kwargs)
+        return {
+            "repair_salvage": {
+                "patch_path": str(tmp_path / "artifacts/salvage/ws.patch"),
+                "patch_sha256": "a" * 64,
+                "patch_bytes": 10,
+                "affected_paths": ["src/fix.py"],
+                "phase": "ci_repair_commit_sink",
+                "operation_type": "ci_repair",
+                "operation_id": None,
+                "operation_start_head": operation_start_head,
+                "salvage_diff_base": post_raise_head,
+                "created_at": "2026-07-02T00:00:00+00:00",
+            }
+        }
+
+    monkeypatch.setattr(pr_ci_ops, "_salvage_ci_repair_dirty_output", _mock_salvage)
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    monkeypatch.setattr(runner, "_rev_parse_head", AsyncMock(return_value=post_raise_head))
+
+    raised_exc = monitor_types.ProviderRecoveryRetryError(
+        "provider recovery raised after protected-scope repair self-committed inside the CI fix commit sink"
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=raised_exc))
+
+    with pytest.raises(monitor_types.ProviderRecoveryRetryError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    assert capture_kwargs["operation_start_head"] == operation_start_head
+    assert capture_kwargs["salvage_diff_base"] == post_raise_head

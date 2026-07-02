@@ -347,6 +347,7 @@ def test_capture_metadata_includes_digest_and_paths(tmp_path: Path) -> None:
     assert details["operation_type"] == "ci_repair"
     assert details["operation_id"] == "op_meta"
     assert details["operation_start_head"] == base_commit
+    assert details["salvage_diff_base"] == base_commit
     assert details["created_at"]
 
 
@@ -556,3 +557,71 @@ def test_capture_only_agent_runtime_raises_no_diff(tmp_path: Path) -> None:
         )
 
     assert exc_info.value.reason_code == REPAIR_SALVAGE_NO_DIFF
+
+
+@pytest.mark.unit
+def test_capture_salvage_diff_base_captures_residue_only_after_self_commit(
+    tmp_path: Path,
+) -> None:
+    """Salvage against rollback anchor must exclude already-committed repair work."""
+    _, operation_start_head = _seed_worktree(tmp_path, "ws_residue")
+    worktree = tmp_path / "git" / "worktrees" / "ws_residue"
+    (worktree / "src/app.py").write_text("VALUE = 'committed'\n", encoding="utf-8")
+    _git(["add", "src/app.py"], worktree)
+    _git(["commit", "-q", "-m", "agent self-commit"], worktree)
+    rollback_anchor = _git(["rev-parse", "HEAD"], worktree)
+    (worktree / "src/app.py").write_text("VALUE = 'residue'\n", encoding="utf-8")
+
+    capture = capture_ci_repair_salvage(
+        worktrees_root=tmp_path / "git" / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_id="ws_residue",
+        operation_start_head=operation_start_head,
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+        salvage_diff_base=rollback_anchor,
+    )
+
+    assert capture.salvage_diff_base == rollback_anchor
+    assert capture.affected_paths == ["src/app.py"]
+    patch_text = capture.patch_path.read_text(encoding="utf-8")
+    assert "residue" in patch_text
+    assert "-VALUE = 'old'" not in patch_text
+
+    _git(["reset", "--hard", rollback_anchor], worktree)
+    subprocess.run(
+        ["git", "-C", str(worktree), "apply", str(capture.patch_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (worktree / "src/app.py").read_text(encoding="utf-8") == "VALUE = 'residue'\n"
+
+
+@pytest.mark.unit
+def test_capture_operation_start_head_includes_self_commits_when_no_salvage_diff_base(
+    tmp_path: Path,
+) -> None:
+    """Without a rollback anchor, salvage still diffs from operation_start_head."""
+    _, operation_start_head = _seed_worktree(tmp_path, "ws_full")
+    worktree = tmp_path / "git" / "worktrees" / "ws_full"
+    (worktree / "src/app.py").write_text("VALUE = 'committed'\n", encoding="utf-8")
+    _git(["add", "src/app.py"], worktree)
+    _git(["commit", "-q", "-m", "agent self-commit"], worktree)
+    (worktree / "src/app.py").write_text("VALUE = 'residue'\n", encoding="utf-8")
+
+    capture = capture_ci_repair_salvage(
+        worktrees_root=tmp_path / "git" / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_id="ws_full",
+        operation_start_head=operation_start_head,
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    assert capture.salvage_diff_base == operation_start_head
+    patch_text = capture.patch_path.read_text(encoding="utf-8")
+    assert "-VALUE = 'old'" in patch_text
+    assert "residue" in patch_text

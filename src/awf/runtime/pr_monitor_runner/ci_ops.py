@@ -220,6 +220,7 @@ async def _salvage_ci_repair_dirty_output(
     operation_id: str | None,
     operation_type: str,
     phase: str,
+    salvage_diff_base: str | None = None,
 ) -> dict[str, Any]:
     """Capture dirty CI-repair output before rollback or terminal failure."""
     from awf.service.repair_salvage import (
@@ -239,6 +240,7 @@ async def _salvage_ci_repair_dirty_output(
             operation_id=operation_id,
             operation_type=operation_type,
             phase=phase,
+            salvage_diff_base=salvage_diff_base,
         )
     except RepairSalvageError as exc:
         _log.warning(
@@ -293,6 +295,7 @@ async def _salvage_and_rollback_stranded_ci_repair_output(
     provider_recovery_exc: BaseException | None,
 ) -> _GitPushResult:
     """Salvage stranded CI-repair output, roll back residue, then finish or re-raise."""
+    restore_ref = await self._rev_parse_head(worktree_path)
     salvage_details = await _salvage_ci_repair_dirty_output(
         self,
         workspace_id=workspace_id,
@@ -300,6 +303,7 @@ async def _salvage_and_rollback_stranded_ci_repair_output(
         operation_id=operation_id,
         operation_type="ci_repair",
         phase="ci_repair_commit_sink",
+        salvage_diff_base=restore_ref,
     )
     failure_details: dict[str, Any] = {
         "phase": "ci_repair_commit_sink",
@@ -327,7 +331,6 @@ async def _salvage_and_rollback_stranded_ci_repair_output(
             reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
             details=failure_details,
         )
-    restore_ref = await self._rev_parse_head(worktree_path)
     rollback_result = await _rollback_ci_fix_residue_before_provider_recovery(
         self,
         workspace_id=workspace_id,
@@ -644,6 +647,7 @@ async def _run_ci_fix(
             operation_id=operation_id,
             operation_type="ci_repair",
             phase="ci_repair_commit_sink",
+            salvage_diff_base=post_agent_head,
         )
         if "repair_salvage" in salvage_details:
             _log.info(
