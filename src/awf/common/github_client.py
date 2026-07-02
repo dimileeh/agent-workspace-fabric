@@ -411,6 +411,11 @@ class GitHubClient:
         section classifies it (transient -> re-poll next cycle; unknown -> fail)
         rather than holding the merge lock across in-cycle backoffs.
         """
+        # One policy for the whole read, including every pagination follow-up:
+        # ``retry=False`` (pre-merge recheck) must fail fast on page 2+ too, or a
+        # transient blip on a later page would run transport backoffs while the
+        # merge critical section is meant to fail fast.
+        retry_policy = RetryPolicy.READ if retry else RetryPolicy.NEVER
         payload = await self._graphql(
             query=_GQL_PR_STATE,
             variables={
@@ -418,7 +423,7 @@ class GitHubClient:
                 "repo": repo.name,
                 "number": pr_number,
             },
-            retry_policy=RetryPolicy.READ if retry else RetryPolicy.NEVER,
+            retry_policy=retry_policy,
         )
         pr = payload["data"]["repository"]["pullRequest"]
         if pr is None:
@@ -465,6 +470,7 @@ class GitHubClient:
             first_page=_dig(pr, "reviewThreads"),
             connection_name="reviewThreads",
             query=_GQL_PR_REVIEW_THREADS_PAGE,
+            retry_policy=retry_policy,
         )
         for node in thread_nodes:
             thread_id = _clean_optional_str(node.get("id"))
@@ -477,6 +483,7 @@ class GitHubClient:
                 await self._fetch_paginated_review_thread_comment_nodes(
                     thread_id=thread_id,
                     first_page=comment_connection,
+                    retry_policy=retry_policy,
                 )
             )
             latest_review_activity_at, latest_review_activity_source = (
@@ -522,6 +529,7 @@ class GitHubClient:
             first_page=_dig(pr, "reviews"),
             connection_name="reviews",
             query=_GQL_PR_REVIEWS_PAGE,
+            retry_policy=retry_policy,
         )
         fetched_reviews = [
             _parse_fetched_review(node, fetch_index=index)
@@ -550,6 +558,7 @@ class GitHubClient:
             first_page=_dig(pr, "comments"),
             connection_name="comments",
             query=_GQL_PR_ISSUE_COMMENTS_PAGE,
+            retry_policy=retry_policy,
         )
         for node in issue_comment_nodes:
             body = node.get("body") or ""
@@ -583,6 +592,7 @@ class GitHubClient:
             repo=repo,
             pr_number=pr_number,
             first_page=_dig(pr, "files"),
+            retry_policy=retry_policy,
         )
         quiet_anchor_at, quiet_anchor_source = _quiet_period_anchor(
             latest_external_review_activity_at=latest_review_activity_at,
@@ -626,8 +636,13 @@ class GitHubClient:
         first_page: Any,
         connection_name: str,
         query: str,
+        retry_policy: RetryPolicy = RetryPolicy.READ,
     ) -> list[dict[str, Any]]:
-        """Fetch all nodes from a paginated pull-request GraphQL connection."""
+        """Fetch all nodes from a paginated pull-request GraphQL connection.
+
+        ``retry_policy`` is threaded through so a ``retry=False`` caller (the
+        pre-merge recheck) fails fast on page 2+ as well as on the first page.
+        """
         nodes = _connection_nodes(first_page)
         cursor = _clean_optional_str(_dig(first_page, "pageInfo", "endCursor"))
         has_next = _dig(first_page, "pageInfo", "hasNextPage") is True
@@ -640,6 +655,7 @@ class GitHubClient:
                     "number": pr_number,
                     "cursor": cursor,
                 },
+                retry_policy=retry_policy,
             )
             page = _dig(payload, "data", "repository", "pullRequest", connection_name)
             nodes.extend(_connection_nodes(page))
@@ -652,8 +668,13 @@ class GitHubClient:
         *,
         thread_id: str,
         first_page: Any,
+        retry_policy: RetryPolicy = RetryPolicy.READ,
     ) -> list[dict[str, Any]]:
-        """Fetch all comment nodes for a review thread using cursor pagination."""
+        """Fetch all comment nodes for a review thread using cursor pagination.
+
+        ``retry_policy`` is threaded through so a ``retry=False`` caller (the
+        pre-merge recheck) fails fast on page 2+ as well as on the first page.
+        """
         nodes = _connection_nodes(first_page)
         cursor = _clean_optional_str(_dig(first_page, "pageInfo", "endCursor"))
         has_next = _dig(first_page, "pageInfo", "hasNextPage") is True
@@ -661,6 +682,7 @@ class GitHubClient:
             payload = await self._graphql(
                 query=_GQL_REVIEW_THREAD_COMMENTS_PAGE,
                 variables={"threadId": thread_id, "cursor": cursor},
+                retry_policy=retry_policy,
             )
             page = _dig(payload, "data", "node", "comments")
             nodes.extend(_connection_nodes(page))
@@ -674,8 +696,13 @@ class GitHubClient:
         repo: RepoRef,
         pr_number: int,
         first_page: Any,
+        retry_policy: RetryPolicy = RetryPolicy.READ,
     ) -> tuple[str, ...]:
-        """Collect changed file paths for the PR across all file pages."""
+        """Collect changed file paths for the PR across all file pages.
+
+        ``retry_policy`` is threaded through so a ``retry=False`` caller (the
+        pre-merge recheck) fails fast on page 2+ as well as on the first page.
+        """
         changed_path_items = _extract_pr_file_paths(first_page)
         files_page = first_page
 
@@ -695,6 +722,7 @@ class GitHubClient:
                     "number": pr_number,
                     "cursor": cursor,
                 },
+                retry_policy=retry_policy,
             )
             next_page = _dig(payload, "data", "repository", "pullRequest", "files")
             if not isinstance(next_page, dict):

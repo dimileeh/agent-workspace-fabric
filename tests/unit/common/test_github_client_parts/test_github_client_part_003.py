@@ -156,7 +156,89 @@ def _sample_pr_payload(
     )
 
 
+class _RecordedSleep:
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
 class TestFetchPrStatusPart002:
+    @pytest.mark.unit
+    async def test_pre_merge_recheck_fails_fast_on_paginated_page(self) -> None:
+        # Regression (PR #729): retry=False must reach page 2+ of every
+        # paginated connection with RetryPolicy.NEVER, not fall back to the
+        # READ default. A transient blip on the review-threads second page must
+        # raise on the first attempt (no transport backoff) so the merge
+        # critical section fails fast instead of holding the merge lock.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads_has_next_page=True,
+                threads_end_cursor="cursor-1",
+            ),
+        )
+        fake.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+        sleep = _RecordedSleep()
+        client = GitHubClient(fake, sleep=sleep)
+
+        with pytest.raises(GitHubClientError, match="502"):
+            await client.fetch_pr_status(
+                repo=RepoRef(owner="o", name="r"),
+                pr_number=1,
+                base_behind_count=0,
+                retry=False,
+            )
+
+        assert len(fake.calls) == 2  # page 1 ok, page 2 raises without retry
+        assert sleep.calls == []  # no transport backoff in the merge critical section
+
+    @pytest.mark.unit
+    async def test_polling_default_retries_transient_on_paginated_page(self) -> None:
+        # Contrast to the pre-merge recheck: ordinary polling (retry=True)
+        # keeps allow-by-default retry on later pages, so a transient page-2
+        # blip recovers in-cycle rather than surfacing to the monitor.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads_has_next_page=True,
+                threads_end_cursor="cursor-1",
+            ),
+        )
+        fake.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [],
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        sleep = _RecordedSleep()
+        client = GitHubClient(fake, sleep=sleep)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            base_behind_count=0,
+        )
+
+        assert status.number == 42
+        assert len(fake.calls) == 3  # page 2 retried after the transient blip
+        assert len(sleep.calls) == 1  # one backoff before the retry
+
     @pytest.mark.unit
     async def test_pr_files_pagination_requires_files_object_on_next_page(self) -> None:
         fake = FakeCommandRunner()
