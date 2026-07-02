@@ -873,6 +873,9 @@ async def _safely_resume_pr_monitor(
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
             return status == OperationStatus.succeeded
 
+        # Record handoff success before the cancellable verify await so stale-monitor
+        # reconciliation cannot finalize the remonitor op as cancelled in this window.
+        self._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)
         monitor_owner_id = getattr(handoff, "run_kwargs", {}).get("monitor_owner_id")
         verify_start = getattr(self._executor, "verify_resume_monitor_start", None)
         if verify_start is not None:
@@ -886,7 +889,6 @@ async def _safely_resume_pr_monitor(
         else:
             verify_ok = True
         if not verify_ok:
-            self._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)
             (
                 status,
                 error_code,
@@ -974,8 +976,8 @@ async def _safely_resume_pr_monitor(
                     finalize_error_code = None
                     finalize_error_message = None
             elif workspace_id in self._monitor_recovery_handoff_succeeded_workspace_ids:
-                # Verify-start skip adds the handoff marker before finalize; derive
-                # the terminal status instead of treating monitoring_pr as success.
+                # Handoff marker is set before the verify await; derive the terminal
+                # status instead of treating monitoring_pr as success.
                 (
                     finalize_status,
                     finalize_error_code,

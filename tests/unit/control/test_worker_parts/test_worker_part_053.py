@@ -1115,6 +1115,85 @@ async def test_safely_resume_pr_monitor_cancellation_during_verify_skip_finalize
 
 
 @pytest.mark.unit
+async def test_safely_resume_pr_monitor_cancellation_during_verify_start_preserves_completed_recovery(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Cancellation during verify-start await must honor the pre-verify handoff marker."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-verify-await-cancel-completed",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="SEED")
+        await session.commit()
+
+    handoff = object()
+    after_cancellation_calls: list[dict[str, object]] = []
+    verify_started = asyncio.Event()
+
+    class HandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
+            """Test helper for resume pr monitor handoff."""
+            assert workspace_id_arg == workspace_id
+            return handoff
+
+        async def verify_resume_monitor_start(self, workspace_id_arg: str) -> bool:
+            """Test helper for verify resume monitor start."""
+            assert workspace_id_arg == workspace_id
+            verify_started.set()
+            await asyncio.Event().wait()
+            return True
+
+        async def run_resumed_pr_monitor(self, workspace_id_arg: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
+            raise AssertionError("monitor run must not start when verify-start is cancelled")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_after_cancellation(*args: object, **kwargs: object) -> None:
+        """Test helper for finish after cancellation."""
+        after_cancellation_calls.append(dict(kwargs))
+
+    worker._finish_monitor_recovery_operation_after_cancellation = (  # type: ignore[method-assign]
+        _finish_after_cancellation
+    )
+
+    resume_task = asyncio.create_task(
+        worker._safely_resume_pr_monitor(  # noqa: SLF001
+            workspace_id,
+            recovery_operation_id="op_verify_await_cancel",
+        )
+    )
+    await asyncio.wait_for(verify_started.wait(), timeout=5.0)
+    resume_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await resume_task
+
+    assert len(after_cancellation_calls) == 1
+    assert after_cancellation_calls[0]["status"] == OperationStatus.succeeded
+    assert after_cancellation_calls[0]["operation_id"] == "op_verify_await_cancel"
+    assert after_cancellation_calls[0]["error_code"] is None
+    assert after_cancellation_calls[0]["error_message"] is None
+
+
+@pytest.mark.unit
 async def test_safely_resume_pr_monitor_cancellation_during_verify_skip_finalize_marks_still_monitoring_failed(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
