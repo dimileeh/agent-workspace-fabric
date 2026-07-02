@@ -540,3 +540,58 @@ async def test_safely_resume_pr_monitor_cancellation_during_verify_skip_finalize
         == "Monitor resume skipped before monitor loop started."
     )
     assert len(finish_calls) == 1
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_pre_start_exception_before_handoff_fails_recovery_op(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Pre-handoff verify failures must fail the remonitor bookkeeping operation."""
+    from awf.control.executor.monitor_handoff import MonitorResumePreStartError
+
+    handoff = object()
+    finish_calls: list[dict[str, object]] = []
+
+    class HandoffExecutor(_RecordingExecutor):
+        """Executor stub that raises before handoff bookkeeping finalizes."""
+
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def verify_resume_monitor_start(self, workspace_id: str) -> bool:
+            """Test helper for verify resume monitor start."""
+            assert workspace_id == "ws_monitor"
+            raise MonitorResumePreStartError("verify failed before finalize")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        """Test helper for finish monitor recovery operation."""
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_pre_handoff_verify_failed",
+    )
+
+    assert result is False
+    assert len(finish_calls) == 1
+    assert finish_calls[0]["operation_id"] == "op_pre_handoff_verify_failed"
+    assert finish_calls[0]["status"] == OperationStatus.failed
+    assert finish_calls[0]["error_code"] == "MONITOR_RECOVERY_FAILED"
+    assert "ws_monitor" not in worker._monitor_recovery_handoff_succeeded_workspace_ids  # noqa: SLF001

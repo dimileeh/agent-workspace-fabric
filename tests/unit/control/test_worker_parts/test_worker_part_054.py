@@ -786,14 +786,15 @@ async def test_monitor_recovery_handoff_failure_error_skips_null_reason_events(
         await repo.add_event(
             ws,
             event_type="workspace.monitor_runtime_restart_failed",
-            reason_code=None,
-            payload={"stderr": "ignored because reason_code is null"},
+            reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+            payload={"message": "compose up failed"},
         )
+        # Newest-first scan must skip a null ``reason_code`` row before the match.
         await repo.add_event(
             ws,
             event_type="workspace.monitor_runtime_restart_failed",
-            reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
-            payload={"message": "compose up failed"},
+            reason_code=None,
+            payload={"stderr": "ignored because reason_code is null"},
         )
         await session.commit()
 

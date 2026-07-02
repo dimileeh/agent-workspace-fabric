@@ -7,12 +7,14 @@ under the first-party 1500-line maintainability guardrail.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.control.worker import ControlWorker, WorkerConfig
 from awf.control.worker import claims as worker_claims
 from awf.control.worker import dispatch_methods as worker_dispatch_methods
 from awf.control.worker.constants import (
@@ -82,6 +84,28 @@ def test_monitor_recovery_handoff_failure_message_returns_default_when_payload_e
         default_message="Monitor recovery handoff failed.",
     )
     assert message == "Monitor recovery handoff failed."
+
+
+@pytest.mark.unit
+async def test_dispatch_preserved_active_validation_returns_false_when_execution_slot_occupied() -> (
+    None
+):
+    """A workspace already tracked in ``_execution_tasks`` must not double-dispatch."""
+    workspace_id = "ws_busy"
+    existing = asyncio.create_task(asyncio.Event().wait(), name="occupied-slot")
+    worker = ControlWorker(
+        session_factory=object(),  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=object(),
+        config=WorkerConfig(max_concurrent_executions=1),
+    )
+    worker._execution_tasks[workspace_id] = existing  # noqa: SLF001
+    try:
+        assert not worker._dispatch_preserved_active_validation(workspace_id)  # noqa: SLF001
+    finally:
+        existing.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await existing
 
 
 @pytest.mark.unit
