@@ -103,7 +103,15 @@ def _monitor_recovery_handoff_failure_message(
 def _monitor_recovery_handoff_failure_error_code(event: WorkspaceEvent) -> str:
     """Return the actionable error code persisted for a handoff failure event."""
     event_reason_code = event.reason_code
-    assert event_reason_code is not None
+    if event_reason_code is None:
+        # Callers filter ``None`` reason codes before reaching here. Raise
+        # explicitly rather than ``assert`` (which ``python -O`` strips, and
+        # which the caller's ``except Exception`` would swallow into a generic
+        # default) so a broken caller surfaces instead of masking the real event.
+        raise ValueError(
+            "monitor recovery handoff failure event has no reason_code; "
+            "callers must filter None reason codes before deriving an error code"
+        )
     payload = event.payload or {}
     payload_reason_code = payload.get("reason_code")
     if isinstance(payload_reason_code, str) and payload_reason_code.strip():
