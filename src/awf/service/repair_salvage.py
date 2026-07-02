@@ -169,6 +169,7 @@ def capture_ci_repair_salvage(
         patch = _run_git(
             worktree,
             [
+                "--literal-pathspecs",
                 "diff",
                 "--cached",
                 "--binary",
