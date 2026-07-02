@@ -68,6 +68,9 @@ def _provider_recovery_operation_result_updates(exc: BaseException) -> dict[str,
     salvage_error = details.get("salvage_error")
     if isinstance(salvage_error, dict):
         updates["salvage_error"] = salvage_error
+    rollback_error = details.get("rollback_error")
+    if isinstance(rollback_error, dict):
+        updates["rollback_error"] = rollback_error
     return updates
 
 

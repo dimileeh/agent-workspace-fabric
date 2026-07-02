@@ -1283,7 +1283,7 @@ async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_except
         lambda event, **fields: warnings.append((event, fields)),
     )
 
-    with pytest.raises(ProviderRecoveryRetryError):
+    with pytest.raises(ProviderRecoveryRetryError) as exc_info:
         await runner._run_ci_fix(
             repo=RepoRef(owner="dimileeh", name="aira-web"),
             pr_number=42,
@@ -1301,6 +1301,11 @@ async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_except
     assert any(
         event == "monitor.ci_fix_provider_recovery_rollback_failed" for event, _ in warnings
     ), warnings
+    assert exc_info.value.details is not None
+    rollback_error = exc_info.value.details["rollback_error"]
+    assert rollback_error["cause"] == "reset_failed"
+    assert "git reset --hard" in rollback_error["message"]
+    assert "could not parse object" in rollback_error["message"]
 
 
 @pytest.mark.unit

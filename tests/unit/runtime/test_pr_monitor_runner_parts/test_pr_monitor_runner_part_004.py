@@ -1377,6 +1377,64 @@ async def test_ci_repair_provider_recovery_includes_salvage_error_in_operation_r
 
 
 @pytest.mark.unit
+async def test_ci_repair_provider_recovery_includes_rollback_error_in_operation_result(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """Rollback failures on the commit-sink recovery path must surface on provider retry."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    rollback_error = {
+        "cause": "reset_failed",
+        "message": "CI repair residue rollback failed (git reset --hard): fatal: could not parse object",
+    }
+
+    async def _raise_provider_retry_with_rollback_error(**_kwargs: object) -> object:
+        raise ProviderRecoveryRetryError(
+            details={
+                "phase": "ci_repair_commit_sink",
+                "rollback_error": rollback_error,
+                "provider_error_stderr": "MODEL_CAPACITY_EXHAUSTED",
+            }
+        )
+
+    mocker.patch.object(runner, "_run_ci_fix", _raise_provider_retry_with_rollback_error)
+    failures = (CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),)
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._execute(
+            action=ReportCiFailure(failures=failures),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=_with_ci_failures(_green_status(), failures),
+            state=MonitorState(started_at=0.0),
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    operation = operations[0]
+    assert operation.type == "ci_repair"
+    assert operation.result is not None
+    assert operation.result["rollback_error"] == rollback_error
+    assert operation.result["phase"] == "ci_repair_commit_sink"
+    assert operation.result["provider_error_stderr"] == "MODEL_CAPACITY_EXHAUSTED"
+
+
+@pytest.mark.unit
 async def test_comment_repair_provider_auth_exception_finishes_operation(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

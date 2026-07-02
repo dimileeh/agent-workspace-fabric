@@ -656,7 +656,7 @@ async def _run_ci_fix(
                 workspace_id=workspace_id,
                 reason_code=salvage_details["salvage_error"]["reason_code"],
             )
-        await _rollback_ci_fix_residue_before_provider_recovery(
+        rollback_result = await _rollback_ci_fix_residue_before_provider_recovery(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
@@ -668,6 +668,11 @@ async def _run_ci_fix(
             "pushed": False,
             **salvage_details,
         }
+        if not rollback_result.ok:
+            recovery_details["rollback_error"] = {
+                "message": rollback_result.message,
+                "cause": rollback_result.cause,
+            }
         if agent_run_err is not None:
             recovery_details["provider_error_stderr"] = agent_run_err.result.stderr[:400]
         # Carry salvage metadata on the recovery exception so CI-repair
