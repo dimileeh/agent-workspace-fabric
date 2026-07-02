@@ -350,3 +350,36 @@ def test_deferred_issue_create_ambiguous_401_markers_are_transient(stderr: str) 
         operation="gh issue create",
         stderr=stderr,
     )
+
+
+@pytest.mark.unit
+def test_resubmit_with_auth_evidence_but_no_ambiguous_context_is_permanent() -> None:
+    """Resubmit guidance + API context + auth evidence, but the operation lacks
+    ambiguous-auth context -> PERMANENT (a create/auth fault, not a retryable blip)."""
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(
+            operation="local validator",
+            stderr="please try resubmitting https://api.github.com/graphql (HTTP 401)",
+        )
+        == GitHubErrorDisposition.PERMANENT
+    )
+
+
+@pytest.mark.unit
+def test_ambiguous_auth_marker_without_context_is_permanent() -> None:
+    """A 401 auth marker with no ambiguous-auth *context* is a deterministic auth
+    fault (PERMANENT), not the #515 transient-401 case."""
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(operation="local validator", stderr="HTTP 401 Unauthorized")
+        == GitHubErrorDisposition.PERMANENT
+    )

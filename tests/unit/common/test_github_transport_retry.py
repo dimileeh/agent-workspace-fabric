@@ -221,3 +221,81 @@ def test_past_transport_deadline_helper() -> None:
     assert past_transport_deadline(time.monotonic() - 1.0)
     assert not past_transport_deadline(time.monotonic() + 60.0)
     assert not past_transport_deadline(None)
+
+
+@pytest.mark.unit
+async def test_is_duplicate_pull_request_error_classification() -> None:
+    from awf.common.github_transport import _is_duplicate_pull_request_error
+
+    dup = GitHubClientError(
+        operation="gh pr create", returncode=1, stderr="a pull request already exists for o:feature"
+    )
+    assert _is_duplicate_pull_request_error(dup) is True
+    other = GitHubClientError(operation="gh pr create", returncode=1, stderr="no commits between")
+    assert _is_duplicate_pull_request_error(other) is False
+    assert _is_duplicate_pull_request_error("not a github error") is False
+
+
+@pytest.mark.unit
+async def test_max_attempts_override_caps_in_transport_retry() -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    with pytest.raises(GitHubClientError):
+        await _execute_gh_with_retry(
+            runner,
+            ["gh", "api", "x"],
+            operation="gh api",
+            retry_policy=RetryPolicy.READ,
+            sleep=_RecordedSleep(),
+            max_attempts=1,
+        )
+    assert len(runner.calls) == 1  # a transient is NOT retried when max_attempts=1
+
+
+@pytest.mark.unit
+async def test_cycle_deadline_before_first_attempt_raises_deadline_error() -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="{}")
+    token = github_retry_context.set(GitHubRetryContext(deadline=time.monotonic() - 100.0))
+    try:
+        with pytest.raises(GitHubClientError) as exc:
+            await _execute_gh_with_retry(
+                runner,
+                ["gh", "api", "x"],
+                operation="gh api",
+                retry_policy=RetryPolicy.READ,
+                sleep=_RecordedSleep(),
+            )
+        assert "deadline" in exc.value.stderr.lower()
+    finally:
+        github_retry_context.reset(token)
+    assert len(runner.calls) == 0  # deadline tripped before any command ran
+
+
+@pytest.mark.unit
+async def test_cycle_deadline_after_first_failure_raises_last_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks = {"n": 0}
+
+    def fake_past(deadline: float | None) -> bool:
+        checks["n"] += 1
+        return checks["n"] >= 2  # not past on the first check, past on the second
+
+    monkeypatch.setattr("awf.common.github_transport.past_transport_deadline", fake_past)
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    token = github_retry_context.set(GitHubRetryContext(deadline=time.monotonic() + 100.0))
+    try:
+        with pytest.raises(GitHubClientError) as exc:
+            await _execute_gh_with_retry(
+                runner,
+                ["gh", "api", "x"],
+                operation="gh api",
+                retry_policy=RetryPolicy.READ,
+                sleep=_RecordedSleep(),
+            )
+        assert "502" in exc.value.stderr  # the preserved last error, not the deadline sentinel
+    finally:
+        github_retry_context.reset(token)
+    assert len(runner.calls) == 1
