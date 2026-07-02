@@ -212,6 +212,16 @@ async def _rollback_ci_fix_residue_before_provider_recovery(
     return _CiFixResidueRollbackResult(ok=True)
 
 
+def _salvage_error_blocks_provider_recovery(salvage_details: dict[str, Any]) -> bool:
+    """Return True when a salvage failure must abort provider recovery."""
+    from awf.service.repair_salvage import REPAIR_SALVAGE_NO_DIFF
+
+    salvage_error = salvage_details.get("salvage_error")
+    if not isinstance(salvage_error, dict):
+        return False
+    return salvage_error.get("reason_code") != REPAIR_SALVAGE_NO_DIFF
+
+
 async def _salvage_ci_repair_dirty_output(
     self: Any,
     *,
@@ -313,7 +323,7 @@ async def _salvage_and_rollback_stranded_ci_repair_output(
         "pushed": False,
         **salvage_details,
     }
-    if "salvage_error" in salvage_details:
+    if _salvage_error_blocks_provider_recovery(salvage_details):
         _log.warning(
             "monitor.ci_fix_dirty_commit_failed",
             workspace_id=workspace_id,
@@ -331,6 +341,12 @@ async def _salvage_and_rollback_stranded_ci_repair_output(
             reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
             details=failure_details,
         )
+    if "salvage_error" in salvage_details:
+        _log.info(
+            "monitor.ci_repair_salvage_no_diff_before_provider_recovery",
+            workspace_id=workspace_id,
+            reason_code=salvage_details["salvage_error"]["reason_code"],
+        )
     rollback_result = await _rollback_ci_fix_residue_before_provider_recovery(
         self,
         workspace_id=workspace_id,
@@ -342,12 +358,17 @@ async def _salvage_and_rollback_stranded_ci_repair_output(
             "message": rollback_result.message,
             "cause": rollback_result.cause,
         }
+        repair_salvage = salvage_details.get("repair_salvage")
         _log.warning(
             "monitor.ci_fix_dirty_commit_failed_after_salvage",
             workspace_id=workspace_id,
             stderr=agent_run_err.result.stderr[:400],
-            patch_path=salvage_details["repair_salvage"]["patch_path"],
-            patch_sha256=salvage_details["repair_salvage"]["patch_sha256"],
+            patch_path=(
+                repair_salvage.get("patch_path") if isinstance(repair_salvage, dict) else None
+            ),
+            patch_sha256=(
+                repair_salvage.get("patch_sha256") if isinstance(repair_salvage, dict) else None
+            ),
             rollback_cause=rollback_result.cause,
         )
         return _GitPushResult(
@@ -361,12 +382,15 @@ async def _salvage_and_rollback_stranded_ci_repair_output(
             reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
             details=failure_details,
         )
+    repair_salvage = salvage_details.get("repair_salvage")
     _log.warning(
         "monitor.ci_fix_dirty_commit_salvaged_for_provider_recovery",
         workspace_id=workspace_id,
         stderr=agent_run_err.result.stderr[:400],
-        patch_path=salvage_details["repair_salvage"]["patch_path"],
-        patch_sha256=salvage_details["repair_salvage"]["patch_sha256"],
+        patch_path=(repair_salvage.get("patch_path") if isinstance(repair_salvage, dict) else None),
+        patch_sha256=(
+            repair_salvage.get("patch_sha256") if isinstance(repair_salvage, dict) else None
+        ),
     )
     if provider_recovery_exc is not None:
         # Provider state was already recorded above; re-raise after
@@ -656,14 +680,20 @@ async def _run_ci_fix(
                 patch_path=salvage_details["repair_salvage"]["patch_path"],
                 patch_sha256=salvage_details["repair_salvage"]["patch_sha256"],
             )
-        elif "salvage_error" in salvage_details:
+        elif _salvage_error_blocks_provider_recovery(salvage_details):
             _log.warning(
                 "monitor.ci_repair_salvage_before_provider_recovery_failed",
                 workspace_id=workspace_id,
                 reason_code=salvage_details["salvage_error"]["reason_code"],
             )
+        elif "salvage_error" in salvage_details:
+            _log.info(
+                "monitor.ci_repair_salvage_no_diff_before_provider_recovery",
+                workspace_id=workspace_id,
+                reason_code=salvage_details["salvage_error"]["reason_code"],
+            )
         provider_stderr = agent_run_err.result.stderr[:400] if agent_run_err is not None else ""
-        if "salvage_error" in salvage_details:
+        if _salvage_error_blocks_provider_recovery(salvage_details):
             recovery_details: dict[str, Any] = {
                 "phase": "ci_repair_commit_sink",
                 "operation_type": "ci_repair",

@@ -627,6 +627,195 @@ async def test_ci_fix_commit_sink_salvage_and_rollback_allows_provider_recovery(
 
 
 @pytest.mark.unit
+async def test_ci_fix_commit_sink_no_diff_salvage_allows_provider_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6N_JyF — NO_DIFF must not block provider recovery.
+
+    When salvage returns ``REPAIR_SALVAGE_NO_DIFF`` (no salvageable uncommitted diff,
+    e.g. repair already committed or only excluded paths), rollback and provider
+    recovery must still run instead of returning terminal ``REPAIR_DIRTY_COMMIT_FAILED``.
+    """
+    from awf.service.repair_salvage import REPAIR_SALVAGE_NO_DIFF
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    operation_start_head = "abc1234567890def"
+    adapter = FakeAdapter()
+    _queue_agent_capacity_exhausted(adapter)
+    cmd = FakeCommandRunner()
+    _queue_ci_fix_dirty_commit_sink_failure(cmd, operation_start_head)
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # rollback HEAD
+    cmd.queue_result(returncode=0)  # git reset --hard
+    cmd.queue_result(returncode=0)  # pre-push validation cleanup
+    cmd.queue_result(returncode=0, stdout="")  # post-rollback dirty guard
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+
+    async def _repair_agent_runtime_ownership(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    async def _mock_salvage_no_diff(self: object, **kwargs: object) -> dict[str, object]:
+        del self, kwargs
+        return {
+            "salvage_error": {
+                "reason_code": REPAIR_SALVAGE_NO_DIFF,
+                "message": "CI repair salvage found no salvageable diff.",
+            },
+        }
+
+    monkeypatch.setattr(pr_ci_ops, "_salvage_ci_repair_dirty_output", _mock_salvage_no_diff)
+
+    async def _raising_handle_provider_agent_run_error(
+        workspace_id_arg: str,
+        exc: AgentRunError,
+        *,
+        state: object = None,
+    ) -> str:
+        del workspace_id_arg, exc, state
+        raise ProviderRecoveryRetryError()
+
+    monkeypatch.setattr(
+        runner,
+        "_handle_provider_agent_run_error",
+        _raising_handle_provider_agent_run_error,
+    )
+
+    with pytest.raises(ProviderRecoveryRetryError) as exc_info:
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    assert exc_info.value.details is not None
+    assert exc_info.value.details["salvage_error"]["reason_code"] == REPAIR_SALVAGE_NO_DIFF
+    assert exc_info.value.details["stranded_paths"] == ["src/fix.py"]
+    assert "repair_salvage" not in exc_info.value.details
+
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        "reset" in call and "--hard" in call and operation_start_head in call
+        for call in joined_calls
+    ), joined_calls
+
+
+@pytest.mark.unit
+async def test_ci_fix_provider_recovery_no_diff_salvage_rolls_back_before_re_raise(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6N_JyF — commit-sink NO_DIFF salvage path."""
+    from unittest.mock import AsyncMock
+
+    from awf.service.repair_salvage import REPAIR_SALVAGE_NO_DIFF
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr="MODEL_CAPACITY_EXHAUSTED",
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    operation_start_head = "abc1234567890def"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # post-raise HEAD
+    cmd.queue_result(returncode=0)  # rollback: git reset --hard
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    async def _mock_salvage_no_diff(self: object, **kwargs: object) -> dict[str, object]:
+        del self, kwargs
+        return {
+            "salvage_error": {
+                "reason_code": REPAIR_SALVAGE_NO_DIFF,
+                "message": "CI repair salvage found no salvageable diff.",
+            },
+        }
+
+    monkeypatch.setattr(pr_ci_ops, "_salvage_ci_repair_dirty_output", _mock_salvage_no_diff)
+
+    raised_exc = ProviderRecoveryRetryError(
+        "provider recovery raised inside the CI fix commit sink"
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=raised_exc))
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        "reset" in call and "--hard" in call and operation_start_head in call
+        for call in joined_calls
+    ), joined_calls
+
+
+@pytest.mark.unit
 async def test_ci_fix_commit_sink_salvage_ok_terminal_provider_skips_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
