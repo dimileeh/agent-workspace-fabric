@@ -235,6 +235,69 @@ class TestResumePrMonitorStatusRechecks:
             assert ws.status == WorkspaceStatus.cancelled.value
 
     @pytest.mark.unit
+    async def test_resume_skips_when_monitor_claim_superseded_before_run(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # PRRT_kwDOSJAM6s6NwlyN: the final recheck before ``monitor.run`` must
+        # fence on ``monitor_claimed_by``, not just status. A stale worker whose
+        # lease was reclaimed after handoff prep must not enter the monitor loop
+        # while the row remains ``monitoring_pr``.
+        compose_calls: list[str] = []
+        monitor_calls: list[str] = []
+
+        class _Compose:
+            async def ensure_project_up(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                compose_calls.append(workspace_id)
+
+        class _Monitor:
+            async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                monitor_calls.append(workspace_id)
+
+        ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-stale"
+            await s.commit()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=_Compose(),
+            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
+        )
+
+        original_recheck = executor._recheck_status
+
+        async def _recheck_status(workspace_id: str, *, expected: Any, action: str, **kw: Any):
+            if action == "resume_monitor_start":
+                async with factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    ws.monitor_claimed_by = "worker-current"
+                    await s.commit()
+            return await original_recheck(workspace_id, expected=expected, action=action, **kw)
+
+        monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert compose_calls == [ws_id]
+        assert monitor_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_claimed_by == "worker-current"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_CLAIM"
+
+    @pytest.mark.unit
     async def test_resume_threads_monitor_claim_owner_into_runner(
         self,
         fake: FakeCommandRunner,

@@ -225,6 +225,8 @@ async def _recheck_status(
     reason_code: str = "EXECUTOR_STALE_STATUS",
     owner_id: str | None = None,
     owner_mismatch_reason_code: str = "EXECUTOR_STALE_CLAIM",
+    monitor_owner_id: str | None = None,
+    monitor_owner_mismatch_reason_code: str = "EXECUTOR_STALE_CLAIM",
 ) -> bool:
     """Confirm the row is still in ``expected`` (and, when ``owner_id`` is
     provided, still claimed by it) before resuming work.
@@ -233,7 +235,10 @@ async def _recheck_status(
     CAS-guarded transitions do: a stale executor whose execution claim was
     transferred to a newer claimant sees ``status == expected`` but a mismatched
     ``execution_claimed_by`` and is skipped, so it cannot drive a duplicate run
-    behind the new claimant's back."""
+    behind the new claimant's back.
+
+    ``monitor_owner_id`` applies the same fence to ``monitor_claimed_by`` for
+    resumed PR-monitor loops."""
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.get(workspace_id)
@@ -246,14 +251,21 @@ async def _recheck_status(
             return False
         status_ok = ws.status == expected.value
         owner_ok = owner_id is None or ws.execution_claimed_by == owner_id
-        if status_ok and owner_ok:
+        monitor_owner_ok = monitor_owner_id is None or ws.monitor_claimed_by == monitor_owner_id
+        if status_ok and owner_ok and monitor_owner_ok:
             return True
+        if not status_ok:
+            skip_reason_code = reason_code
+        elif not owner_ok:
+            skip_reason_code = owner_mismatch_reason_code
+        else:
+            skip_reason_code = monitor_owner_mismatch_reason_code
         await self._record_stale_action_skip(
             repo,
             ws,
             action=action,
             expected=expected,
-            reason_code=reason_code if not status_ok else owner_mismatch_reason_code,
+            reason_code=skip_reason_code,
         )
         if _is_callback_terminal_status(ws.status):
             await self._finish_ignored_stale_callback_operations_in_session(

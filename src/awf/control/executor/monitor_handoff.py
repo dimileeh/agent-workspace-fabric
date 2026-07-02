@@ -417,13 +417,19 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     )
 
 
-async def verify_resume_monitor_start(self: Any, workspace_id: str) -> bool:
+async def verify_resume_monitor_start(
+    self: Any,
+    workspace_id: str,
+    *,
+    monitor_owner_id: str | None = None,
+) -> bool:
     """Confirm the workspace is still eligible to enter the resumed monitor loop."""
     return bool(
         await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.monitoring_pr,
             action="resume_monitor_start",
+            monitor_owner_id=monitor_owner_id,
         )
     )
 
@@ -437,9 +443,15 @@ async def run_resumed_pr_monitor(
 
     Returns ``True`` when the monitor loop was entered, ``False`` when the
     start recheck bailed before ``monitor.run`` (e.g. workspace left
-    ``monitoring_pr`` between handoff finalize and loop entry).
+    ``monitoring_pr`` or lost its monitor claim between handoff finalize and
+    loop entry).
     """
-    if not await verify_resume_monitor_start(self, workspace_id):
+    monitor_owner_id = handoff.run_kwargs.get("monitor_owner_id")
+    if not await verify_resume_monitor_start(
+        self,
+        workspace_id,
+        monitor_owner_id=monitor_owner_id,
+    ):
         return False
     await handoff.monitor.run(
         workspace_id=workspace_id,

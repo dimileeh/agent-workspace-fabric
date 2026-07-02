@@ -346,7 +346,7 @@ async def test_run_resumed_pr_monitor_skips_monitor_loop_when_start_recheck_bail
             nonlocal monitor_ran
             monitor_ran = True
 
-    async def _verify_start(_self: object, workspace_id: str) -> bool:
+    async def _verify_start(_self: object, workspace_id: str, **_kwargs: object) -> bool:
         """Test helper for verify start."""
         assert workspace_id == "ws_monitor"
         return False
@@ -384,7 +384,7 @@ async def test_run_resumed_pr_monitor_enters_monitor_loop_when_start_recheck_pas
             nonlocal monitor_ran
             monitor_ran = True
 
-    async def _verify_start(_self: object, workspace_id: str) -> bool:
+    async def _verify_start(_self: object, workspace_id: str, **_kwargs: object) -> bool:
         """Test helper for verify start."""
         assert workspace_id == "ws_monitor"
         return True

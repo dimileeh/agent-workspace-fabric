@@ -178,11 +178,17 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
             workspace_id=workspace_id,
         )
 
-    async def verify_resume_monitor_start(self: Any, workspace_id: str) -> bool:
+    async def verify_resume_monitor_start(
+        self: Any,
+        workspace_id: str,
+        *,
+        monitor_owner_id: str | None = None,
+    ) -> bool:
         """Confirm the workspace is still eligible to enter the resumed monitor loop."""
         return await _monitor_handoff.verify_resume_monitor_start(
             self,
             workspace_id=workspace_id,
+            monitor_owner_id=monitor_owner_id,
         )
 
     async def run_resumed_pr_monitor(self: Any, workspace_id: str, handoff: Any) -> bool:
