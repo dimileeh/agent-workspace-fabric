@@ -940,7 +940,10 @@ async def _safely_resume_pr_monitor(
             finalize_error_message: str | None = (
                 "Monitor resume cancelled after workspace left monitoring_pr."
             )
-            if handoff_succeeded:
+            if (
+                handoff_succeeded
+                or workspace_id in self._monitor_recovery_handoff_succeeded_workspace_ids
+            ):
                 ws_status = (await self._load_workspace_statuses([workspace_id])).get(workspace_id)
                 if (
                     ws_status is None
