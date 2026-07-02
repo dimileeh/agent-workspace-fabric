@@ -246,11 +246,15 @@ class TestResumePrMonitorStatusRechecks:
         monitor_calls: list[str] = []
 
         class _Compose:
+            """Compose stub that records restart calls."""
+
             async def ensure_project_up(self, *, workspace_id: str, **_kwargs: Any) -> None:
                 """Test helper that records compose restart calls."""
                 compose_calls.append(workspace_id)
 
         class _Monitor:
+            """Monitor stub for resumed-run and handoff tests."""
+
             async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
                 """Test helper that records monitor.run calls."""
                 monitor_calls.append(workspace_id)

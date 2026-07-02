@@ -294,6 +294,8 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
     )
 
     class _Session:
+        """Async session context manager stub for cooldown tests."""
+
         async def __aenter__(self) -> _Session:
             """Test helper for  aenter  ."""
             return self
@@ -303,6 +305,8 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
             return
 
     class _Repo:
+        """Workspace repository stub returning a fixed status."""
+
         workspace: object | None = SimpleNamespace(status=WorkspaceStatus.monitoring_pr.value)
 
         def __init__(self, _session: object) -> None:
@@ -314,6 +318,8 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
             return self.workspace
 
     class _OpRepo:
+        """Operation repository stub for cooldown lookup tests."""
+
         operation: object | None = None
 
         def __init__(self, _session: object) -> None:
@@ -359,6 +365,8 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
         )
 
         class _BoomSession:
+            """Session stub that raises on enter to exercise lookup failures."""
+
             async def __aenter__(self) -> _BoomSession:
                 """Test helper for  aenter  ."""
                 raise RuntimeError("lookup failed")
@@ -565,6 +573,8 @@ async def test_active_salvage_resume_cooldown_record_skips_missing_or_wrong_stat
     """Skip cooldown recording when the workspace row is missing or not monitoring_pr."""
 
     class _Session:
+        """Async session stub for cooldown record persistence tests."""
+
         committed = False
 
         async def __aenter__(self) -> _Session:

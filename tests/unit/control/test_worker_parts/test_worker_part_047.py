@@ -342,6 +342,8 @@ async def test_safe_worker_paths_swallow_runtime_failures(
     assert finish_calls[0]["status"] == OperationStatus.succeeded
 
     class _FailingHandoffExecutor(_RecordingExecutor):
+        """Executor whose handoff returns None to simulate failure."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object | None:
             """Test helper for resume pr monitor handoff."""
             del workspace_id
@@ -394,6 +396,8 @@ async def test_safely_resume_pr_monitor_cancelled_handoff_skips_classifies_opera
     finish_calls: list[dict[str, object]] = []
 
     class _CancelledHandoffExecutor(_RecordingExecutor):
+        """Executor whose handoff returns None for a cancelled workspace."""
+
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object | None:
             """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
@@ -456,6 +460,8 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_cancelled_ha
     cooldown_recorded = False
 
     class _CancelledHandoffExecutor(_RecordingExecutor):
+        """Executor whose handoff returns None for a cancelled workspace."""
+
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object | None:
             """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
@@ -539,6 +545,8 @@ async def test_safely_resume_pr_monitor_completed_handoff_skips_classifies_opera
     finish_calls: list[dict[str, object]] = []
 
     class _CompletedHandoffExecutor(_RecordingExecutor):
+        """Executor that completes handoff and resumed run successfully."""
+
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object | None:
             """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
@@ -587,6 +595,8 @@ async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_w
     monitor_ran_after_finalize = False
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -645,6 +655,8 @@ async def test_safely_resume_pr_monitor_post_handoff_runtime_error_does_not_fail
     finish_calls: list[dict[str, object]] = []
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -696,6 +708,8 @@ async def test_safely_resume_pr_monitor_skips_monitor_when_finalize_never_succee
     monitor_ran = False
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -822,6 +836,8 @@ async def test_workspace_is_monitoring_pr_returns_false_on_db_error(
     """Transient DB errors must not skip terminal finalize eligibility."""
 
     class FakeSession:
+        """Minimal async session stub for finalize tests."""
+
         async def __aenter__(self) -> FakeSession:
             """Test helper for  aenter  ."""
             return self
@@ -831,6 +847,8 @@ async def test_workspace_is_monitoring_pr_returns_false_on_db_error(
             return
 
     class FailingWorkspaceRepository:
+        """Repository stub that raises on persistence calls."""
+
         def __init__(self, _session: FakeSession) -> None:
             """Test helper for __init__."""
             pass
@@ -863,6 +881,8 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
     """Pending finalize must attempt terminal finalize when status lookup fails."""
 
     class FakeSession:
+        """Minimal async session stub for finalize tests."""
+
         async def __aenter__(self) -> FakeSession:
             """Test helper for  aenter  ."""
             return self
@@ -872,6 +892,8 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
             return
 
     class FailingWorkspaceRepository:
+        """Repository stub that raises on persistence calls."""
+
         def __init__(self, _session: FakeSession) -> None:
             """Test helper for __init__."""
             pass
@@ -970,6 +992,8 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
     lookup_calls = 0
 
     class IntermittentWorkspaceRepository:
+        """Repository stub that fails on alternating calls."""
+
         def __init__(self, session: AsyncSession) -> None:
             """Test helper for __init__."""
             self._session = session
@@ -1072,6 +1096,8 @@ async def test_safely_resume_claimed_pr_monitor_propagates_cancellation_when_sti
     claim_released = False
 
     class IntermittentWorkspaceRepository:
+        """Repository stub that fails on alternating calls."""
+
         def __init__(self, session: AsyncSession) -> None:
             """Test helper for __init__."""
             self._session = session
@@ -1166,6 +1192,8 @@ async def test_safely_resume_claimed_pr_monitor_finalizes_when_finalize_pending_
     lookup_calls = 0
 
     class IntermittentWorkspaceRepository:
+        """Repository stub that fails on alternating calls."""
+
         def __init__(self, session: AsyncSession) -> None:
             """Test helper for __init__."""
             self._session = session

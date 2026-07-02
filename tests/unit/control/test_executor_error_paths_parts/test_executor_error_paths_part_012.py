@@ -341,6 +341,8 @@ async def test_run_resumed_pr_monitor_skips_monitor_loop_when_start_recheck_bail
     monitor_ran = False
 
     class _Monitor:
+        """Monitor stub for resumed-run and handoff tests."""
+
         async def run(self, **_kwargs: object) -> None:
             """Test helper for run."""
             nonlocal monitor_ran
@@ -379,6 +381,8 @@ async def test_run_resumed_pr_monitor_enters_monitor_loop_when_start_recheck_pas
     monitor_ran = False
 
     class _Monitor:
+        """Monitor stub for resumed-run and handoff tests."""
+
         async def run(self, **_kwargs: object) -> None:
             """Test helper for run."""
             nonlocal monitor_ran

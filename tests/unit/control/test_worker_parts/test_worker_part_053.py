@@ -59,6 +59,8 @@ def worker(session_factory: async_sessionmaker[AsyncSession], tmp_path: Path) ->
 
 
 class _RecordingExecutor:
+    """Executor double that records execute and resume calls."""
+
     def __init__(self) -> None:
         """Test helper for __init__."""
         self.calls: list[str] = []
@@ -255,6 +257,8 @@ async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_pre_f
     monitor_ran = False
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
@@ -323,6 +327,8 @@ async def test_safely_resume_pr_monitor_pre_finalize_verify_passes_handoff_monit
     verify_kwargs: dict[str, object] = {}
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -375,6 +381,8 @@ async def test_safely_resume_pr_monitor_fails_operation_when_start_recheck_bails
     monitor_ran = False
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -433,6 +441,8 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_start_rechec
     cooldown_recorded = False
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -524,6 +534,8 @@ async def test_safely_resume_claimed_pr_monitor_applies_cooldown_when_handoff_ab
     cooldown_recorded = False
 
     class _AbortingHandoffExecutor(_RecordingExecutor):
+        """Executor whose handoff raises to exercise abort paths."""
+
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object | None:
             """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
@@ -622,6 +634,8 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_cancelled_af
     cooldown_recorded = False
 
     class BlockingRunExecutor(_RecordingExecutor):
+        """Executor that blocks in run_resumed_pr_monitor."""
+
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
@@ -697,6 +711,8 @@ async def test_safely_resume_pr_monitor_none_return_does_not_refinish_succeeded_
     monitor_ran = False
 
     class LegacyVoidRunExecutor(_RecordingExecutor):
+        """Legacy executor stub with void run_resumed_pr_monitor."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -750,6 +766,8 @@ async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_post_
     verify_calls = 0
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -812,6 +830,8 @@ async def test_safely_resume_pr_monitor_post_handoff_cancellation_does_not_cance
     after_cancellation_called = False
 
     class BlockingRunExecutor(_RecordingExecutor):
+        """Executor that blocks in run_resumed_pr_monitor."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -880,6 +900,8 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
     finish_attempts = 0
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -966,6 +988,8 @@ async def test_safely_resume_pr_monitor_cancellation_during_finalize_preserves_c
     finalize_started = asyncio.Event()
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id_arg == workspace_id
@@ -1053,6 +1077,8 @@ async def test_safely_resume_pr_monitor_cancellation_during_verify_skip_finalize
     finalize_started = asyncio.Event()
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id_arg == workspace_id
@@ -1144,6 +1170,8 @@ async def test_safely_resume_pr_monitor_cancellation_during_verify_start_preserv
     verify_started = asyncio.Event()
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id_arg == workspace_id
@@ -1223,6 +1251,8 @@ async def test_safely_resume_pr_monitor_cancellation_during_verify_skip_finalize
     finalize_started = asyncio.Event()
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id_arg == workspace_id
@@ -1315,6 +1345,8 @@ async def test_safely_resume_pr_monitor_cancellation_during_finalize_preserves_f
     finalize_started = asyncio.Event()
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id_arg == workspace_id
@@ -1379,6 +1411,8 @@ async def test_safely_resume_pr_monitor_retains_handle_when_cancellation_finaliz
     handoff_started = asyncio.Event()
 
     class BlockingHandoffExecutor(_RecordingExecutor):
+        """Executor that blocks during handoff finalization."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -1429,6 +1463,8 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_after_cancellatio
     finish_attempts = 0
 
     class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
@@ -1501,6 +1537,8 @@ async def test_safely_resume_claimed_pr_monitor_legacy_releases_claim_after_canc
     claim_released = False
 
     class BlockingLegacyExecutor:
+        """Legacy executor that blocks during resume_pr_monitor."""
+
         async def resume_pr_monitor(self, workspace_id: str) -> None:
             """Test helper for resume pr monitor."""
             assert workspace_id == "ws_monitor"
@@ -1563,6 +1601,8 @@ async def test_safely_resume_pr_monitor_falls_back_to_protocol_resume(
     finish_calls: list[dict[str, object]] = []
 
     class _ProtocolOnlyExecutor:
+        """Minimal executor exposing only the resume protocol."""
+
         def __init__(self) -> None:
             """Test helper for __init__."""
             self.resume_calls: list[str] = []
@@ -1619,6 +1659,8 @@ async def test_safely_resume_pr_monitor_falls_back_when_handoff_api_incomplete(
     finish_calls: list[dict[str, object]] = []
 
     class _PartialHandoffExecutor:
+        """Executor implementing only the handoff half of resume."""
+
         def __init__(self) -> None:
             """Test helper for __init__."""
             self.handoff_calls: list[str] = []
@@ -2077,6 +2119,8 @@ async def test_monitor_recovery_handoff_failure_error_lookup_exception_returns_d
     )
 
     class _BrokenRepo:
+        """Repository stub that raises on get for finalize error paths."""
+
         async def get(self, workspace_id: str) -> None:
             """Test helper for get."""
             del workspace_id
@@ -2112,6 +2156,8 @@ async def test_monitor_recovery_start_skipped_operation_status_lookup_exception_
     )
 
     class _BrokenRepo:
+        """Repository stub that raises on get for finalize error paths."""
+
         async def get(self, workspace_id: str) -> None:
             """Test helper for get."""
             del workspace_id
@@ -2236,6 +2282,8 @@ async def test_safely_resume_pr_monitor_legacy_failure_clears_recovery_handle(
     finish_calls: list[dict[str, object]] = []
 
     class _RaisingLegacyExecutor:
+        """Legacy executor whose resume_pr_monitor raises."""
+
         async def resume_pr_monitor(self, workspace_id: str) -> None:
             """Test helper for resume pr monitor."""
             del workspace_id
@@ -2286,6 +2334,8 @@ async def test_safely_resume_pr_monitor_legacy_failure_retains_handle_when_final
     """Verify safely resume pr monitor legacy failure retains handle when finalize fails."""
 
     class _RaisingLegacyExecutor:
+        """Legacy executor whose resume_pr_monitor raises."""
+
         async def resume_pr_monitor(self, workspace_id: str) -> None:
             """Test helper for resume pr monitor."""
             del workspace_id
@@ -2328,6 +2378,8 @@ async def test_safely_resume_pr_monitor_handoff_exception_clears_recovery_handle
     finish_calls: list[dict[str, object]] = []
 
     class _RaisingHandoffExecutor(_RecordingExecutor):
+        """Executor whose handoff raises during recovery."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             del workspace_id
@@ -2378,6 +2430,8 @@ async def test_safely_resume_pr_monitor_handoff_exception_retains_handle_when_fi
     """Verify safely resume pr monitor handoff exception retains handle when finalize fails."""
 
     class _RaisingHandoffExecutor(_RecordingExecutor):
+        """Executor whose handoff raises during recovery."""
+
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
             """Test helper for resume pr monitor handoff."""
             del workspace_id

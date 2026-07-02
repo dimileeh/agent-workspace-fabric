@@ -1359,6 +1359,8 @@ class TestRunOnceExecutionPart004:
         )
 
         class _HandoffBlockingMonitorExecutor(_RecordingExecutor):
+            """Executor that blocks in handoff until released."""
+
             def __init__(self) -> None:
                 """Test helper for __init__."""
                 super().__init__()

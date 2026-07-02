@@ -78,7 +78,10 @@ def _patch_compose_runtime_inspect(
     *,
     stack_state: str,
 ) -> None:
+    """Patch compose runtime inspect to return a fixed stack state."""
+
     async def _inspect(_compose_project: str) -> RuntimeSnapshot:
+        """Return a runtime snapshot with the patched stack state."""
         return RuntimeSnapshot(stack_state=stack_state)
 
     monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
@@ -1026,6 +1029,8 @@ class TestExecutorCoverageEdgesPart002:
         _patch_compose_runtime_inspect(monkeypatch, stack_state="running")
 
         class _FailingCompose:
+            """Compose stub that raises on ensure_project_up."""
+
             async def ensure_project_up(
                 self,
                 *,
@@ -1037,6 +1042,7 @@ class TestExecutorCoverageEdgesPart002:
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
             ) -> None:
+                """Raise or record a compose restart for the test."""
                 del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
                 del force_recreate, services
                 raise ComposeOperationError(
@@ -1048,9 +1054,12 @@ class TestExecutorCoverageEdgesPart002:
                 )
 
         class _Monitor:
+            """Monitor stub for resumed-run and handoff tests."""
+
             async def run(
                 self, *, workspace_id: str, compose_project: str, compose_file: Path
             ) -> None:
+                """Record that the monitor loop was entered."""
                 del compose_project, compose_file
 
         ws_id = await _seed_monitoring_pr(factory)
