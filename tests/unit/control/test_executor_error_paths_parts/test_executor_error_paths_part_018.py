@@ -622,6 +622,7 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Feature handoff skips monitor.run when status changes after monitor build."""
         # Mirror of the release case for the adopted-feature-PR handoff: the
         # monitor builds, but the workspace leaves ``running`` before adoption is
         # persisted, so the handoff records a stale-action skip and stops.
@@ -634,6 +635,7 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
 
         class _Monitor:
             async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                """Fail fast if stale-status fencing did not skip monitor execution."""
                 raise AssertionError("monitor must not run after a stale-status skip")
 
         executor = _make_executor(
@@ -647,6 +649,7 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
         original_build = executor._build_handoff_pr_monitor
 
         async def _build_handoff_pr_monitor(**kwargs: Any) -> Any:
+            """Cancel the workspace after monitor build to simulate a stale-status race."""
             monitor = await original_build(**kwargs)
             async with factory() as s:
                 repo = WorkspaceRepository(s)

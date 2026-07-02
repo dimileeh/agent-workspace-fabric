@@ -29,7 +29,10 @@ async def _read_execution_claim_epoch(self: Any, workspace_id: str) -> int | Non
 
 
 async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
+    """Extend this worker's execution-claim lease while provision/execute runs."""
+
     async def _operation(session: AsyncSession) -> bool:
+        """Refresh the execution claim inside a retried DB transaction."""
         lease_expires_at = self._execution_claim_expires_at()
         return await WorkspaceRepository(session).refresh_execution_claim(
             workspace_id,
@@ -50,6 +53,7 @@ async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
 async def _release_execution_claim(
     self: Any, workspace_id: str, *, skip_if_blocked: bool = False
 ) -> None:
+    """Drop this worker's execution claim unless the workspace is paused in-place."""
     try:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -117,6 +121,7 @@ async def _release_execution_claim_after_cancellation(self: Any, workspace_id: s
 
 
 async def _release_monitoring_pr_claim(self: Any, workspace_id: str) -> None:
+    """Release this worker's PR-monitor claim after the monitor loop ends."""
     try:
         async with self._session_factory() as session:
             await WorkspaceRepository(session).release_monitoring_pr_claim(
