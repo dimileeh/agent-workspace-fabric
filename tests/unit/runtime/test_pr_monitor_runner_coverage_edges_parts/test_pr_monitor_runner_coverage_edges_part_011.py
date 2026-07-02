@@ -600,7 +600,7 @@ async def test_ci_fix_commit_sink_salvage_and_rollback_allows_provider_recovery(
         _raising_handle_provider_agent_run_error,
     )
 
-    with pytest.raises(ProviderRecoveryRetryError):
+    with pytest.raises(ProviderRecoveryRetryError) as exc_info:
         await runner._run_ci_fix(
             repo=RepoRef(owner="dimileeh", name="aira-web"),
             pr_number=42,
@@ -612,6 +612,11 @@ async def test_ci_fix_commit_sink_salvage_and_rollback_allows_provider_recovery(
             workspace_id=workspace_id,
             remote_branch=f"awf/{workspace_id}",
         )
+
+    assert exc_info.value.details is not None
+    assert exc_info.value.details["repair_salvage"]["patch_sha256"] == "a" * 64
+    assert exc_info.value.details["stranded_paths"] == ["src/fix.py"]
+    assert exc_info.value.details["phase"] == "ci_repair_commit_sink"
 
     clean = await runner._pre_existing_dirty_repair_worktree_result(
         workspace_id=workspace_id,

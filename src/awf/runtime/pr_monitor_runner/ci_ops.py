@@ -47,6 +47,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.loop_recovery_ops import _attach_provider_recovery_details
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -369,7 +370,10 @@ async def _salvage_and_rollback_stranded_ci_repair_output(
     if provider_recovery_exc is not None:
         # Provider state was already recorded above; re-raise after
         # salvage and rollback so the next attempt sees a clean worktree
-        # (PRRT_kwDOSJAM6s6N599P).
+        # (PRRT_kwDOSJAM6s6N599P). Carry salvage metadata on the recovery
+        # exception so CI-repair operation results stay discoverable
+        # (PRRT_kwDOSJAM6s6N6xha).
+        _attach_provider_recovery_details(provider_recovery_exc, failure_details)
         raise provider_recovery_exc
     # Salvage and rollback succeeded, but provider recovery returned
     # terminal/deterministic instead of raising a retry/fallback/auth

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from awf.db.enums import OperationStatus
@@ -28,6 +29,43 @@ def _agent_service_recovery_operation_details(
 ) -> dict[str, object] | None:
     details = getattr(exc, "details", None)
     return dict(details) if isinstance(details, dict) else None
+
+
+def _attach_provider_recovery_details(
+    exc: BaseException,
+    details: Mapping[str, object],
+) -> None:
+    """Merge salvage/repair metadata onto a provider-recovery control-flow exception."""
+    if not details:
+        return
+    existing = getattr(exc, "details", None)
+    if isinstance(existing, dict):
+        merged = dict(existing)
+        merged.update(details)
+        exc.details = merged  # type: ignore[attr-defined]
+        return
+    exc.details = dict(details)  # type: ignore[attr-defined]
+
+
+def _provider_recovery_operation_result_updates(exc: BaseException) -> dict[str, object]:
+    """Extract discoverable salvage metadata from a provider-recovery exception."""
+    details = getattr(exc, "details", None)
+    if not isinstance(details, dict):
+        return {}
+    updates: dict[str, object] = {}
+    repair_salvage = details.get("repair_salvage")
+    if isinstance(repair_salvage, dict):
+        updates["repair_salvage"] = repair_salvage
+    stranded_paths = details.get("stranded_paths")
+    if isinstance(stranded_paths, list):
+        updates["stranded_paths"] = stranded_paths
+    phase = details.get("phase")
+    if isinstance(phase, str):
+        updates["phase"] = phase
+    provider_error_stderr = details.get("provider_error_stderr")
+    if isinstance(provider_error_stderr, str):
+        updates["provider_error_stderr"] = provider_error_stderr
+    return updates
 
 
 async def _finish_agent_service_recovery_failed_operation(
