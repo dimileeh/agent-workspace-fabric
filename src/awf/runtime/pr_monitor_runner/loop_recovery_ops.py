@@ -65,6 +65,9 @@ def _provider_recovery_operation_result_updates(exc: BaseException) -> dict[str,
     provider_error_stderr = details.get("provider_error_stderr")
     if isinstance(provider_error_stderr, str):
         updates["provider_error_stderr"] = provider_error_stderr
+    salvage_error = details.get("salvage_error")
+    if isinstance(salvage_error, dict):
+        updates["salvage_error"] = salvage_error
     return updates
 
 
