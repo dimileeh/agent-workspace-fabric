@@ -304,6 +304,14 @@ async def _create_release_pr_with_redundancy(
     sleep: SleepFn,
 ) -> tuple[int, bool]:
     del runner, sleep
+    # Release-PR sync is GitHub-only — ``ensure_release_sync_forge_supported``
+    # fails closed upstream — so ``gh`` is always a ``GitHubClient`` here. Narrow
+    # it so the release path can wire its own transient-retry budget through
+    # ``transient_max_attempts`` (retries + the initial attempt), mirroring
+    # ``PullRequestCreator``. Without this, create silently falls back to the
+    # transport default of five attempts instead of
+    # ``_RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES``.
+    assert isinstance(gh, GitHubClient)
     try:
         pr_url = await gh.create_pull_request(
             repo=repo,
@@ -311,6 +319,7 @@ async def _create_release_pr_with_redundancy(
             head=source_branch,
             title=title,
             body=body,
+            transient_max_attempts=_RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES + 1,
         )
     except GitHubClientError as exc:
         if exc.returncode == 0:

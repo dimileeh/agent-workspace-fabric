@@ -629,14 +629,19 @@ class TestFindOrCreateReleasePr:
 
     @pytest.mark.unit
     async def test_transient_create_failure_retry_exhausted_reraises(self) -> None:
-        # Four consecutive transient create failures whose reconcile lookups find
-        # nothing must exhaust the bounded retry loop
-        # (``attempt > _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES``) and re-raise the
-        # original gh error rather than looping forever. Mirrors the feature-PR
-        # exhaustion guard in ``test_pr_creator.py``.
+        # The release path wires its own attempt budget through
+        # ``transient_max_attempts`` (``_RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES``
+        # retries + the initial attempt = 4 creates), mirroring the feature-PR
+        # exhaustion guard in ``test_pr_creator.py``. It must NOT fall back to the
+        # transport default of five attempts: consecutive transient create failures
+        # whose reconcile lookups find nothing exhaust the bounded budget and
+        # re-raise the original gh error rather than looping to the transport cap.
+        from awf.runtime.release_pr_sync import _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES
+
+        create_attempts = _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES + 1
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
-        for _ in range(5):
+        for _ in range(create_attempts):
             fake.queue_result(returncode=1, stderr="HTTP 500 from GitHub")  # gh pr create
             fake.queue_result(returncode=0, stdout="[]")  # reconcile gh pr list -> none
         gh = _gh_client(fake)
@@ -653,7 +658,9 @@ class TestFindOrCreateReleasePr:
             )
 
         assert exc.value.operation == "gh pr create"
-        assert len([c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"]]) == 5
+        assert (
+            len([c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"]]) == create_attempts
+        )
         assert all(c.args[:3] != ["gh", "pr", "view"] for c in fake.calls)
 
     @pytest.mark.unit
