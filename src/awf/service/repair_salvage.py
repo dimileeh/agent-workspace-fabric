@@ -22,6 +22,9 @@ from awf.service._git_salvage_utils import (
     git_lines as _git_lines,
 )
 from awf.service._git_salvage_utils import (
+    paths_from_name_status as _paths_from_name_status,
+)
+from awf.service._git_salvage_utils import (
     run_git as _run_git_shared,
 )
 from awf.service.conformance_salvage import INTERNAL_PLAN_ARTIFACT_PREFIX
@@ -136,13 +139,13 @@ def capture_ci_repair_salvage(
         git_env = {**env_base, "GIT_INDEX_FILE": index_path}
         _run_git(worktree, ["read-tree", "HEAD"], run=run, env=git_env)
         _run_git(worktree, ["add", "-A", "--", "."], run=run, env=git_env)
-        raw_paths = _git_lines(
+        raw_paths = _paths_from_name_status(
             _run_git(
                 worktree,
                 [
                     "diff",
                     "--cached",
-                    "--name-only",
+                    "--name-status",
                     operation_start_head,
                     "--",
                     ".",

@@ -347,6 +347,32 @@ def test_capture_metadata_includes_digest_and_paths(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_capture_renamed_tracked_file_includes_source_and_dest_paths(
+    tmp_path: Path,
+) -> None:
+    """Renamed tracked files must salvage both source and destination paths."""
+    _, base_commit = _seed_worktree(tmp_path, "ws_rename")
+    worktree = tmp_path / "git" / "worktrees" / "ws_rename"
+    _git(["mv", "src/app.py", "src/renamed.py"], worktree)
+
+    capture = capture_ci_repair_salvage(
+        worktrees_root=tmp_path / "git" / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_id="ws_rename",
+        operation_start_head=base_commit,
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    assert capture.affected_paths == ["src/app.py", "src/renamed.py"]
+    patch_text = capture.patch_path.read_text(encoding="utf-8")
+    assert "rename from src/app.py" in patch_text
+    assert "rename to src/renamed.py" in patch_text
+    assert "new file mode" not in patch_text
+
+
+@pytest.mark.unit
 def test_capture_only_agent_runtime_raises_no_diff(tmp_path: Path) -> None:
     _, base_commit = _seed_worktree(tmp_path, "ws_runtime_only")
     worktree = tmp_path / "git" / "worktrees" / "ws_runtime_only"

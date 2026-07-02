@@ -56,6 +56,23 @@ def git_lines(value: str) -> list[str]:
     return sorted(line.strip() for line in value.splitlines() if line.strip())
 
 
+def paths_from_name_status(value: str) -> list[str]:
+    """Collect all old and new paths from ``git diff --name-status`` output."""
+    paths: set[str] = set()
+    for line in value.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split("\t")
+        status = parts[0]
+        if status.startswith(("R", "C")) and len(parts) >= 3:
+            paths.add(parts[1])
+            paths.add(parts[2])
+        elif len(parts) >= 2:
+            paths.add(parts[1])
+    return sorted(paths)
+
+
 def _timeout_output_text(output: str | bytes | None) -> str:
     """Normalize timeout-captured subprocess output to JSON-safe text."""
     if output is None:
