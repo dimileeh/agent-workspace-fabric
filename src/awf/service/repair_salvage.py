@@ -11,12 +11,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from awf.runtime.validation_worktree import is_under_agent_runtime_root
 from awf.service._git_salvage_utils import (
+    CompletedProcessBytesLike,
     CompletedProcessLike,
     SubprocessRun,
+    SubprocessRunBytes,
 )
 from awf.service._git_salvage_utils import (
     paths_from_ls_files_z as _paths_from_ls_files_z,
@@ -26,6 +28,9 @@ from awf.service._git_salvage_utils import (
 )
 from awf.service._git_salvage_utils import (
     run_git as _run_git_shared,
+)
+from awf.service._git_salvage_utils import (
+    run_git_bytes as _run_git_bytes_shared,
 )
 from awf.service.conformance_salvage import INTERNAL_PLAN_ARTIFACT_PREFIX
 
@@ -166,7 +171,7 @@ def capture_ci_repair_salvage(
                 reason_code=REPAIR_SALVAGE_NO_DIFF,
                 message="CI repair salvage found no salvageable diff.",
             )
-        patch = _run_git(
+        patch = _run_git_bytes(
             worktree,
             [
                 "--literal-pathspecs",
@@ -179,7 +184,7 @@ def capture_ci_repair_salvage(
             ],
             run=run,
             env=git_env,
-        ).stdout.encode("utf-8")
+        ).stdout
 
     patch_sha256 = hashlib.sha256(patch).hexdigest()
     patch_path = artifacts_dir / f"{workspace_id}-{patch_sha256[:12]}.patch"
@@ -228,6 +233,26 @@ def _run_git(
         worktree,
         args,
         run=run,
+        env=env,
+        raise_error=RepairSalvageError,
+        failure_reason=failure_reason,
+        failure_context="CI repair salvage",
+    )
+
+
+def _run_git_bytes(
+    worktree: Path,
+    args: list[str],
+    *,
+    run: SubprocessRun,
+    env: Mapping[str, str],
+    failure_reason: str = REPAIR_SALVAGE_SOURCE_UNAVAILABLE,
+) -> CompletedProcessBytesLike:
+    """Run a git command and return raw stdout bytes for binary patch capture."""
+    return _run_git_bytes_shared(
+        worktree,
+        args,
+        run=cast(SubprocessRunBytes, run),
         env=env,
         raise_error=RepairSalvageError,
         failure_reason=failure_reason,

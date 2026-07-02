@@ -474,6 +474,69 @@ def test_capture_renamed_tracked_file_includes_source_and_dest_paths(
 
 
 @pytest.mark.unit
+def test_capture_preserves_crlf_line_endings_in_binary_patch(tmp_path: Path) -> None:
+    """Salvage patches must preserve CRLF bytes for git apply against CRLF bases."""
+    _, base_commit = _seed_worktree(tmp_path, "ws_crlf")
+    worktree = tmp_path / "git" / "worktrees" / "ws_crlf"
+    _git(["config", "core.autocrlf", "false"], worktree)
+    crlf_file = worktree / "src/app.py"
+    crlf_file.write_bytes(b"VALUE = 'old'\r\n")
+    _git(["add", "src/app.py"], worktree)
+    _git(["commit", "-q", "-m", "crlf base"], worktree)
+    base_commit = _git(["rev-parse", "HEAD"], worktree)
+    crlf_file.write_bytes(b"VALUE = 'new'\r\n")
+
+    capture = capture_ci_repair_salvage(
+        worktrees_root=tmp_path / "git" / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_id="ws_crlf",
+        operation_start_head=base_commit,
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    patch_bytes = capture.patch_path.read_bytes()
+    assert b"+VALUE = 'new'\r\n" in patch_bytes
+    assert b"+VALUE = 'new'\n" not in patch_bytes
+
+    expected = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "diff",
+            "--binary",
+            base_commit,
+            "--",
+            "src/app.py",
+        ],
+        check=True,
+        capture_output=True,
+        text=False,
+    ).stdout
+    assert b"+VALUE = 'new'\r\n" in expected
+
+
+@pytest.mark.unit
+def test_run_git_bytes_timeout_raises_repair_salvage_error(tmp_path: Path) -> None:
+    def _run_timeout(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(args, timeout=GIT_TIMEOUT_SECONDS)
+
+    with pytest.raises(RepairSalvageError) as exc_info:
+        repair_salvage_mod._run_git_bytes(  # noqa: SLF001
+            tmp_path,
+            ["diff", "--binary", "HEAD"],
+            run=_run_timeout,
+            env={},
+            failure_reason=REPAIR_SALVAGE_SOURCE_UNAVAILABLE,
+        )
+
+    assert exc_info.value.reason_code == REPAIR_SALVAGE_SOURCE_UNAVAILABLE
+    assert "timed out" in str(exc_info.value)
+
+
+@pytest.mark.unit
 def test_capture_only_agent_runtime_raises_no_diff(tmp_path: Path) -> None:
     _, base_commit = _seed_worktree(tmp_path, "ws_runtime_only")
     worktree = tmp_path / "git" / "worktrees" / "ws_runtime_only"
