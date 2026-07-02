@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from awf.service import repair_salvage as repair_salvage_mod
-from awf.service._git_salvage_utils import GIT_TIMEOUT_SECONDS
+from awf.service._git_salvage_utils import GIT_TIMEOUT_SECONDS, paths_from_name_status
 from awf.service.repair_salvage import (
     REPAIR_SALVAGE_BASE_UNAVAILABLE,
     REPAIR_SALVAGE_NO_DIFF,
@@ -344,6 +344,41 @@ def test_capture_metadata_includes_digest_and_paths(tmp_path: Path) -> None:
     assert details["operation_id"] == "op_meta"
     assert details["operation_start_head"] == base_commit
     assert details["created_at"]
+
+
+@pytest.mark.unit
+def test_paths_from_name_status_z_preserves_tab_and_trailing_space_paths() -> None:
+    """NUL-delimited parsing must not strip or split paths with tabs or trailing spaces."""
+    assert paths_from_name_status("M\0src/foo\tbar.py\0") == ["src/foo\tbar.py"]
+    assert paths_from_name_status("M\0src/trailing.py \0") == ["src/trailing.py "]
+    assert paths_from_name_status("R100\0src/old\tname.py\0src/new\tname.py\0") == [
+        "src/new\tname.py",
+        "src/old\tname.py",
+    ]
+
+
+@pytest.mark.unit
+def test_capture_preserves_path_with_tab_in_filename(tmp_path: Path) -> None:
+    """Salvage must preserve exact paths when filenames contain tab characters."""
+    _, base_commit = _seed_worktree(tmp_path, "ws_tab")
+    worktree = tmp_path / "git" / "worktrees" / "ws_tab"
+    tab_path = worktree / "src" / "foo\tbar.py"
+    tab_path.parent.mkdir(parents=True, exist_ok=True)
+    tab_path.write_text("VALUE = 'tab'\n", encoding="utf-8")
+
+    capture = capture_ci_repair_salvage(
+        worktrees_root=tmp_path / "git" / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_id="ws_tab",
+        operation_start_head=base_commit,
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    assert capture.affected_paths == ["src/foo\tbar.py"]
+    assert capture.patch_bytes > 0
+    assert "tab" in capture.patch_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.unit

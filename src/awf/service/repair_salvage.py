@@ -146,6 +146,7 @@ def capture_ci_repair_salvage(
                     "diff",
                     "--cached",
                     "--name-status",
+                    "-z",
                     operation_start_head,
                     "--",
                     ".",

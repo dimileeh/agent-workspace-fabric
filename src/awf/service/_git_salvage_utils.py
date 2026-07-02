@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from awf.common.git_identity import git_safe_directory_config_args
+from awf.control.protected_file_diffs import changed_paths_from_name_status_z
 
 GIT_TIMEOUT_SECONDS = 30.0
 
@@ -57,20 +58,8 @@ def git_lines(value: str) -> list[str]:
 
 
 def paths_from_name_status(value: str) -> list[str]:
-    """Collect all old and new paths from ``git diff --name-status`` output."""
-    paths: set[str] = set()
-    for line in value.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        parts = stripped.split("\t")
-        status = parts[0]
-        if status.startswith(("R", "C")) and len(parts) >= 3:
-            paths.add(parts[1])
-            paths.add(parts[2])
-        elif len(parts) >= 2:
-            paths.add(parts[1])
-    return sorted(paths)
+    """Collect all old and new paths from ``git diff --name-status -z`` output."""
+    return sorted(changed_paths_from_name_status_z(value))
 
 
 def _timeout_output_text(output: str | bytes | None) -> str:
