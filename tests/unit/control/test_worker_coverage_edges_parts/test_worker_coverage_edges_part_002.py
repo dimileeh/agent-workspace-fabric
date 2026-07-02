@@ -1471,6 +1471,53 @@ async def test_active_worker_restart_remonitor_operation_id_returns_running_oper
 
 
 @pytest.mark.unit
+async def test_active_worker_restart_remonitor_operation_id_prefers_newest_active_operation(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """When multiple worker-restart remonitor ops are active, adopt the newest."""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@example.com:repo/app.git",
+            branch_base="main",
+            task_title="active worker restart remonitor newest",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        op_repo = OperationRepository(session)
+        await op_repo.create(
+            workspace_id=ws.id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.running,
+            payload={
+                "source": _MONITOR_RECOVERY_SOURCE,
+                "owner": _MONITOR_RECOVERY_OWNER,
+            },
+        )
+        newer = await op_repo.create(
+            workspace_id=ws.id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.running,
+            payload={
+                "source": _MONITOR_RECOVERY_SOURCE,
+                "owner": _MONITOR_RECOVERY_OWNER,
+            },
+        )
+        await session.commit()
+        workspace_id = ws.id
+        newer_id = newer.id
+
+    async with factory() as session:
+        found = await worker_claims._active_worker_restart_remonitor_operation_id(  # noqa: SLF001
+            session,
+            workspace_id,
+        )
+
+    assert found == newer_id
+
+
+@pytest.mark.unit
 async def test_active_worker_restart_remonitor_operation_id_returns_none_for_fresh_previous_owner(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -270,6 +270,37 @@ async def test_operation_active_matching_payload_skips_non_dict_payloads(
 
 
 @pytest.mark.unit
+async def test_operation_active_matching_payload_prefers_newest_when_requested(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, title="operation payload newest preference")
+    repo = OperationRepository(session)
+    older = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        status=OperationStatus.running,
+        payload={"source": "operator_api", "reason": "refresh"},
+    )
+    newer = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        status=OperationStatus.running,
+        payload={"source": "operator_api", "reason": "refresh"},
+    )
+
+    found = await repo.find_active_matching_payload(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        payload_identity={"source": "operator_api", "reason": "refresh"},
+        prefer_newest=True,
+    )
+
+    assert found is not None
+    assert found.id == newer.id
+    assert found.id != older.id
+
+
+@pytest.mark.unit
 async def test_operation_active_matching_payload_requires_present_null_keys(
     session: AsyncSession,
 ) -> None:

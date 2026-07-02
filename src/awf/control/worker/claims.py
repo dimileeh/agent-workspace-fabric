@@ -648,6 +648,7 @@ async def _active_worker_restart_remonitor_operation_id(
             "source": _MONITOR_RECOVERY_SOURCE,
             "owner": _MONITOR_RECOVERY_OWNER,
         },
+        prefer_newest=True,
     )
     if operation is None:
         return None
