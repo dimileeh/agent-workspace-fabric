@@ -18,9 +18,7 @@ call (``gh pr create`` for GitHub, the REST API for Bitbucket).
 
 from __future__ import annotations
 
-import asyncio
 import re
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,10 +49,6 @@ _URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)[^/@\s]+(?::[^/@\s]+)?@")
 _MAX_DIAGNOSTIC_COMMITS = 50
 _HEADS_REF_PREFIX = "refs/heads/"
 _PR_CREATE_TRANSIENT_MAX_RETRIES = 3
-_PR_CREATE_TRANSIENT_INITIAL_BACKOFF_SECONDS = 5.0
-_PR_CREATE_TRANSIENT_MAX_BACKOFF_SECONDS = 30.0
-
-_Sleep = Callable[[float], Awaitable[None]]
 
 
 def _redact_credentials(text: str) -> str:
@@ -147,23 +141,14 @@ class PullRequestCreator:
         runner: AsyncCommandRunner,
         *,
         pr_create_transient_max_retries: int = _PR_CREATE_TRANSIENT_MAX_RETRIES,
-        pr_create_transient_initial_backoff_seconds: float = (
-            _PR_CREATE_TRANSIENT_INITIAL_BACKOFF_SECONDS
-        ),
-        pr_create_transient_max_backoff_seconds: float = _PR_CREATE_TRANSIENT_MAX_BACKOFF_SECONDS,
-        sleep: _Sleep = asyncio.sleep,
     ) -> None:
         self._runner = runner
+        # Only the attempt budget is a creator-level knob: it is forwarded to the
+        # GitHub transport as ``transient_max_attempts``. Per-attempt backoff and
+        # the sleep hook live in the shared transport (``execute_gh_with_retry``)
+        # since retries moved there — the creator no longer owns retry timing, so
+        # exposing initial/max backoff or a sleep here would be dead config.
         self._pr_create_transient_max_retries: int = max(pr_create_transient_max_retries, 0)
-        self._pr_create_transient_initial_backoff_seconds: float = max(
-            pr_create_transient_initial_backoff_seconds,
-            0.0,
-        )
-        self._pr_create_transient_max_backoff_seconds: float = max(
-            pr_create_transient_max_backoff_seconds,
-            0.0,
-        )
-        self._sleep: _Sleep = sleep
 
     async def push_and_open(
         self,

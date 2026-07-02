@@ -226,7 +226,6 @@ class TestPushAndOpen:
         creator = PullRequestCreator(
             runner,
             pr_create_transient_max_retries=1,
-            pr_create_transient_initial_backoff_seconds=0,
         )
         result = await creator.push_and_open(
             worktree_path=_WORKTREE,
@@ -272,7 +271,6 @@ class TestPushAndOpen:
         creator = PullRequestCreator(
             runner,
             pr_create_transient_max_retries=1,
-            pr_create_transient_initial_backoff_seconds=0,
         )
         result = await creator.push_and_open(
             worktree_path=_WORKTREE,
@@ -313,7 +311,6 @@ class TestPushAndOpen:
         creator = PullRequestCreator(
             runner,
             pr_create_transient_max_retries=1,
-            pr_create_transient_initial_backoff_seconds=0,
         )
         with pytest.raises(PullRequestError) as exc:
             await creator.push_and_open(
@@ -352,10 +349,7 @@ class TestPushAndOpen:
             stdout=_open_pr_list_payload(number=77, branch="awf/ws_x", head_sha="a" * 40),
         )
 
-        creator = PullRequestCreator(
-            runner,
-            pr_create_transient_initial_backoff_seconds=0,
-        )
+        creator = PullRequestCreator(runner)
         result = await creator.push_and_open(
             worktree_path=_WORKTREE,
             branch_name="awf/ws_x",
@@ -409,7 +403,6 @@ class TestPushAndOpen:
         creator = PullRequestCreator(
             runner,
             pr_create_transient_max_retries=1,
-            pr_create_transient_initial_backoff_seconds=0.5,
         )
         result = await creator.push_and_open(
             worktree_path=_WORKTREE,
@@ -425,6 +418,21 @@ class TestPushAndOpen:
         assert slept == [0.25]
         create_calls = [call for call in runner.calls if call.args[:3] == ["gh", "pr", "create"]]
         assert len(create_calls) == 2
+
+    @pytest.mark.unit
+    async def test_creator_rejects_dead_backoff_knobs(self) -> None:
+        # Regression: after PR-create retries moved into the shared GitHub
+        # transport (which owns per-attempt jittered backoff and the sleep hook),
+        # the creator only forwards the attempt budget. The old backoff/sleep
+        # constructor knobs were ignored, so they must not silently reappear as
+        # dead config that misleads callers into thinking they tune retry timing.
+        runner = FakeCommandRunner()
+        with pytest.raises(TypeError):
+            PullRequestCreator(runner, pr_create_transient_initial_backoff_seconds=1)  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            PullRequestCreator(runner, pr_create_transient_max_backoff_seconds=1)  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            PullRequestCreator(runner, sleep=lambda _s: None)  # type: ignore[call-arg]
 
     @pytest.mark.unit
     async def test_reconciled_pr_without_head_sha_omits_it_from_metadata(self) -> None:
@@ -443,10 +451,7 @@ class TestPushAndOpen:
             stdout=_open_pr_list_payload(number=77, branch="awf/ws_x", head_sha=""),
         )
 
-        creator = PullRequestCreator(
-            runner,
-            pr_create_transient_initial_backoff_seconds=0,
-        )
+        creator = PullRequestCreator(runner)
         result = await creator.push_and_open(
             worktree_path=_WORKTREE,
             branch_name="awf/ws_x",
@@ -517,10 +522,7 @@ class TestPushAndOpen:
             stdout=_open_pr_list_payload(number=89, branch="awf/ws_x"),
         )
 
-        creator = PullRequestCreator(
-            runner,
-            pr_create_transient_initial_backoff_seconds=0,
-        )
+        creator = PullRequestCreator(runner)
         result = await creator.push_and_open(
             worktree_path=_WORKTREE,
             branch_name="awf/ws_x",
@@ -605,7 +607,6 @@ class TestPushAndOpen:
         creator = PullRequestCreator(
             runner,
             pr_create_transient_max_retries=0,
-            pr_create_transient_initial_backoff_seconds=0,
         )
         with pytest.raises(PullRequestError) as exc:
             await creator.push_and_open(
@@ -646,7 +647,6 @@ class TestPushAndOpen:
         creator = PullRequestCreator(
             runner,
             pr_create_transient_max_retries=0,
-            pr_create_transient_initial_backoff_seconds=0,
         )
         with pytest.raises(PullRequestError) as exc:
             await creator.push_and_open(
@@ -679,10 +679,7 @@ class TestPushAndOpen:
             ),
         )
 
-        creator = PullRequestCreator(
-            runner,
-            pr_create_transient_initial_backoff_seconds=0,
-        )
+        creator = PullRequestCreator(runner)
         with pytest.raises(PullRequestError) as exc:
             await creator.push_and_open(
                 worktree_path=_WORKTREE,

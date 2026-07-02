@@ -854,7 +854,6 @@ class TestFailurePaths:
         executor._pr_creator = PullRequestCreator(  # noqa: SLF001
             fake,
             pr_create_transient_max_retries=0,
-            pr_create_transient_initial_backoff_seconds=0,
         )
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)
@@ -919,7 +918,6 @@ class TestFailurePaths:
         executor._pr_creator = PullRequestCreator(  # noqa: SLF001
             fake,
             pr_create_transient_max_retries=0,
-            pr_create_transient_initial_backoff_seconds=0,
         )
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)
