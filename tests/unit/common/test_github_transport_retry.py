@@ -321,3 +321,36 @@ async def test_cycle_deadline_after_first_failure_raises_last_error(
     finally:
         github_retry_context.reset(token)
     assert len(runner.calls) == 1
+
+
+@pytest.mark.unit
+async def test_secret_stderr_redacted_before_logging_and_persisting(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # gh/GraphQL stderr can embed raw tokens; the live transport_retry warning
+    # and the persisted error_message payload must both be redacted, not just
+    # truncated (AGENTS.md: redact secrets for live logs and persisted payloads).
+    secret = "ghp_should_not_persist"
+    stderr = (
+        f"remote: https://x-access-token:{secret}@github.com/org/repo "
+        f"Authorization: Bearer {secret}"
+    )
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr=stderr)
+    runner.queue_result(returncode=0, stdout='{"ok": true}')
+    persisted: list[dict[str, object]] = []
+
+    with caplog.at_level("WARNING"):
+        result = await _execute_gh_with_retry(
+            runner,
+            ["gh", "api", "repos/o/r"],
+            operation="gh api repo",
+            retry_policy=RetryPolicy.READ,
+            sleep=_RecordedSleep(),
+            on_failure=persisted.append,
+        )
+
+    assert result.ok
+    assert secret not in caplog.text  # live warning must not leak the token
+    assert secret not in str(persisted[0]["error_message"])  # nor the persisted payload
+    assert "<redacted>" in str(persisted[0]["error_message"])

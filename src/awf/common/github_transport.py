@@ -20,6 +20,7 @@ from awf.common.github_transient import (
     github_error_disposition,
 )
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 
 _log = get_logger(__name__)
 
@@ -27,7 +28,10 @@ _TIMEOUT_RETURN_CODE = 124
 
 
 def _short_github_error(text: str) -> str:
-    cleaned = text.strip() or "<no output>"
+    # Redact before truncating so gh/GraphQL stderr embedding raw tokens never
+    # reaches the live github.transport_retry warning or the persisted
+    # error_message payload verbatim (AGENTS.md: redact secrets for live logs).
+    cleaned = redact_secrets(text.strip()) or "<no output>"
     return cleaned[:1000]
 
 
