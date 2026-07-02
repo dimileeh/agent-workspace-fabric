@@ -1259,6 +1259,32 @@ async def _safely_resume_claimed_pr_monitor(
                 await self._release_terminal_runtime_promptly(workspace_id)
 
 
+async def _other_active_worker_restart_remonitor_operation_id(
+    operation_repo: OperationRepository,
+    *,
+    workspace_id: str,
+    operation_id: str,
+) -> str | None:
+    """Return another in-flight worker-restart remonitor recovery operation, if any."""
+    for status in (OperationStatus.pending, OperationStatus.running):
+        for candidate in await operation_repo.list_for_workspace(
+            workspace_id,
+            status=status,
+            operation_type=OperationType.remonitor,
+            limit=100,
+        ):
+            if candidate.id == operation_id:
+                continue
+            payload = candidate.payload
+            if (
+                isinstance(payload, dict)
+                and payload.get("source") == _MONITOR_RECOVERY_SOURCE
+                and payload.get("owner") == _MONITOR_RECOVERY_OWNER
+            ):
+                return candidate.id
+    return None
+
+
 async def _finish_monitor_recovery_operation(
     self: Any,
     workspace_id: str,
@@ -1292,6 +1318,48 @@ async def _finish_monitor_recovery_operation(
                 and ws.monitor_claimed_by is not None
                 and ws.monitor_claimed_by != self._worker_id
             ):
+                replacement_operation_id = (
+                    await _other_active_worker_restart_remonitor_operation_id(
+                        operation_repo,
+                        workspace_id=workspace_id,
+                        operation_id=operation_id,
+                    )
+                )
+                if replacement_operation_id is not None:
+                    _log.info(
+                        "worker.monitor_recovery_operation_finish_superseded_lost_claim",
+                        workspace_id=workspace_id,
+                        operation_id=operation_id,
+                        worker_id=self._worker_id,
+                        monitor_claimed_by=ws.monitor_claimed_by,
+                        replacement_operation_id=replacement_operation_id,
+                    )
+                    superseded_result: dict[str, Any] = {
+                        "requested_action": OperationType.remonitor.value,
+                        "worker_id": self._worker_id,
+                        "outcome": "monitor_recovery_superseded_lost_claim",
+                        "replacement_operation_id": replacement_operation_id,
+                    }
+                    if ws is not None:
+                        superseded_result.update(
+                            {
+                                "status": ws.status,
+                                "pr_url": ws.pr_url,
+                                "pr_number": ws.pr_number,
+                            }
+                        )
+                    await operation_repo.finish(
+                        operation,
+                        status=OperationStatus.cancelled,
+                        result=superseded_result,
+                        error_code="MONITOR_RECOVERY_SUPERSEDED",
+                        error_message=(
+                            "Monitor recovery operation superseded after monitor claim was "
+                            "lost to a replacement recovery operation."
+                        ),
+                    )
+                    await session.commit()
+                    return True
                 _log.info(
                     "worker.monitor_recovery_operation_finish_skipped_lost_claim",
                     workspace_id=workspace_id,

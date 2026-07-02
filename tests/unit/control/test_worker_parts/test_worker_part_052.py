@@ -598,6 +598,25 @@ async def test_claim_monitoring_pr_creates_fresh_recovery_when_fresh_worker_leas
     assert remonitor_by_id[first_operation_id].status == OperationStatus.running.value
     assert remonitor_by_id[second_operation_id].status == OperationStatus.running.value
 
+    assert (
+        await worker_a._finish_monitor_recovery_operation(  # noqa: SLF001
+            monitor_id,
+            operation_id=first_operation_id,
+            status=OperationStatus.succeeded,
+        )
+        is True
+    )
+
+    async with session_factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=monitor_id)
+    remonitor_by_id = {
+        operation.id: operation
+        for operation in operations
+        if operation.type == OperationType.remonitor.value
+    }
+    assert remonitor_by_id[first_operation_id].status == OperationStatus.cancelled.value
+    assert remonitor_by_id[second_operation_id].status == OperationStatus.running.value
+
 
 @pytest.mark.unit
 async def test_finish_monitor_recovery_operation_skips_when_monitor_claim_lost(
