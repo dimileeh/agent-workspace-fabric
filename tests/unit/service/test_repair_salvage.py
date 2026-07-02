@@ -13,6 +13,7 @@ from awf.service._git_salvage_utils import (
     GIT_TIMEOUT_SECONDS,
     paths_from_ls_files_z,
     paths_from_name_status,
+    write_nul_delimited_pathspec_file,
 )
 from awf.service.repair_salvage import (
     REPAIR_SALVAGE_BASE_UNAVAILABLE,
@@ -625,3 +626,56 @@ def test_capture_operation_start_head_includes_self_commits_when_no_salvage_diff
     patch_text = capture.patch_path.read_text(encoding="utf-8")
     assert "-VALUE = 'old'" in patch_text
     assert "residue" in patch_text
+
+
+@pytest.mark.unit
+def test_write_nul_delimited_pathspec_file_preserves_tabs_and_magic_paths(
+    tmp_path: Path,
+) -> None:
+    """Pathspec files must preserve exact path bytes for ``--pathspec-file-nul``."""
+    pathspec_file = tmp_path / "paths"
+    write_nul_delimited_pathspec_file(
+        ["src/foo\tbar.py", ":(glob)foo.txt"],
+        pathspec_file,
+    )
+    assert pathspec_file.read_bytes() == b"src/foo\tbar.py\0:(glob)foo.txt"
+
+
+@pytest.mark.unit
+def test_capture_many_affected_paths_uses_pathspec_from_file(tmp_path: Path) -> None:
+    """Large salvage captures must not expand every path into subprocess argv."""
+    workspace_id = "ws_many_paths"
+    worktree, base_commit = _seed_worktree(tmp_path, workspace_id)
+    many_paths = [f"src/file_{index:03d}.py" for index in range(120)]
+    for index, relative_path in enumerate(many_paths):
+        file_path = worktree / relative_path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(f"VALUE = {index}\n", encoding="utf-8")
+
+    git_calls: list[list[str]] = []
+
+    def _recording_run(
+        args: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str | bytes]:
+        git_calls.append(list(args))
+        return subprocess.run(args, **kwargs)  # type: ignore[arg-type]
+
+    capture = capture_ci_repair_salvage(
+        worktrees_root=tmp_path / "git" / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_id=workspace_id,
+        operation_start_head=base_commit,
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+        run_subprocess=_recording_run,
+    )
+
+    assert capture.affected_paths == sorted(many_paths)
+    assert capture.patch_bytes > 0
+    flat_args = [arg for call in git_calls for arg in call]
+    assert any(arg.startswith("--pathspec-from-file=") for arg in flat_args)
+    assert "src/file_119.py" not in flat_args
+    diff_calls = [call for call in git_calls if "diff" in call and "--binary" in call]
+    assert len(diff_calls) == 1
+    assert "--" not in diff_calls[0]

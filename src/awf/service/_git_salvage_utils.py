@@ -92,6 +92,11 @@ def paths_from_name_status(value: str) -> list[str]:
     return sorted(changed_paths_from_name_status_z(value))
 
 
+def write_nul_delimited_pathspec_file(paths: list[str], path: Path) -> None:
+    """Write NUL-separated pathspec entries for ``--pathspec-from-file``."""
+    path.write_bytes("\0".join(paths).encode())
+
+
 def _timeout_output_text(output: str | bytes | None) -> str:
     """Normalize timeout-captured subprocess output to JSON-safe text."""
     if output is None:

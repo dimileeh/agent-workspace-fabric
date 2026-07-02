@@ -32,6 +32,9 @@ from awf.service._git_salvage_utils import (
 from awf.service._git_salvage_utils import (
     run_git_bytes as _run_git_bytes_shared,
 )
+from awf.service._git_salvage_utils import (
+    write_nul_delimited_pathspec_file as _write_nul_delimited_pathspec_file,
+)
 from awf.service.conformance_salvage import INTERNAL_PLAN_ARTIFACT_PREFIX
 
 REPAIR_SALVAGE_BASE_UNAVAILABLE = "REPAIR_SALVAGE_BASE_UNAVAILABLE"
@@ -175,17 +178,23 @@ def capture_ci_repair_salvage(
                 reason_code=REPAIR_SALVAGE_NO_DIFF,
                 message="CI repair salvage found no salvageable diff.",
             )
-        patch = _run_git_bytes(
+        pathspec_file = Path(tmp_dir) / "affected-pathspecs"
+        _write_nul_delimited_pathspec_file(affected_paths, pathspec_file)
+        _run_git(worktree, ["read-tree", "HEAD"], run=run, env=git_env)
+        _run_git(
             worktree,
             [
                 "--literal-pathspecs",
-                "diff",
-                "--cached",
-                "--binary",
-                diff_base,
-                "--",
-                *affected_paths,
+                "add",
+                f"--pathspec-from-file={pathspec_file}",
+                "--pathspec-file-nul",
             ],
+            run=run,
+            env=git_env,
+        )
+        patch = _run_git_bytes(
+            worktree,
+            ["diff", "--cached", "--binary", diff_base],
             run=run,
             env=git_env,
         ).stdout
