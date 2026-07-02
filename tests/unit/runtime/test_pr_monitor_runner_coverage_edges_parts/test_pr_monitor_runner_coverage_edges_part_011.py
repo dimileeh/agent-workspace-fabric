@@ -1193,26 +1193,21 @@ async def test_ci_fix_clean_commit_preserves_commit_when_provider_recovery_raise
 
 
 @pytest.mark.unit
-async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_exception(
+async def test_ci_fix_provider_recovery_rollback_failure_returns_terminal_dirty_commit(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for PRRT_kwDOSJAM6s6Kg4JR — rollback failure must not swallow recovery.
+    """Regression for PRRT_kwDOSJAM6s6N8a5t — rollback failure must stay terminal.
 
-    When the residue rollback itself fails (``git reset --hard`` errors), the
-    pending provider-recovery exception must still propagate so the monitor
-    loop's dedicated handlers surface ``PROVIDER_OUTAGE`` semantics. A stranded
-    residue surfaces as the next attempt's pre-existing-dirty guard rather
-    than being silently swallowed here.
+    When the residue rollback itself fails (``git reset --hard`` errors) on the
+    commit-sink-raised provider-recovery path, return
+    ``REPAIR_DIRTY_COMMIT_FAILED`` instead of re-raising provider recovery so
+    dirty residue is not reported as a provider retry while still stranded.
 
     This exercises the commit-sink-RAISED path: ``_commit_dirty_worktree``
     itself raises ``ProviderRecoveryRetryError`` (e.g. from
-    ``_repair_protected_scope_changes_before_commit``), so the dirty
-    protected-scope repair residue MUST be rolled back to
-    ``operation_start_head`` before re-raising. The clean commit path no
-    longer rolls back (its worktree is clean), so the rollback-failure branch
-    is only reachable on the commit-sink-raised path now.
+    ``_repair_protected_scope_changes_before_commit``).
     """
     from unittest.mock import AsyncMock
 
@@ -1248,6 +1243,7 @@ async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_except
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
     )
 
     async def _repair_agent_runtime_ownership(
@@ -1267,14 +1263,31 @@ async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_except
         _repair_agent_runtime_ownership,
     )
 
+    repair_salvage = {
+        "patch_path": str(tmp_path / "artifacts/salvage/ws.patch"),
+        "patch_sha256": "b" * 64,
+        "patch_bytes": 42,
+        "affected_paths": ["src/fix.py"],
+        "phase": "ci_repair_commit_sink",
+        "operation_type": "ci_repair",
+        "operation_id": None,
+        "operation_start_head": operation_start_head,
+        "created_at": "2026-07-02T00:00:00+00:00",
+    }
+
+    async def _mock_salvage_success(self: object, **kwargs: object) -> dict[str, object]:
+        del self, kwargs
+        return {"repair_salvage": repair_salvage}
+
+    monkeypatch.setattr(pr_ci_ops, "_salvage_ci_repair_dirty_output", _mock_salvage_success)
+
     raised_exc = ProviderRecoveryRetryError(
         "provider recovery raised inside the CI fix commit sink"
     )
     # The commit sink itself raises the provider-recovery exception (e.g. from
     # ``_repair_protected_scope_changes_before_commit`` ->
-    # ``_handle_provider_agent_run_error``). The dirty residue the
-    # protected-scope repair agent left behind must be rolled back before
-    # re-raising; a rollback failure must not swallow the recovery exception.
+    # ``_handle_provider_agent_run_error``). Rollback failure must return a
+    # terminal dirty-commit result instead of re-raising provider recovery.
     monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=raised_exc))
 
     warnings: list[tuple[str, dict[str, object]]] = []
@@ -1283,26 +1296,25 @@ async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_except
         lambda event, **fields: warnings.append((event, fields)),
     )
 
-    with pytest.raises(ProviderRecoveryRetryError) as exc_info:
-        await runner._run_ci_fix(
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            failures=(
-                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
-            ),
-            compose_project=f"awf_{workspace_id}",
-            compose_file=tmp_path / "compose.yml",
-            workspace_id=workspace_id,
-            remote_branch=f"awf/{workspace_id}",
-        )
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
 
-    # The rollback failure was logged but did NOT swallow the recovery
-    # exception — the loop's recovery handlers still run.
+    assert push_result.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
+    assert push_result.details is not None
     assert any(
         event == "monitor.ci_fix_provider_recovery_rollback_failed" for event, _ in warnings
     ), warnings
-    assert exc_info.value.details is not None
-    rollback_error = exc_info.value.details["rollback_error"]
+    assert any(
+        event == "monitor.ci_fix_dirty_commit_failed_after_salvage" for event, _ in warnings
+    ), warnings
+    rollback_error = push_result.details["rollback_error"]
     assert rollback_error["cause"] == "reset_failed"
     assert "git reset --hard" in rollback_error["message"]
     assert "could not parse object" in rollback_error["message"]
@@ -1389,6 +1401,24 @@ async def test_ci_fix_commit_sink_provider_recovery_rolls_back_residue_before_re
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
+
+    async def _mock_salvage_success(self: object, **kwargs: object) -> dict[str, object]:
+        del self, kwargs
+        return {
+            "repair_salvage": {
+                "patch_path": str(tmp_path / "artifacts/salvage/ws.patch"),
+                "patch_sha256": "c" * 64,
+                "patch_bytes": 10,
+                "affected_paths": ["src/fix.py"],
+                "phase": "ci_repair_commit_sink",
+                "operation_type": "ci_repair",
+                "operation_id": None,
+                "operation_start_head": operation_start_head,
+                "created_at": "2026-07-02T00:00:00+00:00",
+            }
+        }
+
+    monkeypatch.setattr(pr_ci_ops, "_salvage_ci_repair_dirty_output", _mock_salvage_success)
 
     raised_exc = getattr(monitor_types, exc_cls_name)(
         "provider recovery raised inside the CI fix commit sink"

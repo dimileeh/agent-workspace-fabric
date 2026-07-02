@@ -34,6 +34,33 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
 
 
+def _patch_ci_repair_salvage_success(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tmp_path: Path,
+    operation_start_head: str,
+) -> None:
+    """Mock successful CI-repair salvage for provider-recovery re-raise tests."""
+
+    async def _mock_salvage_success(self: object, **kwargs: object) -> dict[str, object]:
+        del self, kwargs
+        return {
+            "repair_salvage": {
+                "patch_path": str(tmp_path / "artifacts/salvage/ws.patch"),
+                "patch_sha256": "a" * 64,
+                "patch_bytes": 10,
+                "affected_paths": ["src/fix.py"],
+                "phase": "ci_repair_commit_sink",
+                "operation_type": "ci_repair",
+                "operation_id": None,
+                "operation_start_head": operation_start_head,
+                "created_at": "2026-07-02T00:00:00+00:00",
+            }
+        }
+
+    monkeypatch.setattr(pr_ci_ops, "_salvage_ci_repair_dirty_output", _mock_salvage_success)
+
+
 @pytest.mark.unit
 async def test_ci_fix_commit_sink_provider_recovery_attaches_salvage_metadata(
     factory: async_sessionmaker[AsyncSession],
@@ -183,7 +210,7 @@ async def test_ci_fix_commit_sink_provider_recovery_cleans_untracked_residue_bef
             details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
         )
     )
-    operation_start_head = "abc1234567890def"
+    operation_start_head = "abc1234567890abcdef1234567890abcdef"
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
@@ -198,6 +225,8 @@ async def test_ci_fix_commit_sink_provider_recovery_cleans_untracked_residue_bef
     cmd.queue_result(returncode=0, stdout="?? src/generated_repair.py\n")
     # ``git clean -ffd -- src/generated_repair.py`` removes the untracked residue.
     cmd.queue_result(returncode=0)
+    # post-clean verify status
+    cmd.queue_result(returncode=0, stdout="")
     # HEAD verification: ``rev-parse <restore_ref>`` + ``rev-parse HEAD``.
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")
@@ -225,31 +254,39 @@ async def test_ci_fix_commit_sink_provider_recovery_cleans_untracked_residue_bef
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
+    _patch_ci_repair_salvage_success(
+        monkeypatch,
+        tmp_path=tmp_path,
+        operation_start_head=operation_start_head,
+    )
 
     raised_exc = ProviderRecoveryRetryError(
         "provider recovery raised inside the CI fix commit sink"
     )
     monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=raised_exc))
 
-    with pytest.raises(ProviderRecoveryRetryError):
-        await runner._run_ci_fix(
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            failures=(
-                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
-            ),
-            compose_project=f"awf_{workspace_id}",
-            compose_file=tmp_path / "compose.yml",
-            workspace_id=workspace_id,
-            remote_branch=f"awf/{workspace_id}",
-        )
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
 
     # The rollback MUST remove untracked residue via ``git clean -ffd`` (or the
-    # equivalent validation cleanup path) before re-raising, so the next monitor
-    # attempt does not trip ``PRE_EXISTING_DIRTY_WORKTREE`` on the untracked
-    # repair output the provider-recovery path left behind.
+    # equivalent validation cleanup path) before finishing. In this lightweight
+    # test double the follow-on cleanup verification may still fail, which now
+    # stays terminal instead of re-raising provider recovery
+    # (PRRT_kwDOSJAM6s6N8a5t).
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any("clean" in call and "-ffd" in call for call in joined_calls), joined_calls
+    if push_result.reason_code == "REPAIR_DIRTY_COMMIT_FAILED":
+        assert push_result.details is not None
+        assert push_result.details["rollback_error"]["cause"] == "cleanup_failed"
+    else:
+        raise AssertionError(f"unexpected push result: {push_result!r}")
 
 
 @pytest.mark.unit
@@ -329,6 +366,11 @@ async def test_ci_fix_commit_sink_provider_recovery_rolls_back_to_post_agent_hea
         pr_remote_repair,
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
+    )
+    _patch_ci_repair_salvage_success(
+        monkeypatch,
+        tmp_path=tmp_path,
+        operation_start_head=operation_start_head,
     )
 
     raised_exc = monitor_types.ProviderRecoveryRetryError(
@@ -481,6 +523,11 @@ async def test_ci_fix_commit_sink_provider_recovery_rolls_back_to_post_raise_hea
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
+    _patch_ci_repair_salvage_success(
+        monkeypatch,
+        tmp_path=tmp_path,
+        operation_start_head=operation_start_head,
+    )
     # Replace ``_rev_parse_head`` with the mutable-cell mock so the pre-try
     # capture (buggy code) and the post-raise capture (fixed code) observe
     # different HEADs without consuming FakeCommandRunner queue slots.
@@ -528,16 +575,15 @@ async def test_ci_fix_commit_sink_provider_recovery_rollback_skipped_when_post_a
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for PRRT_kwDOSJAM6s6Klf74 / PRRT_kwDOSJAM6s6KpAD6 — missing anchor skips the reset.
+    """Regression for PRRT_kwDOSJAM6s6N8a5t — missing anchor stays terminal.
 
     If the post-raise HEAD cannot be resolved (``git rev-parse HEAD`` fails or
     returns empty inside the provider-recovery ``except`` clause), the rollback
     must be SKIPPED instead of restoring against the wrong ref
     (``operation_start_head`` or the stale pre-sink HEAD), mirroring the
     finalize rollback's ``restore_ref is None`` guard. A missing anchor makes a
-    safe ``git reset --hard`` impossible — better to strand visibly than discard
-    the agent's committed work against the wrong baseline. The provider-recovery
-    exception still propagates so the loop's handlers run.
+    safe ``git reset --hard`` impossible — return a terminal dirty-commit result
+    instead of re-raising provider recovery while residue remains stranded.
     """
     from unittest.mock import AsyncMock
 
@@ -590,6 +636,11 @@ async def test_ci_fix_commit_sink_provider_recovery_rollback_skipped_when_post_a
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
+    _patch_ci_repair_salvage_success(
+        monkeypatch,
+        tmp_path=tmp_path,
+        operation_start_head=operation_start_head,
+    )
 
     raised_exc = monitor_types.ProviderRecoveryRetryError(
         "provider recovery raised inside the CI fix commit sink"
@@ -602,18 +653,20 @@ async def test_ci_fix_commit_sink_provider_recovery_rollback_skipped_when_post_a
         lambda event, **fields: warnings.append((event, fields)),
     )
 
-    with pytest.raises(ProviderRecoveryRetryError):
-        await runner._run_ci_fix(
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            failures=(
-                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
-            ),
-            compose_project=f"awf_{workspace_id}",
-            compose_file=tmp_path / "compose.yml",
-            workspace_id=workspace_id,
-            remote_branch=f"awf/{workspace_id}",
-        )
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
+    assert push_result.details is not None
+    rollback_error = push_result.details["rollback_error"]
+    assert rollback_error["cause"] == "missing_anchor"
 
     # No ``git reset --hard`` runs — the missing anchor makes a safe restore
     # impossible, so the residue strands visibly instead of being discarded
@@ -675,7 +728,7 @@ async def test_ci_fix_provider_recovery_rollback_runs_when_salvage_raises_unexpe
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for PRRT_kwDOSJAM6s6N6A4y — salvage infra failures must not skip rollback."""
+    """Regression for PRRT_kwDOSJAM6s6N8a5t: salvage failures must stay terminal."""
     import subprocess
     from unittest.mock import AsyncMock
 
@@ -751,19 +804,24 @@ async def test_ci_fix_provider_recovery_rollback_runs_when_salvage_raises_unexpe
         lambda event, **fields: warnings.append((event, fields)),
     )
 
-    with pytest.raises(ProviderRecoveryRetryError):
-        await runner._run_ci_fix(
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            failures=(
-                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
-            ),
-            compose_project=f"awf_{workspace_id}",
-            compose_file=tmp_path / "compose.yml",
-            workspace_id=workspace_id,
-            remote_branch=f"awf/{workspace_id}",
-        )
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
 
+    assert push_result.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
+    assert push_result.details is not None
+    assert push_result.details["salvage_error"]["reason_code"] == REPAIR_SALVAGE_UNEXPECTED
+    assert any(
+        event == "monitor.ci_fix_dirty_commit_failed"
+        and fields.get("salvage_reason_code") == REPAIR_SALVAGE_UNEXPECTED
+        for event, fields in warnings
+    ), warnings
     assert any(
         event == "monitor.ci_repair_salvage_failed"
         and fields.get("reason_code") == REPAIR_SALVAGE_UNEXPECTED

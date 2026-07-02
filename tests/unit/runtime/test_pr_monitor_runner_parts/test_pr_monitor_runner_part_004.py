@@ -1317,12 +1317,12 @@ async def test_ci_repair_provider_recovery_includes_repair_salvage_in_operation_
 
 
 @pytest.mark.unit
-async def test_ci_repair_provider_recovery_includes_salvage_error_in_operation_result(
+async def test_ci_repair_dirty_commit_salvage_error_surfaces_in_operation_result(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
 ) -> None:
-    """Regression for PRRT_kwDOSJAM6s6N7XTN/PRRT_kwDOSJAM6s6N7ZZC: salvage failures must surface on provider retry."""
+    """Regression for PRRT_kwDOSJAM6s6N8a5t: salvage failures must surface terminally."""
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
         factory=factory,
@@ -1335,54 +1335,67 @@ async def test_ci_repair_provider_recovery_includes_salvage_error_in_operation_r
         "reason_code": "REPAIR_SALVAGE_UNEXPECTED",
         "message": "Command '['git', 'diff']' timed out after 30.0 seconds",
     }
+    failure_details = {
+        "phase": "ci_repair_commit_sink",
+        "stranded_paths": ["src/fix.py"],
+        "salvage_error": salvage_error,
+        "provider_error_stderr": "MODEL_CAPACITY_EXHAUSTED",
+        "pushed": False,
+    }
 
-    async def _raise_provider_retry_with_salvage_error(**_kwargs: object) -> object:
-        raise ProviderRecoveryRetryError(
-            details={
-                "phase": "ci_repair_commit_sink",
-                "stranded_paths": ["src/fix.py"],
-                "salvage_error": salvage_error,
-                "provider_error_stderr": "MODEL_CAPACITY_EXHAUSTED",
-            }
+    async def _return_dirty_commit_salvage_failure(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=(
+                "CI repair commit sink failed; dirty repair output could not "
+                "be salvaged before provider recovery."
+            ),
+            reason_code="REPAIR_DIRTY_COMMIT_FAILED",
+            details=failure_details,
         )
 
-    mocker.patch.object(runner, "_run_ci_fix", _raise_provider_retry_with_salvage_error)
+    mocker.patch.object(runner, "_run_ci_fix", _return_dirty_commit_salvage_failure)
     failures = (CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),)
 
-    with pytest.raises(ProviderRecoveryRetryError):
-        await runner._execute(
-            action=ReportCiFailure(failures=failures),
-            workspace_id=workspace_id,
-            repo_url="git@github.com:dimileeh/aira-web.git",
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            status=_with_ci_failures(_green_status(), failures),
-            state=MonitorState(started_at=0.0),
-            base_branch="development",
-            remote_branch=f"awf/{workspace_id}",
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            monitor_log=None,
-        )
+    terminated = await runner._execute(
+        action=ReportCiFailure(failures=failures),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_with_ci_failures(_green_status(), failures),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
 
+    assert terminated is True
     async with factory() as session:
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
     operation = operations[0]
     assert operation.type == "ci_repair"
     assert operation.result is not None
-    assert operation.result["salvage_error"] == salvage_error
-    assert operation.result["stranded_paths"] == ["src/fix.py"]
-    assert operation.result["phase"] == "ci_repair_commit_sink"
-    assert operation.result["provider_error_stderr"] == "MODEL_CAPACITY_EXHAUSTED"
+    failure_evidence = operation.result["failure_evidence"]
+    assert isinstance(failure_evidence, dict)
+    assert failure_evidence["salvage_error"] == salvage_error
+    assert failure_evidence["stranded_paths"] == ["src/fix.py"]
+    assert failure_evidence["phase"] == "ci_repair_commit_sink"
+    assert failure_evidence["provider_error_stderr"] == "MODEL_CAPACITY_EXHAUSTED"
+    assert operation.error_code == "REPAIR_DIRTY_COMMIT_FAILED"
 
 
 @pytest.mark.unit
-async def test_ci_repair_provider_recovery_includes_rollback_error_in_operation_result(
+async def test_ci_repair_dirty_commit_rollback_error_surfaces_in_operation_result(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
 ) -> None:
-    """Rollback failures on the commit-sink recovery path must surface on provider retry."""
+    """Rollback failures on the commit-sink recovery path must surface terminally."""
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
         factory=factory,
@@ -1395,43 +1408,56 @@ async def test_ci_repair_provider_recovery_includes_rollback_error_in_operation_
         "cause": "reset_failed",
         "message": "CI repair residue rollback failed (git reset --hard): fatal: could not parse object",
     }
+    failure_details = {
+        "phase": "ci_repair_commit_sink",
+        "rollback_error": rollback_error,
+        "provider_error_stderr": "MODEL_CAPACITY_EXHAUSTED",
+        "pushed": False,
+    }
 
-    async def _raise_provider_retry_with_rollback_error(**_kwargs: object) -> object:
-        raise ProviderRecoveryRetryError(
-            details={
-                "phase": "ci_repair_commit_sink",
-                "rollback_error": rollback_error,
-                "provider_error_stderr": "MODEL_CAPACITY_EXHAUSTED",
-            }
+    async def _return_dirty_commit_rollback_failure(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=(
+                "CI repair commit sink failed; salvage succeeded but "
+                "worktree rollback failed before provider recovery."
+            ),
+            reason_code="REPAIR_DIRTY_COMMIT_FAILED",
+            details=failure_details,
         )
 
-    mocker.patch.object(runner, "_run_ci_fix", _raise_provider_retry_with_rollback_error)
+    mocker.patch.object(runner, "_run_ci_fix", _return_dirty_commit_rollback_failure)
     failures = (CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),)
 
-    with pytest.raises(ProviderRecoveryRetryError):
-        await runner._execute(
-            action=ReportCiFailure(failures=failures),
-            workspace_id=workspace_id,
-            repo_url="git@github.com:dimileeh/aira-web.git",
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            status=_with_ci_failures(_green_status(), failures),
-            state=MonitorState(started_at=0.0),
-            base_branch="development",
-            remote_branch=f"awf/{workspace_id}",
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            monitor_log=None,
-        )
+    terminated = await runner._execute(
+        action=ReportCiFailure(failures=failures),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_with_ci_failures(_green_status(), failures),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
 
+    assert terminated is True
     async with factory() as session:
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
     operation = operations[0]
     assert operation.type == "ci_repair"
     assert operation.result is not None
-    assert operation.result["rollback_error"] == rollback_error
-    assert operation.result["phase"] == "ci_repair_commit_sink"
-    assert operation.result["provider_error_stderr"] == "MODEL_CAPACITY_EXHAUSTED"
+    failure_evidence = operation.result["failure_evidence"]
+    assert isinstance(failure_evidence, dict)
+    assert failure_evidence["rollback_error"] == rollback_error
+    assert failure_evidence["phase"] == "ci_repair_commit_sink"
+    assert failure_evidence["provider_error_stderr"] == "MODEL_CAPACITY_EXHAUSTED"
+    assert operation.error_code == "REPAIR_DIRTY_COMMIT_FAILED"
 
 
 @pytest.mark.unit
