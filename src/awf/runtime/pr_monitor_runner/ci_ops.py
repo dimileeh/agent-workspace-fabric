@@ -388,7 +388,7 @@ async def _salvage_and_rollback_stranded_ci_repair_output(
         failed=True,
         returncode=agent_run_err.result.returncode or 1,
         stderr=agent_run_err.result.stderr,
-        reason_code=agent_run_err.reason_code,
+        reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
         details=failure_details,
     )
 

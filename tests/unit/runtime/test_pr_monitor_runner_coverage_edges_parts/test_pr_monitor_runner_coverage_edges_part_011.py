@@ -727,10 +727,12 @@ async def test_ci_fix_commit_sink_salvage_ok_terminal_provider_skips_push(
     assert push_attempted is False
     assert push_result.pushed is False
     assert push_result.failed is True
-    assert push_result.reason_code == AGENT_PROVIDER_CAPACITY_EXHAUSTED
+    assert push_result.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
+    assert push_result.terminal_monitor_failure is True
     assert push_result.details is not None
     assert push_result.details["repair_salvage"] == repair_salvage
     assert push_result.details["stranded_paths"] == ["src/fix.py"]
+    assert push_result.details["provider_error_stderr"] == expected_stderr
 
 
 @pytest.mark.unit
