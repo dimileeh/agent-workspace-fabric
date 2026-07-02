@@ -233,6 +233,12 @@ async def test_is_duplicate_pull_request_error_classification() -> None:
     assert _is_duplicate_pull_request_error(dup) is True
     other = GitHubClientError(operation="gh pr create", returncode=1, stderr="no commits between")
     assert _is_duplicate_pull_request_error(other) is False
+    # An "already exists" failure from an unrelated operation (label, ref, ...) must
+    # not be misclassified as a duplicate PR now that the check is scoped to pr-create.
+    unrelated = GitHubClientError(
+        operation="gh label create", returncode=1, stderr="label already exists"
+    )
+    assert _is_duplicate_pull_request_error(unrelated) is False
     assert _is_duplicate_pull_request_error("not a github error") is False
 
 

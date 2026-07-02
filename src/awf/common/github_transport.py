@@ -40,7 +40,15 @@ def _is_duplicate_pull_request_error(error: object) -> bool:
 
     if not isinstance(error, GitHubClientError):
         return False
-    return error.returncode == 1 and "already exists" in error.stderr.lower()
+    # Scope to the create-PR path. ``execute_gh_with_retry`` is a generic transport
+    # for many gh/GraphQL operations, so an unrelated "already exists" failure (a
+    # label, ref, etc.) must not be misclassified as a duplicate PR and routed into
+    # PR-create reconciliation or flagged ``duplicate`` in the failure audit detail.
+    return (
+        error.returncode == 1
+        and "pr create" in error.operation.lower()
+        and "already exists" in error.stderr.lower()
+    )
 
 
 def _github_failure_detail(
