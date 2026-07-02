@@ -56,6 +56,15 @@ def git_lines(value: str) -> list[str]:
     return sorted(line.strip() for line in value.splitlines() if line.strip())
 
 
+def _timeout_output_text(output: str | bytes | None) -> str:
+    """Normalize timeout-captured subprocess output to JSON-safe text."""
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output
+
+
 def run_git(
     worktree: Path,
     args: list[str],
@@ -78,10 +87,12 @@ def run_git(
         )
     except subprocess.TimeoutExpired as exc:
         detail: dict[str, Any] = {"timeout_seconds": GIT_TIMEOUT_SECONDS}
-        if exc.stdout:
-            detail["stdout"] = exc.stdout[-2000:]
-        if exc.stderr:
-            detail["stderr"] = exc.stderr[-2000:]
+        stdout = _timeout_output_text(exc.stdout)
+        if stdout:
+            detail["stdout"] = stdout[-2000:]
+        stderr = _timeout_output_text(exc.stderr)
+        if stderr:
+            detail["stderr"] = stderr[-2000:]
         raise raise_error(
             reason_code=failure_reason,
             message=f"git {' '.join(args)} timed out during {failure_context}.",

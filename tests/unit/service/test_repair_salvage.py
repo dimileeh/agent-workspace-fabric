@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -199,6 +200,31 @@ def test_run_git_timeout_raises_repair_salvage_error(tmp_path: Path) -> None:
     assert exc_info.value.reason_code == REPAIR_SALVAGE_SOURCE_UNAVAILABLE
     assert "timed out" in str(exc_info.value)
     assert exc_info.value.detail["timeout_seconds"] == GIT_TIMEOUT_SECONDS
+
+
+@pytest.mark.unit
+def test_run_git_timeout_decodes_byte_output_for_json_safe_detail(tmp_path: Path) -> None:
+    def _run_timeout(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            args,
+            timeout=GIT_TIMEOUT_SECONDS,
+            output=b"partial stdout",
+            stderr=b"partial stderr",
+        )
+
+    with pytest.raises(RepairSalvageError) as exc_info:
+        repair_salvage_mod._run_git(  # noqa: SLF001
+            tmp_path,
+            ["status"],
+            run=_run_timeout,
+            env={},
+            failure_reason=REPAIR_SALVAGE_SOURCE_UNAVAILABLE,
+        )
+
+    detail = exc_info.value.detail
+    assert detail["stdout"] == "partial stdout"
+    assert detail["stderr"] == "partial stderr"
+    json.dumps(detail)
 
 
 @pytest.mark.unit
