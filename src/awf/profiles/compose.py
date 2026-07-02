@@ -497,10 +497,12 @@ def agent_exec_env_passthrough(
 
 
 def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
+    """Return agent auth env keys already declared in the compose environment block."""
     return frozenset(name for name in AGENT_AUTH_ENV_VARS if name in compose_env)
 
 
 def _compose_environment_mapping(environment: object) -> dict[str, str]:
+    """Normalize a compose ``environment`` scalar, list, or mapping into a string dict."""
     if isinstance(environment, Mapping):
         return {str(key): str(value) for key, value in environment.items()}
     if isinstance(environment, list):

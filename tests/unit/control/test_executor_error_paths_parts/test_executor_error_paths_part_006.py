@@ -37,6 +37,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
+from awf.control.executor import monitor_handoff as monitor_handoff_module
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Operation, WorkspaceEvent
 from awf.db.repositories import (
@@ -49,6 +50,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeOperationError
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
+from awf.runtime.inspection import RuntimeSnapshot
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import (
@@ -71,7 +73,22 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
+def _patch_compose_runtime_inspect(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stack_state: str,
+) -> None:
+    """Patch compose runtime inspect to return a fixed stack state."""
+
+    async def _inspect(_compose_project: str) -> RuntimeSnapshot:
+        """Return a runtime snapshot with the patched stack state."""
+        return RuntimeSnapshot(stack_state=stack_state)
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+
 def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
+    """Test helper for _queue_validation_head."""
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
@@ -892,6 +909,7 @@ class TestExecutorCoverageEdgesPart002:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Regression coverage for persist pr records stale skip when status changed after push."""
         ws_id = await _seed_ready(factory)
         fake.queue_result(returncode=0)  # adapter
         fake.queue_result(returncode=0, stdout="awf/x\n")  # branch drift check
@@ -926,12 +944,15 @@ class TestExecutorCoverageEdgesPart002:
             assert ws.events[-1].payload["action"] == "persist_pr"
 
     @pytest.mark.unit
-    async def test_resume_pr_monitor_compose_failure_records_warning_and_runs_monitor(
+    async def test_resume_pr_monitor_compose_failure_records_event_and_aborts_handoff(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Verify resume pr monitor compose failure records event and aborts handoff."""
+        _patch_compose_runtime_inspect(monkeypatch, stack_state="stopped")
         monitor_calls: list[str] = []
 
         class _FailingCompose:
@@ -972,9 +993,10 @@ class TestExecutorCoverageEdgesPart002:
             pr_monitor_factory=lambda *_args: _Monitor(),
         )
 
-        await executor.resume_pr_monitor(ws_id)
+        handoff = await executor.resume_pr_monitor_handoff(ws_id)
 
-        assert monitor_calls == [ws_id]
+        assert handoff is None
+        assert monitor_calls == []
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
@@ -998,12 +1020,85 @@ class TestExecutorCoverageEdgesPart002:
         }
 
     @pytest.mark.unit
-    async def test_resume_pr_monitor_compose_failure_continues_when_warning_record_fails(
+    async def test_resume_pr_monitor_compose_failure_continues_handoff_when_runtime_still_running(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Compose restart failures must not skip monitor when the stack is still running."""
+        _patch_compose_runtime_inspect(monkeypatch, stack_state="running")
+
+        class _FailingCompose:
+            """Compose stub that raises on ensure_project_up."""
+
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
+                force_recreate: bool = False,
+                services: tuple[str, ...] = (),
+            ) -> None:
+                """Raise or record a compose restart for the test."""
+                del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
+                del force_recreate, services
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=1,
+                    stdout="",
+                    stderr="force-recreate failed",
+                    reason_code="COMPOSE_UP_FAILED",
+                )
+
+        class _Monitor:
+            """Monitor stub for resumed-run and handoff tests."""
+
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                """Record that the monitor loop was entered."""
+                del compose_project, compose_file
+
+        ws_id = await _seed_monitoring_pr(factory)
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=_FailingCompose(),
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
+
+        handoff = await executor.resume_pr_monitor_handoff(ws_id)
+
+        assert handoff is not None
+        assert handoff.compose_project == "awf_x"
+        assert handoff.monitor is not None
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            compose_events = [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.monitor_runtime_restart_failed"
+            ]
+        assert len(compose_events) == 1
+        assert compose_events[0].reason_code == "MONITOR_RECOVERY_COMPOSE_FAILED"
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_compose_failure_aborts_handoff_when_event_record_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify resume pr monitor compose failure aborts handoff when event record fails."""
+        _patch_compose_runtime_inspect(monkeypatch, stack_state="stopped")
         monitor_calls: list[str] = []
 
         class _OneShotFailingSessionFactory:
@@ -1059,9 +1154,10 @@ class TestExecutorCoverageEdgesPart002:
         )
 
         with structlog.testing.capture_logs() as captured:
-            await executor.resume_pr_monitor(ws_id)
+            handoff = await executor.resume_pr_monitor_handoff(ws_id)
 
-        assert monitor_calls == [ws_id]
+        assert handoff is None
+        assert monitor_calls == []
         assert any(
             entry["event"] == "executor.monitor_runtime_restart_failed_record_failed"
             for entry in captured

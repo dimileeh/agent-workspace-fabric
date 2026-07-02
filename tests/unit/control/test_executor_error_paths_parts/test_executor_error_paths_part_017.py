@@ -186,9 +186,7 @@ class TestResumePrMonitorStatusRechecks:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # The final recheck immediately before ``monitor.run`` guards against a
-        # concurrent cancel between compose-up and handing off; the monitor must
-        # not run when the status no longer matches.
+        """Skip monitor.run when a concurrent cancel changes status before the final recheck."""
         compose_calls: list[str] = []
         monitor_calls: list[str] = []
 
@@ -212,7 +210,8 @@ class TestResumePrMonitorStatusRechecks:
         original_recheck = executor._recheck_status
 
         async def _recheck_status(workspace_id: str, *, expected: Any, action: str, **kw: Any):
-            if action == "resume_monitor_run":
+            """Test helper that cancels the workspace on resume_monitor_start recheck."""
+            if action == "resume_monitor_start":
                 async with factory() as s:
                     repo = WorkspaceRepository(s)
                     ws = await repo.get(workspace_id)
@@ -235,6 +234,118 @@ class TestResumePrMonitorStatusRechecks:
             assert ws.status == WorkspaceStatus.cancelled.value
 
     @pytest.mark.unit
+    async def test_resume_skips_compose_restart_when_monitor_claim_superseded(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compose_calls: list[str] = []
+
+        class _Compose:
+            async def ensure_project_up(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                compose_calls.append(workspace_id)
+
+        ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-stale"
+            await s.commit()
+
+        executor = _make_executor(fake, factory, tmp_path, compose=_Compose())
+        original_recheck = executor._recheck_status
+
+        async def _recheck_status(workspace_id: str, *, expected: Any, action: str, **kw: Any):
+            if action == "resume_compose":
+                async with factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    ws.monitor_claimed_by = "worker-current"
+                    await s.commit()
+            return await original_recheck(workspace_id, expected=expected, action=action, **kw)
+
+        monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert compose_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.monitor_claimed_by == "worker-current"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_CLAIM"
+
+    @pytest.mark.unit
+    async def test_resume_skips_when_monitor_claim_superseded_before_run(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Skip monitor.run when monitor_claimed_by was superseded before the final recheck."""
+        compose_calls: list[str] = []
+        monitor_calls: list[str] = []
+
+        class _Compose:
+            """Compose stub that records restart calls."""
+
+            async def ensure_project_up(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                """Test helper that records compose restart calls."""
+                compose_calls.append(workspace_id)
+
+        class _Monitor:
+            """Monitor stub for resumed-run and handoff tests."""
+
+            async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                """Test helper that records monitor.run calls."""
+                monitor_calls.append(workspace_id)
+
+        ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-stale"
+            await s.commit()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=_Compose(),
+            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
+        )
+
+        original_recheck = executor._recheck_status
+
+        async def _recheck_status(workspace_id: str, *, expected: Any, action: str, **kw: Any):
+            """Test helper that simulates monitor-claim takeover before monitor.run."""
+            if action == "resume_monitor_start":
+                async with factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    ws.monitor_claimed_by = "worker-current"
+                    await s.commit()
+            return await original_recheck(workspace_id, expected=expected, action=action, **kw)
+
+        monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert compose_calls == [ws_id]
+        assert monitor_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_claimed_by == "worker-current"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_CLAIM"
+
+    @pytest.mark.unit
     async def test_resume_threads_monitor_claim_owner_into_runner(
         self,
         fake: FakeCommandRunner,
@@ -245,6 +356,7 @@ class TestResumePrMonitorStatusRechecks:
         # claim owner (``monitor_claimed_by`` on the reclaimed row) so the
         # protected-scope pause CAS can fence on it. A stale runner that later
         # finds the claim reassigned then loses the CAS instead of clobbering.
+        """Regression coverage for resume threads monitor claim owner into runner."""
         captured: list[str | None] = []
 
         class _Compose:
@@ -1320,6 +1432,7 @@ class TestSyncReleasePrHandoffRemainingBranches:
         # The monitor builds and the PR is adopted, but the workspace leaves
         # ``running`` before the adoption is persisted; the handoff records a
         # stale-action skip and never transitions the workspace to monitoring.
+        """Regression coverage for release handoff stale status after monitor built skips."""
         fake.queue_result(returncode=0)  # initial git fetch
         fake.queue_result(returncode=0, stdout="3\n")  # initial rev-list --count
         fake.queue_result(returncode=0)  # post-setup git fetch
@@ -1376,62 +1489,4 @@ class TestSyncReleasePrHandoffRemainingBranches:
             assert ws.pr_url is None
             assert ws.events[-1].event_type == "workspace.stale_action_skipped"
             assert ws.events[-1].payload["action"] == "sync_release_pr_handoff"
-            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
-
-
-class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
-    @pytest.mark.unit
-    async def test_feature_handoff_stale_status_after_monitor_built_skips(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Mirror of the release case for the adopted-feature-PR handoff: the
-        # monitor builds, but the workspace leaves ``running`` before adoption is
-        # persisted, so the handoff records a stale-action skip and stops.
-        validation = _OkSetupValidation()
-        ws_id = await _seed_ready(
-            factory,
-            task_kind="sync_feature_pr",
-            task_policy=_PR_ADOPTION_POLICY,
-        )
-
-        class _Monitor:
-            async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
-                raise AssertionError("monitor must not run after a stale-status skip")
-
-        executor = _make_executor(
-            fake,
-            factory,
-            tmp_path,
-            validation=validation,
-            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
-        )
-
-        original_build = executor._build_handoff_pr_monitor
-
-        async def _build_handoff_pr_monitor(**kwargs: Any) -> Any:
-            monitor = await original_build(**kwargs)
-            async with factory() as s:
-                repo = WorkspaceRepository(s)
-                ws = await repo.get(ws_id)
-                assert ws is not None
-                await repo.transition(
-                    ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCELLED"
-                )
-                await s.commit()
-            return monitor
-
-        monkeypatch.setattr(executor, "_build_handoff_pr_monitor", _build_handoff_pr_monitor)
-
-        await executor.execute(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.cancelled.value
-            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
-            assert ws.events[-1].payload["action"] == "sync_feature_pr_handoff"
             assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"

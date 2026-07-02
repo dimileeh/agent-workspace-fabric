@@ -593,14 +593,28 @@ class _RecordingExecutor:
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Test helper for execute."""
         self.calls.append(workspace_id)
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
+        del handoff
         self.resume_calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _BlockingExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -613,18 +627,32 @@ class _BlockingExecutor(_RecordingExecutor):
 
 class _BlockingMonitorExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
+        del handoff
         self.resume_calls.append(workspace_id)
         self.started.set()
         await self.release.wait()
 
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
+
 
 class _RecordingRuntimeInspector:
     def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
+        """Test helper for __init__."""
         self._snapshots = snapshots
         self.calls: list[str | None] = []
 
@@ -1307,6 +1335,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart020:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Regression coverage for stale active execution scan skips unexpired exited claim failure."""
         workspace_id = await _create_active_execution(
             session_factory,
             origin_repo,
@@ -1368,3 +1397,72 @@ class TestRunOnceStaleActiveExecutionRecoveryPart020:
         assert preserved_events == []
         assert stranded_events == []
         assert inspector.calls == []
+
+
+class TestRunOnceStaleActiveExecutionRecoveryPart019Continued:
+    @pytest.mark.unit
+    async def test_operator_refresh_before_first_preservation_preserves_live_runtime(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        """Regression coverage for operator refresh before first preservation preserves live runtime."""
+        compose_project = "awf_refresh_before_preservation"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "refresh-before-preservation",
+            WorkspaceStatus.pushing,
+            compose_project_name=compose_project,
+        )
+        async with session_factory() as s:
+            await WorkspaceControlService(
+                s,
+                project_stopper=_noop_project_stop,
+                cleaner_factory=_unexpected_cleaner_factory,
+            ).request_refresh_workspace(
+                workspace_id,
+                reason="operator recovery",
+                idempotency_key="refresh-before-preservation",
+            )
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {compose_project: _live_agent_snapshot(container_id="agent-refresh-before-preserve")}
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert ws.status == WorkspaceStatus.pushing.value
+        assert ws.subphase == PRESERVED_EXECUTION_SUBPHASE
+        assert ws.failure_reason is None
+        assert ws.failure_message is None
+        assert len(preserved_events) == 1
+        assert stale_events == []
+        assert cleaner.calls == []
+        assert inspector.calls == [compose_project]

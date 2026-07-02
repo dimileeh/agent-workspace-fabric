@@ -826,6 +826,7 @@ async def test_auto_retry_planning_scope_failure_ignores_other_reason_codes(
 async def test_git_commit_count_since_handles_failed_and_invalid_output(
     tmp_path: Path,
 ) -> None:
+    """Regression coverage for git commit count since handles failed and invalid output."""
     failed_runner = FakeCommandRunner()
     failed_runner.queue_result(returncode=1, stderr="bad revision")
     failed_executor = _executor_with_runner(failed_runner, tmp_path)
@@ -835,3 +836,54 @@ async def test_git_commit_count_since_handles_failed_and_invalid_output(
     invalid_runner.queue_result(returncode=0, stdout="not-an-int\n")
     invalid_executor = _executor_with_runner(invalid_runner, tmp_path)
     assert await invalid_executor._git_commit_count_since(tmp_path / "worktree", "base") == 0
+
+
+@pytest.mark.unit
+async def test_workspace_executor_delegates_monitor_handoff_helpers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify workspace executor delegates monitor handoff helpers."""
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    handoff = object()
+
+    async def _resume_handoff(self: object, *, workspace_id: str) -> object:
+        """Test helper for resume handoff."""
+        assert workspace_id == "ws_monitor"
+        return handoff
+
+    async def _verify_start(
+        self: object,
+        *,
+        workspace_id: str,
+        monitor_owner_id: str | None = None,
+    ) -> bool:
+        """Test helper for verify start."""
+        assert workspace_id == "ws_monitor"
+        assert monitor_owner_id is None
+        return True
+
+    monkeypatch.setattr(
+        "awf.control.executor.base._monitor_handoff.resume_pr_monitor_handoff",
+        _resume_handoff,
+    )
+    monkeypatch.setattr(
+        "awf.control.executor.base._monitor_handoff.verify_resume_monitor_start",
+        _verify_start,
+    )
+
+    async def _run_resumed(self: object, *, workspace_id: str, handoff: object) -> bool:
+        """Test helper for run resumed."""
+        assert workspace_id == "ws_monitor"
+        assert handoff is expected_handoff
+        return True
+
+    expected_handoff = handoff
+    monkeypatch.setattr(
+        "awf.control.executor.base._monitor_handoff.run_resumed_pr_monitor",
+        _run_resumed,
+    )
+
+    assert await executor.resume_pr_monitor_handoff("ws_monitor") is handoff
+    assert await executor.verify_resume_monitor_start("ws_monitor") is True
+    assert await executor.run_resumed_pr_monitor("ws_monitor", handoff) is True

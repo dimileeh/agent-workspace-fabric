@@ -544,9 +544,20 @@ class OperationRepository:
         operation_type: OperationType | str,
         payload_identity: Mapping[str, Any],
         limit: int = 100,
+        prefer_newest: bool = False,
     ) -> Operation | None:
+        """Return the active operation whose payload matches ``payload_identity``.
+
+        When ``prefer_newest`` is true, scan in descending creation order so a later
+        reclaim reuses the freshest matching recovery row instead of a stale one.
+        """
         operation_type_value = (
             operation_type.value if isinstance(operation_type, OperationType) else operation_type
+        )
+        order_by = (
+            (Operation.created_at.desc(), Operation.id.desc())
+            if prefer_newest
+            else (Operation.created_at.asc(), Operation.id.asc())
         )
         stmt = (
             select(Operation)
@@ -560,7 +571,7 @@ class OperationRepository:
                     )
                 ),
             )
-            .order_by(Operation.created_at.asc(), Operation.id.asc())
+            .order_by(*order_by)
             .limit(limit)
         )
         for operation in (await self._session.execute(stmt)).scalars():

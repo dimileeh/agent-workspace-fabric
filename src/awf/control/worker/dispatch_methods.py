@@ -12,11 +12,13 @@ from functools import partial
 from typing import Any, cast
 
 from awf.common.redaction import redact_secrets
+from awf.control.executor.monitor_handoff import MonitorResumePreStartError
 from awf.control.executor.types import PauseResumeReason
 from awf.control.worker.constants import (
     _BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE,
     _BLOCKED_RESUME_EXECUTION_FAILED_REASON_CODE,
     _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL,
+    _MONITOR_RECOVERY_START_SKIPPED_ERROR_CODE,
     _RECOVERING_RESUME_EXECUTION_CANCELLED_REASON_CODE,
     _RECOVERING_RESUME_EXECUTION_FAILED_REASON_CODE,
     _RECOVERING_RESUME_WORKTREE_RESET_ABORTED_REASON_CODE,
@@ -28,6 +30,8 @@ from awf.db.enums import (
     OperationStatus,
     WorkspaceStatus,
 )
+from awf.db.models import Workspace, WorkspaceEvent
+from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 
 # Per-pause-reason wiring for the shared resume path: the slot-tracking task kind
 # and the restore reason codes that revert a stranded ``running`` row back to its
@@ -55,8 +59,60 @@ _PAUSED_RESUME_SAFE_METHOD: dict[str, str] = {
     "recovering": "_safely_resume_recovering_claimed",
 }
 
+_MONITOR_RECOVERY_HANDOFF_FAILURE_REASON_CODES = frozenset(
+    {
+        "FORGE_NOT_SUPPORTED",
+        "BITBUCKET_AUTH_NOT_CONFIGURED",
+        "DEPRECATED_TASK_KIND",
+        "UNSUPPORTED_TASK_KIND",
+    }
+)
+
+
+def _is_monitor_recovery_handoff_failure_reason(reason_code: str) -> bool:
+    """Return whether ``reason_code`` reflects a monitor handoff abort cause."""
+    if reason_code in _MONITOR_RECOVERY_HANDOFF_FAILURE_REASON_CODES:
+        return True
+    if not reason_code.startswith("MONITOR_RECOVERY"):
+        return False
+    return reason_code.endswith("_FAILED") or reason_code.endswith("_MISSING")
+
+
+def _monitor_recovery_handoff_failure_message(
+    event: WorkspaceEvent,
+    *,
+    workspace: Workspace,
+    default_message: str,
+) -> str:
+    """Derive the remonitor error message aligned with a handoff-failure event."""
+    payload = event.payload or {}
+    message = payload.get("message")
+    if isinstance(message, str) and message.strip():
+        return message[:2000]
+    stderr = payload.get("stderr")
+    if isinstance(stderr, str) and stderr.strip():
+        return stderr[:2000]
+    operation = payload.get("operation")
+    if isinstance(operation, str) and operation.strip():
+        return f"Monitor recovery handoff failed during {operation}."[:2000]
+    if workspace.status == WorkspaceStatus.failed.value and workspace.failure_message:
+        return workspace.failure_message[:2000]
+    return default_message
+
+
+def _monitor_recovery_handoff_failure_error_code(event: WorkspaceEvent) -> str:
+    """Return the actionable error code persisted for a handoff failure event."""
+    event_reason_code = event.reason_code
+    assert event_reason_code is not None
+    payload = event.payload or {}
+    payload_reason_code = payload.get("reason_code")
+    if isinstance(payload_reason_code, str) and payload_reason_code.strip():
+        return payload_reason_code.strip()
+    return event_reason_code
+
 
 def _draining_execution_task_count(self: Any) -> int:
+    """Count in-flight monitor draining tasks tracked for slot-budget exclusion."""
     return sum(
         1
         for kind in self._execution_task_kinds.values()
@@ -498,6 +554,7 @@ def _update_execution_slot_saturation(self: Any, *, dispatched: int) -> None:
 
 
 async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
+    """Run a claimed provisioning attempt with claim release and heartbeat fencing."""
     # The execution claim was already stamped on the row by the earlier
     # scheduling transaction, so *every* exit from here must release it —
     # including a cancel landing on the initial epoch read below, before the
@@ -601,6 +658,7 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
 
 
 async def _safely_execute(self: Any, workspace_id: str) -> None:
+    """Execute a claimed workspace while isolating unexpected executor failures."""
     if self._executor is None:
         return
     try:
@@ -617,6 +675,7 @@ async def _safely_execute(self: Any, workspace_id: str) -> None:
 
 
 async def _safely_execute_claimed(self: Any, workspace_id: str) -> None:
+    """Run executor for a claimed ready workspace while heartbeating the execution claim."""
     heartbeat = asyncio.create_task(
         self._refresh_execution_claim_loop(workspace_id),
         name=f"awf-execution-claim-{workspace_id}",
@@ -641,59 +700,385 @@ async def _safely_execute_claimed(self: Any, workspace_id: str) -> None:
         await self._release_terminal_runtime_promptly(workspace_id)
 
 
-async def _safely_resume_pr_monitor(
+async def _monitor_recovery_handoff_failure_error(
+    self: Any,
+    workspace_id: str,
+) -> tuple[str, str]:
+    """Derive recovery-operation error details after a failed monitor handoff."""
+    default_code = "MONITOR_RECOVERY_FAILED"
+    default_message = "Monitor recovery handoff failed."
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            if ws is None:
+                return default_code, default_message
+            events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                limit=10,
+            )
+            # ``list()`` returns newest-first; return the latest matching failure.
+            for event in events:
+                reason_code = event.reason_code
+                if reason_code is None:
+                    continue
+                if not _is_monitor_recovery_handoff_failure_reason(reason_code):
+                    continue
+                message = _monitor_recovery_handoff_failure_message(
+                    event,
+                    workspace=ws,
+                    default_message=default_message,
+                )
+                return _monitor_recovery_handoff_failure_error_code(event), message
+            if ws.status == WorkspaceStatus.failed.value and ws.failure_message:
+                return default_code, ws.failure_message[:2000]
+    except Exception:
+        _log.exception(
+            "worker.monitor_recovery_handoff_failure_lookup_failed",
+            workspace_id=workspace_id,
+        )
+    return default_code, default_message
+
+
+async def _monitor_recovery_start_skipped_operation_status(
+    self: Any,
+    workspace_id: str,
+    *,
+    after_successful_handoff: bool = False,
+) -> tuple[OperationStatus, str | None, str | None]:
+    """Derive remonitor terminal status when start recheck bails after handoff."""
+    default_message = "Monitor resume skipped before monitor loop started."
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            if ws is not None:
+                if ws.status == WorkspaceStatus.cancelled.value:
+                    return (
+                        OperationStatus.cancelled,
+                        "MONITOR_RECOVERY_CANCELLED",
+                        default_message,
+                    )
+                if ws.status == WorkspaceStatus.completed.value:
+                    return OperationStatus.succeeded, None, None
+                if after_successful_handoff and ws.status == WorkspaceStatus.failed.value:
+                    return OperationStatus.succeeded, None, None
+                if after_successful_handoff and ws.status == WorkspaceStatus.monitoring_pr.value:
+                    return (
+                        OperationStatus.failed,
+                        _MONITOR_RECOVERY_START_SKIPPED_ERROR_CODE,
+                        default_message,
+                    )
+    except Exception:
+        _log.exception(
+            "worker.monitor_recovery_start_skip_status_lookup_failed",
+            workspace_id=workspace_id,
+        )
+    error_code, error_message = await _monitor_recovery_handoff_failure_error(
+        self,
+        workspace_id,
+    )
+    return OperationStatus.failed, error_code, error_message
+
+
+def _executor_supports_pr_monitor_handoff(executor: Any) -> bool:
+    """Return whether ``executor`` implements the complete two-phase monitor resume API."""
+    return callable(getattr(executor, "resume_pr_monitor_handoff", None)) and callable(
+        getattr(executor, "run_resumed_pr_monitor", None)
+    )
+
+
+async def _safely_resume_pr_monitor_legacy(
     self: Any,
     workspace_id: str,
     *,
     recovery_operation_id: str | None = None,
 ) -> bool:
-    if self._executor is None:
-        await self._finish_monitor_recovery_operation(
-            workspace_id,
-            operation_id=recovery_operation_id,
-            status=OperationStatus.failed,
-            error_code="MONITOR_RECOVERY_NO_EXECUTOR",
-            error_message="Worker has no executor configured.",
-        )
-        return False
+    """Resume via ``resume_pr_monitor()`` for protocol-only executor implementations."""
     try:
         await self._executor.resume_pr_monitor(workspace_id)
     except asyncio.CancelledError:
-        # A stale-monitor reconcile cancels this task once its workspace has
-        # left monitoring_pr. CancelledError is a BaseException, so it skips
-        # the Exception handler below; without finalizing here the remonitor
-        # operation stays stuck in running while the caller's finally drops
-        # _monitor_recovery_operation_ids, losing the handle to finish it
-        # later. Finalize through the shielded helper so a second cancellation
-        # (e.g. worker shutdown) landing mid-write cannot re-orphan it, then
-        # re-raise so the task still ends cancelled and the slot drains.
-        await self._finish_monitor_recovery_operation_after_cancellation(
+        finalized = await self._finish_monitor_recovery_operation_after_cancellation(
             workspace_id,
             operation_id=recovery_operation_id,
             status=OperationStatus.cancelled,
             error_code="MONITOR_RECOVERY_CANCELLED",
             error_message="Monitor resume cancelled after workspace left monitoring_pr.",
         )
+        if finalized:
+            self._monitor_recovery_operation_ids.pop(workspace_id, None)
         raise
     except Exception as exc:
-        # The monitor runner owns normal terminal transitions. Recovery
-        # dispatch still must not take the service worker down if a single
-        # workspace hits an unexpected runtime error.
         _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
-        await self._finish_monitor_recovery_operation(
+        finalized = await self._finish_monitor_recovery_operation(
             workspace_id,
             operation_id=recovery_operation_id,
             status=OperationStatus.failed,
             error_code="MONITOR_RECOVERY_FAILED",
             error_message=repr(exc)[:2000],
         )
+        if finalized:
+            self._monitor_recovery_operation_ids.pop(workspace_id, None)
         return False
 
-    await self._finish_monitor_recovery_operation(
+    finalized = await self._finish_monitor_recovery_operation(
         workspace_id,
         operation_id=recovery_operation_id,
         status=OperationStatus.succeeded,
     )
+    if finalized:
+        self._monitor_recovery_operation_ids.pop(workspace_id, None)
+    return True
+
+
+async def _safely_resume_pr_monitor(
+    self: Any,
+    workspace_id: str,
+    *,
+    recovery_operation_id: str | None = None,
+) -> bool:
+    """Hand off monitor recovery, finalize the remonitor op, then run the monitor loop.
+
+    Returns ``True`` when the worker should treat the recovery dispatch as complete
+    (handoff succeeded or post-handoff monitor errors that must not crash the worker).
+    Returns ``False`` when handoff failed before the monitor loop started, or when
+    the remonitor operation could not be finalized after a successful handoff.
+    """
+    if self._executor is None:
+        finalized = await self._finish_monitor_recovery_operation(
+            workspace_id,
+            operation_id=recovery_operation_id,
+            status=OperationStatus.failed,
+            error_code="MONITOR_RECOVERY_NO_EXECUTOR",
+            error_message="Worker has no executor configured.",
+        )
+        if finalized:
+            self._monitor_recovery_operation_ids.pop(workspace_id, None)
+        return False
+    if not _executor_supports_pr_monitor_handoff(self._executor):
+        return await _safely_resume_pr_monitor_legacy(
+            self,
+            workspace_id,
+            recovery_operation_id=recovery_operation_id,
+        )
+    handoff_succeeded = False
+    handoff_finalized = False
+    verify_start_pending = False
+    try:
+        handoff = await self._executor.resume_pr_monitor_handoff(workspace_id)
+        if handoff is None:
+            (
+                status,
+                error_code,
+                error_message,
+            ) = await _monitor_recovery_start_skipped_operation_status(
+                self,
+                workspace_id,
+            )
+            finalized = await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+            )
+            if finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            return status == OperationStatus.succeeded
+
+        # Record handoff success before the cancellable verify await. The CancelledError
+        # handler below cannot rely on ``handoff_succeeded`` (still False until verify
+        # returns) but must know compose prep already completed so stale-monitor
+        # reconciliation does not finalize the remonitor op as cancelled mid-verify.
+        self._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)
+        monitor_owner_id = getattr(handoff, "run_kwargs", {}).get("monitor_owner_id")
+        verify_start = getattr(self._executor, "verify_resume_monitor_start", None)
+        verify_start_pending = verify_start is not None
+        if verify_start is not None:
+            if monitor_owner_id is not None:
+                verify_ok = await verify_start(
+                    workspace_id,
+                    monitor_owner_id=monitor_owner_id,
+                )
+            else:
+                verify_ok = await verify_start(workspace_id)
+            verify_start_pending = False
+        else:
+            verify_ok = True
+        if not verify_ok:
+            (
+                status,
+                error_code,
+                error_message,
+            ) = await _monitor_recovery_start_skipped_operation_status(
+                self,
+                workspace_id,
+                after_successful_handoff=True,
+            )
+            finalized = await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+            )
+            if finalized:
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            else:
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+            return status == OperationStatus.succeeded
+
+        handoff_succeeded = True
+        # Idempotent re-add: the pre-verify marker above already covers this workspace;
+        # keep the set membership explicit here so readers see the marker spans verify
+        # through finalize without re-reading the earlier add.
+        self._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)
+        handoff_finalized = await self._finish_monitor_recovery_operation(
+            workspace_id,
+            operation_id=recovery_operation_id,
+            status=OperationStatus.succeeded,
+        )
+        if handoff_finalized:
+            self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+            self._monitor_recovery_operation_ids.pop(workspace_id, None)
+
+        if not handoff_finalized:
+            # One immediate retry: ``_finish_monitor_recovery_operation`` returns
+            # False when we lost the monitor claim to another worker but that worker
+            # has not created its replacement remonitor operation yet (see
+            # ``_other_active_worker_restart_remonitor_operation_id``). The concurrent
+            # reclaim usually lands within one poll cycle, so a second call in-process
+            # avoids leaving the handoff-succeeded op stuck running until the caller's
+            # finally releases the claim and retries.
+            handoff_finalized = await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=OperationStatus.succeeded,
+            )
+            if handoff_finalized:
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+
+        if not handoff_finalized:
+            _log.error(
+                "worker.monitor_recovery_finalize_failed_before_monitor",
+                workspace_id=workspace_id,
+                operation_id=recovery_operation_id,
+            )
+            self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+            return False
+
+        monitor_started = await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
+        if monitor_started is False:
+            # The remonitor bookkeeping op already succeeded at handoff; a
+            # post-handoff start recheck bail must not downgrade it.
+            self._monitor_recovery_post_handoff_start_bailed_workspace_ids.add(workspace_id)
+            _log.info(
+                "worker.monitor_recovery_start_skipped_after_handoff",
+                workspace_id=workspace_id,
+                operation_id=recovery_operation_id,
+            )
+            return True
+    except asyncio.CancelledError:
+        if not handoff_finalized:
+            # A stale-monitor reconcile cancels this task once its workspace has
+            # left monitoring_pr. CancelledError is a BaseException, so it skips
+            # the Exception handler below; without finalizing here the remonitor
+            # operation stays stuck in running while the caller's finally drops
+            # _monitor_recovery_operation_ids, losing the handle to finish it
+            # later. Finalize through the shielded helper so a second cancellation
+            # (e.g. worker shutdown) landing mid-write cannot re-orphan it, then
+            # re-raise so the task still ends cancelled and the slot drains.
+            finalize_status = OperationStatus.cancelled
+            finalize_error_code: str | None = "MONITOR_RECOVERY_CANCELLED"
+            finalize_error_message: str | None = (
+                "Monitor resume cancelled after workspace left monitoring_pr."
+            )
+            preserve_pending_for_retry = False
+            if handoff_succeeded:
+                ws_status = (await self._load_workspace_statuses([workspace_id])).get(workspace_id)
+                if (
+                    ws_status is None
+                    or ws_status == WorkspaceStatus.monitoring_pr.value
+                    or ws_status == WorkspaceStatus.completed.value
+                    or ws_status == WorkspaceStatus.failed.value
+                ):
+                    finalize_status = OperationStatus.succeeded
+                    finalize_error_code = None
+                    finalize_error_message = None
+            elif workspace_id in self._monitor_recovery_handoff_succeeded_workspace_ids:
+                # Handoff marker is set before the verify await; derive the terminal
+                # status instead of treating monitoring_pr as success.
+                if verify_start_pending:
+                    ws_status = (await self._load_workspace_statuses([workspace_id])).get(
+                        workspace_id
+                    )
+                    if ws_status == WorkspaceStatus.monitoring_pr.value:
+                        # Worker shutdown interrupted verify before start; leave the
+                        # recovery operation pending so the caller can release the claim
+                        # and retry instead of recording a terminal handoff failure.
+                        preserve_pending_for_retry = True
+                if not preserve_pending_for_retry:
+                    (
+                        finalize_status,
+                        finalize_error_code,
+                        finalize_error_message,
+                    ) = await _monitor_recovery_start_skipped_operation_status(
+                        self,
+                        workspace_id,
+                        after_successful_handoff=True,
+                    )
+            if preserve_pending_for_retry:
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+            else:
+                finalized = await self._finish_monitor_recovery_operation_after_cancellation(
+                    workspace_id,
+                    operation_id=recovery_operation_id,
+                    status=finalize_status,
+                    error_code=finalize_error_code,
+                    error_message=finalize_error_message,
+                )
+                if finalized:
+                    self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+                    self._monitor_recovery_operation_ids.pop(workspace_id, None)
+                else:
+                    self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+        raise
+    except MonitorResumePreStartError:
+        if not handoff_succeeded:
+            _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
+            finalized = await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=OperationStatus.failed,
+                error_code="MONITOR_RECOVERY_FAILED",
+                error_message="Monitor resume failed before monitor loop started.",
+            )
+            if finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+            return False
+        _log.exception("worker.pr_monitor_pre_start_failed", workspace_id=workspace_id)
+        return False
+    except Exception as exc:
+        if not handoff_succeeded:
+            _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
+            finalized = await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=OperationStatus.failed,
+                error_code="MONITOR_RECOVERY_FAILED",
+                error_message=repr(exc)[:2000],
+            )
+            if finalized:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+            return False
+        # The monitor runner owns post-handoff terminal transitions. Recovery
+        # dispatch still must not take the service worker down if a single
+        # workspace hits an unexpected runtime error after handoff.
+        _log.exception("worker.pr_monitor_run_failed", workspace_id=workspace_id)
+        return True
+
     return True
 
 

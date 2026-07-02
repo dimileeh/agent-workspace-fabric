@@ -592,14 +592,28 @@ class _RecordingExecutor:
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Test helper for execute."""
         self.calls.append(workspace_id)
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
+        del handoff
         self.resume_calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _BlockingExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -612,18 +626,32 @@ class _BlockingExecutor(_RecordingExecutor):
 
 class _BlockingMonitorExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
+        del handoff
         self.resume_calls.append(workspace_id)
         self.started.set()
         await self.release.wait()
 
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
+
 
 class _RecordingRuntimeInspector:
     def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
+        """Test helper for __init__."""
         self._snapshots = snapshots
         self.calls: list[str | None] = []
 
@@ -903,6 +931,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011RemotePushBranch:
         origin_repo: Path,
         tmp_path: Path,
     ) -> None:
+        """Regression coverage for preserved active pushed branch no open pr uses remote push branch when branch name blank."""
         workspace_id = await _create_active_execution(
             session_factory,
             origin_repo,
@@ -988,3 +1017,97 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011RemotePushBranch:
         ]
         assert executor.calls == [workspace_id]
         assert cleaner.calls == []
+
+
+@pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_retains_handle_when_terminal_finalize_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Failed terminal finalize must drop the claim but keep the recovery handle."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-terminal-finalize-failed",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="SEED",
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_runtime_restart_failed",
+            reason_code="MONITOR_RECOVERY_METADATA_MISSING",
+            payload={"reason_code": "MONITOR_RECOVERY_METADATA_MISSING"},
+        )
+        ws.failure_message = "Monitor recovery metadata missing after handoff."
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="SEED")
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    claim_released = False
+    prompt_released = False
+
+    async def _resume(
+        resume_workspace_id: str,
+        *,
+        recovery_operation_id: str | None = None,
+    ) -> bool:
+        """Test helper for resume."""
+        assert resume_workspace_id == workspace_id
+        assert recovery_operation_id == "op_terminal_finalize_failed"
+        return False
+
+    async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
+        nonlocal claim_released
+        assert released_workspace_id == workspace_id
+        claim_released = True
+
+    async def _prompt_release(released_workspace_id: str) -> None:
+        """Test helper for prompt release."""
+        nonlocal prompt_released
+        assert released_workspace_id == workspace_id
+        prompt_released = True
+
+    async def _finish_monitor_recovery_operation(
+        finish_workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        """Test helper for finish monitor recovery operation."""
+        assert finish_workspace_id == workspace_id
+        return False
+
+    worker._monitor_recovery_operation_ids[workspace_id] = "op_terminal_finalize_failed"  # noqa: SLF001
+    worker._safely_resume_pr_monitor = _resume  # type: ignore[method-assign]
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._release_terminal_runtime_promptly = _prompt_release  # type: ignore[method-assign]
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    await worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+        workspace_id,
+        recovery_operation_id="op_terminal_finalize_failed",
+    )
+
+    assert claim_released is True
+    assert prompt_released is False
+    assert worker._monitor_recovery_operation_ids[workspace_id] == "op_terminal_finalize_failed"  # noqa: SLF001
+    assert worker._monitor_claim_heartbeat_tasks.get(workspace_id) is None  # noqa: SLF001

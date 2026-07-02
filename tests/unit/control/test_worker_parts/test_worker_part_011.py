@@ -551,6 +551,7 @@ async def _move_to_operator_control_status(
 
 class _TransitioningProvisioner:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        """Test helper for __init__."""
         self._session_factory = session_factory
         self.calls: list[str] = []
 
@@ -583,6 +584,7 @@ class _TransitioningProvisioner:
 
 class _MissingWorktreePathProvisioner(_TransitioningProvisioner):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], worktrees_root: Path):
+        """Test helper for __init__."""
         super().__init__(session_factory)
         self._worktrees_root = worktrees_root
 
@@ -592,18 +594,33 @@ class _MissingWorktreePathProvisioner(_TransitioningProvisioner):
 
 class _RecordingExecutor:
     def __init__(self) -> None:
+        """Test helper for __init__."""
         self.calls: list[str] = []
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Test helper for execute."""
         self.calls.append(workspace_id)
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
+        del handoff
         self.resume_calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _BlockingExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -616,18 +633,32 @@ class _BlockingExecutor(_RecordingExecutor):
 
 class _BlockingMonitorExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
+        del handoff
         self.resume_calls.append(workspace_id)
         self.started.set()
         await self.release.wait()
 
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
+
 
 class _RecordingRuntimeInspector:
     def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
+        """Test helper for __init__."""
         self._snapshots = snapshots
         self.calls: list[str | None] = []
 
@@ -638,6 +669,7 @@ class _RecordingRuntimeInspector:
 
 class _RecordingRuntimeCleaner:
     def __init__(self, result: WorkspaceCleanupResult | None = None) -> None:
+        """Test helper for __init__."""
         self.result = result or WorkspaceCleanupResult.from_steps(
             [
                 WorkspaceCleanupStepResult(
@@ -676,6 +708,7 @@ class _RecordingRuntimeCleaner:
 
 class _TrackedSessionContext:
     def __init__(self, factory: _TrackingSessionFactory) -> None:
+        """Test helper for __init__."""
         self._factory = factory
         self._session = factory.base_factory()
 
@@ -698,6 +731,7 @@ class _TrackedSessionContext:
 
 class _TrackingSessionFactory:
     def __init__(self, base_factory: async_sessionmaker[AsyncSession]) -> None:
+        """Test helper for __init__."""
         self.base_factory = base_factory
         self.active_sessions = 0
 
@@ -710,6 +744,7 @@ class _RecordingBranchOpenPRResolver:
         self,
         results_by_branch: dict[str, list[SimpleNamespace] | Exception],
     ) -> None:
+        """Test helper for __init__."""
         self._results_by_branch = results_by_branch
         self.calls: list[dict[str, str | None]] = []
 
@@ -738,6 +773,7 @@ class _RetargetedBranchOpenPRResolver:
         self,
         results_by_branch: dict[str, list[SimpleNamespace]],
     ) -> None:
+        """Test helper for __init__."""
         self._results_by_branch = results_by_branch
         self.calls: list[dict[str, str | None]] = []
 
@@ -765,6 +801,7 @@ class _SequenceBranchOpenPRResolver:
         self,
         results_by_branch: dict[str, list[list[SimpleNamespace] | Exception]],
     ) -> None:
+        """Test helper for __init__."""
         self._results_by_branch = results_by_branch
         self.calls: list[dict[str, str | None]] = []
 
@@ -859,9 +896,11 @@ def _closed_connection_error() -> InterfaceError:
 
 class _HealthyRuntimeInspector:
     def __init__(self) -> None:
+        """Test helper for __init__."""
         self.calls: list[str | None] = []
 
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        """Test helper for inspect."""
         self.calls.append(compose_project_name)
         return RuntimeSnapshot(
             stack_state="running",
@@ -878,6 +917,7 @@ class _HealthyRuntimeInspector:
 
 class _RaisingRuntimeInspector:
     def __init__(self, exc: Exception) -> None:
+        """Test helper for __init__."""
         self.exc = exc
         self.calls: list[str | None] = []
 
@@ -906,14 +946,17 @@ class TestRunOnceExecutionPart004:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """A failing ready execution must not prevent dispatch of other ready workspaces."""
         first_id = await _create_ready(session_factory, origin_repo, "bad")
         second_id = await _create_ready(session_factory, origin_repo, "good")
 
         class _FlakyExecutor:
             def __init__(self) -> None:
+                """Test helper for __init__."""
                 self.calls: list[str] = []
 
             async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+                """Test helper for execute."""
                 self.calls.append(workspace_id)
                 if workspace_id == first_id:
                     raise RuntimeError("boom")
@@ -994,6 +1037,7 @@ class TestRunOnceExecutionPart004:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Concurrent workers must not claim the same ready workspace for execution."""
         ready_id = await _create_ready(session_factory, origin_repo, "race-ready")
         started = asyncio.Event()
         release = asyncio.Event()
@@ -1001,6 +1045,7 @@ class TestRunOnceExecutionPart004:
 
         class _ClaimingExecutor:
             async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+                """Test helper for execute."""
                 async with session_factory() as s:
                     repo = WorkspaceRepository(s)
                     ws = await repo.transition_if_current(
@@ -1018,6 +1063,7 @@ class TestRunOnceExecutionPart004:
                 await release.wait()
 
             async def resume_pr_monitor(self, workspace_id: str) -> None:
+                """Test helper for resume pr monitor."""
                 raise AssertionError(f"unexpected monitor resume for {workspace_id}")
 
         executor = _ClaimingExecutor()
@@ -1230,6 +1276,7 @@ class TestRunOnceExecutionPart004:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Stale-monitor CancelledError must finalize the remonitor recovery operation."""
         # CancelledError is a BaseException, so a stale-monitor reconcile cancel
         # skips the resume coroutine's Exception handler. Without an explicit
         # CancelledError finalizer the remonitor operation would stay stuck in
@@ -1266,10 +1313,11 @@ class TestRunOnceExecutionPart004:
             ]
             assert len(remonitor_operations) == 1
             operation_id = remonitor_operations[0].id
-            assert remonitor_operations[0].status == OperationStatus.running.value
+            assert remonitor_operations[0].status == OperationStatus.succeeded.value
 
             # The workspace leaves monitoring_pr, so the resume is now stale and
-            # reconcile cancels it.
+            # reconcile cancels it. The recovery bookkeeping op already succeeded
+            # at handoff; cancellation applies only to the monitor run task.
             async with session_factory() as s:
                 await s.execute(
                     update(Workspace)
@@ -1285,13 +1333,11 @@ class TestRunOnceExecutionPart004:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
 
-            # The remonitor op is finalized as cancelled, not stuck in running.
+            # The remonitor op stays succeeded; only the monitor task was cancelled.
             async with session_factory() as s:
                 finalized = await OperationRepository(s).get(operation_id)
             assert finalized is not None
-            assert finalized.status == OperationStatus.cancelled.value
-            assert finalized.error_code == "MONITOR_RECOVERY_CANCELLED"
-            # The recovery handle is dropped only after the op is finalized.
+            assert finalized.status == OperationStatus.succeeded.value
             assert monitor_id not in worker._monitor_recovery_operation_ids  # noqa: SLF001
         finally:
             executor.release.set()
@@ -1303,21 +1349,36 @@ class TestRunOnceExecutionPart004:
             )
 
     @pytest.mark.unit
-    async def test_stale_monitor_cancellation_finalizes_despite_second_cancel(
+    async def test_stale_monitor_cancellation_before_handoff_finalizes_recovery_operation(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        # The CancelledError finalize is itself a cancellable DB write. If a
-        # second cancellation (e.g. worker shutdown cancelling outstanding tasks)
-        # lands mid-write, the remonitor op must still reach cancelled rather than
-        # stay stuck in running once the caller's finally drops the recovery
-        # handle. The finalize is shielded, so it runs to completion across the
-        # second cancel.
+        # Cancellation during handoff (before the recovery op is finalized as
+        # succeeded) must still mark the remonitor operation cancelled via the
+        # shielded finalize helper.
+        """Verify stale monitor cancellation before handoff finalizes recovery operation."""
         monitor_id = await _create_monitoring_pr(
-            session_factory, origin_repo, "double-cancel-monitor"
+            session_factory, origin_repo, "cancel-before-handoff-monitor"
         )
-        executor = _BlockingMonitorExecutor()
+
+        class _HandoffBlockingMonitorExecutor(_RecordingExecutor):
+            """Executor that blocks in handoff until released."""
+
+            def __init__(self) -> None:
+                """Test helper for __init__."""
+                super().__init__()
+                self.handoff_started = asyncio.Event()
+                self.release_handoff = asyncio.Event()
+
+            async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+                """Test helper for resume pr monitor handoff."""
+                self.resume_calls.append(workspace_id)
+                self.handoff_started.set()
+                await self.release_handoff.wait()
+                return object()
+
+        executor = _HandoffBlockingMonitorExecutor()
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -1334,7 +1395,9 @@ class TestRunOnceExecutionPart004:
             assert (
                 await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
             )
-            await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                executor.handoff_started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+            )
             monitor_task = worker._execution_tasks[monitor_id]  # noqa: SLF001
 
             async with session_factory() as s:
@@ -1348,23 +1411,19 @@ class TestRunOnceExecutionPart004:
             operation_id = remonitor_operations[0].id
             assert remonitor_operations[0].status == OperationStatus.running.value
 
-            # Inject a second cancellation the instant the finalize DB write
-            # begins, reproducing a shutdown cancel arriving mid-write. Without
-            # the shield this would abort the write and orphan the op in running.
             original_finish = worker._finish_monitor_recovery_operation  # noqa: SLF001
             second_cancel_injected = False
 
-            async def _finish_with_second_cancel(*args: Any, **kwargs: Any) -> None:
+            async def _finish_with_second_cancel(*args: Any, **kwargs: Any) -> bool:
+                """Test helper for finish with second cancel."""
                 nonlocal second_cancel_injected
                 if not second_cancel_injected and monitor_task is not None:
                     second_cancel_injected = True
                     monitor_task.cancel()
-                await original_finish(*args, **kwargs)
+                return await original_finish(*args, **kwargs)
 
             worker._finish_monitor_recovery_operation = _finish_with_second_cancel  # type: ignore[method-assign]  # noqa: SLF001
 
-            # Workspace leaves monitoring_pr, so the resume is stale and reconcile
-            # cancels it (the first cancellation).
             async with session_factory() as s:
                 await s.execute(
                     update(Workspace)
@@ -1375,12 +1434,10 @@ class TestRunOnceExecutionPart004:
             await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
             assert monitor_task.cancelling() > 0
 
-            executor.release.set()
+            executor.release_handoff.set()
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
 
-            # The second cancel fired during finalize, but the shielded write
-            # still completed: the op is cancelled, not stuck in running.
             assert second_cancel_injected
             async with session_factory() as s:
                 finalized = await OperationRepository(s).get(operation_id)
@@ -1389,10 +1446,44 @@ class TestRunOnceExecutionPart004:
             assert finalized.error_code == "MONITOR_RECOVERY_CANCELLED"
             assert monitor_id not in worker._monitor_recovery_operation_ids  # noqa: SLF001
         finally:
-            executor.release.set()
+            executor.release_handoff.set()
             if monitor_task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
             await asyncio.wait_for(
                 worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
             )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed])
+async def test_stale_ready_list_entry_is_rechecked_before_dispatch(
+    final_status: WorkspaceStatus,
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    ready_id = await _create_ready(session_factory, origin_repo, "stale-ready")
+    await _move_to_operator_control_status(session_factory, ready_id, final_status)
+
+    executor = _RecordingExecutor()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+        executor=executor,
+        config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+    )
+
+    async def _stale_ready_list(
+        *,
+        limit: int | None = None,
+        exclude_ids: set[str] | None = None,
+    ) -> list[str]:
+        del limit, exclude_ids
+        return [ready_id]
+
+    worker._list_ready = _stale_ready_list  # type: ignore[method-assign]
+
+    assert await worker.run_once() == 0
+    await worker.wait_for_execution_tasks()
+
+    assert executor.calls == []

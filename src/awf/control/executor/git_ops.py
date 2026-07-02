@@ -63,6 +63,7 @@ def _git_error_indicates_missing_head_object(text: str) -> bool:
 
 
 def _agent_git_writability_preflight_script(workspace_id: str) -> str:
+    """Shell script that verifies agent git write access in the worktree before execution."""
     quoted_workspace_id = shlex.quote(workspace_id)
     return f"""
 set -eu
@@ -207,6 +208,7 @@ async def _repair_agent_git_ownership(
     worktree_path: Path,
     reason: str,
 ) -> bool:
+    """Chown mirror/worktree git metadata to the agent uid when preflight detects drift."""
     _ = executor
     try:
         mirror_path = mirror_path_for_worktree(worktree_path)

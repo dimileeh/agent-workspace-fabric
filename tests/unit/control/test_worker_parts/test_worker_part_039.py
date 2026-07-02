@@ -596,14 +596,28 @@ class _RecordingExecutor:
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Test helper for execute."""
         self.calls.append(workspace_id)
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
+        del handoff
         self.resume_calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _BlockingExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -616,18 +630,32 @@ class _BlockingExecutor(_RecordingExecutor):
 
 class _BlockingMonitorExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
+        del handoff
         self.resume_calls.append(workspace_id)
         self.started.set()
         await self.release.wait()
 
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
+
 
 class _RecordingRuntimeInspector:
     def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
+        """Test helper for __init__."""
         self._snapshots = snapshots
         self.calls: list[str | None] = []
 
@@ -896,6 +924,7 @@ class _UnexpectedCleaner:
 
 
 def _unexpected_cleaner_factory() -> _UnexpectedCleaner:
+    """Test helper for _unexpected_cleaner_factory."""
     return _UnexpectedCleaner()
 
 
@@ -903,6 +932,8 @@ def _unexpected_cleaner_factory() -> _UnexpectedCleaner:
 async def test_finish_monitor_recovery_operation_handles_missing_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Return True when there is no recovery operation state to finalize."""
+
     class EmptyOperationSession:
         entered = False
         exited = False
@@ -934,10 +965,13 @@ async def test_finish_monitor_recovery_operation_handles_missing_state(
         config=WorkerConfig(poll_interval_seconds=0.01),
     )
 
-    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
-        "ws_monitor",
-        operation_id=None,
-        status=OperationStatus.succeeded,
+    assert (
+        await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+            "ws_monitor",
+            operation_id=None,
+            status=OperationStatus.succeeded,
+        )
+        is True
     )
     assert empty_session.entered is False
 
@@ -945,10 +979,13 @@ async def test_finish_monitor_recovery_operation_handles_missing_state(
         "awf.control.worker.claims.OperationRepository",
         EmptyOperationRepository,
     )
-    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
-        "ws_monitor",
-        operation_id="missing-op",
-        status=OperationStatus.succeeded,
+    assert (
+        await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+            "ws_monitor",
+            operation_id="missing-op",
+            status=OperationStatus.succeeded,
+        )
+        is False
     )
     assert empty_session.entered is True
     assert empty_session.exited is True
@@ -975,10 +1012,13 @@ async def test_finish_monitor_recovery_operation_handles_missing_state(
         config=WorkerConfig(poll_interval_seconds=0.01),
     )
 
-    await failing_worker._finish_monitor_recovery_operation(  # noqa: SLF001
-        "ws_monitor",
-        operation_id="op-session-failed",
-        status=OperationStatus.failed,
+    assert (
+        await failing_worker._finish_monitor_recovery_operation(  # noqa: SLF001
+            "ws_monitor",
+            operation_id="op-session-failed",
+            status=OperationStatus.failed,
+        )
+        is False
     )
     assert raising_session.entered is True
 
