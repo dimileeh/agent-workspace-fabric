@@ -145,6 +145,35 @@ async def test_response_validator_permanent_payload_raises_without_retry() -> No
 
 
 @pytest.mark.unit
+async def test_response_validator_exception_becomes_client_error() -> None:
+    # A caller-supplied validator that raises must surface as the structured
+    # GitHubClientError the transport contract guarantees — not as the raw
+    # exception type — so callers that only catch GitHubClientError still see a
+    # reason-coded failure. It fails fast (a validator bug is deterministic).
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout='{"data": {"ok": true}}')
+    sleep = _RecordedSleep()
+
+    def _boom(_result: object) -> str | None:
+        raise ValueError("validator blew up")
+
+    with pytest.raises(GitHubClientError) as exc_info:
+        await _execute_gh_with_retry(
+            runner,
+            ["gh", "api", "graphql"],
+            operation="gh api graphql",
+            retry_policy=RetryPolicy.READ,
+            sleep=sleep,
+            response_validator=_boom,
+        )
+
+    assert "validator blew up" in exc_info.value.stderr
+    assert exc_info.value.reason_code == GITHUB_API_ERROR
+    assert len(runner.calls) == 1
+    assert sleep.calls == []
+
+
+@pytest.mark.unit
 async def test_response_validator_none_accepts_result() -> None:
     # A validator that returns None leaves an exit-0 result untouched (no retry).
     runner = FakeCommandRunner()

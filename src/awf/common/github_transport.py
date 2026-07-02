@@ -150,7 +150,29 @@ async def execute_gh_with_retry(
         )
         payload_error: str | None = None
         if result.ok:
-            payload_error = response_validator(result) if response_validator is not None else None
+            if response_validator is not None:
+                try:
+                    payload_error = response_validator(result)
+                except Exception as validator_exc:
+                    # A caller-supplied ``response_validator`` raising is a contract
+                    # violation, not a gh transport fault, but it must still reach
+                    # callers as the structured ``GitHubClientError`` the transport
+                    # guarantees. Callers such as
+                    # ``fetch_pull_request_adoption_metadata`` and
+                    # ``list_open_pull_requests_for_branch`` invoke this transport
+                    # directly and only catch ``GitHubClientError``, and
+                    # ``_run_gh_command`` no longer blanket-wraps unexpected
+                    # exceptions — so without this the crash would escape as an
+                    # unclassified type, breaking the "reason codes flow end-to-end"
+                    # contract for this one surface. Fail fast (a validator bug is
+                    # deterministic; retrying is futile) with the default
+                    # ``GITHUB_API_ERROR`` reason code. The broad catch is a
+                    # deliberate boundary around foreign, caller-supplied code.
+                    raise GitHubClientError(
+                        operation=operation,
+                        returncode=1,
+                        stderr=f"response_validator raised: {validator_exc}",
+                    ) from validator_exc
             if payload_error is None:
                 return result
 
