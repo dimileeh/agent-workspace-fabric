@@ -405,7 +405,7 @@ async def test_ci_fix_dirty_commit_failed_surfaces_terminal_result_not_provider_
             remote_branch=f"awf/{workspace_id}",
         )
 
-    assert len(handle_calls) == 2
+    assert len(handle_calls) == 1
     assert handle_calls[0][0] == workspace_id
     assert handle_calls[0][1].result.stderr == expected_stderr
     assert ownership_reasons == [
@@ -718,7 +718,7 @@ async def test_ci_fix_commit_sink_salvage_ok_terminal_provider_skips_push(
         remote_branch=f"awf/{workspace_id}",
     )
 
-    assert handle_calls == 2
+    assert handle_calls == 1
     assert push_attempted is False
     assert push_result.pushed is False
     assert push_result.failed is True

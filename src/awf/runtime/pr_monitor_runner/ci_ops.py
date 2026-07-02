@@ -612,14 +612,17 @@ async def _run_ci_fix(
                 operation_type="ci_repair",
             )
             if stranded_dirty is not None:
-                with contextlib.suppress(
-                    ProviderRecoveryRetryError,
-                    ProviderRecoveryFallbackError,
-                    ProviderRecoveryAuthError,
-                ):
+                provider_recovery_exc: BaseException | None = None
+                try:
                     await self._handle_provider_agent_run_error(
                         workspace_id, agent_run_err, state=state
                     )
+                except (
+                    ProviderRecoveryRetryError,
+                    ProviderRecoveryFallbackError,
+                    ProviderRecoveryAuthError,
+                ) as exc:
+                    provider_recovery_exc = exc
                 # If the post-commit recheck failed because ``git status``
                 # itself errored (transient status/inspection failure), the
                 # helper returns ``REPAIR_WORKTREE_STATUS_FAILED`` — not dirty
@@ -710,9 +713,11 @@ async def _run_ci_fix(
                     patch_path=salvage_details["repair_salvage"]["patch_path"],
                     patch_sha256=salvage_details["repair_salvage"]["patch_sha256"],
                 )
-                await self._handle_provider_agent_run_error(
-                    workspace_id, agent_run_err, state=state
-                )
+                if provider_recovery_exc is not None:
+                    # Provider state was already recorded above; re-raise after
+                    # salvage and rollback so the next attempt sees a clean worktree
+                    # (PRRT_kwDOSJAM6s6N599P).
+                    raise provider_recovery_exc
                 # Salvage and rollback succeeded, but provider recovery returned
                 # terminal/deterministic instead of raising a retry/fallback/auth
                 # control-flow exception. Do not fall through to the clean-commit
