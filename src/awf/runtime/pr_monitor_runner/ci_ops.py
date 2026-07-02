@@ -671,8 +671,9 @@ async def _run_ci_fix(
         if agent_run_err is not None:
             recovery_details["provider_error_stderr"] = agent_run_err.result.stderr[:400]
         # Carry salvage metadata on the recovery exception so CI-repair
-        # operation results stay discoverable (PRRT_kwDOSJAM6s6N7A9i,
-        # mirroring the stranded commit-sink path PRRT_kwDOSJAM6s6N6xha).
+        # operation results stay discoverable (PRRT_kwDOSJAM6s6N7EXs,
+        # PRRT_kwDOSJAM6s6N7A9i, mirroring the stranded commit-sink path
+        # PRRT_kwDOSJAM6s6N6xha).
         _attach_provider_recovery_details(exc, recovery_details)
         raise
     except ProtectedScopeDiffError as exc:
