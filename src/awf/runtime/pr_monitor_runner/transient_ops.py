@@ -21,6 +21,7 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
 )
+from awf.common.github_retry import github_retry_context
 from awf.db.repositories import WorkspaceEventCreate
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
@@ -98,6 +99,24 @@ async def _fetch_status_for_decision(
         worktree_path=worktree_path,
         base_branch=base_branch,
     )
+    if retry:
+        # Start the gh transport cycle deadline *after* the local base refresh
+        # above. The runner establishes the deadline at cycle start so later
+        # actions share one budget, but ``_fetch_base``/``_count_base_behind``
+        # run before any gh call and, in a slow or large repo, can themselves
+        # outlast ``github_transport_cycle_deadline_seconds``. Left unrefreshed,
+        # the first retrying ``fetch_pr_status`` would see an already-expired
+        # deadline and raise a fabricated "cycle deadline exceeded" without ever
+        # contacting GitHub — which the monitor treats as a terminal UNKNOWN
+        # GITHUB_API_ERROR (PRRT_kwDOSJAM6s6OBcIY). Refresh it here, around the
+        # actual gh retry batch. The pre-merge recheck (``retry=False`` ->
+        # RetryPolicy.NEVER) is exempt from the deadline gate, so it is left
+        # untouched to preserve the merge critical section's shared budget.
+        ctx = github_retry_context.get()
+        if ctx is not None:
+            ctx.deadline = (
+                time.monotonic() + self._runner_config.github_transport_cycle_deadline_seconds
+            )
     status = await self._deps.gh.fetch_pr_status(
         repo=repo, pr_number=pr_number, base_behind_count=base_behind, retry=retry
     )
