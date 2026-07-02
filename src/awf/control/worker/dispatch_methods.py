@@ -851,6 +851,7 @@ async def _safely_resume_pr_monitor(
         )
     handoff_succeeded = False
     handoff_finalized = False
+    verify_start_pending = False
     try:
         handoff = await self._executor.resume_pr_monitor_handoff(workspace_id)
         if handoff is None:
@@ -878,6 +879,7 @@ async def _safely_resume_pr_monitor(
         self._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)
         monitor_owner_id = getattr(handoff, "run_kwargs", {}).get("monitor_owner_id")
         verify_start = getattr(self._executor, "verify_resume_monitor_start", None)
+        verify_start_pending = verify_start is not None
         if verify_start is not None:
             if monitor_owner_id is not None:
                 verify_ok = await verify_start(
@@ -886,6 +888,7 @@ async def _safely_resume_pr_monitor(
                 )
             else:
                 verify_ok = await verify_start(workspace_id)
+            verify_start_pending = False
         else:
             verify_ok = True
         if not verify_ok:
@@ -967,6 +970,7 @@ async def _safely_resume_pr_monitor(
             finalize_error_message: str | None = (
                 "Monitor resume cancelled after workspace left monitoring_pr."
             )
+            preserve_pending_for_retry = False
             if handoff_succeeded:
                 ws_status = (await self._load_workspace_statuses([workspace_id])).get(workspace_id)
                 if (
@@ -981,27 +985,40 @@ async def _safely_resume_pr_monitor(
             elif workspace_id in self._monitor_recovery_handoff_succeeded_workspace_ids:
                 # Handoff marker is set before the verify await; derive the terminal
                 # status instead of treating monitoring_pr as success.
-                (
-                    finalize_status,
-                    finalize_error_code,
-                    finalize_error_message,
-                ) = await _monitor_recovery_start_skipped_operation_status(
-                    self,
-                    workspace_id,
-                    after_successful_handoff=True,
-                )
-            finalized = await self._finish_monitor_recovery_operation_after_cancellation(
-                workspace_id,
-                operation_id=recovery_operation_id,
-                status=finalize_status,
-                error_code=finalize_error_code,
-                error_message=finalize_error_message,
-            )
-            if finalized:
+                if verify_start_pending:
+                    ws_status = (await self._load_workspace_statuses([workspace_id])).get(
+                        workspace_id
+                    )
+                    if ws_status == WorkspaceStatus.monitoring_pr.value:
+                        # Worker shutdown interrupted verify before start; leave the
+                        # recovery operation pending so the caller can release the claim
+                        # and retry instead of recording a terminal handoff failure.
+                        preserve_pending_for_retry = True
+                if not preserve_pending_for_retry:
+                    (
+                        finalize_status,
+                        finalize_error_code,
+                        finalize_error_message,
+                    ) = await _monitor_recovery_start_skipped_operation_status(
+                        self,
+                        workspace_id,
+                        after_successful_handoff=True,
+                    )
+            if preserve_pending_for_retry:
                 self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
-                self._monitor_recovery_operation_ids.pop(workspace_id, None)
             else:
-                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+                finalized = await self._finish_monitor_recovery_operation_after_cancellation(
+                    workspace_id,
+                    operation_id=recovery_operation_id,
+                    status=finalize_status,
+                    error_code=finalize_error_code,
+                    error_message=finalize_error_message,
+                )
+                if finalized:
+                    self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+                    self._monitor_recovery_operation_ids.pop(workspace_id, None)
+                else:
+                    self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
         raise
     except Exception as exc:
         if not handoff_succeeded:
