@@ -37,17 +37,20 @@ from tests.postgres import postgres_test_engine
 
 
 async def _pending_execution_task() -> None:
+    """Block until cancelled so dispatch-limit tests can simulate an in-flight task."""
     await asyncio.Event().wait()
 
 
 @pytest.fixture
 async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a Postgres-backed async session factory for worker tests."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
 
 @pytest.fixture
 def worker(session_factory: async_sessionmaker[AsyncSession], tmp_path: Path) -> ControlWorker:
+    """Build a ControlWorker wired to a real provisioner for dispatch helper tests."""
     git = GitManager(tmp_path / "awf-work")
     prov = Provisioner(
         session_factory=session_factory,
@@ -68,6 +71,7 @@ class _RecordingExecutor:
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Record execute calls for assertions."""
         self.calls.append(workspace_id)
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object | None:
@@ -90,6 +94,7 @@ class _RecordingExecutor:
 
 
 def _closed_connection_error() -> InterfaceError:
+    """Return a SQLAlchemy InterfaceError that mimics a closed DB connection."""
     return InterfaceError(
         "SELECT 1",
         {},
@@ -109,12 +114,15 @@ async def test_db_connection_closed_event_skips_stale_workspace(
         closed = False
 
         async def commit(self) -> None:
+            """Record that the session committed."""
             self.committed = True
 
         async def rollback(self) -> None:
+            """Fail if stale-event handling attempts a rollback."""
             raise AssertionError("stale event skip should not roll back")
 
         async def close(self) -> None:
+            """Record that the session closed."""
             self.closed = True
 
     class StaleWorkspaceRepository:
@@ -128,6 +136,7 @@ async def test_db_connection_closed_event_skips_stale_workspace(
             return SimpleNamespace(status=WorkspaceStatus.ready.value)
 
         async def add_event(self, *_args: object, **_kwargs: object) -> object:
+            """Fail if stale-event handling attempts to persist an event."""
             raise AssertionError("stale workspace should not receive an event")
 
     recording_session = RecordingSession()
@@ -158,6 +167,7 @@ async def test_db_connection_closed_event_skips_stale_workspace(
 async def test_dispatch_helpers_respect_limits_and_existing_tasks(
     worker: ControlWorker,
 ) -> None:
+    """Dispatch helpers must honor limits and skip workspaces with active tasks."""
     existing_task = asyncio.create_task(_pending_execution_task())
     try:
         worker._execution_tasks["existing"] = existing_task  # noqa: SLF001
@@ -188,6 +198,7 @@ async def test_dispatch_helpers_respect_limits_and_existing_tasks(
 def test_active_salvage_monitor_recovery_operation_ids_are_bounded(
     worker: ControlWorker,
 ) -> None:
+    """Remembered salvage recovery operation ids must stay within the configured cap."""
     limit = worker_recovery_cooldown._ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT  # noqa: SLF001
 
     for index in range(limit + 2):
@@ -207,6 +218,7 @@ def test_active_salvage_monitor_resume_cooldowns_are_bounded_and_expired_entries
     worker: ControlWorker,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Salvage resume cooldowns must cap size and drop expired entries on access."""
     current_time = 1_000.0
     monkeypatch.setattr("awf.control.worker.recovery_cooldown.monotonic", lambda: current_time)
     limit = worker_recovery_cooldown._ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT  # noqa: SLF001
@@ -248,11 +260,13 @@ async def test_safe_worker_paths_swallow_runtime_failures(
         async def provision_claimed(
             self, workspace_id: str, execution_claim_epoch: int | None = None
         ) -> None:
+            """Raise to exercise safe provision error isolation."""
             assert workspace_id == "ws_provision"
             raise RuntimeError("provision failed")
 
     class RaisingExecutor(_RecordingExecutor):
         async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+            """Raise to exercise safe execute error isolation."""
             assert workspace_id == "ws_execute"
             raise RuntimeError("execute failed")
 

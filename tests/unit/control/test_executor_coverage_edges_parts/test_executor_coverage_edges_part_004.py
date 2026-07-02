@@ -189,11 +189,13 @@ async def test_repair_agent_git_ownership_repairs_linked_mirror(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Pass the linked mirror path into worktree ownership repair."""
     mirror, worktree = _fake_linked_worktree(tmp_path)
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     captured: list[tuple[Path | None, Path]] = []
 
     def _repair(layout_mirror: Path | None, worktree_path: Path) -> None:
+        """Capture repair inputs for assertions."""
         captured.append((layout_mirror, worktree_path))
 
     monkeypatch.setattr(executor_git_ops, "repair_agent_writable_worktree", _repair)

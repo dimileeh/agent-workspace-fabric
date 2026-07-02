@@ -38,6 +38,7 @@ class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Skip deferred-claim recording when the caller passes a non-positive limit."""
         monitor_id = await _create_monitoring_pr(
             session_factory,
             origin_repo,
@@ -86,6 +87,7 @@ class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
         origin_repo: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Return False when monitor claim loss is followed by a missing workspace row."""
         monitor_id = await _create_monitoring_pr(
             session_factory,
             origin_repo,
@@ -101,6 +103,7 @@ class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
             *args: Any,
             **kwargs: Any,
         ) -> Any:
+            """Return the workspace once, then simulate a concurrent delete."""
             nonlocal get_calls
             get_calls += 1
             if get_calls == 1:
@@ -108,6 +111,7 @@ class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
             return None
 
         async def lose_monitor_claim(*args: Any, **kwargs: Any) -> bool:
+            """Simulate losing the monitor claim CAS."""
             return False
 
         monkeypatch.setattr(WorkspaceRepository, "get", get_once_then_missing)
@@ -136,6 +140,7 @@ class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Defer monitor recovery while another worker holds an unexpired execution claim."""
         execution_expires_at = datetime.now(UTC) + timedelta(minutes=10)
         monitor_id = await _create_monitoring_pr(
             session_factory,
@@ -266,6 +271,7 @@ class TestRunOnceMonitorRecoveryActiveExecutionClaimPart002:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Allow monitor recovery when this worker already owns the execution claim."""
         execution_expires_at = datetime.now(UTC) + timedelta(minutes=10)
         monitor_id = await _create_monitoring_pr(
             session_factory,
