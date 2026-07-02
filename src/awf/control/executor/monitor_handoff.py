@@ -63,6 +63,7 @@ from awf.node.companion_services import (
 )
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
+from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 
 _add_executor_pr_audit_event = _monitor_handoff_audit._add_executor_pr_audit_event
 _record_executor_pr_audit_event = _monitor_handoff_audit._record_executor_pr_audit_event
@@ -285,7 +286,14 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             compose_file_path=compose_file_path,
             error=exc,
         )
-        return None
+        if not await _compose_runtime_usable_after_restart_failure(compose_project):
+            return None
+        _log.warning(
+            "executor.resume_compose_up_failed_runtime_still_usable",
+            workspace_id=workspace_id,
+            compose_project_name=compose_project,
+            reason_code=exc.reason_code,
+        )
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
@@ -460,6 +468,25 @@ async def run_resumed_pr_monitor(
         **handoff.run_kwargs,
     )
     return True
+
+
+async def _inspect_compose_runtime(compose_project: str) -> RuntimeSnapshot:
+    """Inspect the persisted compose project; isolated for test monkeypatching."""
+    return await RuntimeInspector().inspect(compose_project)
+
+
+async def _compose_runtime_usable_after_restart_failure(compose_project: str) -> bool:
+    """Return whether monitor resume can proceed after a compose restart failure."""
+    try:
+        snapshot = await _inspect_compose_runtime(compose_project)
+    except Exception:
+        _log.exception(
+            "executor.resume_compose_runtime_inspect_failed",
+            compose_project_name=compose_project,
+        )
+        # Inspection failure is not proof the runtime is down.
+        return True
+    return snapshot.stack_state != "stopped"
 
 
 def _precheck_required_companion_env_secrets_for_resume(
