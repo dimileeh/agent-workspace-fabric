@@ -67,6 +67,24 @@ async def _should_apply_active_salvage_monitor_resume_cooldown(
     if recovery_operation_id not in self._active_salvage_monitor_recovery_operation_ids:
         return False
     if resume_succeeded:
+        try:
+            async with self._session_factory() as session:
+                ws = await WorkspaceRepository(session).get(workspace_id)
+                if ws is not None and ws.status == WorkspaceStatus.monitoring_pr.value:
+                    operation = await OperationRepository(session).get(recovery_operation_id)
+                    if (
+                        operation is not None
+                        and operation.workspace_id == workspace_id
+                        and operation.status == OperationStatus.succeeded.value
+                    ):
+                        # Handoff succeeded but the monitor loop never entered (post-handoff
+                        # start recheck bail); allow immediate reclaim instead of cooling down.
+                        return False
+        except Exception:
+            _log.exception(
+                "worker.active_salvage_monitor_resume_cooldown_eligibility_lookup_failed",
+                workspace_id=workspace_id,
+            )
         return True
     try:
         async with self._session_factory() as session:

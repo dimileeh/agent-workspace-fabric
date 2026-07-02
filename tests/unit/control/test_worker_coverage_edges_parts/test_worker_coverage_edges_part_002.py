@@ -286,6 +286,7 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
         resume_succeeded=False,
         recovery_operation_id="op-missing",
     )
+    worker._session_factory = lambda: (_ for _ in ()).throw(AssertionError("unused"))
     assert await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
         worker,
         "ws-1",
@@ -353,6 +354,22 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
                 recovery_operation_id="op-1",
             )
         )
+        assert (
+            not await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+                worker,
+                "ws-1",
+                resume_succeeded=True,
+                recovery_operation_id="op-1",
+            )
+        )
+        _Repo.workspace = SimpleNamespace(status=WorkspaceStatus.completed.value)
+        assert await worker_recovery_cooldown._should_apply_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+            worker,
+            "ws-1",
+            resume_succeeded=True,
+            recovery_operation_id="op-1",
+        )
+        _Repo.workspace = SimpleNamespace(status=WorkspaceStatus.monitoring_pr.value)
         _OpRepo.operation = SimpleNamespace(
             workspace_id="ws-1",
             status=OperationStatus.failed.value,

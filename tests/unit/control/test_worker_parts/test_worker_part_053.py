@@ -606,6 +606,114 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_start_rechec
 
 
 @pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_post_finalize_start_recheck_bails(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Post-finalize verify failure must not apply active-salvage monitor cooldown."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-post-finalize-start-recheck-bail",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="SEED",
+        )
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.running,
+            payload={"source": "worker_restart"},
+        )
+        operation_id = operation.id
+        await session.commit()
+
+    handoff = object()
+    verify_calls = 0
+    cooldown_recorded = False
+
+    class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for post-finalize monitor start recheck bail."""
+
+        async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
+            assert handoff_workspace_id == workspace_id
+            return handoff
+
+        async def verify_resume_monitor_start(self, handoff_workspace_id: str) -> bool:
+            """Test helper for verify resume monitor start."""
+            nonlocal verify_calls
+            assert handoff_workspace_id == workspace_id
+            verify_calls += 1
+            return verify_calls == 1
+
+        async def run_resumed_pr_monitor(
+            self,
+            handoff_workspace_id: str,
+            handoff_obj: object,
+        ) -> bool:
+            """Test helper for run resumed pr monitor."""
+            assert handoff_obj is handoff
+            assert handoff_workspace_id == workspace_id
+            if not await self.verify_resume_monitor_start(handoff_workspace_id):
+                return False
+            raise AssertionError("monitor run must not start when post-finalize recheck bails")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01, monitor_claim_lease_seconds=30.0),
+    )
+    worker._remember_active_salvage_monitor_recovery_operation_id(  # noqa: SLF001
+        operation_id
+    )
+
+    async def _record_cooldown(_record_workspace_id: str, **kwargs: object) -> None:
+        """Test helper for record cooldown."""
+        nonlocal cooldown_recorded
+        assert _record_workspace_id == workspace_id
+        assert kwargs["recovery_operation_id"] == operation_id
+        cooldown_recorded = True
+
+    worker._record_active_salvage_monitor_resume_cooldown = (  # type: ignore[method-assign]
+        _record_cooldown
+    )
+
+    async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
+        assert released_workspace_id == workspace_id
+
+    async def _prompt_release(released_workspace_id: str) -> None:
+        """Test helper for prompt release."""
+        assert released_workspace_id == workspace_id
+
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._release_terminal_runtime_promptly = _prompt_release  # type: ignore[method-assign]
+
+    await worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+        workspace_id,
+        recovery_operation_id=operation_id,
+    )
+
+    assert verify_calls == 2
+    assert cooldown_recorded is False
+    assert workspace_id not in worker._active_salvage_monitor_resume_cooldowns  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_safely_resume_claimed_pr_monitor_applies_cooldown_when_handoff_aborts_while_monitorable(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
