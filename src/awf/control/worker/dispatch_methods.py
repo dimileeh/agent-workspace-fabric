@@ -727,6 +727,8 @@ async def _monitor_recovery_handoff_failure_error(
 async def _monitor_recovery_start_skipped_operation_status(
     self: Any,
     workspace_id: str,
+    *,
+    after_successful_handoff: bool = False,
 ) -> tuple[OperationStatus, str | None, str | None]:
     """Derive remonitor terminal status when start recheck bails after handoff."""
     default_message = "Monitor resume skipped before monitor loop started."
@@ -741,6 +743,8 @@ async def _monitor_recovery_start_skipped_operation_status(
                         default_message,
                     )
                 if ws.status == WorkspaceStatus.completed.value:
+                    return OperationStatus.succeeded, None, None
+                if after_successful_handoff and ws.status == WorkspaceStatus.failed.value:
                     return OperationStatus.succeeded, None, None
     except Exception:
         _log.exception(
@@ -867,6 +871,7 @@ async def _safely_resume_pr_monitor(
             ) = await _monitor_recovery_start_skipped_operation_status(
                 self,
                 workspace_id,
+                after_successful_handoff=True,
             )
             finalized = await self._finish_monitor_recovery_operation(
                 workspace_id,

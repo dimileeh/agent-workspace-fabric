@@ -130,6 +130,127 @@ async def test_monitor_recovery_terminal_finalize_status_preserves_handoff_failu
 
 
 @pytest.mark.unit
+async def test_monitor_recovery_start_skipped_operation_status_preserves_success_after_handoff_failed_race(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-pre-finalize-failed-race",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="SEED")
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    (
+        status,
+        error_code,
+        error_message,
+    ) = await worker_dispatch_methods._monitor_recovery_start_skipped_operation_status(  # noqa: SLF001
+        worker,
+        workspace_id,
+        after_successful_handoff=True,
+    )
+    assert status == OperationStatus.succeeded
+    assert error_code is None
+    assert error_message is None
+
+
+@pytest.mark.unit
+async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_pre_finalize_start_recheck_bails_after_failed_race(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Pre-finalize verify failure after handoff must not downgrade on terminal failed races."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-pre-finalize-failed-race",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="SEED")
+        await session.commit()
+
+    handoff = object()
+    finish_calls: list[dict[str, object]] = []
+    monitor_ran = False
+
+    class HandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object:
+            assert handoff_workspace_id == workspace_id
+            return handoff
+
+        async def verify_resume_monitor_start(self, handoff_workspace_id: str) -> bool:
+            assert handoff_workspace_id == workspace_id
+            return False
+
+        async def run_resumed_pr_monitor(
+            self,
+            handoff_workspace_id: str,
+            handoff_obj: object,
+        ) -> None:
+            nonlocal monitor_ran
+            del handoff_obj
+            assert handoff_workspace_id == workspace_id
+            monitor_ran = True
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _finish_monitor_recovery_operation(
+        finish_workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finish_calls.append({"workspace_id": finish_workspace_id, **kwargs})
+        return True
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        workspace_id,
+        recovery_operation_id="op_pre_finalize_failed_race",
+    )
+
+    assert result is True
+    assert monitor_ran is False
+    assert len(finish_calls) == 1
+    assert finish_calls[0]["operation_id"] == "op_pre_finalize_failed_race"
+    assert finish_calls[0]["status"] == OperationStatus.succeeded
+
+
+@pytest.mark.unit
 async def test_safely_resume_pr_monitor_fails_operation_when_start_recheck_bails(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
