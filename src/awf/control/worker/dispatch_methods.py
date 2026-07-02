@@ -554,6 +554,7 @@ def _update_execution_slot_saturation(self: Any, *, dispatched: int) -> None:
 
 
 async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
+    """Run a claimed provisioning attempt with claim release and heartbeat fencing."""
     # The execution claim was already stamped on the row by the earlier
     # scheduling transaction, so *every* exit from here must release it —
     # including a cancel landing on the initial epoch read below, before the
@@ -657,6 +658,7 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
 
 
 async def _safely_execute(self: Any, workspace_id: str) -> None:
+    """Execute a claimed workspace while isolating unexpected executor failures."""
     if self._executor is None:
         return
     try:

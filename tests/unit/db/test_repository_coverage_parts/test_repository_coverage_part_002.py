@@ -273,6 +273,7 @@ async def test_operation_active_matching_payload_skips_non_dict_payloads(
 async def test_operation_active_matching_payload_prefers_newest_when_requested(
     session: AsyncSession,
 ) -> None:
+    """Prefer the newest active operation when ``prefer_newest`` is enabled."""
     workspace = await _workspace(session, title="operation payload newest preference")
     repo = OperationRepository(session)
     older = await repo.create(

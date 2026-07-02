@@ -546,6 +546,11 @@ class OperationRepository:
         limit: int = 100,
         prefer_newest: bool = False,
     ) -> Operation | None:
+        """Return the active operation whose payload matches ``payload_identity``.
+
+        When ``prefer_newest`` is true, scan in descending creation order so a later
+        reclaim reuses the freshest matching recovery row instead of a stale one.
+        """
         operation_type_value = (
             operation_type.value if isinstance(operation_type, OperationType) else operation_type
         )
