@@ -1256,6 +1256,84 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
 
 
 @pytest.mark.unit
+async def test_safely_resume_claimed_pr_monitor_preserves_succeeded_finalize_after_handoff_failed_race(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Pending finalize retry after successful handoff must not downgrade on failed races."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-handoff-success-finalize-race",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="SEED")
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    claim_released = False
+    finalize_calls: list[dict[str, object]] = []
+
+    async def _resume(
+        resume_workspace_id: str,
+        *,
+        recovery_operation_id: str | None = None,
+    ) -> bool:
+        assert resume_workspace_id == workspace_id
+        assert recovery_operation_id == "op_handoff_success_finalize_race"
+        worker._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)  # noqa: SLF001
+        return False
+
+    async def _release_monitor_claim(released_workspace_id: str) -> None:
+        nonlocal claim_released
+        assert released_workspace_id == workspace_id
+        claim_released = True
+
+    async def _finish_monitor_recovery_operation(
+        finish_workspace_id: str,
+        **kwargs: object,
+    ) -> bool:
+        finalize_calls.append({"workspace_id": finish_workspace_id, **kwargs})
+        return True
+
+    worker._monitor_recovery_operation_ids[workspace_id] = "op_handoff_success_finalize_race"  # noqa: SLF001
+    worker._safely_resume_pr_monitor = _resume  # type: ignore[method-assign]
+    worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    await worker._safely_resume_claimed_pr_monitor(  # noqa: SLF001
+        workspace_id,
+        recovery_operation_id="op_handoff_success_finalize_race",
+    )
+
+    assert claim_released is True
+    assert workspace_id not in worker._monitor_recovery_operation_ids  # noqa: SLF001
+    assert workspace_id not in worker._monitor_recovery_handoff_succeeded_workspace_ids  # noqa: SLF001
+    assert len(finalize_calls) == 1
+    assert finalize_calls[0]["status"] == OperationStatus.succeeded
+    assert finalize_calls[0]["operation_id"] == "op_handoff_success_finalize_race"
+    assert finalize_calls[0]["error_code"] is None
+    assert finalize_calls[0]["error_message"] is None
+
+
+@pytest.mark.unit
 async def test_safely_resume_claimed_pr_monitor_retains_handle_when_terminal_finalize_fails(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

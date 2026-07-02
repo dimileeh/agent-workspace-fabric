@@ -1104,6 +1104,8 @@ async def _workspace_is_monitoring_pr(self: Any, workspace_id: str) -> bool:
 async def _monitor_recovery_terminal_finalize_status(
     self: Any,
     workspace_id: str,
+    *,
+    after_successful_handoff: bool = False,
 ) -> tuple[OperationStatus, str | None, str | None]:
     """Best-effort remonitor terminal status when recovery cannot retry."""
     default_message = (
@@ -1125,6 +1127,8 @@ async def _monitor_recovery_terminal_finalize_status(
                     "Monitor recovery abandoned after workspace cancellation.",
                 )
             if ws.status == WorkspaceStatus.completed.value:
+                return OperationStatus.succeeded, None, None
+            if after_successful_handoff and ws.status == WorkspaceStatus.failed.value:
                 return OperationStatus.succeeded, None, None
             if ws.status == WorkspaceStatus.failed.value:
                 error_code, error_message = await _monitor_recovery_handoff_failure_error(
@@ -1206,12 +1210,19 @@ async def _safely_resume_claimed_pr_monitor(
             still_monitoring_for_retry = False
             if recovery_finalize_pending:
                 pending_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)
+                after_successful_handoff = resume_succeeded or (
+                    workspace_id in self._monitor_recovery_handoff_succeeded_workspace_ids
+                )
                 try:
                     (
                         terminal_status,
                         terminal_error_code,
                         terminal_error_message,
-                    ) = await _monitor_recovery_terminal_finalize_status(self, workspace_id)
+                    ) = await _monitor_recovery_terminal_finalize_status(
+                        self,
+                        workspace_id,
+                        after_successful_handoff=after_successful_handoff,
+                    )
                 except _MonitorRecoveryStillMonitoringError:
                     still_monitoring_for_retry = True
                 else:
@@ -1226,6 +1237,7 @@ async def _safely_resume_claimed_pr_monitor(
             await self._release_monitoring_pr_claim(workspace_id)
             if recovery_finalized and not still_monitoring_for_retry:
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
                 if recovery_operation_id is not None:
                     self._forget_active_salvage_monitor_recovery_operation_id(recovery_operation_id)
                 # Promptly release the terminal runtime when the monitor ended terminal

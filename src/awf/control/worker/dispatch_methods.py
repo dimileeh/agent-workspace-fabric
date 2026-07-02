@@ -864,6 +864,7 @@ async def _safely_resume_pr_monitor(
 
         verify_start = getattr(self._executor, "verify_resume_monitor_start", None)
         if verify_start is not None and not await verify_start(workspace_id):
+            self._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)
             (
                 status,
                 error_code,
@@ -881,16 +882,19 @@ async def _safely_resume_pr_monitor(
                 error_message=error_message,
             )
             if finalized:
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
             return status == OperationStatus.succeeded
 
         handoff_succeeded = True
+        self._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)
         handoff_finalized = await self._finish_monitor_recovery_operation(
             workspace_id,
             operation_id=recovery_operation_id,
             status=OperationStatus.succeeded,
         )
         if handoff_finalized:
+            self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
             self._monitor_recovery_operation_ids.pop(workspace_id, None)
 
         if not handoff_finalized:
@@ -900,6 +904,7 @@ async def _safely_resume_pr_monitor(
                 status=OperationStatus.succeeded,
             )
             if handoff_finalized:
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
 
         if not handoff_finalized:
@@ -954,6 +959,7 @@ async def _safely_resume_pr_monitor(
                 error_message=finalize_error_message,
             )
             if finalized:
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
         raise
     except Exception as exc:

@@ -139,6 +139,9 @@ class ControlWorker(WorkerDelegatesMixin):
         self._execution_claim_epochs: dict[str, int] = {}
         self._consecutive_saturated_cycles: int = 0
         self._monitor_recovery_operation_ids: dict[str, str] = {}
+        # Workspaces whose two-phase monitor handoff succeeded but the remonitor
+        # operation finalize write is still pending (see ``_safely_resume_pr_monitor``).
+        self._monitor_recovery_handoff_succeeded_workspace_ids: set[str] = set()
         # Detached monitor-claim refresh loops kept alive while a remonitor
         # recovery operation is still pending DB finalization.
         self._monitor_claim_heartbeat_tasks: dict[str, asyncio.Task[None]] = {}
