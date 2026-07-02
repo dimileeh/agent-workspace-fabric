@@ -37,7 +37,11 @@ async def fetch_pull_request_adoption_metadata(
     pr_number: int,
 ) -> PullRequestAdoptionMetadata:
     """Fetch one-shot metadata for adopting an existing GitHub PR."""
-    from awf.common.github_client import GitHubClientError, PullRequestMetadataError
+    from awf.common.github_client import (
+        GITHUB_API_ERROR,
+        GitHubClientError,
+        PullRequestMetadataError,
+    )
 
     # NEVER-retry: this one-shot read classifies its own failure into a stable
     # reason code (not-found vs fetch-failed). The transport retry would consume the
@@ -60,11 +64,15 @@ async def fetch_pull_request_adoption_metadata(
             retry_policy=RetryPolicy.NEVER,
         )
     except GitHubClientError as exc:
-        reason = (
-            "PR_NOT_FOUND"
-            if _looks_like_missing_pr_error(exc.stderr)
-            else "PR_METADATA_FETCH_FAILED"
-        )
+        if _looks_like_missing_pr_error(exc.stderr):
+            reason = "PR_NOT_FOUND"
+        elif exc.reason_code != GITHUB_API_ERROR:
+            # Preserve non-default transport provenance (e.g. COMMAND_TIMEOUT) so an
+            # adoption/release-sync metadata lookup that times out keeps its specific
+            # reason code instead of collapsing to the generic fetch-failed mapping.
+            reason = exc.reason_code
+        else:
+            reason = "PR_METADATA_FETCH_FAILED"
         raise PullRequestMetadataError(
             reason_code=reason,
             message=(exc.stderr or f"gh pr view exited {exc.returncode}").strip(),

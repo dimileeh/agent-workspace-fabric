@@ -16,7 +16,7 @@ import json
 import pytest
 import structlog
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import COMMAND_TIMEOUT_REASON, FakeCommandRunner
 from awf.common.github_client import (
     BranchOpenPullRequestResolver,
     PullRequestMetadataError,
@@ -372,6 +372,28 @@ class TestFetchPullRequestAdoptionMetadata:
 
         assert excinfo.value.reason_code == "PR_METADATA_FETCH_FAILED"
         assert excinfo.value.detail["returncode"] == 1
+
+    @pytest.mark.unit
+    async def test_metadata_fetch_timeout_preserves_timeout_reason(self) -> None:
+        # A timed-out gh pr view carries the transport's COMMAND_TIMEOUT provenance;
+        # the adoption wrapper must thread that non-default reason code through rather
+        # than collapsing it to the generic PR_METADATA_FETCH_FAILED mapping.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=124,
+            stderr="gh pr view timed out",
+            reason_code=COMMAND_TIMEOUT_REASON,
+        )
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await fetch_pull_request_adoption_metadata(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+
+        assert excinfo.value.reason_code == COMMAND_TIMEOUT_REASON
+        assert excinfo.value.detail["returncode"] == 124
 
     @pytest.mark.unit
     async def test_invalid_json_raises_invalid_metadata_reason(self) -> None:
