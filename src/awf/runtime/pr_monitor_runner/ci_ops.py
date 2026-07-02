@@ -193,6 +193,7 @@ async def _salvage_ci_repair_dirty_output(
 ) -> dict[str, Any]:
     """Capture dirty CI-repair output before rollback or terminal failure."""
     from awf.service.repair_salvage import (
+        REPAIR_SALVAGE_UNEXPECTED,
         RepairSalvageError,
         as_repair_salvage_details,
         capture_ci_repair_salvage,
@@ -220,6 +221,21 @@ async def _salvage_ci_repair_dirty_output(
         return {
             "salvage_error": {
                 "reason_code": exc.reason_code,
+                "message": str(exc),
+            },
+        }
+    except Exception as exc:
+        _log.warning(
+            "monitor.ci_repair_salvage_failed",
+            workspace_id=workspace_id,
+            reason_code=REPAIR_SALVAGE_UNEXPECTED,
+            patch_path=None,
+            patch_sha256=None,
+            error_type=exc.__class__.__name__,
+        )
+        return {
+            "salvage_error": {
+                "reason_code": REPAIR_SALVAGE_UNEXPECTED,
                 "message": str(exc),
             },
         }

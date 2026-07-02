@@ -1894,3 +1894,157 @@ async def test_ci_fix_commit_sink_provider_recovery_rollback_skipped_when_post_a
         event == "monitor.ci_fix_provider_recovery_rollback_skipped_no_anchor"
         for event, _ in warnings
     ), warnings
+
+
+@pytest.mark.unit
+async def test_salvage_ci_repair_dirty_output_unexpected_exception_returns_salvage_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6N6A4y — unexpected salvage failures are contained."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from awf.service.repair_salvage import REPAIR_SALVAGE_UNEXPECTED
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    artifacts_root = tmp_path / "artifacts"
+    self = SimpleNamespace(_work_dir=work_dir, _artifacts_root=artifacts_root)
+
+    def _raising_capture(**kwargs: object) -> object:
+        del kwargs
+        raise subprocess.TimeoutExpired(cmd=["git", "diff"], timeout=30.0)
+
+    monkeypatch.setattr(
+        "awf.service.repair_salvage.capture_ci_repair_salvage",
+        _raising_capture,
+    )
+
+    result = await pr_ci_ops._salvage_ci_repair_dirty_output(
+        self,
+        workspace_id="ws-123",
+        operation_start_head="abc1234567890def",
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    assert result == {
+        "salvage_error": {
+            "reason_code": REPAIR_SALVAGE_UNEXPECTED,
+            "message": "Command '['git', 'diff']' timed out after 30.0 seconds",
+        },
+    }
+
+
+@pytest.mark.unit
+async def test_ci_fix_provider_recovery_rollback_runs_when_salvage_raises_unexpectedly(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6N6A4y — salvage infra failures must not skip rollback."""
+    import subprocess
+    from unittest.mock import AsyncMock
+
+    from awf.service.repair_salvage import REPAIR_SALVAGE_UNEXPECTED
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr="MODEL_CAPACITY_EXHAUSTED",
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    operation_start_head = "abc1234567890def"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # post-raise HEAD
+    cmd.queue_result(returncode=0, stdout="")  # rollback reset succeeds
+    cmd.queue_result(returncode=0, stdout="")  # cleanup restore
+    cmd.queue_result(returncode=0, stdout="")  # cleanup clean
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+    )
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    def _raising_capture(**kwargs: object) -> object:
+        del kwargs
+        raise subprocess.TimeoutExpired(cmd=["git", "diff"], timeout=30.0)
+
+    monkeypatch.setattr(
+        "awf.service.repair_salvage.capture_ci_repair_salvage",
+        _raising_capture,
+    )
+
+    raised_exc = ProviderRecoveryRetryError(
+        "provider recovery raised inside the CI fix commit sink"
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=raised_exc))
+
+    warnings: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.ci_ops._log.warning",
+        lambda event, **fields: warnings.append((event, fields)),
+    )
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    assert any(
+        event == "monitor.ci_repair_salvage_failed"
+        and fields.get("reason_code") == REPAIR_SALVAGE_UNEXPECTED
+        for event, fields in warnings
+    ), warnings
+    assert any(
+        event == "monitor.ci_repair_salvage_before_provider_recovery_failed"
+        and fields.get("reason_code") == REPAIR_SALVAGE_UNEXPECTED
+        for event, fields in warnings
+    ), warnings
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        "reset" in call and "--hard" in call and operation_start_head in call
+        for call in joined_calls
+    ), joined_calls
