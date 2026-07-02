@@ -892,33 +892,3 @@ class TestReleasePrText:
         assert "development" in title and "main" in title
         assert "development" in body and "main" in body
         assert "auto-merge disabled" in body
-
-
-@pytest.mark.unit
-def test_release_pr_create_pure_helpers() -> None:
-    from awf.runtime.release_pr_sync import (
-        _is_duplicate_pull_request_error,
-        _release_pr_create_failure_detail,
-        _release_pr_create_retry_wait_seconds,
-    )
-
-    dup = GitHubClientError(
-        operation="gh pr create",
-        returncode=1,
-        stderr='a pull request for branch "s" into branch "t" already exists',
-    )
-    assert _is_duplicate_pull_request_error(dup) is True
-    assert (
-        _is_duplicate_pull_request_error(
-            GitHubClientError(operation="gh pr create", returncode=1, stderr="no commits between")
-        )
-        is False
-    )
-    assert _release_pr_create_retry_wait_seconds(1) == 5.0
-    assert _release_pr_create_retry_wait_seconds(2) == 10.0
-    assert _release_pr_create_retry_wait_seconds(20) == 30.0  # capped
-    detail = _release_pr_create_failure_detail(dup, attempt=2, transient=False, duplicate=True)
-    assert detail["operation"] == "gh pr create"
-    assert detail["returncode"] == 1
-    assert detail["attempt"] == 2
-    assert detail["duplicate"] is True

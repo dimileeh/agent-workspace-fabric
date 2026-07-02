@@ -49,8 +49,6 @@ NO_CHANGES_REASON_CODE = "NO_CHANGES_TO_SYNC"
 # ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` and ``PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY``.
 RELEASE_SYNC_FORGE_NOT_SUPPORTED_REASON_CODE = "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
 _RELEASE_PR_CREATE_TRANSIENT_MAX_RETRIES = 3
-_RELEASE_PR_CREATE_TRANSIENT_INITIAL_BACKOFF_SECONDS = 5.0
-_RELEASE_PR_CREATE_TRANSIENT_MAX_BACKOFF_SECONDS = 30.0
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -175,43 +173,6 @@ async def count_commits_ahead(
             message=f"git rev-list --count returned non-numeric output: {text!r}",
             detail={"source_branch": source_branch, "target_branch": target_branch},
         ) from exc
-
-
-def _is_duplicate_pull_request_error(exc: GitHubClientError) -> bool:
-    """True when ``gh pr create`` failed because the PR already exists.
-
-    ``gh`` exits 1 with stderr like ``a pull request for branch "X" into
-    branch "Y" already exists`` when a concurrent run or a human opened the
-    source→target PR first. Only this signal is treated as a recoverable
-    TOCTOU race; auth/network/branch-protection failures must propagate.
-    """
-
-    return exc.returncode == 1 and "already exists" in exc.stderr.lower()
-
-
-def _release_pr_create_retry_wait_seconds(attempt: int) -> float:
-    wait_seconds = min(
-        _RELEASE_PR_CREATE_TRANSIENT_INITIAL_BACKOFF_SECONDS * (2 ** max(0, attempt - 1)),
-        _RELEASE_PR_CREATE_TRANSIENT_MAX_BACKOFF_SECONDS,
-    )
-    return float(wait_seconds)
-
-
-def _release_pr_create_failure_detail(
-    exc: GitHubClientError,
-    *,
-    attempt: int,
-    transient: bool,
-    duplicate: bool,
-) -> dict[str, object]:
-    return {
-        "operation": exc.operation,
-        "returncode": exc.returncode,
-        "attempt": attempt,
-        "transient": transient,
-        "duplicate": duplicate,
-        "error_message": exc.stderr.strip(),
-    }
 
 
 async def _find_open_same_repo_pr_number(
