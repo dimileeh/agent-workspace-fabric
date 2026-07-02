@@ -98,6 +98,17 @@ def _monitor_recovery_handoff_failure_message(
     return default_message
 
 
+def _monitor_recovery_handoff_failure_error_code(event: WorkspaceEvent) -> str:
+    """Return the actionable error code persisted for a handoff failure event."""
+    event_reason_code = event.reason_code
+    assert event_reason_code is not None
+    payload = event.payload or {}
+    payload_reason_code = payload.get("reason_code")
+    if isinstance(payload_reason_code, str) and payload_reason_code.strip():
+        return payload_reason_code.strip()
+    return event_reason_code
+
+
 def _draining_execution_task_count(self: Any) -> int:
     """Count in-flight monitor draining tasks tracked for slot-budget exclusion."""
     return sum(
@@ -713,7 +724,7 @@ async def _monitor_recovery_handoff_failure_error(
                     workspace=ws,
                     default_message=default_message,
                 )
-                return reason_code, message
+                return _monitor_recovery_handoff_failure_error_code(event), message
             if ws.status == WorkspaceStatus.failed.value and ws.failure_message:
                 return default_code, ws.failure_message[:2000]
     except Exception:

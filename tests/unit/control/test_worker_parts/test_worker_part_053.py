@@ -1657,6 +1657,79 @@ async def test_monitor_recovery_handoff_failure_error_uses_event_message_not_sta
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("event_reason_code", "payload_reason_code"),
+    [
+        ("MONITOR_RECOVERY_COMPOSE_FAILED", "DOCKER_UNAVAILABLE"),
+        ("MONITOR_RECOVERY_PRECHECK_FAILED", "COMPANION_ENV_SECRET_SOURCE_MISSING"),
+    ],
+)
+async def test_monitor_recovery_handoff_failure_error_prefers_payload_reason_code(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_reason_code: str,
+    payload_reason_code: str,
+) -> None:
+    """Concrete compose/precheck failure codes must surface on the remonitor op."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-handoff-payload-reason",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.add_event(
+            ws,
+            event_type="workspace.monitor_runtime_restart_failed",
+            reason_code=event_reason_code,
+            payload={
+                "reason_code": payload_reason_code,
+                "operation": "up",
+                "stderr": "compose handoff failed",
+            },
+        )
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    error_code, _ = await worker_dispatch_methods._monitor_recovery_handoff_failure_error(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert error_code == payload_reason_code
+
+
+@pytest.mark.unit
+def test_monitor_recovery_handoff_failure_error_code_prefers_payload() -> None:
+    event = SimpleNamespace(
+        reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+        payload={"reason_code": "DOCKER_UNAVAILABLE"},
+    )
+    assert (
+        worker_dispatch_methods._monitor_recovery_handoff_failure_error_code(event)  # noqa: SLF001
+        == "DOCKER_UNAVAILABLE"
+    )
+
+
+@pytest.mark.unit
+def test_monitor_recovery_handoff_failure_error_code_falls_back_to_event_reason() -> None:
+    event = SimpleNamespace(
+        reason_code="MONITOR_RECOVERY_METADATA_MISSING",
+        payload={},
+    )
+    assert (
+        worker_dispatch_methods._monitor_recovery_handoff_failure_error_code(event)  # noqa: SLF001
+        == "MONITOR_RECOVERY_METADATA_MISSING"
+    )
+
+
+@pytest.mark.unit
 def test_monitor_recovery_handoff_failure_message_prefers_payload_message() -> None:
     event = SimpleNamespace(payload={"message": "  compose handoff rejected  "})
     workspace = SimpleNamespace(
