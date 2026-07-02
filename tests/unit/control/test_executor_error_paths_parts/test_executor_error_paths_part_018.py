@@ -73,6 +73,44 @@ class _ExplodingSetupValidation:
         return ValidationResult()
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stack_state", "expected"),
+    [
+        ("running", True),
+        ("stopped", False),
+        ("unavailable", False),
+        ("unknown", False),
+    ],
+)
+async def test_compose_runtime_usable_after_restart_failure_requires_running_stack(
+    monkeypatch: pytest.MonkeyPatch,
+    stack_state: str,
+    expected: bool,
+) -> None:
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        return monitor_handoff_module.RuntimeSnapshot(stack_state=stack_state)
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert (
+        await monitor_handoff_module._compose_runtime_usable_after_restart_failure("awf_x")
+        is expected
+    )
+
+
+@pytest.mark.unit
+async def test_compose_runtime_usable_after_restart_failure_rejects_inspection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        raise RuntimeError("docker inspect unavailable")
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure("awf_x")
+
+
 class TestExecutorMonitorHandoffSetupSplit:
     @pytest.mark.unit
     async def test_handoff_setup_marks_profile_command_failure_with_redacted_command(

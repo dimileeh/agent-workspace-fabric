@@ -493,9 +493,8 @@ async def _compose_runtime_usable_after_restart_failure(compose_project: str) ->
             "executor.resume_compose_runtime_inspect_failed",
             compose_project_name=compose_project,
         )
-        # Inspection failure is not proof the runtime is down.
-        return True
-    return snapshot.stack_state != "stopped"
+        return False
+    return snapshot.stack_state == "running"
 
 
 def _precheck_required_companion_env_secrets_for_resume(
