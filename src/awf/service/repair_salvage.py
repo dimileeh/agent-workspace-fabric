@@ -194,7 +194,10 @@ def _salvage_exclude_pathspecs() -> list[str]:
     excludes = [f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**"]
     for root in AWF_AGENT_RUNTIME_IGNORED_ROOTS:
         normalized = root.rstrip("/")
-        excludes.append(f":(exclude){normalized}")
+        # Directory-only: mirror ``is_under_agent_runtime_root`` — suppress the
+        # ignored root directory and descendants, not a regular file spelled
+        # exactly ``.claude/agent-memory`` (no trailing slash).
+        excludes.append(f":(exclude){normalized}/")
         excludes.append(f":(exclude){normalized}/**")
     return excludes
 

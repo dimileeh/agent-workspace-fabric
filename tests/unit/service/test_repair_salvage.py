@@ -108,6 +108,34 @@ def test_capture_untracked_files(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_capture_includes_tracked_file_named_exactly_agent_memory(tmp_path: Path) -> None:
+    """A tracked file spelled exactly ``.claude/agent-memory`` must be salvageable."""
+    _, base_commit = _seed_worktree(tmp_path, "ws_exact_memory_file")
+    worktree = tmp_path / "git" / "worktrees" / "ws_exact_memory_file"
+    claude_dir = worktree / ".claude"
+    claude_dir.mkdir(parents=True)
+    agent_memory_file = claude_dir / "agent-memory"
+    agent_memory_file.write_text("tracked knowledge\n", encoding="utf-8")
+    _git(["add", ".claude/agent-memory"], worktree)
+    _git(["commit", "-q", "-m", "add agent-memory file"], worktree)
+    base_commit = _git(["rev-parse", "HEAD"], worktree)
+    agent_memory_file.write_text("modified knowledge\n", encoding="utf-8")
+
+    capture = capture_ci_repair_salvage(
+        work_dir=tmp_path,
+        artifacts_root=tmp_path / "artifacts",
+        workspace_id="ws_exact_memory_file",
+        operation_start_head=base_commit,
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    assert capture.affected_paths == [".claude/agent-memory"]
+    assert "modified knowledge" in capture.patch_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
 def test_capture_excludes_agent_runtime_memory_paths(tmp_path: Path) -> None:
     _, base_commit = _seed_worktree(tmp_path, "ws_runtime")
     worktree = tmp_path / "git" / "worktrees" / "ws_runtime"
