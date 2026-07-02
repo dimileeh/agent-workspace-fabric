@@ -186,7 +186,7 @@ async def _salvage_ci_repair_dirty_output(
     self: Any,
     *,
     workspace_id: str,
-    operation_start_head: str,
+    operation_start_head: str | None,
     operation_id: str | None,
     operation_type: str,
     phase: str,
