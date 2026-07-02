@@ -940,10 +940,7 @@ async def _safely_resume_pr_monitor(
             finalize_error_message: str | None = (
                 "Monitor resume cancelled after workspace left monitoring_pr."
             )
-            if (
-                handoff_succeeded
-                or workspace_id in self._monitor_recovery_handoff_succeeded_workspace_ids
-            ):
+            if handoff_succeeded:
                 ws_status = (await self._load_workspace_statuses([workspace_id])).get(workspace_id)
                 if (
                     ws_status is None
@@ -954,6 +951,18 @@ async def _safely_resume_pr_monitor(
                     finalize_status = OperationStatus.succeeded
                     finalize_error_code = None
                     finalize_error_message = None
+            elif workspace_id in self._monitor_recovery_handoff_succeeded_workspace_ids:
+                # Verify-start skip adds the handoff marker before finalize; derive
+                # the terminal status instead of treating monitoring_pr as success.
+                (
+                    finalize_status,
+                    finalize_error_code,
+                    finalize_error_message,
+                ) = await _monitor_recovery_start_skipped_operation_status(
+                    self,
+                    workspace_id,
+                    after_successful_handoff=True,
+                )
             finalized = await self._finish_monitor_recovery_operation_after_cancellation(
                 workspace_id,
                 operation_id=recovery_operation_id,
