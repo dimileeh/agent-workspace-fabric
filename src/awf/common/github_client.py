@@ -1285,7 +1285,15 @@ class GitHubClient:
                     ".mergeCommit.oid // empty",
                 ],
                 operation="gh pr view merge commit",
-                retry_policy=RetryPolicy.READ,
+                # NEVER-retry: ``merge_pr`` runs inside the monitor's serialized
+                # merge critical section, and this post-merge SHA read is best-effort
+                # (a failure returns "" and the caller falls back to the head SHA via
+                # ``_merge_completion_marker``). A ``READ`` policy would sleep+retry a
+                # transient blip *while holding the merge lock*, contradicting the
+                # fail-fast ``retry=False`` contract other forge reads honor under the
+                # same lock (merge_loop.py pre-merge recheck). One attempt, then fall
+                # back — the merge already succeeded, so the SHA is metadata only.
+                retry_policy=RetryPolicy.NEVER,
             )
         except GitHubClientError:
             return ""

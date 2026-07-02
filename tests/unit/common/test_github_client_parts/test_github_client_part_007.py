@@ -164,6 +164,30 @@ class TestMutations:
         assert sha == ""
 
     @pytest.mark.unit
+    async def test_merge_pr_sha_fetch_does_not_retry_transient_under_lock(self) -> None:
+        """The post-merge SHA read is fail-fast (NEVER), never retried.
+
+        ``merge_pr`` runs inside the monitor's serialized merge critical section,
+        so a transient blip on the best-effort SHA fetch must raise on the first
+        attempt (returning "") rather than sleep+retry while holding the merge
+        lock. A ``READ`` policy would issue further attempts on this transient
+        error; ``NEVER`` issues exactly one.
+        """
+        sleeps: list[float] = []
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0)  # merge ok
+        fake.queue_result(
+            returncode=1, stderr="http 503 service unavailable"
+        )  # transient sha fetch — would be retried under READ
+        client = GitHubClient(fake, sleep=lambda seconds: sleeps.append(seconds))
+        sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
+        assert sha == ""
+        # merge + exactly one SHA-fetch attempt: no retry storm under the lock.
+        sha_fetch_calls = [call for call in fake.calls if call.args[:3] == ["gh", "pr", "view"]]
+        assert len(sha_fetch_calls) == 1
+        assert sleeps == []
+
+    @pytest.mark.unit
     async def test_fetch_repo_merge_methods_reads_repo_flags(self) -> None:
         """Repository merge method discovery follows the GitHub repo flags."""
         fake = FakeCommandRunner()
