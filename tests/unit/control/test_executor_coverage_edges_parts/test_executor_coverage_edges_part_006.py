@@ -862,5 +862,17 @@ async def test_workspace_executor_delegates_monitor_handoff_helpers(
         _verify_start,
     )
 
+    async def _run_resumed(self: object, *, workspace_id: str, handoff: object) -> bool:
+        assert workspace_id == "ws_monitor"
+        assert handoff is expected_handoff
+        return True
+
+    expected_handoff = handoff
+    monkeypatch.setattr(
+        "awf.control.executor.base._monitor_handoff.run_resumed_pr_monitor",
+        _run_resumed,
+    )
+
     assert await executor.resume_pr_monitor_handoff("ws_monitor") is handoff
     assert await executor.verify_resume_monitor_start("ws_monitor") is True
+    assert await executor.run_resumed_pr_monitor("ws_monitor", handoff) is True

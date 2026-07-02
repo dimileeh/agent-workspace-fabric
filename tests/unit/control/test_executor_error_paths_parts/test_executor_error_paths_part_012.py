@@ -331,3 +331,73 @@ def test_atomic_write_text_removes_temporary_file_when_replace_fails(
 
     assert target.read_text(encoding="utf-8") == "old"
     assert list(tmp_path.glob(".compose.yml.*.tmp")) == []
+
+
+@pytest.mark.unit
+async def test_run_resumed_pr_monitor_skips_monitor_loop_when_start_recheck_bails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor_ran = False
+
+    class _Monitor:
+        async def run(self, **_kwargs: object) -> None:
+            nonlocal monitor_ran
+            monitor_ran = True
+
+    async def _verify_start(_self: object, workspace_id: str) -> bool:
+        assert workspace_id == "ws_monitor"
+        return False
+
+    monkeypatch.setattr(executor_monitor_handoff, "verify_resume_monitor_start", _verify_start)
+
+    handoff = executor_monitor_handoff.ResumeHandoff(
+        monitor=_Monitor(),
+        compose_project="proj",
+        compose_file=Path("/tmp/compose.yml"),
+        run_kwargs={},
+    )
+    executor = object()
+
+    result = await executor_monitor_handoff.run_resumed_pr_monitor(
+        executor,
+        "ws_monitor",
+        handoff,
+    )
+
+    assert result is False
+    assert monitor_ran is False
+
+
+@pytest.mark.unit
+async def test_run_resumed_pr_monitor_enters_monitor_loop_when_start_recheck_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor_ran = False
+
+    class _Monitor:
+        async def run(self, **_kwargs: object) -> None:
+            nonlocal monitor_ran
+            monitor_ran = True
+
+    async def _verify_start(_self: object, workspace_id: str) -> bool:
+        assert workspace_id == "ws_monitor"
+        return True
+
+    monkeypatch.setattr(executor_monitor_handoff, "verify_resume_monitor_start", _verify_start)
+
+    handoff = executor_monitor_handoff.ResumeHandoff(
+        monitor=_Monitor(),
+        compose_project="proj",
+        compose_file=Path("/tmp/compose.yml"),
+        run_kwargs={"monitor_owner_id": "worker-1"},
+    )
+    executor = object()
+
+    result = await executor_monitor_handoff.run_resumed_pr_monitor(
+        executor,
+        "ws_monitor",
+        handoff,
+    )
+
+    assert result is True
+    assert monitor_ran is True
