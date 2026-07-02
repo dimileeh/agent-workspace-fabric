@@ -636,6 +636,9 @@ async def _record_monitor_recovery_deferred_active_execution_claim(
 async def _active_worker_restart_remonitor_operation_id(
     session: AsyncSession,
     workspace_id: str,
+    *,
+    previous_monitor_claimed_by: str | None = None,
+    fresh_worker_ids: set[str] | frozenset[str] | None = None,
 ) -> str | None:
     """Return the id of an in-flight worker-restart remonitor recovery operation."""
     operation = await OperationRepository(session).find_active_matching_payload(
@@ -647,6 +650,12 @@ async def _active_worker_restart_remonitor_operation_id(
         },
     )
     if operation is None:
+        return None
+    if (
+        previous_monitor_claimed_by is not None
+        and fresh_worker_ids is not None
+        and previous_monitor_claimed_by in fresh_worker_ids
+    ):
         return None
     return operation.id
 
@@ -706,6 +715,8 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
                 pending_operation_id = await _active_worker_restart_remonitor_operation_id(
                     session,
                     workspace_id,
+                    previous_monitor_claimed_by=previous_claim.get("monitor_claimed_by"),
+                    fresh_worker_ids=fresh_execution_claim_owner_ids,
                 )
                 if pending_operation_id is not None:
                     self._monitor_recovery_operation_ids[workspace_id] = pending_operation_id
@@ -1270,7 +1281,25 @@ async def _finish_monitor_recovery_operation(
             operation = await operation_repo.get(operation_id)
             if operation is None or operation.workspace_id != workspace_id:
                 return False
+            if operation.status not in (
+                OperationStatus.pending.value,
+                OperationStatus.running.value,
+            ):
+                return True
             ws = await WorkspaceRepository(session).get(workspace_id)
+            if (
+                ws is not None
+                and ws.monitor_claimed_by is not None
+                and ws.monitor_claimed_by != self._worker_id
+            ):
+                _log.info(
+                    "worker.monitor_recovery_operation_finish_skipped_lost_claim",
+                    workspace_id=workspace_id,
+                    operation_id=operation_id,
+                    worker_id=self._worker_id,
+                    monitor_claimed_by=ws.monitor_claimed_by,
+                )
+                return True
             result: dict[str, Any] = {
                 "requested_action": OperationType.remonitor.value,
                 "worker_id": self._worker_id,

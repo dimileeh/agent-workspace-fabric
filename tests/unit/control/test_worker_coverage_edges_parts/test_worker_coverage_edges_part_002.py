@@ -1370,6 +1370,43 @@ async def test_active_worker_restart_remonitor_operation_id_returns_running_oper
 
 
 @pytest.mark.unit
+async def test_active_worker_restart_remonitor_operation_id_returns_none_for_fresh_previous_owner(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@example.com:repo/app.git",
+            branch_base="main",
+            task_title="active worker restart remonitor fresh owner",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await OperationRepository(session).create(
+            workspace_id=ws.id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.running,
+            payload={
+                "source": _MONITOR_RECOVERY_SOURCE,
+                "owner": _MONITOR_RECOVERY_OWNER,
+            },
+        )
+        await session.commit()
+        workspace_id = ws.id
+
+    async with factory() as session:
+        found = await worker_claims._active_worker_restart_remonitor_operation_id(  # noqa: SLF001
+            session,
+            workspace_id,
+            previous_monitor_claimed_by="live-worker",
+            fresh_worker_ids={"live-worker"},
+        )
+
+    assert found is None
+
+
+@pytest.mark.unit
 async def test_active_worker_restart_remonitor_operation_id_returns_none_when_absent(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
