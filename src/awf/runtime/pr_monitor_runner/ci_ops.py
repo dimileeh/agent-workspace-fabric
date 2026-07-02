@@ -593,7 +593,7 @@ async def _run_ci_fix(
         ProviderRecoveryRetryError,
         ProviderRecoveryFallbackError,
         ProviderRecoveryAuthError,
-    ):
+    ) as exc:
         # ``_commit_dirty_worktree`` ->
         # ``_repair_protected_scope_changes_before_commit`` raises these
         # provider-recovery control-flow exceptions when a provider outage
@@ -662,6 +662,18 @@ async def _run_ci_fix(
             worktree_path=worktree_path,
             restore_ref=post_agent_head,
         )
+        recovery_details: dict[str, Any] = {
+            "phase": "ci_repair_commit_sink",
+            "operation_type": "ci_repair",
+            "pushed": False,
+            **salvage_details,
+        }
+        if agent_run_err is not None:
+            recovery_details["provider_error_stderr"] = agent_run_err.result.stderr[:400]
+        # Carry salvage metadata on the recovery exception so CI-repair
+        # operation results stay discoverable (PRRT_kwDOSJAM6s6N7A9i,
+        # mirroring the stranded commit-sink path PRRT_kwDOSJAM6s6N6xha).
+        _attach_provider_recovery_details(exc, recovery_details)
         raise
     except ProtectedScopeDiffError as exc:
         if agent_run_err is not None:
