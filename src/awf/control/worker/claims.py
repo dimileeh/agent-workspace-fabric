@@ -1296,8 +1296,11 @@ async def _finish_monitor_recovery_operation(
 ) -> bool:
     """Persist terminal status for a worker restart ``remonitor`` recovery operation.
 
-    Returns ``True`` when the operation was absent, already terminal, or successfully
-    finished; ``False`` when the row could not be loaded or the write failed.
+    Returns ``True`` when the operation was absent, already terminal, superseded by
+    another worker's recovery operation, or successfully finished; ``False`` when the
+    row could not be loaded, the write failed, or the monitor claim was lost to
+    another worker with no replacement recovery operation yet (callers must retain
+    in-memory tracking and retry).
     """
     if operation_id is None:
         return True
@@ -1367,7 +1370,7 @@ async def _finish_monitor_recovery_operation(
                     worker_id=self._worker_id,
                     monitor_claimed_by=ws.monitor_claimed_by,
                 )
-                return True
+                return False
             result: dict[str, Any] = {
                 "requested_action": OperationType.remonitor.value,
                 "worker_id": self._worker_id,

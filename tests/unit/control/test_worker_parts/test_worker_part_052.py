@@ -673,7 +673,7 @@ async def test_finish_monitor_recovery_operation_skips_when_monitor_claim_lost(
             operation_id=operation_id,
             status=OperationStatus.succeeded,
         )
-        is True
+        is False
     )
 
     async with session_factory() as session:
