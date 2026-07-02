@@ -165,14 +165,44 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         )
 
     async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
+        """Resume the PR monitor for a workspace already in ``monitoring_pr``."""
         return await _monitor_handoff.resume_pr_monitor(
             self,
             workspace_id=workspace_id,
         )
 
+    async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> Any:
+        """Prepare compose/monitor state for restart recovery; return handoff or ``None``."""
+        return await _monitor_handoff.resume_pr_monitor_handoff(
+            self,
+            workspace_id=workspace_id,
+        )
+
+    async def verify_resume_monitor_start(
+        self: Any,
+        workspace_id: str,
+        *,
+        monitor_owner_id: str | None = None,
+    ) -> bool:
+        """Confirm the workspace is still eligible to enter the resumed monitor loop."""
+        return await _monitor_handoff.verify_resume_monitor_start(
+            self,
+            workspace_id=workspace_id,
+            monitor_owner_id=monitor_owner_id,
+        )
+
+    async def run_resumed_pr_monitor(self: Any, workspace_id: str, handoff: Any) -> bool:
+        """Run the long-lived PR monitor loop after a successful restart handoff."""
+        return await _monitor_handoff.run_resumed_pr_monitor(
+            self,
+            workspace_id=workspace_id,
+            handoff=handoff,
+        )
+
     # ── Internals ──────────────────────────────────────────────────────────
 
     def _defaults_for(self: Any, agent: AgentRuntime) -> AgentDefaults | None:
+        """Return configured agent defaults for ``agent``, including model overrides."""
         defaults = defaults_with_model_overrides(
             self._config.default_models,
             base=self._config.agent_defaults,

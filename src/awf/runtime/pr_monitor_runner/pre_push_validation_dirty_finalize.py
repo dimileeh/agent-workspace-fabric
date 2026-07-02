@@ -1199,6 +1199,7 @@ async def _cleanup_proven_post_operation_residue_paths(
     )
 
     async def _run_git(args: list[str]) -> Any:
+        """Run a git subcommand in the dirty-finalize worktree."""
         return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
 
     cleaned_paths: list[str] = []

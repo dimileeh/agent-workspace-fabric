@@ -60,6 +60,7 @@ def _pm_scope_value_flags(pm_base: str) -> frozenset[str]:
 
 
 def _pm_scope_flags(pm_base: str) -> frozenset[str]:
+    """Return the combined boolean and value flags accepted for ``pm_base`` scope."""
     return _pm_scope_boolean_flags(pm_base) | _pm_scope_value_flags(pm_base)
 
 
