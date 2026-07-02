@@ -240,6 +240,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         workspace_id,
         expected=WorkspaceStatus.monitoring_pr,
         action="resume_compose",
+        monitor_owner_id=monitor_owner_id,
     ):
         return None
 

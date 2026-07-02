@@ -234,6 +234,51 @@ class TestResumePrMonitorStatusRechecks:
             assert ws.status == WorkspaceStatus.cancelled.value
 
     @pytest.mark.unit
+    async def test_resume_skips_compose_restart_when_monitor_claim_superseded(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compose_calls: list[str] = []
+
+        class _Compose:
+            async def ensure_project_up(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                compose_calls.append(workspace_id)
+
+        ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-stale"
+            await s.commit()
+
+        executor = _make_executor(fake, factory, tmp_path, compose=_Compose())
+        original_recheck = executor._recheck_status
+
+        async def _recheck_status(workspace_id: str, *, expected: Any, action: str, **kw: Any):
+            if action == "resume_compose":
+                async with factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    ws.monitor_claimed_by = "worker-current"
+                    await s.commit()
+            return await original_recheck(workspace_id, expected=expected, action=action, **kw)
+
+        monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert compose_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.monitor_claimed_by == "worker-current"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_CLAIM"
+
+    @pytest.mark.unit
     async def test_resume_skips_when_monitor_claim_superseded_before_run(
         self,
         fake: FakeCommandRunner,
