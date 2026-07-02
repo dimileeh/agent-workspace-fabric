@@ -43,6 +43,7 @@ def test_git_error_indicates_missing_head_object() -> None:
 
 @pytest.mark.unit
 def test_agent_git_writability_preflight_script_exercises_object_and_ref_writes() -> None:
+    """Preflight shell script must exercise object write and ref update paths."""
     script = _agent_git_writability_preflight_script("ws_preflight")
 
     assert 'git -c "safe.directory=$(pwd -P)" "$@"' in script
@@ -57,6 +58,7 @@ def test_agent_git_writability_preflight_script_exercises_object_and_ref_writes(
 async def test_agent_git_writability_preflight_runs_inside_agent_container(
     tmp_path: Path,
 ) -> None:
+    """Preflight must run via compose exec inside the agent container."""
     runner = FakeCommandRunner()
     executor = _executor_with_runner(runner, tmp_path)
     worktree_path = tmp_path / "worktree"
