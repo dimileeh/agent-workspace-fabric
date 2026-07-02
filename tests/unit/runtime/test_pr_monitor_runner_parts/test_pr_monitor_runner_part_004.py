@@ -1322,7 +1322,7 @@ async def test_ci_repair_provider_recovery_includes_salvage_error_in_operation_r
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
 ) -> None:
-    """Regression for PRRT_kwDOSJAM6s6N7XTN: salvage failures must surface on provider retry."""
+    """Regression for PRRT_kwDOSJAM6s6N7XTN/PRRT_kwDOSJAM6s6N7ZZC: salvage failures must surface on provider retry."""
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
         factory=factory,
