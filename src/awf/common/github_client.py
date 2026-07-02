@@ -63,6 +63,10 @@ from awf.common.github_retry import (
     Reconciler,
     RetryPolicy,
 )
+from awf.common.github_transient import (
+    GitHubErrorDisposition,
+    github_error_disposition,
+)
 from awf.common.github_transport import execute_gh_with_retry as _execute_gh_with_retry
 from awf.common.logging import get_logger
 from awf.db.enums import ForgeKind
@@ -105,6 +109,38 @@ def _branch_open_pr_metadata(pr: BranchOpenPullRequest) -> dict[str, object]:
 # PR monitor classifies transient-vs-deterministic from stderr markers, not this
 # code). Defined here, in a client file, so the reason catalog picks it up.
 GITHUB_API_ERROR = "GITHUB_API_ERROR"
+
+
+def _transient_graphql_payload_error(result: CommandResult) -> str | None:
+    """Flag an exit-0 ``gh api graphql`` body that carries a transient errors array.
+
+    ``gh api graphql`` exits 0 for an HTTP-200 response even when the body holds a
+    GraphQL ``errors`` array (gh only surfaces errors as a non-zero exit for
+    HTTP >= 400). A transient server-side blip ("something went wrong", rate-limit
+    guidance) therefore returns with a 0 exit and, without this hook, the
+    ``payload.get("errors")`` raise in ``_graphql`` would bypass the transport's
+    in-cycle retry entirely. Returning the errors text lets the transport retry it
+    under the caller's policy. Only *transient* payloads are surfaced here — a
+    permanent/schema error still falls through to the ``_graphql`` raise unchanged,
+    so its fast-fail behavior is preserved.
+    """
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        # A malformed body is handled by _graphql's own JSON decode + raise; the
+        # transport must not misread it as a retryable payload error.
+        return None
+    if not isinstance(payload, dict):
+        return None
+    errors = payload.get("errors")
+    if not errors:
+        return None
+    errors_text = json.dumps(errors)
+    disposition = github_error_disposition(operation="gh api graphql", stderr=errors_text)
+    if disposition == GitHubErrorDisposition.TRANSIENT:
+        return errors_text[:1000]
+    return None
 
 
 class GitHubClientError(ForgeClientError):
@@ -1309,6 +1345,7 @@ class GitHubClient:
         on_failure: Callable[[dict[str, object]], None] | None = None,
         allow_duplicate_retry: Callable[[], bool] | None = None,
         max_attempts: int | None = None,
+        response_validator: Callable[[CommandResult], str | None] | None = None,
     ) -> CommandResult:
         try:
             return await _execute_gh_with_retry(
@@ -1321,6 +1358,7 @@ class GitHubClient:
                 sleep=self._sleep,
                 allow_duplicate_retry=allow_duplicate_retry,
                 max_attempts=max_attempts,
+                response_validator=response_validator,
             )
         except GitHubClientError:
             raise
@@ -1355,6 +1393,7 @@ class GitHubClient:
             args,
             operation="gh api graphql",
             retry_policy=retry_policy,
+            response_validator=_transient_graphql_payload_error,
         )
         try:
             payload = json.loads(result.stdout)

@@ -15,11 +15,12 @@ import json
 
 import pytest
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
     RepoRef,
+    _transient_graphql_payload_error,
 )
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
 
@@ -1002,6 +1003,57 @@ class TestFetchPrStatusPart002:
         assert "doesn't exist" in str(exc.value)
 
     @pytest.mark.unit
+    async def test_transient_graphql_payload_error_retries_then_succeeds(self) -> None:
+        # Regression (PR #729): a GraphQL HTTP-200 response carrying a transient
+        # errors array ("something went wrong") makes gh exit 0, so the payload
+        # error previously bypassed the transport retry. Under retry=True it must
+        # now be retried in-cycle like a stderr-surfaced transient blip.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {"errors": [{"message": "something went wrong while executing your query"}]}
+            ),
+        )
+        fake.queue_result(returncode=0, stdout=_sample_pr_payload())
+        sleep = _RecordedSleep()
+        client = GitHubClient(fake, sleep=sleep)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            base_behind_count=0,
+        )
+
+        assert status.number == 42
+        assert len(fake.calls) == 2  # transient payload retried after backoff
+        assert len(sleep.calls) == 1
+
+    @pytest.mark.unit
+    async def test_transient_graphql_payload_error_fails_fast_when_no_retry(self) -> None:
+        # The pre-merge recheck passes retry=False: a transient payload error must
+        # raise on the first attempt (no transport backoff) so the merge critical
+        # section fails fast, mirroring the stderr-surfaced transient contract.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps({"errors": [{"message": "something went wrong"}]}),
+        )
+        sleep = _RecordedSleep()
+        client = GitHubClient(fake, sleep=sleep)
+
+        with pytest.raises(GitHubClientError, match="something went wrong"):
+            await client.fetch_pr_status(
+                repo=RepoRef(owner="o", name="r"),
+                pr_number=1,
+                base_behind_count=0,
+                retry=False,
+            )
+
+        assert len(fake.calls) == 1  # no in-cycle retry under retry=False
+        assert sleep.calls == []
+
+    @pytest.mark.unit
     async def test_bad_json_raises(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="not json")
@@ -1012,6 +1064,44 @@ class TestFetchPrStatusPart002:
                 pr_number=1,
                 base_behind_count=0,
             )
+
+
+class TestTransientGraphqlPayloadError:
+    """Unit contract for the ``_graphql`` transport response-validator hook."""
+
+    @staticmethod
+    def _result(stdout: str) -> CommandResult:
+        return CommandResult(returncode=0, stdout=stdout, stderr="")
+
+    @pytest.mark.unit
+    def test_transient_errors_payload_returns_text(self) -> None:
+        text = _transient_graphql_payload_error(
+            self._result(json.dumps({"errors": [{"message": "something went wrong"}]}))
+        )
+        assert text is not None and "something went wrong" in text
+
+    @pytest.mark.unit
+    def test_permanent_errors_payload_returns_none(self) -> None:
+        assert (
+            _transient_graphql_payload_error(
+                self._result(json.dumps({"errors": [{"message": "could not resolve to a node"}]}))
+            )
+            is None
+        )
+
+    @pytest.mark.unit
+    def test_non_dict_and_clean_payloads_return_none(self) -> None:
+        # A non-object JSON body (defensive) and a clean payload both pass through.
+        assert _transient_graphql_payload_error(self._result("[1, 2, 3]")) is None
+        assert (
+            _transient_graphql_payload_error(self._result(json.dumps({"data": {"ok": True}})))
+            is None
+        )
+
+    @pytest.mark.unit
+    def test_malformed_json_returns_none(self) -> None:
+        # Malformed bodies are left to _graphql's own JSON decode + raise.
+        assert _transient_graphql_payload_error(self._result("not json")) is None
 
 
 class TestCreatePullRequestUrlValidation:

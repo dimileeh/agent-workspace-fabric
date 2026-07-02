@@ -87,6 +87,83 @@ async def test_permanent_error_does_not_retry() -> None:
 
 
 @pytest.mark.unit
+async def test_response_validator_retries_transient_payload_then_succeeds() -> None:
+    # gh api graphql exits 0 on an HTTP-200 body; the first body carries a
+    # transient GraphQL errors array, the second is clean. The validator routes
+    # the exit-0 payload error through the same retry machinery as a stderr fault.
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=0,
+        stdout='{"errors": [{"message": "something went wrong"}]}',
+    )
+    runner.queue_result(returncode=0, stdout='{"data": {"ok": true}}')
+    sleep = _RecordedSleep()
+
+    def _validator(result: object) -> str | None:
+        payload = json.loads(result.stdout)  # type: ignore[attr-defined]
+        errors = payload.get("errors")
+        return json.dumps(errors) if errors else None
+
+    result = await _execute_gh_with_retry(
+        runner,
+        ["gh", "api", "graphql"],
+        operation="gh api graphql",
+        retry_policy=RetryPolicy.READ,
+        sleep=sleep,
+        response_validator=_validator,
+    )
+
+    assert result.ok
+    assert json.loads(result.stdout)["data"]["ok"] is True
+    assert len(runner.calls) == 2
+    assert len(sleep.calls) == 1
+
+
+@pytest.mark.unit
+async def test_response_validator_permanent_payload_raises_without_retry() -> None:
+    # A permanent payload error surfaced by the validator classifies PERMANENT and
+    # fails fast — the transport must not retry it.
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=0,
+        stdout='{"errors": [{"message": "could not resolve to a node"}]}',
+    )
+    sleep = _RecordedSleep()
+
+    with pytest.raises(GitHubClientError, match="could not resolve"):
+        await _execute_gh_with_retry(
+            runner,
+            ["gh", "api", "graphql"],
+            operation="gh api graphql",
+            retry_policy=RetryPolicy.READ,
+            sleep=sleep,
+            response_validator=lambda r: json.dumps(json.loads(r.stdout)["errors"]),
+        )
+
+    assert len(runner.calls) == 1
+    assert sleep.calls == []
+
+
+@pytest.mark.unit
+async def test_response_validator_none_accepts_result() -> None:
+    # A validator that returns None leaves an exit-0 result untouched (no retry).
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout='{"data": {"ok": true}}')
+
+    result = await _execute_gh_with_retry(
+        runner,
+        ["gh", "api", "graphql"],
+        operation="gh api graphql",
+        retry_policy=RetryPolicy.READ,
+        sleep=_RecordedSleep(),
+        response_validator=lambda _r: None,
+    )
+
+    assert result.ok
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.unit
 async def test_never_policy_raises_without_retry() -> None:
     runner = FakeCommandRunner()
     runner.queue_result(returncode=1, stderr="HTTP 503 Service Unavailable")

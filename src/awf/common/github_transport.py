@@ -88,12 +88,21 @@ async def execute_gh_with_retry(
     on_failure: Callable[[dict[str, object]], None] | None = None,
     allow_duplicate_retry: Callable[[], bool] | None = None,
     max_attempts: int | None = None,
+    response_validator: Callable[[CommandResult], str | None] | None = None,
 ) -> CommandResult:
     """Run gh with bounded retry, per-attempt timeout, and explicit policy.
 
     ``max_attempts`` overrides the default attempt cap for callers that own their
     own retry budget (e.g. ``create_pull_request`` drives it from
     ``pr_create_transient_max_retries``); ``None`` uses the transport default.
+
+    ``response_validator`` inspects an otherwise-successful (exit 0) result and
+    returns error text when the *body* signals a logical failure the process exit
+    did not — e.g. ``gh api graphql`` exits 0 on an HTTP-200 GraphQL ``errors``
+    payload (gh only surfaces errors for HTTP >= 400). Returning a string routes
+    that body through the same disposition/retry machinery as a non-zero exit, so
+    a transient server-side GraphQL blip is retried under the caller's policy
+    instead of bypassing the transport; ``None`` accepts the result as-is.
     """
 
     from awf.common.github_client import GITHUB_API_ERROR, GitHubClientError
@@ -140,21 +149,36 @@ async def execute_gh_with_retry(
             args,
             timeout_seconds=GITHUB_TRANSPORT_PER_ATTEMPT_TIMEOUT_SECONDS,
         )
+        payload_error: str | None = None
         if result.ok:
-            return result
+            payload_error = response_validator(result) if response_validator is not None else None
+            if payload_error is None:
+                return result
 
-        stderr = result.stderr
-        if result.reason_code == COMMAND_TIMEOUT_REASON:
-            stderr = f"{operation} timed out: {result.stderr}"
-
-        error = GitHubClientError(
-            operation=operation,
-            returncode=result.returncode,
-            stderr=stderr,
+        if payload_error is not None:
+            # An exit-0 result whose body carries a logical failure (e.g. a GraphQL
+            # HTTP-200 ``errors`` payload). Synthesize a returncode-0 failure so the
+            # disposition/retry logic below classifies and retries it under the same
+            # policy as a stderr-surfaced fault instead of the caller having to raise
+            # past the transport.
+            stderr = payload_error
+            returncode = 0
+            reason_code = GITHUB_API_ERROR
+        else:
+            stderr = result.stderr
+            if result.reason_code == COMMAND_TIMEOUT_REASON:
+                stderr = f"{operation} timed out: {result.stderr}"
+            returncode = result.returncode
             # Preserve the runner's reason code (e.g. COMMAND_TIMEOUT) so the
             # monitor records the timeout provenance instead of a generic
             # GITHUB_API_ERROR once retries exhaust (AGENTS.md retry rule).
-            reason_code=result.reason_code or GITHUB_API_ERROR,
+            reason_code = result.reason_code or GITHUB_API_ERROR
+
+        error = GitHubClientError(
+            operation=operation,
+            returncode=returncode,
+            stderr=stderr,
+            reason_code=reason_code,
         )
         last_error = error
         duplicate = _is_duplicate_pull_request_error(error)
@@ -162,7 +186,7 @@ async def execute_gh_with_retry(
         failure_detail = _github_failure_detail(
             attempt=attempt,
             operation=operation,
-            returncode=result.returncode,
+            returncode=returncode,
             stderr=stderr,
             disposition=disposition,
             duplicate=duplicate,
