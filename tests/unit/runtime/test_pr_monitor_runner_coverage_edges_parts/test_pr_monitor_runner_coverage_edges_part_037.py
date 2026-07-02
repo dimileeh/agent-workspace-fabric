@@ -39,26 +39,26 @@ def _patch_ci_repair_salvage_success(
     *,
     tmp_path: Path,
     operation_start_head: str,
-) -> None:
+) -> dict[str, object]:
     """Mock successful CI-repair salvage for provider-recovery re-raise tests."""
+    repair_salvage: dict[str, object] = {
+        "patch_path": str(tmp_path / "artifacts/salvage/ws.patch"),
+        "patch_sha256": "a" * 64,
+        "patch_bytes": 10,
+        "affected_paths": ["src/fix.py"],
+        "phase": "ci_repair_commit_sink",
+        "operation_type": "ci_repair",
+        "operation_id": None,
+        "operation_start_head": operation_start_head,
+        "created_at": "2026-07-02T00:00:00+00:00",
+    }
 
     async def _mock_salvage_success(self: object, **kwargs: object) -> dict[str, object]:
         del self, kwargs
-        return {
-            "repair_salvage": {
-                "patch_path": str(tmp_path / "artifacts/salvage/ws.patch"),
-                "patch_sha256": "a" * 64,
-                "patch_bytes": 10,
-                "affected_paths": ["src/fix.py"],
-                "phase": "ci_repair_commit_sink",
-                "operation_type": "ci_repair",
-                "operation_id": None,
-                "operation_start_head": operation_start_head,
-                "created_at": "2026-07-02T00:00:00+00:00",
-            }
-        }
+        return {"repair_salvage": repair_salvage}
 
     monkeypatch.setattr(pr_ci_ops, "_salvage_ci_repair_dirty_output", _mock_salvage_success)
+    return repair_salvage
 
 
 @pytest.mark.unit
@@ -126,23 +126,11 @@ async def test_ci_fix_commit_sink_provider_recovery_attaches_salvage_metadata(
         _repair_agent_runtime_ownership,
     )
 
-    repair_salvage = {
-        "patch_path": str(tmp_path / "artifacts/salvage/ws.patch"),
-        "patch_sha256": "b" * 64,
-        "patch_bytes": 10,
-        "affected_paths": ["src/fix.py"],
-        "phase": "ci_repair_commit_sink",
-        "operation_type": "ci_repair",
-        "operation_id": None,
-        "operation_start_head": operation_start_head,
-        "created_at": "2026-07-02T00:00:00+00:00",
-    }
-
-    async def _mock_salvage_success(self: object, **kwargs: object) -> dict[str, object]:
-        del self, kwargs
-        return {"repair_salvage": repair_salvage}
-
-    monkeypatch.setattr(pr_ci_ops, "_salvage_ci_repair_dirty_output", _mock_salvage_success)
+    repair_salvage = _patch_ci_repair_salvage_success(
+        monkeypatch,
+        tmp_path=tmp_path,
+        operation_start_head=operation_start_head,
+    )
 
     raised_exc = monitor_types.ProviderRecoveryRetryError(
         "provider recovery raised inside the CI fix commit sink"
