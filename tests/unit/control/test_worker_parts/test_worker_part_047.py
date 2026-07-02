@@ -63,6 +63,7 @@ def worker(session_factory: async_sessionmaker[AsyncSession], tmp_path: Path) ->
 
 class _RecordingExecutor:
     def __init__(self) -> None:
+        """Test helper for __init__."""
         self.calls: list[str] = []
         self.resume_calls: list[str] = []
 
@@ -70,15 +71,18 @@ class _RecordingExecutor:
         self.calls.append(workspace_id)
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object | None:
+        """Test helper for resume pr monitor handoff."""
         del workspace_id
         return object()
 
     async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> bool:
+        """Test helper for run resumed pr monitor."""
         del handoff
         self.resume_calls.append(workspace_id)
         return True
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
         if handoff is None:
             return
@@ -113,9 +117,11 @@ async def test_db_connection_closed_event_skips_stale_workspace(
 
     class StaleWorkspaceRepository:
         def __init__(self, session: RecordingSession) -> None:
+            """Test helper for __init__."""
             assert session is recording_session
 
         async def get(self, workspace_id: str) -> SimpleNamespace:
+            """Test helper for get."""
             assert workspace_id == "ws_stale_event"
             return SimpleNamespace(status=WorkspaceStatus.ready.value)
 
@@ -248,6 +254,7 @@ async def test_safe_worker_paths_swallow_runtime_failures(
 
     class RaisingMonitorExecutor(_RecordingExecutor):
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+            """Test helper for run resumed pr monitor."""
             del handoff
             assert workspace_id == "ws_monitor"
             raise RuntimeError("resume failed")
@@ -263,6 +270,7 @@ async def test_safe_worker_paths_swallow_runtime_failures(
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
@@ -317,6 +325,7 @@ async def test_safe_worker_paths_swallow_runtime_failures(
 
     class _FailingHandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object | None:
+            """Test helper for resume pr monitor handoff."""
             del workspace_id
             return None
 
@@ -368,6 +377,7 @@ async def test_safely_resume_pr_monitor_cancelled_handoff_skips_classifies_opera
 
     class _CancelledHandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object | None:
+            """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
             return None
 
@@ -382,6 +392,7 @@ async def test_safely_resume_pr_monitor_cancelled_handoff_skips_classifies_opera
         finish_workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": finish_workspace_id, **kwargs})
         return True
 
@@ -428,6 +439,7 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_cancelled_ha
 
     class _CancelledHandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object | None:
+            """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
             return None
 
@@ -445,10 +457,12 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_cancelled_ha
         finish_workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         assert finish_workspace_id == workspace_id
         return True
 
     async def _record_cooldown(**kwargs: object) -> None:
+        """Test helper for record cooldown."""
         nonlocal cooldown_recorded
         cooldown_recorded = True
 
@@ -460,9 +474,11 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_cancelled_ha
     )
 
     async def _release_monitor_claim(release_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         assert release_workspace_id == workspace_id
 
     async def _prompt_release(release_workspace_id: str) -> None:
+        """Test helper for prompt release."""
         assert release_workspace_id == workspace_id
 
     worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
@@ -506,6 +522,7 @@ async def test_safely_resume_pr_monitor_completed_handoff_skips_classifies_opera
 
     class _CompletedHandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object | None:
+            """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
             return None
 
@@ -520,6 +537,7 @@ async def test_safely_resume_pr_monitor_completed_handoff_skips_classifies_opera
         finish_workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": finish_workspace_id, **kwargs})
         return True
 
@@ -544,6 +562,7 @@ async def test_safely_resume_pr_monitor_completed_handoff_skips_classifies_opera
 async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_write_failure(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify safely resume pr monitor retries succeed finalize after handoff write failure."""
     handoff = object()
     finish_calls: list[dict[str, object]] = []
     succeed_attempt = 0
@@ -551,10 +570,12 @@ async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_w
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             return handoff
 
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> bool:
+            """Test helper for run resumed pr monitor."""
             nonlocal monitor_ran_after_finalize
             assert handoff_obj is handoff
             assert workspace_id == "ws_monitor"
@@ -572,6 +593,7 @@ async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_w
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         if kwargs.get("status") == OperationStatus.succeeded:
             nonlocal succeed_attempt
@@ -600,15 +622,18 @@ async def test_safely_resume_pr_monitor_retries_succeed_finalize_after_handoff_w
 async def test_safely_resume_pr_monitor_post_handoff_runtime_error_does_not_fail_recovery_op(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify safely resume pr monitor post handoff runtime error does not fail recovery op."""
     handoff = object()
     finish_calls: list[dict[str, object]] = []
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             return handoff
 
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             assert handoff_obj is handoff
             assert workspace_id == "ws_monitor"
             raise RuntimeError("monitor run failed")
@@ -624,6 +649,7 @@ async def test_safely_resume_pr_monitor_post_handoff_runtime_error_does_not_fail
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
@@ -646,16 +672,19 @@ async def test_safely_resume_pr_monitor_post_handoff_runtime_error_does_not_fail
 async def test_safely_resume_pr_monitor_skips_monitor_when_finalize_never_succeeds(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify safely resume pr monitor skips monitor when finalize never succeeds."""
     handoff = object()
     finish_calls: list[dict[str, object]] = []
     monitor_ran = False
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             return handoff
 
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             nonlocal monitor_ran
             del handoff_obj
             assert workspace_id == "ws_monitor"
@@ -672,6 +701,7 @@ async def test_safely_resume_pr_monitor_skips_monitor_when_finalize_never_succee
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return kwargs.get("status") != OperationStatus.succeeded
 
@@ -734,16 +764,19 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
         *,
         recovery_operation_id: str | None = None,
     ) -> bool:
+        """Test helper for resume."""
         assert resume_workspace_id == workspace_id
         assert recovery_operation_id == "op_finalize_pending"
         return False
 
     async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         nonlocal claim_released
         assert released_workspace_id == workspace_id
         claim_released = True
 
     async def _prompt_release(released_workspace_id: str) -> None:
+        """Test helper for prompt release."""
         nonlocal prompt_released
         assert released_workspace_id == workspace_id
         prompt_released = True
@@ -772,16 +805,20 @@ async def test_workspace_is_monitoring_pr_returns_false_on_db_error(
 
     class FakeSession:
         async def __aenter__(self) -> FakeSession:
+            """Test helper for  aenter  ."""
             return self
 
         async def __aexit__(self, *_args: object) -> None:
-            return None
+            """Test helper for  aexit  ."""
+            return
 
     class FailingWorkspaceRepository:
         def __init__(self, _session: FakeSession) -> None:
+            """Test helper for __init__."""
             pass
 
         async def get(self, workspace_id: str) -> None:
+            """Test helper for get."""
             assert workspace_id == "ws_monitor"
             raise _closed_connection_error()
 
@@ -809,16 +846,20 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
 
     class FakeSession:
         async def __aenter__(self) -> FakeSession:
+            """Test helper for  aenter  ."""
             return self
 
         async def __aexit__(self, *_args: object) -> None:
-            return None
+            """Test helper for  aexit  ."""
+            return
 
     class FailingWorkspaceRepository:
         def __init__(self, _session: FakeSession) -> None:
+            """Test helper for __init__."""
             pass
 
         async def get(self, workspace_id: str) -> None:
+            """Test helper for get."""
             assert workspace_id == "ws_monitor"
             raise _closed_connection_error()
 
@@ -841,11 +882,13 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
         *,
         recovery_operation_id: str | None = None,
     ) -> bool:
+        """Test helper for resume."""
         assert resume_workspace_id == workspace_id
         assert recovery_operation_id == "op_finalize_pending_db_error"
         return False
 
     async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         nonlocal claim_released
         assert released_workspace_id == workspace_id
         claim_released = True
@@ -854,6 +897,7 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
         *_args: object,
         **_kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         nonlocal finalize_called
         finalize_called = True
         return True
@@ -909,9 +953,11 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
 
     class IntermittentWorkspaceRepository:
         def __init__(self, session: AsyncSession) -> None:
+            """Test helper for __init__."""
             self._session = session
 
         async def get(self, workspace_id: str) -> object:
+            """Test helper for get."""
             nonlocal lookup_calls
             lookup_calls += 1
             if lookup_calls == 1:
@@ -936,11 +982,13 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
         *,
         recovery_operation_id: str | None = None,
     ) -> bool:
+        """Test helper for resume."""
         assert resume_workspace_id == workspace_id
         assert recovery_operation_id == "op_retry_lookup_failed"
         return False
 
     async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         nonlocal claim_released
         assert released_workspace_id == workspace_id
         claim_released = True
@@ -949,6 +997,7 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
         *_args: object,
         **_kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         nonlocal finalize_called
         finalize_called = True
         return True
@@ -1006,9 +1055,11 @@ async def test_safely_resume_claimed_pr_monitor_propagates_cancellation_when_sti
 
     class IntermittentWorkspaceRepository:
         def __init__(self, session: AsyncSession) -> None:
+            """Test helper for __init__."""
             self._session = session
 
         async def get(self, workspace_id: str) -> object:
+            """Test helper for get."""
             nonlocal lookup_calls
             lookup_calls += 1
             if lookup_calls == 1:
@@ -1031,6 +1082,7 @@ async def test_safely_resume_claimed_pr_monitor_propagates_cancellation_when_sti
         *,
         recovery_operation_id: str | None = None,
     ) -> bool:
+        """Test helper for resume."""
         assert resume_workspace_id == workspace_id
         assert recovery_operation_id == "op_cancel_still_monitoring"
         resume_started.set()
@@ -1038,6 +1090,7 @@ async def test_safely_resume_claimed_pr_monitor_propagates_cancellation_when_sti
         return False
 
     async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         nonlocal claim_released
         assert released_workspace_id == workspace_id
         claim_released = True
@@ -1096,9 +1149,11 @@ async def test_safely_resume_claimed_pr_monitor_finalizes_when_finalize_pending_
 
     class IntermittentWorkspaceRepository:
         def __init__(self, session: AsyncSession) -> None:
+            """Test helper for __init__."""
             self._session = session
 
         async def get(self, workspace_id: str) -> object:
+            """Test helper for get."""
             nonlocal lookup_calls
             lookup_calls += 1
             if lookup_calls == 1:
@@ -1123,11 +1178,13 @@ async def test_safely_resume_claimed_pr_monitor_finalizes_when_finalize_pending_
         *,
         recovery_operation_id: str | None = None,
     ) -> bool:
+        """Test helper for resume."""
         assert resume_workspace_id == workspace_id
         assert recovery_operation_id == "op_terminal_db_error"
         return False
 
     async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         nonlocal claim_released
         assert released_workspace_id == workspace_id
         claim_released = True
@@ -1136,6 +1193,7 @@ async def test_safely_resume_claimed_pr_monitor_finalizes_when_finalize_pending_
         finish_workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finalize_calls.append({"workspace_id": finish_workspace_id, **kwargs})
         return True
 
@@ -1210,16 +1268,19 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
         *,
         recovery_operation_id: str | None = None,
     ) -> bool:
+        """Test helper for resume."""
         assert resume_workspace_id == workspace_id
         assert recovery_operation_id == "op_terminal_finalize_pending"
         return False
 
     async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         nonlocal claim_released
         assert released_workspace_id == workspace_id
         claim_released = True
 
     async def _prompt_release(released_workspace_id: str) -> None:
+        """Test helper for prompt release."""
         nonlocal prompt_released
         assert released_workspace_id == workspace_id
         prompt_released = True
@@ -1228,6 +1289,7 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_when_finalize_pen
         finish_workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finalize_calls.append({"workspace_id": finish_workspace_id, **kwargs})
         return True
 
@@ -1294,12 +1356,14 @@ async def test_safely_resume_claimed_pr_monitor_preserves_succeeded_finalize_aft
         *,
         recovery_operation_id: str | None = None,
     ) -> bool:
+        """Test helper for resume."""
         assert resume_workspace_id == workspace_id
         assert recovery_operation_id == "op_handoff_success_finalize_race"
         worker._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)  # noqa: SLF001
         return False
 
     async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         nonlocal claim_released
         assert released_workspace_id == workspace_id
         claim_released = True
@@ -1308,6 +1372,7 @@ async def test_safely_resume_claimed_pr_monitor_preserves_succeeded_finalize_aft
         finish_workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finalize_calls.append({"workspace_id": finish_workspace_id, **kwargs})
         return True
 
@@ -1383,16 +1448,19 @@ async def test_safely_resume_claimed_pr_monitor_retains_handle_when_terminal_fin
         *,
         recovery_operation_id: str | None = None,
     ) -> bool:
+        """Test helper for resume."""
         assert resume_workspace_id == workspace_id
         assert recovery_operation_id == "op_terminal_finalize_failed"
         return False
 
     async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         nonlocal claim_released
         assert released_workspace_id == workspace_id
         claim_released = True
 
     async def _prompt_release(released_workspace_id: str) -> None:
+        """Test helper for prompt release."""
         nonlocal prompt_released
         assert released_workspace_id == workspace_id
         prompt_released = True
@@ -1401,6 +1469,7 @@ async def test_safely_resume_claimed_pr_monitor_retains_handle_when_terminal_fin
         finish_workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         assert finish_workspace_id == workspace_id
         return False
 

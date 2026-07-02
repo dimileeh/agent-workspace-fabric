@@ -842,14 +842,17 @@ async def test_workspace_executor_delegates_monitor_handoff_helpers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify workspace executor delegates monitor handoff helpers."""
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     handoff = object()
 
     async def _resume_handoff(self: object, *, workspace_id: str) -> object:
+        """Test helper for resume handoff."""
         assert workspace_id == "ws_monitor"
         return handoff
 
     async def _verify_start(self: object, *, workspace_id: str) -> bool:
+        """Test helper for verify start."""
         assert workspace_id == "ws_monitor"
         return True
 
@@ -863,6 +866,7 @@ async def test_workspace_executor_delegates_monitor_handoff_helpers(
     )
 
     async def _run_resumed(self: object, *, workspace_id: str, handoff: object) -> bool:
+        """Test helper for run resumed."""
         assert workspace_id == "ws_monitor"
         assert handoff is expected_handoff
         return True

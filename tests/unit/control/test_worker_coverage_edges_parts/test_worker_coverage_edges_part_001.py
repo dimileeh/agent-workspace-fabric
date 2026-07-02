@@ -92,16 +92,19 @@ class _RecordingExecutor:
             raise RuntimeError("executor crashed")
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
         del workspace_id
         return object()
 
     async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
         del handoff
         self.resumed.append(workspace_id)
         if self.fail:
             raise RuntimeError("monitor crashed")
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
         await self.run_resumed_pr_monitor(workspace_id, handoff)
 

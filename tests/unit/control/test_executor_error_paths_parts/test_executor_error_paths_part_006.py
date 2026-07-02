@@ -932,6 +932,7 @@ class TestExecutorCoverageEdgesPart002:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Verify resume pr monitor compose failure records event and aborts handoff."""
         monitor_calls: list[str] = []
 
         class _FailingCompose:
@@ -1005,6 +1006,7 @@ class TestExecutorCoverageEdgesPart002:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Verify resume pr monitor compose failure aborts handoff when event record fails."""
         monitor_calls: list[str] = []
 
         class _OneShotFailingSessionFactory:

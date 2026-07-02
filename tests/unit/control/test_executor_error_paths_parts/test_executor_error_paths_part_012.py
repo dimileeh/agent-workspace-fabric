@@ -337,14 +337,17 @@ def test_atomic_write_text_removes_temporary_file_when_replace_fails(
 async def test_run_resumed_pr_monitor_skips_monitor_loop_when_start_recheck_bails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify run resumed pr monitor skips monitor loop when start recheck bails."""
     monitor_ran = False
 
     class _Monitor:
         async def run(self, **_kwargs: object) -> None:
+            """Test helper for run."""
             nonlocal monitor_ran
             monitor_ran = True
 
     async def _verify_start(_self: object, workspace_id: str) -> bool:
+        """Test helper for verify start."""
         assert workspace_id == "ws_monitor"
         return False
 
@@ -372,14 +375,17 @@ async def test_run_resumed_pr_monitor_skips_monitor_loop_when_start_recheck_bail
 async def test_run_resumed_pr_monitor_enters_monitor_loop_when_start_recheck_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify run resumed pr monitor enters monitor loop when start recheck passes."""
     monitor_ran = False
 
     class _Monitor:
         async def run(self, **_kwargs: object) -> None:
+            """Test helper for run."""
             nonlocal monitor_ran
             monitor_ran = True
 
     async def _verify_start(_self: object, workspace_id: str) -> bool:
+        """Test helper for verify start."""
         assert workspace_id == "ws_monitor"
         return True
 

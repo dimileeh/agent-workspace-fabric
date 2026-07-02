@@ -299,6 +299,7 @@ async def test_dispatchable_execution_ids_stops_after_limit(
 async def test_stale_active_execution_can_fail_ignores_salvage_for_other_status(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify stale active execution can fail ignores salvage for other status."""
     workspace_id = await _seed_status(
         factory, WorkspaceStatus.running, title="status-scoped-salvage"
     )

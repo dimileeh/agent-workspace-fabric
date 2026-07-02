@@ -63,6 +63,7 @@ class _NoopProvisioner:
 
 class _RecordingExecutor:
     def __init__(self, *, fail: bool = False) -> None:
+        """Test helper for __init__."""
         self.fail = fail
         self.executed: list[str] = []
         self.resumed: list[str] = []
@@ -80,16 +81,19 @@ class _RecordingExecutor:
             raise RuntimeError("executor crashed")
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object | None:
+        """Test helper for resume pr monitor handoff."""
         del workspace_id
         return object()
 
     async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
         del handoff
         self.resumed.append(workspace_id)
         if self.fail:
             raise RuntimeError("monitor crashed")
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
         if handoff is None:
             return
@@ -185,6 +189,7 @@ class _ExplodingSessionFactory:
 
 class _PublicWorktreePathProvisioner(_NoopProvisioner):
     def __init__(self, root: Path) -> None:
+        """Test helper for __init__."""
         self.root = root
         self.requests: list[str] = []
 
@@ -195,6 +200,7 @@ class _PublicWorktreePathProvisioner(_NoopProvisioner):
 
 class _RefreshLoopWorker(ControlWorker):
     def __init__(self, *, raises: bool, refreshed: bool) -> None:
+        """Test helper for __init__."""
         super().__init__(
             session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
             provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
@@ -262,6 +268,7 @@ def test_active_salvage_recovery_operation_id_cache_moves_recent_and_evicts_olde
 
 @pytest.mark.unit
 async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
+    """Verify should apply active salvage monitor resume cooldown."""
     worker = SimpleNamespace(
         _active_salvage_monitor_recovery_operation_ids={"op-1": None},
         _session_factory=lambda: (_ for _ in ()).throw(AssertionError("unused")),
@@ -288,27 +295,33 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
 
     class _Session:
         async def __aenter__(self) -> _Session:
+            """Test helper for  aenter  ."""
             return self
 
         async def __aexit__(self, *_args: object) -> None:
-            return None
+            """Test helper for  aexit  ."""
+            return
 
     class _Repo:
         workspace: object | None = SimpleNamespace(status=WorkspaceStatus.monitoring_pr.value)
 
         def __init__(self, _session: object) -> None:
+            """Test helper for __init__."""
             pass
 
         async def get(self, _workspace_id: str) -> object | None:
+            """Test helper for get."""
             return self.workspace
 
     class _OpRepo:
         operation: object | None = None
 
         def __init__(self, _session: object) -> None:
+            """Test helper for __init__."""
             pass
 
         async def get(self, _operation_id: str) -> object | None:
+            """Test helper for get."""
             return self.operation
 
     worker._session_factory = lambda: _Session()
@@ -347,10 +360,12 @@ async def test_should_apply_active_salvage_monitor_resume_cooldown() -> None:
 
         class _BoomSession:
             async def __aenter__(self) -> _BoomSession:
+                """Test helper for  aenter  ."""
                 raise RuntimeError("lookup failed")
 
             async def __aexit__(self, *_args: object) -> None:
-                return None
+                """Test helper for  aexit  ."""
+                return
 
         worker._session_factory = lambda: _BoomSession()
         assert (
@@ -439,10 +454,12 @@ async def test_persisted_active_salvage_resume_cooldown_handles_zero_lease_and_e
 
     class _Session:
         async def __aenter__(self) -> _Session:
+            """Test helper for  aenter  ."""
             return self
 
         async def __aexit__(self, *_args: object) -> None:
-            return None
+            """Test helper for  aexit  ."""
+            return
 
         async def execute(self, _stmt: object) -> _Result:
             return _Result()
@@ -463,6 +480,7 @@ async def test_persisted_active_salvage_resume_cooldown_handles_missing_and_expi
 ):
     class _Result:
         def __init__(self, event: object | None) -> None:
+            """Test helper for __init__."""
             self.event = event
 
         def scalar_one_or_none(self) -> object | None:
@@ -470,13 +488,16 @@ async def test_persisted_active_salvage_resume_cooldown_handles_missing_and_expi
 
     class _Session:
         def __init__(self, event: object | None) -> None:
+            """Test helper for __init__."""
             self.event = event
 
         async def __aenter__(self) -> _Session:
+            """Test helper for  aenter  ."""
             return self
 
         async def __aexit__(self, *_args: object) -> None:
-            return None
+            """Test helper for  aexit  ."""
+            return
 
         async def execute(self, _stmt: object) -> _Result:
             return _Result(self.event)
@@ -512,10 +533,12 @@ async def test_persisted_active_salvage_resume_cooldown_handles_missing_and_expi
 async def test_active_salvage_resume_cooldown_record_swallows_session_failures() -> None:
     class _FailingSession:
         async def __aenter__(self) -> object:
+            """Test helper for  aenter  ."""
             raise RuntimeError("database offline")
 
         async def __aexit__(self, *_args: object) -> None:
-            return None
+            """Test helper for  aexit  ."""
+            return
 
     worker = SimpleNamespace(
         _session_factory=lambda: _FailingSession(),
@@ -538,10 +561,12 @@ async def test_active_salvage_resume_cooldown_record_skips_missing_or_wrong_stat
         committed = False
 
         async def __aenter__(self) -> _Session:
+            """Test helper for  aenter  ."""
             return self
 
         async def __aexit__(self, *_args: object) -> None:
-            return None
+            """Test helper for  aexit  ."""
+            return
 
         async def commit(self) -> None:
             self.committed = True
@@ -551,9 +576,11 @@ async def test_active_salvage_resume_cooldown_record_skips_missing_or_wrong_stat
         events: list[object] = []
 
         def __init__(self, session: object) -> None:
+            """Test helper for __init__."""
             self.session = session
 
         async def get(self, _workspace_id: str) -> object | None:
+            """Test helper for get."""
             return self.workspace
 
         async def add_event(self, *_args: object, **_kwargs: object) -> None:
@@ -966,6 +993,7 @@ async def test_preserved_active_branch_lookup_covers_invalid_empty_and_multiple_
 
     class _StaticResolver:
         def __init__(self, matches: list[object]) -> None:
+            """Test helper for __init__."""
             self.matches = matches
 
         async def resolve(self, **_kwargs: object) -> list[object]:
@@ -1261,6 +1289,7 @@ async def test_reconcile_drops_monitor_kind_when_task_already_gone(
     ],
 )
 def test_is_monitor_recovery_handoff_failure_reason(reason_code: str, expected: bool) -> None:
+    """Verify is monitor recovery handoff failure reason."""
     assert (
         worker_dispatch_methods._is_monitor_recovery_handoff_failure_reason(reason_code)  # noqa: SLF001
         is expected
@@ -1269,6 +1298,7 @@ def test_is_monitor_recovery_handoff_failure_reason(reason_code: str, expected: 
 
 @pytest.mark.unit
 def test_monitor_recovery_handoff_failure_message_uses_workspace_failure_message() -> None:
+    """Verify monitor recovery handoff failure message uses workspace failure message."""
     event = SimpleNamespace(payload={})
     workspace = SimpleNamespace(
         status=WorkspaceStatus.failed.value,
@@ -1284,6 +1314,7 @@ def test_monitor_recovery_handoff_failure_message_uses_workspace_failure_message
 
 @pytest.mark.unit
 def test_monitor_recovery_handoff_failure_message_returns_default_when_payload_empty() -> None:
+    """Verify monitor recovery handoff failure message returns default when payload empty."""
     event = SimpleNamespace(payload={})
     workspace = SimpleNamespace(status=WorkspaceStatus.monitoring_pr.value, failure_message=None)
     message = worker_dispatch_methods._monitor_recovery_handoff_failure_message(  # noqa: SLF001
@@ -1296,10 +1327,12 @@ def test_monitor_recovery_handoff_failure_message_returns_default_when_payload_e
 
 @pytest.mark.unit
 async def test_cancel_monitor_claim_heartbeat_pops_matching_task_and_awaits_cancel() -> None:
+    """Verify cancel monitor claim heartbeat pops matching task and awaits cancel."""
     started = asyncio.Event()
     cancelled = asyncio.Event()
 
     async def _heartbeat() -> None:
+        """Test helper for heartbeat."""
         started.set()
         try:
             await asyncio.Event().wait()
@@ -1326,6 +1359,7 @@ async def test_cancel_monitor_claim_heartbeat_pops_matching_task_and_awaits_canc
 
 @pytest.mark.unit
 async def test_cancel_monitor_claim_heartbeat_noop_when_task_already_gone() -> None:
+    """Verify cancel monitor claim heartbeat noop when task already gone."""
     worker = SimpleNamespace(_monitor_claim_heartbeat_tasks={})
 
     await worker_claims._cancel_monitor_claim_heartbeat(worker, "ws_missing")  # noqa: SLF001
@@ -1337,6 +1371,7 @@ async def test_cancel_monitor_claim_heartbeat_noop_when_task_already_gone() -> N
 async def test_active_worker_restart_remonitor_operation_id_returns_running_operation(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify active worker restart remonitor operation id returns running operation."""
     async with factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.create(
@@ -1373,6 +1408,7 @@ async def test_active_worker_restart_remonitor_operation_id_returns_running_oper
 async def test_active_worker_restart_remonitor_operation_id_returns_none_for_fresh_previous_owner(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify active worker restart remonitor operation id returns none for fresh previous owner."""
     async with factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.create(
@@ -1410,6 +1446,7 @@ async def test_active_worker_restart_remonitor_operation_id_returns_none_for_fre
 async def test_active_worker_restart_remonitor_operation_id_returns_none_when_absent(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify active worker restart remonitor operation id returns none when absent."""
     async with factory() as session:
         assert (
             await worker_claims._active_worker_restart_remonitor_operation_id(  # noqa: SLF001

@@ -551,6 +551,7 @@ async def _move_to_operator_control_status(
 
 class _TransitioningProvisioner:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        """Test helper for __init__."""
         self._session_factory = session_factory
         self.calls: list[str] = []
 
@@ -583,6 +584,7 @@ class _TransitioningProvisioner:
 
 class _MissingWorktreePathProvisioner(_TransitioningProvisioner):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], worktrees_root: Path):
+        """Test helper for __init__."""
         super().__init__(session_factory)
         self._worktrees_root = worktrees_root
 
@@ -592,6 +594,7 @@ class _MissingWorktreePathProvisioner(_TransitioningProvisioner):
 
 class _RecordingExecutor:
     def __init__(self) -> None:
+        """Test helper for __init__."""
         self.calls: list[str] = []
         self.resume_calls: list[str] = []
 
@@ -599,20 +602,24 @@ class _RecordingExecutor:
         self.calls.append(workspace_id)
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
         del workspace_id
         return object()
 
     async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
         del handoff
         self.resume_calls.append(workspace_id)
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
         await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _BlockingExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -625,27 +632,32 @@ class _BlockingExecutor(_RecordingExecutor):
 
 class _BlockingMonitorExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
         del workspace_id
         return object()
 
     async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
         del handoff
         self.resume_calls.append(workspace_id)
         self.started.set()
         await self.release.wait()
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
         await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _RecordingRuntimeInspector:
     def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
+        """Test helper for __init__."""
         self._snapshots = snapshots
         self.calls: list[str | None] = []
 
@@ -656,6 +668,7 @@ class _RecordingRuntimeInspector:
 
 class _RecordingRuntimeCleaner:
     def __init__(self, result: WorkspaceCleanupResult | None = None) -> None:
+        """Test helper for __init__."""
         self.result = result or WorkspaceCleanupResult.from_steps(
             [
                 WorkspaceCleanupStepResult(
@@ -694,6 +707,7 @@ class _RecordingRuntimeCleaner:
 
 class _TrackedSessionContext:
     def __init__(self, factory: _TrackingSessionFactory) -> None:
+        """Test helper for __init__."""
         self._factory = factory
         self._session = factory.base_factory()
 
@@ -716,6 +730,7 @@ class _TrackedSessionContext:
 
 class _TrackingSessionFactory:
     def __init__(self, base_factory: async_sessionmaker[AsyncSession]) -> None:
+        """Test helper for __init__."""
         self.base_factory = base_factory
         self.active_sessions = 0
 
@@ -728,6 +743,7 @@ class _RecordingBranchOpenPRResolver:
         self,
         results_by_branch: dict[str, list[SimpleNamespace] | Exception],
     ) -> None:
+        """Test helper for __init__."""
         self._results_by_branch = results_by_branch
         self.calls: list[dict[str, str | None]] = []
 
@@ -756,6 +772,7 @@ class _RetargetedBranchOpenPRResolver:
         self,
         results_by_branch: dict[str, list[SimpleNamespace]],
     ) -> None:
+        """Test helper for __init__."""
         self._results_by_branch = results_by_branch
         self.calls: list[dict[str, str | None]] = []
 
@@ -783,6 +800,7 @@ class _SequenceBranchOpenPRResolver:
         self,
         results_by_branch: dict[str, list[list[SimpleNamespace] | Exception]],
     ) -> None:
+        """Test helper for __init__."""
         self._results_by_branch = results_by_branch
         self.calls: list[dict[str, str | None]] = []
 
@@ -877,6 +895,7 @@ def _closed_connection_error() -> InterfaceError:
 
 class _HealthyRuntimeInspector:
     def __init__(self) -> None:
+        """Test helper for __init__."""
         self.calls: list[str | None] = []
 
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
@@ -896,6 +915,7 @@ class _HealthyRuntimeInspector:
 
 class _RaisingRuntimeInspector:
     def __init__(self, exc: Exception) -> None:
+        """Test helper for __init__."""
         self.exc = exc
         self.calls: list[str | None] = []
 
@@ -929,6 +949,7 @@ class TestRunOnceExecutionPart004:
 
         class _FlakyExecutor:
             def __init__(self) -> None:
+                """Test helper for __init__."""
                 self.calls: list[str] = []
 
             async def execute(self, workspace_id: str, **_kwargs: object) -> None:
@@ -1036,6 +1057,7 @@ class TestRunOnceExecutionPart004:
                 await release.wait()
 
             async def resume_pr_monitor(self, workspace_id: str) -> None:
+                """Test helper for resume pr monitor."""
                 raise AssertionError(f"unexpected monitor resume for {workspace_id}")
 
         executor = _ClaimingExecutor()
@@ -1328,17 +1350,20 @@ class TestRunOnceExecutionPart004:
         # Cancellation during handoff (before the recovery op is finalized as
         # succeeded) must still mark the remonitor operation cancelled via the
         # shielded finalize helper.
+        """Verify stale monitor cancellation before handoff finalizes recovery operation."""
         monitor_id = await _create_monitoring_pr(
             session_factory, origin_repo, "cancel-before-handoff-monitor"
         )
 
         class _HandoffBlockingMonitorExecutor(_RecordingExecutor):
             def __init__(self) -> None:
+                """Test helper for __init__."""
                 super().__init__()
                 self.handoff_started = asyncio.Event()
                 self.release_handoff = asyncio.Event()
 
             async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+                """Test helper for resume pr monitor handoff."""
                 self.resume_calls.append(workspace_id)
                 self.handoff_started.set()
                 await self.release_handoff.wait()
@@ -1381,6 +1406,7 @@ class TestRunOnceExecutionPart004:
             second_cancel_injected = False
 
             async def _finish_with_second_cancel(*args: Any, **kwargs: Any) -> bool:
+                """Test helper for finish with second cancel."""
                 nonlocal second_cancel_injected
                 if not second_cancel_injected and monitor_task is not None:
                     second_cancel_injected = True

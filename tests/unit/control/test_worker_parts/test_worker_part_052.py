@@ -321,6 +321,7 @@ async def test_claim_monitoring_pr_reuses_pending_recovery_operation_without_dup
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,
 ) -> None:
+    """Verify claim monitoring pr reuses pending recovery operation without duplicate."""
     monitor_id = await _create_monitoring_pr(
         session_factory,
         origin_repo,
@@ -430,6 +431,7 @@ async def test_claim_monitoring_pr_reuses_db_pending_recovery_without_in_memory_
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,
 ) -> None:
+    """Verify claim monitoring pr reuses db pending recovery without in memory handle."""
     monitor_id = await _create_monitoring_pr(
         session_factory,
         origin_repo,
@@ -623,6 +625,7 @@ async def test_finish_monitor_recovery_operation_skips_when_monitor_claim_lost(
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,
 ) -> None:
+    """Verify finish monitor recovery operation skips when monitor claim lost."""
     monitor_id = await _create_monitoring_pr(
         session_factory,
         origin_repo,

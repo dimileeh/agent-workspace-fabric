@@ -31,17 +31,20 @@ from tests.postgres import postgres_test_engine
 
 
 async def _pending_execution_task() -> None:
+    """Test helper for pending execution task."""
     await asyncio.Event().wait()
 
 
 @pytest.fixture
 async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Test helper for session factory."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
 
 @pytest.fixture
 def worker(session_factory: async_sessionmaker[AsyncSession], tmp_path: Path) -> ControlWorker:
+    """Test helper for worker."""
     git = GitManager(tmp_path / "awf-work")
     prov = Provisioner(
         session_factory=session_factory,
@@ -57,22 +60,27 @@ def worker(session_factory: async_sessionmaker[AsyncSession], tmp_path: Path) ->
 
 class _RecordingExecutor:
     def __init__(self) -> None:
+        """Test helper for __init__."""
         self.calls: list[str] = []
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Test helper for execute."""
         self.calls.append(workspace_id)
 
     async def resume_pr_monitor_handoff(self, workspace_id: str) -> object | None:
+        """Test helper for resume pr monitor handoff."""
         del workspace_id
         return object()
 
     async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> bool:
+        """Test helper for run resumed pr monitor."""
         del handoff
         self.resume_calls.append(workspace_id)
         return True
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
         handoff = await self.resume_pr_monitor_handoff(workspace_id)
         if handoff is None:
             return
@@ -177,6 +185,7 @@ async def test_monitor_recovery_terminal_finalize_status_preserves_success_after
 async def test_monitor_recovery_start_skipped_operation_status_preserves_success_after_handoff_failed_race(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify monitor recovery start skipped operation status preserves success after handoff failed race."""
     async with session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.create(
@@ -247,10 +256,12 @@ async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_pre_f
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
             return handoff
 
         async def verify_resume_monitor_start(self, handoff_workspace_id: str) -> bool:
+            """Test helper for verify resume monitor start."""
             assert handoff_workspace_id == workspace_id
             return False
 
@@ -259,6 +270,7 @@ async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_pre_f
             handoff_workspace_id: str,
             handoff_obj: object,
         ) -> None:
+            """Test helper for run resumed pr monitor."""
             nonlocal monitor_ran
             del handoff_obj
             assert handoff_workspace_id == workspace_id
@@ -275,6 +287,7 @@ async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_pre_f
         finish_workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": finish_workspace_id, **kwargs})
         return True
 
@@ -298,20 +311,24 @@ async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_pre_f
 async def test_safely_resume_pr_monitor_fails_operation_when_start_recheck_bails(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify safely resume pr monitor fails operation when start recheck bails."""
     handoff = object()
     finish_calls: list[dict[str, object]] = []
     monitor_ran = False
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             return handoff
 
         async def verify_resume_monitor_start(self, workspace_id: str) -> bool:
+            """Test helper for verify resume monitor start."""
             assert workspace_id == "ws_monitor"
             return False
 
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             nonlocal monitor_ran
             del handoff_obj
             assert workspace_id == "ws_monitor"
@@ -328,6 +345,7 @@ async def test_safely_resume_pr_monitor_fails_operation_when_start_recheck_bails
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
@@ -358,10 +376,12 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_start_rechec
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             return handoff
 
         async def verify_resume_monitor_start(self, workspace_id: str) -> bool:
+            """Test helper for verify resume monitor start."""
             assert workspace_id == "ws_monitor"
             return False
 
@@ -379,10 +399,12 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_start_rechec
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         assert workspace_id == "ws_monitor"
         return True
 
     async def _record_cooldown(**kwargs: object) -> None:
+        """Test helper for record cooldown."""
         nonlocal cooldown_recorded
         cooldown_recorded = True
 
@@ -394,9 +416,11 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_start_rechec
     )
 
     async def _release_monitor_claim(workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         assert workspace_id == "ws_monitor"
 
     async def _prompt_release(workspace_id: str) -> None:
+        """Test helper for prompt release."""
         assert workspace_id == "ws_monitor"
 
     worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
@@ -443,6 +467,7 @@ async def test_safely_resume_claimed_pr_monitor_applies_cooldown_when_handoff_ab
 
     class _AbortingHandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object | None:
+            """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
             return None
 
@@ -460,11 +485,13 @@ async def test_safely_resume_claimed_pr_monitor_applies_cooldown_when_handoff_ab
         finish_workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         assert finish_workspace_id == workspace_id
         assert kwargs["status"] == OperationStatus.failed
         return True
 
     async def _record_cooldown(_record_workspace_id: str, **kwargs: object) -> None:
+        """Test helper for record cooldown."""
         nonlocal cooldown_recorded
         assert _record_workspace_id == workspace_id
         assert kwargs["recovery_operation_id"] == "op_handoff_aborted"
@@ -478,9 +505,11 @@ async def test_safely_resume_claimed_pr_monitor_applies_cooldown_when_handoff_ab
     )
 
     async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         assert released_workspace_id == workspace_id
 
     async def _prompt_release(released_workspace_id: str) -> None:
+        """Test helper for prompt release."""
         assert released_workspace_id == workspace_id
 
     worker._release_monitoring_pr_claim = _release_monitor_claim  # type: ignore[method-assign]
@@ -536,6 +565,7 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_cancelled_af
 
     class BlockingRunExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, handoff_workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert handoff_workspace_id == workspace_id
             return handoff
 
@@ -544,6 +574,7 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_cancelled_af
             handoff_workspace_id: str,
             handoff_obj: object,
         ) -> None:
+            """Test helper for run resumed pr monitor."""
             assert handoff_obj is handoff
             assert handoff_workspace_id == workspace_id
             run_started.set()
@@ -560,14 +591,17 @@ async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_cancelled_af
     )
 
     async def _record_cooldown(_record_workspace_id: str, **kwargs: object) -> None:
+        """Test helper for record cooldown."""
         nonlocal cooldown_recorded
         assert _record_workspace_id == workspace_id
         cooldown_recorded = True
 
     async def _release_monitor_claim(released_workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         assert released_workspace_id == workspace_id
 
     async def _prompt_release(released_workspace_id: str) -> None:
+        """Test helper for prompt release."""
         assert released_workspace_id == workspace_id
 
     worker._record_active_salvage_monitor_resume_cooldown = (  # type: ignore[method-assign]
@@ -606,10 +640,12 @@ async def test_safely_resume_pr_monitor_none_return_does_not_refinish_succeeded_
 
     class LegacyVoidRunExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             return handoff
 
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             nonlocal monitor_ran
             assert handoff_obj is handoff
             assert workspace_id == "ws_monitor"
@@ -626,6 +662,7 @@ async def test_safely_resume_pr_monitor_none_return_does_not_refinish_succeeded_
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
@@ -656,16 +693,19 @@ async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_post_
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             return handoff
 
         async def verify_resume_monitor_start(self, workspace_id: str) -> bool:
+            """Test helper for verify resume monitor start."""
             nonlocal verify_calls
             assert workspace_id == "ws_monitor"
             verify_calls += 1
             return verify_calls == 1
 
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> bool:
+            """Test helper for run resumed pr monitor."""
             assert handoff_obj is handoff
             assert workspace_id == "ws_monitor"
             if not await self.verify_resume_monitor_start(workspace_id):
@@ -683,6 +723,7 @@ async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_post_
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
@@ -706,6 +747,7 @@ async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_post_
 async def test_safely_resume_pr_monitor_post_handoff_cancellation_does_not_cancel_recovery_op(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify safely resume pr monitor post handoff cancellation does not cancel recovery op."""
     handoff = object()
     finish_calls: list[dict[str, object]] = []
     run_started = asyncio.Event()
@@ -713,10 +755,12 @@ async def test_safely_resume_pr_monitor_post_handoff_cancellation_does_not_cance
 
     class BlockingRunExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             return handoff
 
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             assert handoff_obj is handoff
             assert workspace_id == "ws_monitor"
             run_started.set()
@@ -733,10 +777,12 @@ async def test_safely_resume_pr_monitor_post_handoff_cancellation_does_not_cance
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
     async def _finish_after_cancellation(*args: object, **kwargs: object) -> None:
+        """Test helper for finish after cancellation."""
         nonlocal after_cancellation_called
         after_cancellation_called = True
 
@@ -777,10 +823,12 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             return handoff
 
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             raise AssertionError("monitor run must not start when finalize is cancelled")
 
     worker = ControlWorker(
@@ -794,6 +842,7 @@ async def test_safely_resume_pr_monitor_cancellation_during_succeed_finalize_shi
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         nonlocal finish_attempts
         finish_attempts += 1
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
@@ -860,10 +909,12 @@ async def test_safely_resume_pr_monitor_cancellation_during_finalize_preserves_c
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id_arg == workspace_id
             return handoff
 
         async def run_resumed_pr_monitor(self, workspace_id_arg: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             raise AssertionError("monitor run must not start when finalize is cancelled")
 
     worker = ControlWorker(
@@ -877,12 +928,14 @@ async def test_safely_resume_pr_monitor_cancellation_during_finalize_preserves_c
         workspace_id_arg: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id_arg, **kwargs})
         finalize_started.set()
         await asyncio.Event().wait()
         return True
 
     async def _finish_after_cancellation(*args: object, **kwargs: object) -> None:
+        """Test helper for finish after cancellation."""
         after_cancellation_calls.append(dict(kwargs))
 
     worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
@@ -943,14 +996,17 @@ async def test_safely_resume_pr_monitor_cancellation_during_verify_skip_finalize
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id_arg == workspace_id
             return handoff
 
         async def verify_resume_monitor_start(self, workspace_id_arg: str) -> bool:
+            """Test helper for verify resume monitor start."""
             assert workspace_id_arg == workspace_id
             return False
 
         async def run_resumed_pr_monitor(self, workspace_id_arg: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             raise AssertionError("monitor run must not start when verify-start skip finalizes")
 
     worker = ControlWorker(
@@ -964,12 +1020,14 @@ async def test_safely_resume_pr_monitor_cancellation_during_verify_skip_finalize
         workspace_id_arg: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id_arg, **kwargs})
         finalize_started.set()
         await asyncio.Event().wait()
         return True
 
     async def _finish_after_cancellation(*args: object, **kwargs: object) -> None:
+        """Test helper for finish after cancellation."""
         after_cancellation_calls.append(dict(kwargs))
 
     worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
@@ -1029,14 +1087,17 @@ async def test_safely_resume_pr_monitor_cancellation_during_verify_skip_finalize
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id_arg == workspace_id
             return handoff
 
         async def verify_resume_monitor_start(self, workspace_id_arg: str) -> bool:
+            """Test helper for verify resume monitor start."""
             assert workspace_id_arg == workspace_id
             return False
 
         async def run_resumed_pr_monitor(self, workspace_id_arg: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             raise AssertionError("monitor run must not start when verify-start skip finalizes")
 
     worker = ControlWorker(
@@ -1050,12 +1111,14 @@ async def test_safely_resume_pr_monitor_cancellation_during_verify_skip_finalize
         workspace_id_arg: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id_arg, **kwargs})
         finalize_started.set()
         await asyncio.Event().wait()
         return True
 
     async def _finish_after_cancellation(*args: object, **kwargs: object) -> None:
+        """Test helper for finish after cancellation."""
         after_cancellation_calls.append(dict(kwargs))
 
     worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
@@ -1116,10 +1179,12 @@ async def test_safely_resume_pr_monitor_cancellation_during_finalize_preserves_f
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id_arg: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id_arg == workspace_id
             return handoff
 
         async def run_resumed_pr_monitor(self, workspace_id_arg: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             raise AssertionError("monitor run must not start when finalize is cancelled")
 
     worker = ControlWorker(
@@ -1133,12 +1198,14 @@ async def test_safely_resume_pr_monitor_cancellation_during_finalize_preserves_f
         workspace_id_arg: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id_arg, **kwargs})
         finalize_started.set()
         await asyncio.Event().wait()
         return True
 
     async def _finish_after_cancellation(*args: object, **kwargs: object) -> None:
+        """Test helper for finish after cancellation."""
         after_cancellation_calls.append(dict(kwargs))
 
     worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
@@ -1176,6 +1243,7 @@ async def test_safely_resume_pr_monitor_retains_handle_when_cancellation_finaliz
 
     class BlockingHandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             handoff_started.set()
             await asyncio.Event().wait()
@@ -1189,6 +1257,7 @@ async def test_safely_resume_pr_monitor_retains_handle_when_cancellation_finaliz
     )
 
     async def _finish_after_cancellation(*args: object, **kwargs: object) -> bool:
+        """Test helper for finish after cancellation."""
         del args, kwargs
         return False
 
@@ -1224,10 +1293,12 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_after_cancellatio
 
     class HandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             assert workspace_id == "ws_monitor"
             return handoff
 
         async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> None:
+            """Test helper for run resumed pr monitor."""
             raise AssertionError("monitor run must not start when finalize is cancelled")
 
     worker = ControlWorker(
@@ -1241,6 +1312,7 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_after_cancellatio
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         nonlocal finish_attempts
         finish_attempts += 1
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
@@ -1250,6 +1322,7 @@ async def test_safely_resume_claimed_pr_monitor_releases_claim_after_cancellatio
         return True
 
     async def _release_monitor_claim(workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         nonlocal claim_released
         assert workspace_id == "ws_monitor"
         claim_released = True
@@ -1292,6 +1365,7 @@ async def test_safely_resume_claimed_pr_monitor_legacy_releases_claim_after_canc
 
     class BlockingLegacyExecutor:
         async def resume_pr_monitor(self, workspace_id: str) -> None:
+            """Test helper for resume pr monitor."""
             assert workspace_id == "ws_monitor"
             resume_started.set()
             await asyncio.Event().wait()
@@ -1307,10 +1381,12 @@ async def test_safely_resume_claimed_pr_monitor_legacy_releases_claim_after_canc
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
     async def _release_monitor_claim(workspace_id: str) -> None:
+        """Test helper for release monitor claim."""
         nonlocal claim_released
         assert workspace_id == "ws_monitor"
         claim_released = True
@@ -1351,12 +1427,15 @@ async def test_safely_resume_pr_monitor_falls_back_to_protocol_resume(
 
     class _ProtocolOnlyExecutor:
         def __init__(self) -> None:
+            """Test helper for __init__."""
             self.resume_calls: list[str] = []
 
         async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+            """Test helper for execute."""
             del workspace_id
 
         async def resume_pr_monitor(self, workspace_id: str) -> None:
+            """Test helper for resume pr monitor."""
             self.resume_calls.append(workspace_id)
 
     executor = _ProtocolOnlyExecutor()
@@ -1371,6 +1450,7 @@ async def test_safely_resume_pr_monitor_falls_back_to_protocol_resume(
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
@@ -1403,17 +1483,21 @@ async def test_safely_resume_pr_monitor_falls_back_when_handoff_api_incomplete(
 
     class _PartialHandoffExecutor:
         def __init__(self) -> None:
+            """Test helper for __init__."""
             self.handoff_calls: list[str] = []
             self.resume_calls: list[str] = []
 
         async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+            """Test helper for execute."""
             del workspace_id
 
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             self.handoff_calls.append(workspace_id)
             return object()
 
         async def resume_pr_monitor(self, workspace_id: str) -> None:
+            """Test helper for resume pr monitor."""
             self.resume_calls.append(workspace_id)
 
     executor = _PartialHandoffExecutor()
@@ -1428,6 +1512,7 @@ async def test_safely_resume_pr_monitor_falls_back_when_handoff_api_incomplete(
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
@@ -1707,6 +1792,7 @@ async def test_monitor_recovery_handoff_failure_error_prefers_payload_reason_cod
 
 @pytest.mark.unit
 def test_monitor_recovery_handoff_failure_error_code_prefers_payload() -> None:
+    """Verify monitor recovery handoff failure error code prefers payload."""
     event = SimpleNamespace(
         reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
         payload={"reason_code": "DOCKER_UNAVAILABLE"},
@@ -1719,6 +1805,7 @@ def test_monitor_recovery_handoff_failure_error_code_prefers_payload() -> None:
 
 @pytest.mark.unit
 def test_monitor_recovery_handoff_failure_error_code_falls_back_to_event_reason() -> None:
+    """Verify monitor recovery handoff failure error code falls back to event reason."""
     event = SimpleNamespace(
         reason_code="MONITOR_RECOVERY_METADATA_MISSING",
         payload={},
@@ -1731,6 +1818,7 @@ def test_monitor_recovery_handoff_failure_error_code_falls_back_to_event_reason(
 
 @pytest.mark.unit
 def test_monitor_recovery_handoff_failure_message_prefers_payload_message() -> None:
+    """Verify monitor recovery handoff failure message prefers payload message."""
     event = SimpleNamespace(payload={"message": "  compose handoff rejected  "})
     workspace = SimpleNamespace(
         status=WorkspaceStatus.monitoring_pr.value,
@@ -1746,6 +1834,7 @@ def test_monitor_recovery_handoff_failure_message_prefers_payload_message() -> N
 
 @pytest.mark.unit
 def test_monitor_recovery_handoff_failure_message_uses_operation_when_no_text_fields() -> None:
+    """Verify monitor recovery handoff failure message uses operation when no text fields."""
     event = SimpleNamespace(payload={"operation": "compose up"})
     workspace = SimpleNamespace(status=WorkspaceStatus.monitoring_pr.value, failure_message=None)
     message = worker_dispatch_methods._monitor_recovery_handoff_failure_message(  # noqa: SLF001
@@ -1760,6 +1849,7 @@ def test_monitor_recovery_handoff_failure_message_uses_operation_when_no_text_fi
 async def test_monitor_recovery_handoff_failure_error_skips_null_reason_events(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify monitor recovery handoff failure error skips null reason events."""
     async with session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.create(
@@ -1805,6 +1895,7 @@ async def test_monitor_recovery_handoff_failure_error_skips_null_reason_events(
 async def test_monitor_recovery_handoff_failure_error_uses_workspace_failure_message(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify monitor recovery handoff failure error uses workspace failure message."""
     async with session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.create(
@@ -1841,6 +1932,7 @@ async def test_monitor_recovery_handoff_failure_error_lookup_exception_returns_d
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify monitor recovery handoff failure error lookup exception returns default."""
     worker = ControlWorker(
         session_factory=session_factory,
         provisioner=object(),  # type: ignore[arg-type]
@@ -1849,6 +1941,7 @@ async def test_monitor_recovery_handoff_failure_error_lookup_exception_returns_d
 
     class _BrokenRepo:
         async def get(self, workspace_id: str) -> None:
+            """Test helper for get."""
             del workspace_id
             raise RuntimeError("lookup failed")
 
@@ -1874,6 +1967,7 @@ async def test_monitor_recovery_start_skipped_operation_status_lookup_exception_
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify monitor recovery start skipped operation status lookup exception returns failed."""
     worker = ControlWorker(
         session_factory=session_factory,
         provisioner=object(),  # type: ignore[arg-type]
@@ -1882,6 +1976,7 @@ async def test_monitor_recovery_start_skipped_operation_status_lookup_exception_
 
     class _BrokenRepo:
         async def get(self, workspace_id: str) -> None:
+            """Test helper for get."""
             del workspace_id
             raise RuntimeError("lookup failed")
 
@@ -1913,6 +2008,7 @@ async def test_monitor_recovery_start_skipped_operation_status_lookup_exception_
 async def test_monitor_recovery_terminal_finalize_status_handles_missing_and_cancelled(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify monitor recovery terminal finalize status handles missing and cancelled."""
     worker = ControlWorker(
         session_factory=session_factory,
         provisioner=object(),  # type: ignore[arg-type]
@@ -1961,6 +2057,7 @@ async def test_monitor_recovery_terminal_finalize_status_handles_missing_and_can
 async def test_monitor_recovery_terminal_finalize_status_marks_left_monitoring_pr_cancelled(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify monitor recovery terminal finalize status marks left monitoring pr cancelled."""
     async with session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.create(
@@ -1998,10 +2095,12 @@ async def test_monitor_recovery_terminal_finalize_status_marks_left_monitoring_p
 async def test_safely_resume_pr_monitor_legacy_failure_clears_recovery_handle(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify safely resume pr monitor legacy failure clears recovery handle."""
     finish_calls: list[dict[str, object]] = []
 
     class _RaisingLegacyExecutor:
         async def resume_pr_monitor(self, workspace_id: str) -> None:
+            """Test helper for resume pr monitor."""
             del workspace_id
             raise RuntimeError("legacy resume failed")
 
@@ -2016,6 +2115,7 @@ async def test_safely_resume_pr_monitor_legacy_failure_clears_recovery_handle(
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
@@ -2046,8 +2146,11 @@ async def test_safely_resume_pr_monitor_legacy_failure_clears_recovery_handle(
 async def test_safely_resume_pr_monitor_legacy_failure_retains_handle_when_finalize_fails(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify safely resume pr monitor legacy failure retains handle when finalize fails."""
+
     class _RaisingLegacyExecutor:
         async def resume_pr_monitor(self, workspace_id: str) -> None:
+            """Test helper for resume pr monitor."""
             del workspace_id
             raise RuntimeError("legacy resume failed")
 
@@ -2062,6 +2165,7 @@ async def test_safely_resume_pr_monitor_legacy_failure_retains_handle_when_final
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         del workspace_id, kwargs
         return False
 
@@ -2083,10 +2187,12 @@ async def test_safely_resume_pr_monitor_legacy_failure_retains_handle_when_final
 async def test_safely_resume_pr_monitor_handoff_exception_clears_recovery_handle(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify safely resume pr monitor handoff exception clears recovery handle."""
     finish_calls: list[dict[str, object]] = []
 
     class _RaisingHandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             del workspace_id
             raise RuntimeError("handoff blew up")
 
@@ -2101,6 +2207,7 @@ async def test_safely_resume_pr_monitor_handoff_exception_clears_recovery_handle
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         finish_calls.append({"workspace_id": workspace_id, **kwargs})
         return True
 
@@ -2131,8 +2238,11 @@ async def test_safely_resume_pr_monitor_handoff_exception_clears_recovery_handle
 async def test_safely_resume_pr_monitor_handoff_exception_retains_handle_when_finalize_fails(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify safely resume pr monitor handoff exception retains handle when finalize fails."""
+
     class _RaisingHandoffExecutor(_RecordingExecutor):
         async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
             del workspace_id
             raise RuntimeError("handoff blew up")
 
@@ -2147,6 +2257,7 @@ async def test_safely_resume_pr_monitor_handoff_exception_retains_handle_when_fi
         workspace_id: str,
         **kwargs: object,
     ) -> bool:
+        """Test helper for finish monitor recovery operation."""
         del workspace_id, kwargs
         return False
 
@@ -2185,12 +2296,14 @@ async def test_safely_provision_isolates_epoch_read_failure(
     )
 
     async def _raising_read(workspace_id: str) -> int | None:
+        """Test helper for raising read."""
         assert workspace_id == "ws_epoch"
         raise RuntimeError("transient db disconnect")
 
     released: list[str] = []
 
     async def _release(workspace_id: str) -> None:
+        """Test helper for release."""
         released.append(workspace_id)
 
     worker._read_execution_claim_epoch = _raising_read  # type: ignore[method-assign]
@@ -2221,11 +2334,13 @@ async def test_safely_provision_propagates_cancel_on_epoch_read(
     )
 
     async def _cancelled_read(workspace_id: str) -> int | None:
+        """Test helper for cancelled read."""
         raise asyncio.CancelledError
 
     released: list[str] = []
 
     async def _release(workspace_id: str) -> None:
+        """Test helper for release."""
         released.append(workspace_id)
 
     worker._read_execution_claim_epoch = _cancelled_read  # type: ignore[method-assign]
@@ -2241,9 +2356,11 @@ async def test_safely_provision_propagates_cancel_on_epoch_read(
 async def test_claim_monitoring_pr_ids_respects_limit_and_existing_tasks(
     worker: ControlWorker,
 ) -> None:
+    """Verify claim monitoring pr ids respects limit and existing tasks."""
     claim_calls: list[str] = []
 
     async def _claim_monitoring_pr(workspace_id: str) -> bool:
+        """Test helper for claim monitoring pr."""
         claim_calls.append(workspace_id)
         return True
 
