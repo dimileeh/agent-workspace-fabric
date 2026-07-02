@@ -324,6 +324,55 @@ async def test_cycle_deadline_after_first_failure_raises_last_error(
 
 
 @pytest.mark.unit
+async def test_never_policy_ignores_stale_cycle_deadline() -> None:
+    # A NEVER-policy call issues exactly one attempt and cannot contribute to a
+    # retry storm, so a cycle deadline already consumed by a long preceding
+    # AddressComments fix/validation pass or settle wait must NOT short-circuit
+    # it. Otherwise the first post-fix settle/recheck/resolve/comment/merge call
+    # raises a fabricated "cycle deadline exceeded" without ever contacting the
+    # forge and can terminate a healthy workspace (PRRT_kwDOSJAM6s6N-X5D).
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout='{"ok": true}')
+    token = github_retry_context.set(GitHubRetryContext(deadline=time.monotonic() - 100.0))
+    try:
+        result = await _execute_gh_with_retry(
+            runner,
+            ["gh", "pr", "merge", "1"],
+            operation="gh pr merge",
+            retry_policy=RetryPolicy.NEVER,
+            sleep=_RecordedSleep(),
+        )
+    finally:
+        github_retry_context.reset(token)
+    assert result.ok
+    assert len(runner.calls) == 1  # the stale deadline did not short-circuit the call
+
+
+@pytest.mark.unit
+async def test_never_policy_surfaces_real_error_despite_stale_deadline() -> None:
+    # Same guard, failure path: a NEVER call reached with a stale deadline must
+    # still contact the forge and surface the *real* error, not the fabricated
+    # deadline sentinel — preserving the true reason code for the caller.
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr="HTTP 422 Unprocessable Entity")
+    token = github_retry_context.set(GitHubRetryContext(deadline=time.monotonic() - 100.0))
+    try:
+        with pytest.raises(GitHubClientError) as exc:
+            await _execute_gh_with_retry(
+                runner,
+                ["gh", "pr", "comment", "1"],
+                operation="gh pr comment",
+                retry_policy=RetryPolicy.NEVER,
+                sleep=_RecordedSleep(),
+            )
+    finally:
+        github_retry_context.reset(token)
+    assert "422" in exc.value.stderr  # the real forge error, not the deadline sentinel
+    assert "deadline" not in exc.value.stderr.lower()
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.unit
 async def test_secret_stderr_redacted_before_logging_and_persisting(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

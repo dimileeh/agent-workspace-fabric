@@ -99,7 +99,17 @@ async def execute_gh_with_retry(
     )
 
     for attempt in range(1, attempt_cap + 1):
-        if past_transport_deadline(deadline):
+        # The cycle deadline bounds *retry* storms — many calls each retrying for
+        # tens of minutes within one monitor poll. A NEVER-policy call issues
+        # exactly one attempt (bounded by the per-attempt timeout) and can never
+        # contribute to that, so it must not be gated by a deadline that a long
+        # preceding AddressComments fix/validation pass or settle wait may have
+        # already consumed. Otherwise the first post-fix settle/recheck/resolve/
+        # comment/merge forge call raises a fabricated "cycle deadline exceeded"
+        # without ever contacting the forge and can terminate a healthy workspace
+        # as GITHUB_API_ERROR (PRRT_kwDOSJAM6s6N-X5D). Retrying policies keep the
+        # pre-attempt check so a genuine retry batch stays bounded.
+        if retry_policy != RetryPolicy.NEVER and past_transport_deadline(deadline):
             if last_error is not None:
                 _log.warning(
                     "github.transport_retry_exhausted",
