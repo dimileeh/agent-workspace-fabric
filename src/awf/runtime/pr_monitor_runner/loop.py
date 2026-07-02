@@ -65,6 +65,7 @@ from awf.runtime.pr_monitor_runner.loop_helpers import (
 from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
     _finish_agent_service_recovery_failed_operation,
     _finish_agent_service_recovery_superseded_operation,
+    _provider_recovery_operation_result_updates,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
@@ -869,40 +870,46 @@ async def _execute(
                 extra_result={"failure_count": len(action.failures)},
             )
             raise
-        except ProviderRecoveryRetryError:
+        except ProviderRecoveryRetryError as exc:
+            retry_result: dict[str, object] = {
+                "status": "failed",
+                "outcome": "provider_retry",
+                "reason_code": "PROVIDER_OUTAGE",
+                "failure_count": len(action.failures),
+                "pushed": False,
+            }
+            retry_result.update(_provider_recovery_operation_result_updates(exc))
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": "provider_retry",
-                    "reason_code": "PROVIDER_OUTAGE",
-                    "failure_count": len(action.failures),
-                    "pushed": False,
-                },
+                result=retry_result,
                 error_code="PROVIDER_OUTAGE",
                 error_message="Provider recovery requested retry",
             )
             raise
-        except ProviderRecoveryFallbackError:
+        except ProviderRecoveryFallbackError as exc:
+            fallback_result: dict[str, object] = {
+                "status": "failed",
+                "outcome": "provider_fallback",
+                "reason_code": "PROVIDER_FALLBACK",
+                "failure_count": len(action.failures),
+                "pushed": False,
+            }
+            fallback_result.update(_provider_recovery_operation_result_updates(exc))
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": "provider_fallback",
-                    "reason_code": "PROVIDER_FALLBACK",
-                    "failure_count": len(action.failures),
-                    "pushed": False,
-                },
+                result=fallback_result,
                 error_code="PROVIDER_FALLBACK",
                 error_message="Provider recovery triggered fallback",
             )
             raise
-        except ProviderRecoveryAuthError:
+        except ProviderRecoveryAuthError as exc:
+            auth_extra: dict[str, object] = {"failure_count": len(action.failures)}
+            auth_extra.update(_provider_recovery_operation_result_updates(exc))
             await self._finish_provider_auth_failed_operation(
                 operation,
-                extra_result={"failure_count": len(action.failures)},
+                extra_result=auth_extra,
             )
             raise
         except ComposeExecCleanupError as exc:

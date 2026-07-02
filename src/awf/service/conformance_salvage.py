@@ -11,10 +11,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any
 
-from awf.common.git_identity import git_safe_directory_config_args
 from awf.runtime.planning import build_conformance_retry_prompt
+from awf.service._git_salvage_utils import (
+    CompletedProcessLike,
+    SubprocessRun,
+)
+from awf.service._git_salvage_utils import (
+    git_lines as _git_lines,
+)
+from awf.service._git_salvage_utils import (
+    run_git as _run_git_shared,
+)
 
 CONFORMANCE_SALVAGE_POLICY_KEY = "conformance_salvage"
 INTERNAL_PLAN_ARTIFACT_PREFIX = "docs/awf-plans/"
@@ -30,33 +39,6 @@ CONFORMANCE_SALVAGE_APPLIED_EVENT_TYPE = "workspace.conformance_salvage_applied"
 CONFORMANCE_SALVAGE_APPLIED_REASON = "CONFORMANCE_SALVAGE_APPLIED"
 CONFORMANCE_SALVAGE_CONFLICT_EVENT_TYPE = "workspace.conformance_salvage_conflict"
 CONFORMANCE_SALVAGE_CONFLICT_REASON = "CONFORMANCE_SALVAGE_CONFLICT"
-
-_GIT_TIMEOUT_SECONDS = 30.0
-
-
-class CompletedProcessLike(Protocol):
-    """Protocol describing the small git subprocess result contract."""
-
-    returncode: int
-    stdout: str
-    stderr: str
-
-
-class SubprocessRun(Protocol):
-    """Protocol for a subprocess runner used by salvage operations."""
-
-    def __call__(  # pragma: no cover - Protocol method declaration only.
-        self,
-        args: list[str],
-        *,
-        check: bool,
-        capture_output: bool,
-        text: Literal[True],
-        timeout: float,
-        env: Mapping[str, str],
-    ) -> CompletedProcessLike:
-        """Execute subprocess command and return a captured result."""
-        ...
 
 
 @dataclass(frozen=True)
@@ -336,29 +318,15 @@ def _run_git(
     failure_reason: str = SALVAGE_SOURCE_UNAVAILABLE,
 ) -> CompletedProcessLike:
     """Run a git command for salvage with deterministic timeout and failure mapping."""
-    result = run(
-        ["git", *git_safe_directory_config_args(worktree), "-C", str(worktree), *args],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=_GIT_TIMEOUT_SECONDS,
+    return _run_git_shared(
+        worktree,
+        args,
+        run=run,
         env=env,
+        raise_error=ConformanceSalvageError,
+        failure_reason=failure_reason,
+        failure_context="conformance salvage",
     )
-    if result.returncode != 0:
-        raise ConformanceSalvageError(
-            reason_code=failure_reason,
-            message=f"git {' '.join(args)} failed during conformance salvage.",
-            detail={
-                "stdout": result.stdout[-2000:],
-                "stderr": result.stderr[-2000:],
-            },
-        )
-    return result
-
-
-def _git_lines(value: str) -> list[str]:
-    """Split git output into a sorted list of non-empty changed paths."""
-    return sorted(line.strip() for line in value.splitlines() if line.strip())
 
 
 def _evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
