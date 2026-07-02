@@ -124,6 +124,13 @@ class AsyncioSubprocessRunner:
             # Terminate and reap it before propagating the cancellation.
             await _terminate_process(proc, wait_task)
             raise
+        finally:
+            # On the success path ``wait_task`` is never awaited — ``communicate``
+            # reaps the process itself — so cancel the bookkeeping task rather
+            # than leave it orphaned in the event loop until GC. On the
+            # timeout/cancel paths ``_terminate_process`` has already reaped it,
+            # so this cancel is a no-op.
+            wait_task.cancel()
         assert proc.returncode is not None
         return CommandResult(
             returncode=proc.returncode,
