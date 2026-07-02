@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -22,10 +24,37 @@ from awf.control.worker import claims as worker_claims
 from awf.control.worker import dispatch_methods as worker_dispatch_methods
 from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_session_factory
+from awf.node.git_manager import GitManager
+from awf.node.provisioner import Provisioner, ProvisionerConfig
+from tests.postgres import postgres_test_engine
 from tests.unit.control.test_worker_parts.test_worker_part_053 import (
     _pending_execution_task,
     _RecordingExecutor,
 )
+
+
+@pytest.fixture
+async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a Postgres-backed async session factory for worker tests."""
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
+
+
+@pytest.fixture
+def worker(session_factory: async_sessionmaker[AsyncSession], tmp_path: Path) -> ControlWorker:
+    """Build a ControlWorker with a real provisioner for claim/dispatch tests."""
+    git = GitManager(tmp_path / "awf-work")
+    prov = Provisioner(
+        session_factory=session_factory,
+        git=git,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    return ControlWorker(
+        session_factory=session_factory,
+        provisioner=prov,
+        config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+    )
 
 
 @pytest.mark.unit
