@@ -752,6 +752,7 @@ async def test_safely_resume_pr_monitor_skips_monitor_when_finalize_never_succee
     assert len(finish_calls) == 2
     assert all(call["status"] == OperationStatus.succeeded for call in finish_calls)
     assert "ws_monitor" in worker._monitor_recovery_operation_ids  # noqa: SLF001
+    assert "ws_monitor" not in worker._monitor_recovery_handoff_succeeded_workspace_ids  # noqa: SLF001
 
 
 @pytest.mark.unit

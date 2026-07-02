@@ -908,6 +908,8 @@ async def _safely_resume_pr_monitor(
             if finalized:
                 self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            else:
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
             return status == OperationStatus.succeeded
 
         handoff_succeeded = True
@@ -937,6 +939,7 @@ async def _safely_resume_pr_monitor(
                 workspace_id=workspace_id,
                 operation_id=recovery_operation_id,
             )
+            self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
             return False
 
         monitor_started = await self._executor.run_resumed_pr_monitor(workspace_id, handoff)
@@ -997,6 +1000,8 @@ async def _safely_resume_pr_monitor(
             if finalized:
                 self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            else:
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
         raise
     except Exception as exc:
         if not handoff_succeeded:
@@ -1010,6 +1015,7 @@ async def _safely_resume_pr_monitor(
             )
             if finalized:
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
             return False
         # The monitor runner owns post-handoff terminal transitions. Recovery
         # dispatch still must not take the service worker down if a single

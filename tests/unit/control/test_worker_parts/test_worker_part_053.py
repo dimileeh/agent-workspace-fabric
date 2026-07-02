@@ -433,6 +433,44 @@ async def test_safely_resume_pr_monitor_fails_operation_when_start_recheck_bails
 
 
 @pytest.mark.unit
+async def test_safely_resume_pr_monitor_clears_handoff_marker_when_verify_skip_finalize_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Verify-start skip must not leave a stale handoff marker when finalize fails."""
+    handoff = object()
+
+    class HandoffExecutor(_RecordingExecutor):
+        """Executor stub for monitor recovery handoff tests."""
+
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def verify_resume_monitor_start(self, workspace_id: str) -> bool:
+            """Test helper for verify resume monitor start."""
+            assert workspace_id == "ws_monitor"
+            return False
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    worker._monitor_recovery_operation_ids["ws_monitor"] = "op_verify_skip_finalize_failed"  # noqa: SLF001
+    worker._finish_monitor_recovery_operation = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_verify_skip_finalize_failed",
+    )
+
+    assert result is False
+    assert "ws_monitor" not in worker._monitor_recovery_handoff_succeeded_workspace_ids  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_safely_resume_claimed_pr_monitor_skips_cooldown_when_start_recheck_bails(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
