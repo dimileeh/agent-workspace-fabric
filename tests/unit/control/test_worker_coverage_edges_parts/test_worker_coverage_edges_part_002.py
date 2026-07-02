@@ -437,6 +437,7 @@ async def test_active_salvage_resume_cooldown_in_memory_blocks_claim() -> None:
 async def test_persisted_active_salvage_resume_cooldown_handles_zero_lease_and_event_fallback() -> (
     None
 ):
+    """Treat zero lease config as inactive and fall back when cooldown payload is invalid."""
     disabled = SimpleNamespace(_config=SimpleNamespace(monitor_claim_lease_seconds=0.0))
     assert (
         not await worker_recovery_cooldown._persisted_active_salvage_monitor_resume_cooldown_active(  # noqa: SLF001
@@ -478,6 +479,8 @@ async def test_persisted_active_salvage_resume_cooldown_handles_zero_lease_and_e
 async def test_persisted_active_salvage_resume_cooldown_handles_missing_and_expired_events() -> (
     None
 ):
+    """Return inactive when no cooldown event exists and inactive when the event expired."""
+
     class _Result:
         def __init__(self, event: object | None) -> None:
             """Test helper for __init__."""
@@ -531,6 +534,8 @@ async def test_persisted_active_salvage_resume_cooldown_handles_missing_and_expi
 
 @pytest.mark.unit
 async def test_active_salvage_resume_cooldown_record_swallows_session_failures() -> None:
+    """Swallow DB session failures when recording an active-salvage resume cooldown."""
+
     class _FailingSession:
         async def __aenter__(self) -> object:
             """Test helper for  aenter  ."""
@@ -557,6 +562,8 @@ async def test_active_salvage_resume_cooldown_record_swallows_session_failures()
 async def test_active_salvage_resume_cooldown_record_skips_missing_or_wrong_status_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Skip cooldown recording when the workspace row is missing or not monitoring_pr."""
+
     class _Session:
         committed = False
 
@@ -989,6 +996,7 @@ async def test_preserved_active_branch_lookup_treats_invalid_repo_url_as_failure
 async def test_preserved_active_branch_lookup_covers_invalid_empty_and_multiple_results(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Map invalid, empty, and ambiguous open-PR resolver results to lookup states."""
     worker = _worker(factory)
 
     class _StaticResolver:
@@ -1254,6 +1262,7 @@ async def test_forget_execution_task_ignores_replaced_task(
 async def test_reconcile_drops_monitor_kind_when_task_already_gone(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Drop stale monitor-resume kind entries when the workspace row is already gone."""
     worker = _worker(factory)
     # Simulate a monitor resume that finished concurrently during the status load:
     # the kind entry lingers while its task is already gone and the workspace row

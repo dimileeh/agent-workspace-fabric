@@ -944,6 +944,7 @@ class TestRunOnceExecutionPart004:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """A failing ready execution must not prevent dispatch of other ready workspaces."""
         first_id = await _create_ready(session_factory, origin_repo, "bad")
         second_id = await _create_ready(session_factory, origin_repo, "good")
 
@@ -1033,6 +1034,7 @@ class TestRunOnceExecutionPart004:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Concurrent workers must not claim the same ready workspace for execution."""
         ready_id = await _create_ready(session_factory, origin_repo, "race-ready")
         started = asyncio.Event()
         release = asyncio.Event()
@@ -1270,6 +1272,7 @@ class TestRunOnceExecutionPart004:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Stale-monitor CancelledError must finalize the remonitor recovery operation."""
         # CancelledError is a BaseException, so a stale-monitor reconcile cancel
         # skips the resume coroutine's Exception handler. Without an explicit
         # CancelledError finalizer the remonitor operation would stay stuck in

@@ -1082,6 +1082,7 @@ class TestRunOnceMonitorRecoveryPart002:
         origin_repo: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Restart recovery clears a dead-owner execution claim and records monitor claim."""
         unexpired_execution_expires_at = datetime.now(UTC) + timedelta(minutes=5)
         monitor_id = await _create_monitoring_pr(
             session_factory,

@@ -186,9 +186,7 @@ class TestResumePrMonitorStatusRechecks:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # The final recheck immediately before ``monitor.run`` guards against a
-        # concurrent cancel between compose-up and handing off; the monitor must
-        # not run when the status no longer matches.
+        """Skip monitor.run when a concurrent cancel changes status before the final recheck."""
         compose_calls: list[str] = []
         monitor_calls: list[str] = []
 
@@ -212,6 +210,7 @@ class TestResumePrMonitorStatusRechecks:
         original_recheck = executor._recheck_status
 
         async def _recheck_status(workspace_id: str, *, expected: Any, action: str, **kw: Any):
+            """Test helper that cancels the workspace on resume_monitor_start recheck."""
             if action == "resume_monitor_start":
                 async with factory() as s:
                     repo = WorkspaceRepository(s)
@@ -242,19 +241,18 @@ class TestResumePrMonitorStatusRechecks:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # PRRT_kwDOSJAM6s6NwlyN: the final recheck before ``monitor.run`` must
-        # fence on ``monitor_claimed_by``, not just status. A stale worker whose
-        # lease was reclaimed after handoff prep must not enter the monitor loop
-        # while the row remains ``monitoring_pr``.
+        """Skip monitor.run when monitor_claimed_by was superseded before the final recheck."""
         compose_calls: list[str] = []
         monitor_calls: list[str] = []
 
         class _Compose:
             async def ensure_project_up(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                """Test helper that records compose restart calls."""
                 compose_calls.append(workspace_id)
 
         class _Monitor:
             async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                """Test helper that records monitor.run calls."""
                 monitor_calls.append(workspace_id)
 
         ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
@@ -275,6 +273,7 @@ class TestResumePrMonitorStatusRechecks:
         original_recheck = executor._recheck_status
 
         async def _recheck_status(workspace_id: str, *, expected: Any, action: str, **kw: Any):
+            """Test helper that simulates monitor-claim takeover before monitor.run."""
             if action == "resume_monitor_start":
                 async with factory() as s:
                     repo = WorkspaceRepository(s)

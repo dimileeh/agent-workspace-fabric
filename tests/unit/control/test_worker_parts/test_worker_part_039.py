@@ -927,6 +927,8 @@ def _unexpected_cleaner_factory() -> _UnexpectedCleaner:
 async def test_finish_monitor_recovery_operation_handles_missing_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Return True when there is no recovery operation state to finalize."""
+
     class EmptyOperationSession:
         entered = False
         exited = False

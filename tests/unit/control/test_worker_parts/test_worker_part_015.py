@@ -1260,6 +1260,7 @@ class TestRunOnceMonitorRecoveryPart003:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Monitor resume and ready execution share the same execution-slot limit."""
         monitor_id = await _create_monitoring_pr(
             session_factory, origin_repo, "needs-monitor-resume"
         )
@@ -1355,6 +1356,7 @@ class TestRunOnceMonitorRecoveryPart003:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """An in-flight monitor resume must not spawn a duplicate execution task."""
         monitor_id = await _create_monitoring_pr(
             session_factory, origin_repo, "needs-monitor-resume"
         )
@@ -1399,6 +1401,7 @@ class TestRunOnceMonitorRecoveryPart003:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Concurrent workers must not claim the same monitoring_pr workspace."""
         monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "race-monitor")
         monitor_started = asyncio.Event()
         release_monitor = asyncio.Event()

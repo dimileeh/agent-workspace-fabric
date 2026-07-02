@@ -102,6 +102,8 @@ def _closed_connection_error() -> InterfaceError:
 async def test_db_connection_closed_event_skips_stale_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Skip event recording when the workspace is no longer in a running state."""
+
     class RecordingSession:
         committed = False
         closed = False
@@ -240,6 +242,8 @@ def test_active_salvage_monitor_resume_cooldowns_are_bounded_and_expired_entries
 async def test_safe_worker_paths_swallow_runtime_failures(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Safe worker entry points must swallow provision, execute, and resume failures."""
+
     class RaisingProvisioner:
         async def provision_claimed(
             self, workspace_id: str, execution_claim_epoch: int | None = None
