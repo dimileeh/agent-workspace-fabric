@@ -57,6 +57,11 @@ def git_lines(value: str) -> list[str]:
     return sorted(line.strip() for line in value.splitlines() if line.strip())
 
 
+def paths_from_ls_files_z(value: str) -> list[str]:
+    """Collect paths from ``git ls-files -z`` output without stripping or C-quote loss."""
+    return sorted(path for path in value.split("\0") if path)
+
+
 def paths_from_name_status(value: str) -> list[str]:
     """Collect all old and new paths from ``git diff --name-status -z`` output."""
     return sorted(changed_paths_from_name_status_z(value))

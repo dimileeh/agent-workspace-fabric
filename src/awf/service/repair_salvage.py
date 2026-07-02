@@ -19,7 +19,7 @@ from awf.service._git_salvage_utils import (
     SubprocessRun,
 )
 from awf.service._git_salvage_utils import (
-    git_lines as _git_lines,
+    paths_from_ls_files_z as _paths_from_ls_files_z,
 )
 from awf.service._git_salvage_utils import (
     paths_from_name_status as _paths_from_name_status,
@@ -123,10 +123,10 @@ def capture_ci_repair_salvage(
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     untracked_paths = set(
-        _git_lines(
+        _paths_from_ls_files_z(
             _run_git(
                 worktree,
-                ["ls-files", "--others", "--exclude-standard"],
+                ["ls-files", "--others", "--exclude-standard", "-z"],
                 run=run,
                 env=env_base,
             ).stdout

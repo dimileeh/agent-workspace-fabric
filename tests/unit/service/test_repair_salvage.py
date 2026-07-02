@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 from awf.service import repair_salvage as repair_salvage_mod
-from awf.service._git_salvage_utils import GIT_TIMEOUT_SECONDS, paths_from_name_status
+from awf.service._git_salvage_utils import (
+    GIT_TIMEOUT_SECONDS,
+    paths_from_ls_files_z,
+    paths_from_name_status,
+)
 from awf.service.repair_salvage import (
     REPAIR_SALVAGE_BASE_UNAVAILABLE,
     REPAIR_SALVAGE_NO_DIFF,
@@ -344,6 +348,45 @@ def test_capture_metadata_includes_digest_and_paths(tmp_path: Path) -> None:
     assert details["operation_id"] == "op_meta"
     assert details["operation_start_head"] == base_commit
     assert details["created_at"]
+
+
+@pytest.mark.unit
+def test_paths_from_ls_files_z_preserves_tab_and_trailing_space_paths() -> None:
+    """NUL-delimited ls-files parsing must preserve exact untracked path names."""
+    assert paths_from_ls_files_z("src/foo\tbar.py\0") == ["src/foo\tbar.py"]
+    assert paths_from_ls_files_z("src/trailing.py \0") == ["src/trailing.py "]
+    assert paths_from_ls_files_z(".claude/agent-memory/note\t.md\0src/app.py\0") == [
+        ".claude/agent-memory/note\t.md",
+        "src/app.py",
+    ]
+
+
+@pytest.mark.unit
+def test_capture_excludes_untracked_agent_memory_with_tab_in_filename(
+    tmp_path: Path,
+) -> None:
+    """Untracked runtime memory with tabbed filenames must not leak into salvage."""
+    _, base_commit = _seed_worktree(tmp_path, "ws_runtime_tab")
+    worktree = tmp_path / "git" / "worktrees" / "ws_runtime_tab"
+    (worktree / "src/app.py").write_text("VALUE = 'fix'\n", encoding="utf-8")
+    memory_dir = worktree / ".claude" / "agent-memory"
+    memory_dir.mkdir(parents=True)
+    tab_memory = memory_dir / "note\tfile.md"
+    tab_memory.write_text("memory only\n", encoding="utf-8")
+
+    capture = capture_ci_repair_salvage(
+        worktrees_root=tmp_path / "git" / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_id="ws_runtime_tab",
+        operation_start_head=base_commit,
+        operation_id=None,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+
+    assert capture.affected_paths == ["src/app.py"]
+    patch_text = capture.patch_path.read_text(encoding="utf-8")
+    assert "agent-memory" not in patch_text
 
 
 @pytest.mark.unit
