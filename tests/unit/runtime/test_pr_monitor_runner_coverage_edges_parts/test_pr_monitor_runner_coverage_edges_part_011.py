@@ -813,6 +813,10 @@ async def test_ci_fix_commit_sink_salvage_ok_rollback_failed_stays_terminal_with
     assert push_result.details is not None
     assert push_result.details["repair_salvage"] == repair_salvage
     assert "rollback_error" in push_result.details
+    rollback_error = push_result.details["rollback_error"]
+    assert rollback_error["cause"] == "reset_failed"
+    assert "git reset --hard" in rollback_error["message"]
+    assert "could not parse object" in rollback_error["message"]
     assert push_result.details["provider_error_stderr"] == expected_stderr
     assert handle_calls == 1
 

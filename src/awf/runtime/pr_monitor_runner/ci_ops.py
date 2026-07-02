@@ -12,6 +12,7 @@ import json as json
 import os as os
 import re as re
 import time as time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -65,13 +66,22 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _CiFixResidueRollbackResult:
+    """Outcome of rolling back CI-repair residue before provider recovery."""
+
+    ok: bool
+    message: str | None = None
+    cause: str | None = None
+
+
 async def _rollback_ci_fix_residue_before_provider_recovery(
     self: Any,
     *,
     workspace_id: str,
     worktree_path: Path,
     restore_ref: str | None,
-) -> bool:
+) -> _CiFixResidueRollbackResult:
     """Roll back CI-repair residue before re-raising provider recovery.
 
     ``_commit_dirty_worktree`` ->
@@ -136,19 +146,30 @@ async def _rollback_ci_fix_residue_before_provider_recovery(
             "monitor.ci_fix_provider_recovery_rollback_skipped_no_anchor",
             workspace_id=workspace_id,
         )
-        return False
+        return _CiFixResidueRollbackResult(
+            ok=False,
+            cause="missing_anchor",
+            message=("CI repair residue rollback skipped: post-raise HEAD anchor unavailable."),
+        )
     reset = await self._deps.runner.run(
         git_worktree_command(worktree_path, "reset", "--hard", restore_ref)
     )
     if not reset.ok:
+        reset_stderr = (reset.stderr or "")[:400]
         _log.warning(
             "monitor.ci_fix_provider_recovery_rollback_failed",
             workspace_id=workspace_id,
             restore_ref=restore_ref,
             reset_returncode=reset.returncode,
-            reset_stderr=(reset.stderr or "")[:400],
+            reset_stderr=reset_stderr,
         )
-        return False
+        return _CiFixResidueRollbackResult(
+            ok=False,
+            cause="reset_failed",
+            message=(
+                f"git reset --hard {restore_ref} failed (exit {reset.returncode}): {reset_stderr}"
+            ),
+        )
     # ``git reset --hard`` does not remove untracked files; the repair agents
     # can leave untracked residue that the next cycle's repair-start guard
     # (``_pre_existing_dirty_repair_worktree_result``) treats as dirty. Run the
@@ -165,21 +186,29 @@ async def _rollback_ci_fix_residue_before_provider_recovery(
         restore_ref=restore_ref,
     )
     if not cleanup.ok:
+        cleanup_message = cleanup.message[:400]
         _log.warning(
             "monitor.ci_fix_provider_recovery_rollback_untracked_cleanup_failed",
             workspace_id=workspace_id,
             restore_ref=restore_ref,
             cleanup_reason_code=cleanup.reason_code,
-            cleanup_message=cleanup.message[:400],
+            cleanup_message=cleanup_message,
             cleanup_stderr=cleanup.cleanup_stderr[:400],
         )
-        return False
+        return _CiFixResidueRollbackResult(
+            ok=False,
+            cause="cleanup_failed",
+            message=(
+                f"Untracked CI repair residue cleanup failed "
+                f"({cleanup.reason_code}): {cleanup_message}"
+            ),
+        )
     _log.info(
         "monitor.ci_fix_provider_recovery_rolled_back_residue",
         workspace_id=workspace_id,
         restore_ref=restore_ref,
     )
-    return True
+    return _CiFixResidueRollbackResult(ok=True)
 
 
 async def _salvage_ci_repair_dirty_output(
@@ -249,6 +278,117 @@ async def _salvage_ci_repair_dirty_output(
         affected_paths_count=len(details["affected_paths"]),
     )
     return {"repair_salvage": details}
+
+
+async def _salvage_and_rollback_stranded_ci_repair_output(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    operation_start_head: str | None,
+    operation_id: str | None,
+    agent_run_err: AgentRunError,
+    stranded_paths: list[str],
+    provider_recovery_exc: BaseException | None,
+) -> _GitPushResult:
+    """Salvage stranded CI-repair output, roll back residue, then finish or re-raise."""
+    salvage_details = await _salvage_ci_repair_dirty_output(
+        self,
+        workspace_id=workspace_id,
+        operation_start_head=operation_start_head,
+        operation_id=operation_id,
+        operation_type="ci_repair",
+        phase="ci_repair_commit_sink",
+    )
+    failure_details: dict[str, Any] = {
+        "phase": "ci_repair_commit_sink",
+        "operation_type": "ci_repair",
+        "provider_error_stderr": agent_run_err.result.stderr[:400],
+        "stranded_paths": stranded_paths,
+        "pushed": False,
+        **salvage_details,
+    }
+    if "salvage_error" in salvage_details:
+        _log.warning(
+            "monitor.ci_fix_dirty_commit_failed",
+            workspace_id=workspace_id,
+            stderr=agent_run_err.result.stderr[:400],
+            salvage_reason_code=salvage_details["salvage_error"]["reason_code"],
+        )
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=(
+                "CI repair commit sink failed; dirty repair output could not "
+                "be salvaged before provider recovery."
+            ),
+            reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
+            details=failure_details,
+        )
+    restore_ref = await self._rev_parse_head(worktree_path)
+    if restore_ref is None:
+        restore_ref = operation_start_head
+    rollback_result = await _rollback_ci_fix_residue_before_provider_recovery(
+        self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        restore_ref=restore_ref,
+    )
+    if not rollback_result.ok:
+        failure_details["rollback_error"] = {
+            "message": rollback_result.message,
+            "cause": rollback_result.cause,
+        }
+        _log.warning(
+            "monitor.ci_fix_dirty_commit_failed_after_salvage",
+            workspace_id=workspace_id,
+            stderr=agent_run_err.result.stderr[:400],
+            patch_path=salvage_details["repair_salvage"]["patch_path"],
+            patch_sha256=salvage_details["repair_salvage"]["patch_sha256"],
+            rollback_cause=rollback_result.cause,
+        )
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=(
+                "CI repair commit sink failed; salvage succeeded but "
+                "worktree rollback failed before provider recovery."
+            ),
+            reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
+            details=failure_details,
+        )
+    _log.warning(
+        "monitor.ci_fix_dirty_commit_salvaged_for_provider_recovery",
+        workspace_id=workspace_id,
+        stderr=agent_run_err.result.stderr[:400],
+        patch_path=salvage_details["repair_salvage"]["patch_path"],
+        patch_sha256=salvage_details["repair_salvage"]["patch_sha256"],
+    )
+    if provider_recovery_exc is not None:
+        # Provider state was already recorded above; re-raise after
+        # salvage and rollback so the next attempt sees a clean worktree
+        # (PRRT_kwDOSJAM6s6N599P).
+        raise provider_recovery_exc
+    # Salvage and rollback succeeded, but provider recovery returned
+    # terminal/deterministic instead of raising a retry/fallback/auth
+    # control-flow exception. Do not fall through to the clean-commit
+    # handler call or push path — the commit sink failed and the worktree
+    # was rolled back with no new CI-fix commit (PRRT_kwDOSJAM6s6N5986).
+    _log.warning(
+        "monitor.ci_fix_cli_failed",
+        workspace_id=workspace_id,
+        stderr=agent_run_err.result.stderr[:400],
+    )
+    return _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=agent_run_err.result.returncode or 1,
+        stderr=agent_run_err.result.stderr,
+        reason_code=agent_run_err.reason_code,
+        details=failure_details,
+    )
 
 
 async def _run_ci_fix(
@@ -654,103 +794,15 @@ async def _run_ci_fix(
                     )
                     return cast(_GitPushResult, stranded_dirty)
                 stranded_paths = list((stranded_dirty.details or {}).get("paths", []))
-                salvage_details = await _salvage_ci_repair_dirty_output(
-                    self,
-                    workspace_id=workspace_id,
-                    operation_start_head=operation_start_head,
-                    operation_id=operation_id,
-                    operation_type="ci_repair",
-                    phase="ci_repair_commit_sink",
-                )
-                failure_details: dict[str, Any] = {
-                    "phase": "ci_repair_commit_sink",
-                    "operation_type": "ci_repair",
-                    "provider_error_stderr": agent_run_err.result.stderr[:400],
-                    "stranded_paths": stranded_paths,
-                    "pushed": False,
-                    **salvage_details,
-                }
-                if "salvage_error" in salvage_details:
-                    _log.warning(
-                        "monitor.ci_fix_dirty_commit_failed",
-                        workspace_id=workspace_id,
-                        stderr=agent_run_err.result.stderr[:400],
-                        salvage_reason_code=salvage_details["salvage_error"]["reason_code"],
-                    )
-                    return _GitPushResult(
-                        pushed=False,
-                        failed=True,
-                        returncode=1,
-                        stderr=(
-                            "CI repair commit sink failed; dirty repair output could not "
-                            "be salvaged before provider recovery."
-                        ),
-                        reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
-                        details=failure_details,
-                    )
-                restore_ref = await self._rev_parse_head(worktree_path)
-                if restore_ref is None:
-                    restore_ref = operation_start_head
-                rollback_ok = await _rollback_ci_fix_residue_before_provider_recovery(
+                return await _salvage_and_rollback_stranded_ci_repair_output(
                     self,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    restore_ref=restore_ref,
-                )
-                if not rollback_ok:
-                    failure_details["rollback_error"] = {
-                        "message": (
-                            "CI repair residue rollback failed after salvage; "
-                            "refusing provider recovery on a still-dirty worktree."
-                        ),
-                    }
-                    _log.warning(
-                        "monitor.ci_fix_dirty_commit_failed_after_salvage",
-                        workspace_id=workspace_id,
-                        stderr=agent_run_err.result.stderr[:400],
-                        patch_path=salvage_details["repair_salvage"]["patch_path"],
-                        patch_sha256=salvage_details["repair_salvage"]["patch_sha256"],
-                    )
-                    return _GitPushResult(
-                        pushed=False,
-                        failed=True,
-                        returncode=1,
-                        stderr=(
-                            "CI repair commit sink failed; salvage succeeded but "
-                            "worktree rollback failed before provider recovery."
-                        ),
-                        reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
-                        details=failure_details,
-                    )
-                _log.warning(
-                    "monitor.ci_fix_dirty_commit_salvaged_for_provider_recovery",
-                    workspace_id=workspace_id,
-                    stderr=agent_run_err.result.stderr[:400],
-                    patch_path=salvage_details["repair_salvage"]["patch_path"],
-                    patch_sha256=salvage_details["repair_salvage"]["patch_sha256"],
-                )
-                if provider_recovery_exc is not None:
-                    # Provider state was already recorded above; re-raise after
-                    # salvage and rollback so the next attempt sees a clean worktree
-                    # (PRRT_kwDOSJAM6s6N599P).
-                    raise provider_recovery_exc
-                # Salvage and rollback succeeded, but provider recovery returned
-                # terminal/deterministic instead of raising a retry/fallback/auth
-                # control-flow exception. Do not fall through to the clean-commit
-                # handler call or push path — the commit sink failed and the worktree
-                # was rolled back with no new CI-fix commit (PRRT_kwDOSJAM6s6N5986).
-                _log.warning(
-                    "monitor.ci_fix_cli_failed",
-                    workspace_id=workspace_id,
-                    stderr=agent_run_err.result.stderr[:400],
-                )
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=agent_run_err.result.returncode or 1,
-                    stderr=agent_run_err.result.stderr,
-                    reason_code=agent_run_err.reason_code,
-                    details=failure_details,
+                    operation_start_head=operation_start_head,
+                    operation_id=operation_id,
+                    agent_run_err=agent_run_err,
+                    stranded_paths=stranded_paths,
+                    provider_recovery_exc=provider_recovery_exc,
                 )
         # ``_commit_dirty_worktree`` returned ``True``: the CI-repair output
         # was committed successfully and the worktree is clean, so there is NO
