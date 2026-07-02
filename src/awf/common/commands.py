@@ -85,6 +85,9 @@ class AsyncioSubprocessRunner:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
     ) -> CommandResult:
+        # Validate before spawning: an invalid (non-positive) timeout must fail
+        # without launching — and then leaking — the child process.
+        _validate_timeout("timeout_seconds", timeout_seconds)
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.PIPE if input_bytes is not None else None,
@@ -96,7 +99,6 @@ class AsyncioSubprocessRunner:
         wait_task = asyncio.create_task(proc.wait())
         try:
             if timeout_seconds is not None:
-                _validate_timeout("timeout_seconds", timeout_seconds)
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     proc.communicate(input=input_bytes),
                     timeout=timeout_seconds,

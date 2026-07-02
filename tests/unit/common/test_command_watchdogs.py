@@ -39,6 +39,26 @@ async def test_asyncio_runner_rejects_non_positive_streaming_timeouts(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("timeout_seconds", [0.0, -1.0])
+async def test_asyncio_runner_run_rejects_non_positive_timeout_without_spawning(
+    monkeypatch: pytest.MonkeyPatch,
+    timeout_seconds: float,
+) -> None:
+    runner = AsyncioSubprocessRunner()
+
+    async def _fail_spawn(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("subprocess must not be spawned for an invalid timeout")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fail_spawn)
+
+    with pytest.raises(ValueError, match="timeout_seconds must be positive"):
+        await runner.run(
+            [sys.executable, "-c", "print('unused')"],
+            timeout_seconds=timeout_seconds,
+        )
+
+
+@pytest.mark.unit
 async def test_asyncio_runner_wall_timeout_terminates_and_preserves_partial_output() -> None:
     runner = AsyncioSubprocessRunner()
     stdout: list[str] = []
