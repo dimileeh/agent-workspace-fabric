@@ -182,6 +182,10 @@ async def test_never_policy_raises_without_retry() -> None:
 
 @pytest.mark.unit
 async def test_transport_respects_top_level_deadline() -> None:
+    # A stale deadline bounds *retries*: the first attempt still contacts the
+    # forge (one request, per-attempt-timeout bounded), and the deadline then
+    # short-circuits the retry — surfacing the real forge error, not a fabricated
+    # "cycle deadline exceeded" sentinel (PRRT_kwDOSJAM6s6OB6L_).
     runner = FakeCommandRunner()
     for _ in range(GITHUB_TRANSPORT_MAX_ATTEMPTS + 2):
         runner.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
@@ -189,7 +193,7 @@ async def test_transport_respects_top_level_deadline() -> None:
         GitHubRetryContext(deadline=time.monotonic() - 1.0),
     )
     try:
-        with pytest.raises(GitHubClientError):
+        with pytest.raises(GitHubClientError) as exc:
             await _execute_gh_with_retry(
                 runner,
                 ["gh", "api", "graphql"],
@@ -199,7 +203,9 @@ async def test_transport_respects_top_level_deadline() -> None:
             )
     finally:
         github_retry_context.reset(token)
-    assert len(runner.calls) == 0
+    assert "502" in exc.value.stderr  # the real error, not a deadline sentinel
+    assert "deadline" not in exc.value.stderr.lower()
+    assert len(runner.calls) == 1  # first attempt ran; the retry was deadline-bounded
 
 
 @pytest.mark.unit
@@ -358,23 +364,28 @@ async def test_timeout_reason_code_preserved_on_exhaustion() -> None:
 
 
 @pytest.mark.unit
-async def test_cycle_deadline_before_first_attempt_raises_deadline_error() -> None:
+async def test_stale_deadline_allows_first_attempt_of_retrying_read() -> None:
+    # A retrying READ whose cycle deadline was already consumed by earlier
+    # *successful* paginated reads in the same status snapshot must still contact
+    # the forge on its first attempt. The deadline bounds retries, not first
+    # attempts, so a healthy later page is returned as-is — never fabricated into
+    # a synthetic "cycle deadline exceeded" UNKNOWN error that would terminate a
+    # healthy workspace even though GitHub never failed (PRRT_kwDOSJAM6s6OB6L_).
     runner = FakeCommandRunner()
-    runner.queue_result(returncode=0, stdout="{}")
+    runner.queue_result(returncode=0, stdout='{"ok": true}')
     token = github_retry_context.set(GitHubRetryContext(deadline=time.monotonic() - 100.0))
     try:
-        with pytest.raises(GitHubClientError) as exc:
-            await _execute_gh_with_retry(
-                runner,
-                ["gh", "api", "x"],
-                operation="gh api",
-                retry_policy=RetryPolicy.READ,
-                sleep=_RecordedSleep(),
-            )
-        assert "deadline" in exc.value.stderr.lower()
+        result = await _execute_gh_with_retry(
+            runner,
+            ["gh", "api", "x"],
+            operation="gh api",
+            retry_policy=RetryPolicy.READ,
+            sleep=_RecordedSleep(),
+        )
     finally:
         github_retry_context.reset(token)
-    assert len(runner.calls) == 0  # deadline tripped before any command ran
+    assert result.ok
+    assert len(runner.calls) == 1  # the stale deadline did not short-circuit the first attempt
 
 
 @pytest.mark.unit
@@ -384,8 +395,10 @@ async def test_cycle_deadline_after_first_failure_raises_last_error(
     checks = {"n": 0}
 
     def fake_past(deadline: float | None) -> bool:
+        # The deadline is only consulted for *retries* (attempts after a failure),
+        # so this first fires at the top of attempt 2 — reporting the budget spent.
         checks["n"] += 1
-        return checks["n"] >= 2  # not past on the first check, past on the second
+        return checks["n"] >= 1
 
     monkeypatch.setattr("awf.common.github_transport.past_transport_deadline", fake_past)
     runner = FakeCommandRunner()

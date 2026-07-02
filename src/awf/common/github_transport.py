@@ -24,8 +24,6 @@ from awf.common.redaction import redact_secrets
 
 _log = get_logger(__name__)
 
-_TIMEOUT_RETURN_CODE = 124
-
 
 def _short_github_error(text: str) -> str:
     # Redact before truncating so gh/GraphQL stderr embedding raw tokens never
@@ -117,33 +115,34 @@ async def execute_gh_with_retry(
 
     for attempt in range(1, attempt_cap + 1):
         # The cycle deadline bounds *retry* storms — many calls each retrying for
-        # tens of minutes within one monitor poll. A NEVER-policy call issues
-        # exactly one attempt (bounded by the per-attempt timeout) and can never
-        # contribute to that, so it must not be gated by a deadline that a long
-        # preceding AddressComments fix/validation pass or settle wait may have
-        # already consumed. Otherwise the first post-fix settle/recheck/resolve/
-        # comment/merge forge call raises a fabricated "cycle deadline exceeded"
-        # without ever contacting the forge and can terminate a healthy workspace
-        # as GITHUB_API_ERROR (PRRT_kwDOSJAM6s6N-X5D). Retrying policies keep the
-        # pre-attempt check so a genuine retry batch stays bounded.
-        if retry_policy != RetryPolicy.NEVER and past_transport_deadline(deadline):
-            if last_error is not None:
-                _log.warning(
-                    "github.transport_retry_exhausted",
-                    workspace_id=ctx.workspace_id if ctx is not None else None,
-                    operation=operation,
-                    attempt_count=attempt - 1,
-                    max_attempts=attempt_cap,
-                    retry_policy=retry_policy.value,
-                    pr_number=ctx.pr_number if ctx is not None else None,
-                    reason="cycle_deadline",
-                )
-                raise last_error
-            raise GitHubClientError(
+        # tens of minutes within one monitor poll — so it gates only attempts that
+        # follow a failure (``last_error is not None``), never a call's *first*
+        # attempt. A first attempt is a single request bounded by the per-attempt
+        # timeout and cannot contribute to a storm; the same reasoning already
+        # exempts NEVER-policy calls (one attempt only). Gating first attempts is
+        # what fabricated a "cycle deadline exceeded" error without ever contacting
+        # the forge — terminating a healthy workspace as an UNKNOWN GITHUB_API_ERROR
+        # when a long preceding fix/validation pass consumed the budget
+        # (PRRT_kwDOSJAM6s6N-X5D) or when earlier *successful* paginated reads in the
+        # same status snapshot spent it, so a large/slow PR's later pages died even
+        # though GitHub never failed (PRRT_kwDOSJAM6s6OB6L_). Retries still stay
+        # bounded, and the caller sees the real last error, not a synthetic one.
+        if (
+            retry_policy != RetryPolicy.NEVER
+            and last_error is not None
+            and past_transport_deadline(deadline)
+        ):
+            _log.warning(
+                "github.transport_retry_exhausted",
+                workspace_id=ctx.workspace_id if ctx is not None else None,
                 operation=operation,
-                returncode=_TIMEOUT_RETURN_CODE,
-                stderr="github transport cycle deadline exceeded",
+                attempt_count=attempt - 1,
+                max_attempts=attempt_cap,
+                retry_policy=retry_policy.value,
+                pr_number=ctx.pr_number if ctx is not None else None,
+                reason="cycle_deadline",
             )
+            raise last_error
 
         result = await runner.run(
             args,
