@@ -26,6 +26,7 @@ from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeClient
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.github_client import (
+    GITHUB_API_ERROR,
     GitHubClient,
     GitHubClientError,
     RepoRef,
@@ -86,11 +87,18 @@ def _pull_request_error_from_github(
     head_sha: str | None,
     details: dict[str, object] | None = None,
 ) -> PullRequestError:
+    # A GitHub fault carrying only the generic default code has no actionable
+    # provenance, so leave ``reason_code`` None and let ``pr_open_step`` fall
+    # back to ``INFRASTRUCTURE_FAILURE``. A non-default code — e.g.
+    # ``COMMAND_TIMEOUT`` once the transport retry budget exhausts — is surfaced
+    # so the failed workspace records the timeout-specific diagnostic instead.
+    reason_code = exc.reason_code if exc.reason_code != GITHUB_API_ERROR else None
     return PullRequestError(
         operation=exc.operation,
         returncode=exc.returncode,
         stderr=exc.stderr,
         head_sha=head_sha,
+        reason_code=reason_code,
         details=details,
     )
 
@@ -122,11 +130,13 @@ class PullRequestError(Exception):
         self.head_sha = head_sha
         self.details = details
         # Forge clients that carry an actionable reason code (e.g.
-        # ``BitbucketClientError`` with auth / rate-limit / transport codes)
+        # ``BitbucketClientError`` with auth / rate-limit / transport codes, or a
+        # ``GitHubClientError`` whose transport preserved ``COMMAND_TIMEOUT``)
         # propagate it here so the executor records the specific doctor
         # guidance on the failed workspace instead of a generic
-        # ``PR_CREATE_FAILED``. ``GitHubClientError`` has no reason code, and
-        # the push / no-client / no-URL raises leave this ``None``.
+        # ``PR_CREATE_FAILED``. A GitHub fault carrying only the generic
+        # ``GITHUB_API_ERROR`` default, and the push / no-client / no-URL raises,
+        # leave this ``None``.
         self.reason_code = reason_code
         super().__init__(
             f"{operation} failed (exit={returncode}): {stderr.strip() or '<no output>'}"

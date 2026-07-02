@@ -19,7 +19,7 @@ from awf.common.bitbucket_client import (
     BITBUCKET_AUTH_NOT_CONFIGURED,
     BitbucketClientError,
 )
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import COMMAND_TIMEOUT_REASON, FakeCommandRunner
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 
@@ -207,6 +207,35 @@ class TestPushAndOpen:
         assert "gh: auth token expired" in exc.value.stderr
         # GitHubClientError carries no reason_code, so the wrapper leaves it None.
         assert exc.value.reason_code is None
+
+    @pytest.mark.unit
+    async def test_github_timeout_pr_create_preserves_reason_code(self) -> None:
+        # When the transport exhausts a per-attempt timeout, the GitHubClientError
+        # carries the specific COMMAND_TIMEOUT reason_code instead of the generic
+        # GITHUB_API_ERROR default. The wrapper must propagate that non-default code
+        # onto PullRequestError so pr_open_step records the timeout-specific
+        # provenance rather than a generic PR-create/infrastructure diagnostic.
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # push succeeds
+        runner.queue_result(
+            returncode=124,
+            stderr="gh pr create timed out: deadline exceeded",
+            reason_code=COMMAND_TIMEOUT_REASON,
+        )
+
+        creator = PullRequestCreator(runner, pr_create_transient_max_retries=0)
+        with pytest.raises(PullRequestError) as exc:
+            await creator.push_and_open(
+                worktree_path=_WORKTREE,
+                branch_name="awf/ws_x",
+                base_branch="development",
+                title="t",
+                body="b",
+                forge_client=_gh_client(runner),
+                repo_url=_GH_REPO_URL,
+            )
+        assert exc.value.reason_code == COMMAND_TIMEOUT_REASON
 
     @pytest.mark.unit
     async def test_github_transient_pr_create_failure_retries_then_succeeds(self) -> None:
