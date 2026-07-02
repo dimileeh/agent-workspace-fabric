@@ -78,6 +78,15 @@ async def _fetch_status_for_decision(
     in-cycle). The pre-merge recheck passes ``retry=False`` so a single failure
     raises promptly and the merge critical section classifies it (transient ->
     re-poll next cycle; unknown -> fail) instead of retrying under the merge lock.
+
+    Under ``retry=False`` the best-effort per-check log fetch is also skipped: it
+    is not part of the merge decision (``decide`` gates on ``check_state``, not on
+    the log text), and Bitbucket's ``fetch_failing_check_logs`` paginates
+    statuses/pipelines/steps with its default in-cycle retry, so a 429/near-limit
+    backoff there would sleep while the merge coordinator lock is held. A PR whose
+    checks flip green -> failing during the recheck still blocks the merge; the
+    next ordinary ``retry=True`` poll gathers the logs for the actual
+    ``ReportCiFailure``.
     """
     worktree_path = self._worktrees_root / workspace_id
     await self._fetch_base(
@@ -92,7 +101,7 @@ async def _fetch_status_for_decision(
     status = await self._deps.gh.fetch_pr_status(
         repo=repo, pr_number=pr_number, base_behind_count=base_behind, retry=retry
     )
-    if status.check_state.value == "FAILURE":
+    if status.check_state.value == "FAILURE" and retry:
         pytest_fallback_commands = await self._workspace_test_commands(workspace_id)
         failures = await self._deps.gh.fetch_failing_check_logs(
             repo=repo,

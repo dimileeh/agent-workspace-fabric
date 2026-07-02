@@ -941,6 +941,50 @@ async def test_fetch_status_supplies_workspace_test_commands_to_ci_log_evidence(
 
 
 @pytest.mark.unit
+async def test_fetch_status_skips_ci_log_fetch_under_fail_fast_recheck(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A ``retry=False`` recheck must not gather best-effort CI logs.
+
+    The pre-merge recheck runs inside the serialized merge critical section
+    with ``retry=False`` so a single forge blip fails fast. The FAILURE branch
+    used to still call ``fetch_failing_check_logs`` with its default retry
+    behaviour; on Bitbucket that paginates statuses/pipelines/steps and can
+    sleep on a 429/near-limit backoff, holding the merge coordinator lock
+    across the wait (PRRT_kwDOSJAM6s6OAtNZ). The freshly flipped FAILURE still
+    blocks the merge; the next ordinary ``retry=True`` poll gathers the logs.
+    """
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        test_commands=["ruff check ."],
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0, stdout="0\n")  # rev-list HEAD..origin/base
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    gh = _CapturingGH(status=replace(_green_status(), check_state=CheckState.FAILURE))
+    runner._deps.gh = gh  # type: ignore[assignment]
+
+    status = await runner._fetch_status_for_decision(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        workspace_id=workspace_id,
+        base_branch="development",
+        retry=False,
+    )
+
+    assert status.check_state is CheckState.FAILURE
+    assert gh.failing_log_requests == []
+
+
+@pytest.mark.unit
 async def test_fetch_status_refuses_to_delete_broken_ref_for_active_workspace(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
