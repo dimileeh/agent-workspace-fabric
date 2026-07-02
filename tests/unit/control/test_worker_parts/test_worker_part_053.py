@@ -308,6 +308,64 @@ async def test_safely_resume_pr_monitor_preserves_succeeded_operation_when_pre_f
 
 
 @pytest.mark.unit
+async def test_safely_resume_pr_monitor_pre_finalize_verify_passes_handoff_monitor_owner_id(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Pre-finalize verify must fence on the handoff monitor_owner_id, not status alone."""
+    from awf.control.executor.monitor_handoff import ResumeHandoff
+
+    handoff = ResumeHandoff(
+        monitor=object(),  # type: ignore[arg-type]
+        compose_project="proj",
+        compose_file=Path("/tmp/compose.yml"),
+        run_kwargs={"monitor_owner_id": "worker-monitor-1"},
+    )
+    verify_kwargs: dict[str, object] = {}
+
+    class HandoffExecutor(_RecordingExecutor):
+        async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+            """Test helper for resume pr monitor handoff."""
+            assert workspace_id == "ws_monitor"
+            return handoff
+
+        async def verify_resume_monitor_start(
+            self,
+            workspace_id: str,
+            *,
+            monitor_owner_id: str | None = None,
+        ) -> bool:
+            """Test helper for verify resume monitor start."""
+            verify_kwargs["workspace_id"] = workspace_id
+            verify_kwargs["monitor_owner_id"] = monitor_owner_id
+            return True
+
+        async def run_resumed_pr_monitor(self, workspace_id: str, handoff_obj: object) -> bool:
+            """Test helper for run resumed pr monitor."""
+            assert workspace_id == "ws_monitor"
+            assert handoff_obj is handoff
+            return True
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=HandoffExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    worker._finish_monitor_recovery_operation = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    result = await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_owner_fence",
+    )
+
+    assert result is True
+    assert verify_kwargs == {
+        "workspace_id": "ws_monitor",
+        "monitor_owner_id": "worker-monitor-1",
+    }
+
+
+@pytest.mark.unit
 async def test_safely_resume_pr_monitor_fails_operation_when_start_recheck_bails(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

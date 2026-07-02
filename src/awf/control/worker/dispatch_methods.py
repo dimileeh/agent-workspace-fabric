@@ -873,8 +873,19 @@ async def _safely_resume_pr_monitor(
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
             return status == OperationStatus.succeeded
 
+        monitor_owner_id = getattr(handoff, "run_kwargs", {}).get("monitor_owner_id")
         verify_start = getattr(self._executor, "verify_resume_monitor_start", None)
-        if verify_start is not None and not await verify_start(workspace_id):
+        if verify_start is not None:
+            if monitor_owner_id is not None:
+                verify_ok = await verify_start(
+                    workspace_id,
+                    monitor_owner_id=monitor_owner_id,
+                )
+            else:
+                verify_ok = await verify_start(workspace_id)
+        else:
+            verify_ok = True
+        if not verify_ok:
             self._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)
             (
                 status,
