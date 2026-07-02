@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from awf.runtime.validation_worktree import is_under_agent_runtime_root
-from awf.runtime.validation_worktree_constants import AWF_AGENT_RUNTIME_IGNORED_ROOTS
 from awf.service._git_salvage_utils import (
     CompletedProcessLike,
     SubprocessRun,
@@ -120,6 +119,16 @@ def capture_ci_repair_salvage(
     artifacts_dir = Path(artifacts_root) / "salvage"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
+    untracked_paths = set(
+        _git_lines(
+            _run_git(
+                worktree,
+                ["ls-files", "--others", "--exclude-standard"],
+                run=run,
+                env=env_base,
+            ).stdout
+        )
+    )
     exclude_pathspecs = _salvage_exclude_pathspecs()
 
     with tempfile.TemporaryDirectory(prefix="awf-repair-salvage-index-") as tmp_dir:
@@ -143,7 +152,11 @@ def capture_ci_repair_salvage(
                 env=git_env,
             ).stdout
         )
-        affected_paths = sorted(path for path in raw_paths if not is_under_agent_runtime_root(path))
+        affected_paths = sorted(
+            path
+            for path in raw_paths
+            if not _is_untracked_runtime_artifact(path, untracked_paths=untracked_paths)
+        )
         if not affected_paths:
             raise RepairSalvageError(
                 reason_code=REPAIR_SALVAGE_NO_DIFF,
@@ -157,8 +170,7 @@ def capture_ci_repair_salvage(
                 "--binary",
                 operation_start_head,
                 "--",
-                ".",
-                *exclude_pathspecs,
+                *affected_paths,
             ],
             run=run,
             env=git_env,
@@ -190,15 +202,12 @@ def capture_ci_repair_salvage(
 
 
 def _salvage_exclude_pathspecs() -> list[str]:
-    excludes = [f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**"]
-    for root in AWF_AGENT_RUNTIME_IGNORED_ROOTS:
-        normalized = root.rstrip("/")
-        # Directory-only: mirror ``is_under_agent_runtime_root`` — suppress the
-        # ignored root directory and descendants, not a regular file spelled
-        # exactly ``.claude/agent-memory`` (no trailing slash).
-        excludes.append(f":(exclude){normalized}/")
-        excludes.append(f":(exclude){normalized}/**")
-    return excludes
+    return [f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**"]
+
+
+def _is_untracked_runtime_artifact(path: str, *, untracked_paths: set[str]) -> bool:
+    """Return whether ``path`` is an untracked AWF-agent-runtime artifact."""
+    return path in untracked_paths and is_under_agent_runtime_root(path)
 
 
 def _run_git(
