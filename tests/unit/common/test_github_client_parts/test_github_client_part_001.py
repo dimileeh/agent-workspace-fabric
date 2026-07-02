@@ -901,6 +901,27 @@ class TestBranchOpenPullRequestResolver:
         assert fake.calls[0].args[:3] == ["gh", "pr", "list"]
 
     @pytest.mark.unit
+    async def test_transient_failure_is_one_shot_no_retry(self) -> None:
+        # This resolver drives worker-recovery preserved-active open-PR lookups,
+        # NOT the create/release reconcile recheck. Per this PR's design (reads
+        # default to NEVER; only mutation-adjacent reconcile lookups retry) and
+        # the caller's own failure classification, a transient blip must surface
+        # on the first attempt without in-transport retry/backoff.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stdout="", stderr="HTTP 503 service unavailable")
+        resolver = BranchOpenPullRequestResolver(fake)
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await resolver.resolve(
+                repo_url="https://github.com/dimileeh/aira-web.git",
+                branch_name="feature/head",
+                base_branch="main",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_FAILED"
+        assert len(fake.calls) == 1
+
+    @pytest.mark.unit
     async def test_invalid_repo_url_raises_lookup_invalid_and_warns(self) -> None:
         fake = FakeCommandRunner()
         resolver = BranchOpenPullRequestResolver(fake)

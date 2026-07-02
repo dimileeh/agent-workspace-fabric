@@ -281,9 +281,14 @@ class BranchOpenPullRequestResolver:
             ) from exc
         return await list_open_pull_requests_for_branch(
             runner=self._runner,
-            # Reconcile recheck (after a create failure): retry a transient lookup so
-            # a blip doesn't force an unnecessary second create attempt.
-            retry_policy=RetryPolicy.READ,
+            # NEVER-retry: this resolver drives worker-recovery preserved-active
+            # open-PR lookups (worker/recovery_preserved_queries), NOT the
+            # create/release reconcile recheck. It is a plain recovery read whose
+            # caller already classifies a failed lookup and re-polls next cycle, so
+            # an in-transport retry here is redundant (and would needlessly burn the
+            # stale-cycle deadline that NEVER-policy calls are exempt from). Only the
+            # mutation-adjacent create/release reconcile lookups pass READ.
+            retry_policy=RetryPolicy.NEVER,
             repo=repo,
             branch_name=branch_name,
             base_branch=base_branch,
