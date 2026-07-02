@@ -884,8 +884,10 @@ async def _safely_resume_pr_monitor(
                 self._monitor_recovery_operation_ids.pop(workspace_id, None)
             return status == OperationStatus.succeeded
 
-        # Record handoff success before the cancellable verify await so stale-monitor
-        # reconciliation cannot finalize the remonitor op as cancelled in this window.
+        # Record handoff success before the cancellable verify await. The CancelledError
+        # handler below cannot rely on ``handoff_succeeded`` (still False until verify
+        # returns) but must know compose prep already completed so stale-monitor
+        # reconciliation does not finalize the remonitor op as cancelled mid-verify.
         self._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)
         monitor_owner_id = getattr(handoff, "run_kwargs", {}).get("monitor_owner_id")
         verify_start = getattr(self._executor, "verify_resume_monitor_start", None)
@@ -926,6 +928,9 @@ async def _safely_resume_pr_monitor(
             return status == OperationStatus.succeeded
 
         handoff_succeeded = True
+        # Idempotent re-add: the pre-verify marker above already covers this workspace;
+        # keep the set membership explicit here so readers see the marker spans verify
+        # through finalize without re-reading the earlier add.
         self._monitor_recovery_handoff_succeeded_workspace_ids.add(workspace_id)
         handoff_finalized = await self._finish_monitor_recovery_operation(
             workspace_id,
@@ -937,6 +942,13 @@ async def _safely_resume_pr_monitor(
             self._monitor_recovery_operation_ids.pop(workspace_id, None)
 
         if not handoff_finalized:
+            # One immediate retry: ``_finish_monitor_recovery_operation`` returns
+            # False when we lost the monitor claim to another worker but that worker
+            # has not created its replacement remonitor operation yet (see
+            # ``_other_active_worker_restart_remonitor_operation_id``). The concurrent
+            # reclaim usually lands within one poll cycle, so a second call in-process
+            # avoids leaving the handoff-succeeded op stuck running until the caller's
+            # finally releases the claim and retries.
             handoff_finalized = await self._finish_monitor_recovery_operation(
                 workspace_id,
                 operation_id=recovery_operation_id,
