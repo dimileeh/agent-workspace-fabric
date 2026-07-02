@@ -42,6 +42,8 @@ REPAIR_SALVAGE_SOURCE_UNAVAILABLE = "REPAIR_SALVAGE_SOURCE_UNAVAILABLE"
 REPAIR_SALVAGE_NO_DIFF = "REPAIR_SALVAGE_NO_DIFF"
 REPAIR_SALVAGE_UNEXPECTED = "REPAIR_SALVAGE_UNEXPECTED"
 
+_SALVAGE_DIFF_BASE_UNSET: object = object()
+
 
 @dataclass(frozen=True)
 class RepairSalvageCapture:
@@ -101,7 +103,7 @@ def capture_ci_repair_salvage(
     operation_id: str | None,
     operation_type: str,
     phase: str,
-    salvage_diff_base: str | None = None,
+    salvage_diff_base: str | None | object = _SALVAGE_DIFF_BASE_UNSET,
     run_subprocess: SubprocessRun | None = None,
 ) -> RepairSalvageCapture:
     """Capture a binary patch and metadata for dirty CI-repair output."""
@@ -110,7 +112,17 @@ def capture_ci_repair_salvage(
             reason_code=REPAIR_SALVAGE_BASE_UNAVAILABLE,
             message="CI repair salvage requires operation_start_head.",
         )
-    diff_base = salvage_diff_base or operation_start_head
+    if salvage_diff_base is _SALVAGE_DIFF_BASE_UNSET:
+        diff_base = operation_start_head
+    elif salvage_diff_base is None:
+        raise RepairSalvageError(
+            reason_code=REPAIR_SALVAGE_BASE_UNAVAILABLE,
+            message=(
+                "CI repair salvage requires salvage_diff_base when post-repair HEAD is unavailable."
+            ),
+        )
+    else:
+        diff_base = str(salvage_diff_base)
 
     worktree = Path(worktrees_root) / workspace_id
     if not worktree.is_dir():

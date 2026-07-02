@@ -631,6 +631,33 @@ def test_capture_excludes_committed_plan_artifact_when_diff_base_behind_head(
 
 
 @pytest.mark.unit
+def test_capture_explicit_none_salvage_diff_base_raises_when_head_unavailable(
+    tmp_path: Path,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6N_dRk — do not fall back to operation_start_head."""
+    _, operation_start_head = _seed_worktree(tmp_path, "ws_no_anchor")
+    worktree = tmp_path / "git" / "worktrees" / "ws_no_anchor"
+    (worktree / "src/app.py").write_text("VALUE = 'committed'\n", encoding="utf-8")
+    _git(["add", "src/app.py"], worktree)
+    _git(["commit", "-q", "-m", "agent self-commit"], worktree)
+    (worktree / "src/app.py").write_text("VALUE = 'residue'\n", encoding="utf-8")
+
+    with pytest.raises(RepairSalvageError) as exc_info:
+        capture_ci_repair_salvage(
+            worktrees_root=tmp_path / "git" / "worktrees",
+            artifacts_root=tmp_path / "artifacts",
+            workspace_id="ws_no_anchor",
+            operation_start_head=operation_start_head,
+            operation_id=None,
+            operation_type="ci_repair",
+            phase="ci_repair_commit_sink",
+            salvage_diff_base=None,
+        )
+
+    assert exc_info.value.reason_code == REPAIR_SALVAGE_BASE_UNAVAILABLE
+
+
+@pytest.mark.unit
 def test_capture_operation_start_head_includes_self_commits_when_no_salvage_diff_base(
     tmp_path: Path,
 ) -> None:

@@ -65,6 +65,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+from awf.service.repair_salvage import _SALVAGE_DIFF_BASE_UNSET
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,7 +231,7 @@ async def _salvage_ci_repair_dirty_output(
     operation_id: str | None,
     operation_type: str,
     phase: str,
-    salvage_diff_base: str | None = None,
+    salvage_diff_base: str | None | object = _SALVAGE_DIFF_BASE_UNSET,
 ) -> dict[str, Any]:
     """Capture dirty CI-repair output before rollback or terminal failure."""
     from awf.service.repair_salvage import (
@@ -240,17 +241,22 @@ async def _salvage_ci_repair_dirty_output(
         capture_ci_repair_salvage,
     )
 
+    capture_kwargs: dict[str, Any] = {
+        "worktrees_root": self._worktrees_root,
+        "artifacts_root": self._artifacts_root,
+        "workspace_id": workspace_id,
+        "operation_start_head": operation_start_head,
+        "operation_id": operation_id,
+        "operation_type": operation_type,
+        "phase": phase,
+    }
+    if salvage_diff_base is not _SALVAGE_DIFF_BASE_UNSET:
+        capture_kwargs["salvage_diff_base"] = salvage_diff_base
+
     try:
         capture = await asyncio.to_thread(
             capture_ci_repair_salvage,
-            worktrees_root=self._worktrees_root,
-            artifacts_root=self._artifacts_root,
-            workspace_id=workspace_id,
-            operation_start_head=operation_start_head,
-            operation_id=operation_id,
-            operation_type=operation_type,
-            phase=phase,
-            salvage_diff_base=salvage_diff_base,
+            **capture_kwargs,
         )
     except RepairSalvageError as exc:
         _log.warning(
