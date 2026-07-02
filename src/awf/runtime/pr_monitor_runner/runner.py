@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import Token
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -147,6 +148,16 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         self._monitor_owner_id = monitor_owner_id
         monitor_log = await self._open_monitor_log(workspace_id)
         state: MonitorState | None = None
+        # ``run()`` is awaited inline on the executor's initial handoff and on the
+        # worker's monitor-resume task (both in ``execution_pr_handoff`` /
+        # ``run_resumed_pr_monitor``), so the ``github_retry_context`` mutations
+        # below persist in the *caller's* context after we return. A per-cycle
+        # deadline left set there is already in the past by the time run() exits,
+        # so a later retrying-policy gh call on the same task would trip
+        # ``past_transport_deadline`` and raise a fabricated "cycle deadline
+        # exceeded" without ever contacting the forge (PRRT_kwDOSJAM6s6N_-ck).
+        # Capture the token so ``finally`` restores the pre-run value.
+        github_retry_context_token: Token[GitHubRetryContext | None] | None = None
         try:
             await self._write_monitor_log(
                 monitor_log,
@@ -156,7 +167,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     "compose_project": compose_project,
                 },
             )
-            github_retry_context.set(GitHubRetryContext(workspace_id=workspace_id))
+            github_retry_context_token = github_retry_context.set(
+                GitHubRetryContext(workspace_id=workspace_id)
+            )
             for _ in range(self._runner_config.max_outer_iterations):
                 ws = await self._load_workspace(workspace_id)
                 if ws.status != WorkspaceStatus.monitoring_pr.value:
@@ -566,6 +579,10 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
             )
             return
         finally:
+            # Restore the caller's transport context so a stale monitor cycle
+            # deadline never leaks onto later gh calls on this asyncio task.
+            if github_retry_context_token is not None:
+                github_retry_context.reset(github_retry_context_token)
             await self._write_monitor_log(
                 monitor_log,
                 {"event": "monitor.closed", "workspace_id": workspace_id},

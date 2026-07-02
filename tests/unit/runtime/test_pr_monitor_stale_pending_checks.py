@@ -11,6 +11,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.github_retry import GitHubRetryContext, github_retry_context
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -464,3 +465,54 @@ class TestStalePendingCheckWarnings:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_message is not None
             assert "max_outer_iterations" in ws.failure_message
+
+
+@pytest.mark.unit
+async def test_run_restores_caller_github_retry_context(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    """``run()`` must not leak its per-cycle transport deadline to the caller.
+
+    The executor's initial handoff and the worker's monitor-resume both await
+    ``run()`` inline, so the ``github_retry_context`` it sets persists in the
+    caller's context after return. Left in place, its already-expired cycle
+    deadline would make a later retrying-policy gh call on the same asyncio task
+    trip ``past_transport_deadline`` and raise a fabricated cycle-deadline error
+    without contacting the forge (PRRT_kwDOSJAM6s6N_-ck). Verify the caller's
+    prior context object is restored by identity on exit.
+    """
+    ws_id = await seed_monitoring_workspace(factory)
+    started = datetime.now(UTC) - timedelta(seconds=75)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(
+            check_state="PENDING",
+            check_contexts=[_pending_check(started_at=started)],
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        max_outer_iterations=1,
+    )
+
+    outer_ctx = GitHubRetryContext(workspace_id="outer", deadline=None)
+    token = github_retry_context.set(outer_ctx)
+    try:
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        assert github_retry_context.get() is outer_ctx
+    finally:
+        github_retry_context.reset(token)
