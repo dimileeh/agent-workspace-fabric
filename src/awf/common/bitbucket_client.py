@@ -267,10 +267,7 @@ class BitbucketClient:
 
         ``base_behind_count`` is computed by the caller (local git), matching the
         GitHub contract — Bitbucket Cloud has no GitHub-style merge-state signal.
-
-        ``retry=False`` (pre-merge recheck) suppresses the 429 backoff on the PR and
-        pagination fetches so a single failure raises promptly for the merge critical
-        section to classify, symmetric with the GitHub arm.
+        ``retry=False`` (pre-merge recheck) suppresses the PR fetch's 429 backoff.
         """
         pr = await self._request_json(
             "GET",
@@ -308,18 +305,15 @@ class BitbucketClient:
             f"{self._repo_path(repo)}/commit/{quote(head_sha, safe='')}/statuses",
             operation="bitbucket fetch_pr_status statuses",
             params={"refname": source_branch} if source_branch else None,
-            retry=retry,
         )
         comments = await self._paginate(
             f"{self._pr_path(repo, pr_number)}/comments",
             operation="bitbucket fetch_pr_status comments",
             cache=True,
-            retry=retry,
         )
         diffstat = await self._paginate(
             f"{self._pr_path(repo, pr_number)}/diffstat",
             operation="bitbucket fetch_pr_status diffstat",
-            retry=retry,
         )
         # Reviewer tasks are exposed separately from comments; a PR with open tasks
         # but no comments would otherwise assemble empty feedback and reach Merge
@@ -328,7 +322,6 @@ class BitbucketClient:
             f"{self._pr_path(repo, pr_number)}/tasks",
             operation="bitbucket fetch_pr_status tasks",
             cache=True,
-            retry=retry,
         )
         account_id = await self._current_account_id()
         merged, closed, merge_commit_sha = parse_pr_terminal_state(pr)
@@ -1209,7 +1202,6 @@ class BitbucketClient:
         operation: str,
         params: Mapping[str, str] | None = None,
         cache: bool = False,
-        retry: bool = True,
     ) -> list[dict[str, Any]]:
         """Follow Bitbucket ``next`` cursor links, collecting all ``values``.
 
@@ -1219,7 +1211,7 @@ class BitbucketClient:
         """
         values: list[dict[str, Any]] = []
         page = await self._request_json(
-            "GET", path, operation=operation, params=params, cache=cache, retry=retry
+            "GET", path, operation=operation, params=params, cache=cache
         )
         pages = 1
         while isinstance(page, dict):
@@ -1245,9 +1237,7 @@ class BitbucketClient:
             # first: otherwise pages 2+ silently bypass the ETag/If-None-Match
             # optimization that ``cache=True`` callers (e.g. fetch_pr_status
             # comments) asked for.
-            page = await self._request_json(
-                "GET", next_url, operation=operation, cache=cache, retry=retry
-            )
+            page = await self._request_json("GET", next_url, operation=operation, cache=cache)
         return values
 
     def _validate_next_url(self, next_url: str, operation: str) -> None:
@@ -1359,11 +1349,7 @@ class BitbucketClient:
         allow_log_redirect: bool = False,
         retry: bool = True,
     ) -> httpx.Response:
-        """Single request with 429/Retry-After backoff and near-limit slow-down.
-
-        ``retry=False`` suppresses the 429 backoff so a caller that classifies a
-        single failure (the pre-merge recheck) is not retried under the merge lock.
-        """
+        """Single request; ``retry=False`` suppresses the 429/Retry-After backoff."""
         headers = {"Accept": "application/json", "Authorization": self._auth.header_value()}
         if extra_headers:
             headers.update(extra_headers)

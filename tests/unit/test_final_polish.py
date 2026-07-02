@@ -39,21 +39,18 @@ class TestGhJsonErrorPaths:
         assert "not logged in" in exc.value.stderr
 
     @pytest.mark.unit
-    async def test_gh_json_transient_error_retries_before_raising(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_gh_json_read_transient_raises_without_in_transport_retry(self) -> None:
+        """Reads default to NEVER: a transient raises on the first attempt so the
+        caller (the monitor's poll loop / error classifier) handles it, rather than
+        retrying in-transport into a stale result. Mutations keep their explicit
+        retry policy; only the generic read helper stops retrying here."""
         runner = FakeCommandRunner()
         runner.queue_result(returncode=1, stderr="rate limit exceeded")
-        runner.queue_result(returncode=1, stderr="rate limit exceeded")
-        runner.queue_result(returncode=1, stderr="rate limit exceeded")
-        runner.queue_result(returncode=1, stderr="rate limit exceeded")
-        runner.queue_result(returncode=1, stderr="rate limit exceeded")
         client = GitHubClient(runner, sleep=_zero_sleep)
-        monkeypatch.setattr("awf.common.github_retry.jittered_backoff_seconds", lambda **_: 0.0)
         with pytest.raises(GitHubClientError) as exc:
             await client._gh_json(["gh", "whatever"], operation="op")
         assert "rate limit" in exc.value.stderr
-        assert len(runner.calls) == 5
+        assert len(runner.calls) == 1
 
     @pytest.mark.unit
     async def test_run_gh_strict_raises_on_failure(self) -> None:
