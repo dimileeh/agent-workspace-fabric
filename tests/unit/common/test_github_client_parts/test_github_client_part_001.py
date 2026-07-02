@@ -613,6 +613,30 @@ class TestListOpenPullRequestsForBranch:
         assert excinfo.value.detail["base_branch"] == " main "
 
     @pytest.mark.unit
+    async def test_gh_pr_list_timeout_preserves_timeout_reason(self) -> None:
+        # A timed-out gh pr list carries the transport's COMMAND_TIMEOUT provenance;
+        # the branch-open lookup wrapper must thread that non-default reason code
+        # through rather than collapsing it to the generic OPEN_PR_LOOKUP_FAILED
+        # mapping, matching the gh pr view adoption path.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=124,
+            stderr="gh pr list timed out",
+            reason_code=COMMAND_TIMEOUT_REASON,
+        )
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+                base_branch=" main ",
+            )
+
+        assert excinfo.value.reason_code == COMMAND_TIMEOUT_REASON
+        assert excinfo.value.detail["returncode"] == 124
+
+    @pytest.mark.unit
     async def test_gh_pr_list_invalid_json_raises_lookup_invalid(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="{not json")

@@ -109,7 +109,11 @@ async def list_open_pull_requests_for_branch(
     failure). The create-PR reconcile path passes a retrying policy, because there
     the lookup is a mutation-adjacent recheck that should survive a transient blip.
     """
-    from awf.common.github_client import GitHubClientError, PullRequestMetadataError
+    from awf.common.github_client import (
+        GITHUB_API_ERROR,
+        GitHubClientError,
+        PullRequestMetadataError,
+    )
 
     stripped_branch = branch_name.strip()
     if not stripped_branch:
@@ -140,8 +144,14 @@ async def list_open_pull_requests_for_branch(
             retry_policy=retry_policy,
         )
     except GitHubClientError as exc:
+        # Preserve non-default transport provenance (e.g. COMMAND_TIMEOUT) so a
+        # timed-out gh pr list — used by release sync, create-PR reconciliation, and
+        # branch-open adoption lookups — keeps its specific reason code instead of
+        # collapsing to the generic OPEN_PR_LOOKUP_FAILED mapping, matching the
+        # gh pr view adoption path.
+        reason = exc.reason_code if exc.reason_code != GITHUB_API_ERROR else "OPEN_PR_LOOKUP_FAILED"
         raise PullRequestMetadataError(
-            reason_code="OPEN_PR_LOOKUP_FAILED",
+            reason_code=reason,
             message=(exc.stderr or f"gh pr list exited {exc.returncode}").strip(),
             detail={
                 "repo_slug": repo.slug(),
