@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+import structlog
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -451,6 +452,32 @@ class TestPostgresAdvisoryMergeCoordinator:
     @pytest.mark.unit
     def test_advisory_asyncpg_query_drops_ssl_when_tuple_is_empty(self) -> None:
         assert merge_coordinator_mod._advisory_asyncpg_query({"ssl": ()}) == {}
+
+    @pytest.mark.unit
+    def test_advisory_asyncpg_query_warns_on_unrecognized_ssl_value(self) -> None:
+        with structlog.testing.capture_logs() as captured:
+            result = merge_coordinator_mod._advisory_asyncpg_query({"ssl": "maybe"})
+
+        assert result == {}
+        assert any(
+            entry.get("event") == "merge_coordinator.asyncpg_dsn_unrecognized_ssl_value"
+            and entry.get("log_level") == "warning"
+            and entry.get("ssl_value") == "maybe"
+            for entry in captured
+        )
+
+    @pytest.mark.unit
+    def test_advisory_asyncpg_query_does_not_warn_on_recognized_or_empty_ssl(self) -> None:
+        with structlog.testing.capture_logs() as captured:
+            recognized = merge_coordinator_mod._advisory_asyncpg_query({"ssl": "require"})
+            empty = merge_coordinator_mod._advisory_asyncpg_query({"ssl": ()})
+
+        assert recognized == {"sslmode": "require"}
+        assert empty == {}
+        assert not any(
+            entry.get("event") == "merge_coordinator.asyncpg_dsn_unrecognized_ssl_value"
+            for entry in captured
+        )
 
 
 def _fake_engine() -> AsyncEngine:

@@ -18,6 +18,10 @@ from typing import Protocol, cast
 import asyncpg  # type: ignore[import-untyped]
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from awf.common.logging import get_logger
+
+_log = get_logger(__name__)
+
 
 class MergeCoordinator(Protocol):
     """Coordinates final auto-merge critical sections."""
@@ -216,9 +220,19 @@ def _advisory_asyncpg_query(query: Mapping[str, _URLQueryValue]) -> dict[str, _U
             continue
         if key == "ssl":
             if not has_sslmode:
-                sslmode = _ssl_query_value_to_sslmode(_single_query_value(value))
+                raw_ssl = _single_query_value(value)
+                sslmode = _ssl_query_value_to_sslmode(raw_ssl)
                 if sslmode is not None:
                     normalized["sslmode"] = sslmode
+                elif raw_ssl is not None:
+                    # Neither ``ssl`` nor ``sslmode`` reaches the DSN, so asyncpg
+                    # falls back to its own default SSL negotiation. Surface the
+                    # dropped value (non-secret) so an unexpected TLS posture is
+                    # diagnosable instead of silent.
+                    _log.warning(
+                        "merge_coordinator.asyncpg_dsn_unrecognized_ssl_value",
+                        ssl_value=raw_ssl,
+                    )
             continue
         normalized[key] = value
     return normalized
