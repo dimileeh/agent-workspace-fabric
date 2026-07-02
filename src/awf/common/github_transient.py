@@ -163,9 +163,16 @@ def github_error_disposition(*, operation: str, stderr: str) -> GitHubErrorDispo
 
     has_rate_limit_marker = any(marker in text for marker in RATE_LIMIT_GITHUB_ERROR_MARKERS)
 
+    # Scope the "already exists" exclusion to the duplicate-PR-create case only. A
+    # bare "already exists" must not blanket-suppress the whole PERMANENT marker set,
+    # or a stderr combining it with e.g. "permission denied" / "branch protection"
+    # would be retried in-cycle instead of failing fast. ``gh pr create`` duplicate
+    # errors always name the "pull request", so requiring both markers is safe.
+    duplicate_pr_marker = "already exists" in stderr_text and "pull request" in stderr_text
+
     if (
         not has_rate_limit_marker
-        and "already exists" not in stderr_text
+        and not duplicate_pr_marker
         and any(marker in text for marker in PERMANENT_GITHUB_ERROR_MARKERS)
     ):
         return GitHubErrorDisposition.PERMANENT

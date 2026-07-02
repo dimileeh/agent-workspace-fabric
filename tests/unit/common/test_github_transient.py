@@ -63,6 +63,29 @@ def test_already_exists_is_not_permanent() -> None:
 @pytest.mark.parametrize(
     "stderr",
     [
+        "HTTP 403: permission denied (repository already exists in org)",
+        "branch protection rule already exists; access denied",
+    ],
+)
+def test_already_exists_does_not_suppress_other_permanent_markers(stderr: str) -> None:
+    """The duplicate-PR ``already exists`` exclusion must not blanket-skip the
+    PERMANENT set: an ``already exists`` stderr that lacks the ``pull request``
+    duplicate-create signal but carries a real permanent marker still fails fast."""
+    from awf.common.github_transient import (
+        GitHubErrorDisposition,
+        github_error_disposition,
+    )
+
+    assert (
+        github_error_disposition(operation="gh api graphql", stderr=stderr)
+        == GitHubErrorDisposition.PERMANENT
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
         "not logged in to any GitHub hosts",
         "HTTP 403: Resource not accessible by integration",
         "SSO authorization required",
