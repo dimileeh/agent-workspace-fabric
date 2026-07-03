@@ -4247,6 +4247,7 @@
                 "type": "null"
               }
             ],
+            "description": "Optional issue/task key linked into the PR title and AWF-authored monitor commits. Accepts a Jira issue key (PROJ-123) or an Aira task entity key (PROJ-T123). Pass bare keys; bracketed [PROJ-T123] is accepted and normalized, but bare is recommended because [ is a shell glob character.",
             "title": "Task Tag"
           },
           "task_title": {
@@ -11666,6 +11667,7 @@
                 "type": "null"
               }
             ],
+            "description": "Optional issue/task key linked into the branch, PR title, and AWF-authored commits. Accepts a Jira issue key (PROJ-123) or an Aira task entity key (PROJ-T123). Pass bare keys; bracketed [PROJ-T123] is accepted and normalized, but bare is recommended because [ is a shell glob character.",
             "title": "Task Tag"
           },
           "title": {

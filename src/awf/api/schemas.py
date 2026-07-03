@@ -155,7 +155,20 @@ class WorkspaceTask(BaseModel):
     model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
-    task_tag: Annotated[str | None, Field(default=None, max_length=64)] = None
+    task_tag: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=64,
+            description=(
+                "Optional issue/task key linked into the branch, PR title, and "
+                "AWF-authored commits. Accepts a Jira issue key (PROJ-123) or an "
+                "Aira task entity key (PROJ-T123). Pass bare keys; bracketed "
+                "[PROJ-T123] is accepted and normalized, but bare is recommended "
+                "because [ is a shell glob character."
+            ),
+        ),
+    ] = None
     task_class: TaskClass | None = None
     priority: int = Field(default=0, ge=0, le=100)
     human_boost: int = Field(default=0, ge=0, le=5)
@@ -393,7 +406,20 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
         str | None,
         Field(default=None, min_length=1, max_length=16384),
     ] = None
-    task_tag: Annotated[str | None, Field(default=None, max_length=64)] = None
+    task_tag: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=64,
+            description=(
+                "Optional issue/task key linked into the PR title and "
+                "AWF-authored monitor commits. Accepts a Jira issue key "
+                "(PROJ-123) or an Aira task entity key (PROJ-T123). Pass bare "
+                "keys; bracketed [PROJ-T123] is accepted and normalized, but "
+                "bare is recommended because [ is a shell glob character."
+            ),
+        ),
+    ] = None
     reason: Annotated[str | None, Field(default=None, max_length=512)] = None
 
     @field_validator("task_tag")
