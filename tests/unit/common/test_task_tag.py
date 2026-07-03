@@ -17,6 +17,8 @@ from awf.common.task_tag import (
     validate_task_tag,
 )
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.parametrize(
     "value",
