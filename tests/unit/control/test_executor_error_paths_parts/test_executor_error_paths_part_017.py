@@ -276,7 +276,9 @@ class TestResumePrMonitorStatusRechecks:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.monitor_claimed_by == "worker-current"
-            assert ws.events[-1].reason_code == "EXECUTOR_STALE_CLAIM"
+            # Monitor-claim takeover records a distinct reason code so it is not
+            # conflated with an execution-claim skip (EXECUTOR_STALE_CLAIM).
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_MONITOR_CLAIM"
 
     @pytest.mark.unit
     async def test_resume_skips_when_monitor_claim_superseded_before_run(
@@ -343,7 +345,9 @@ class TestResumePrMonitorStatusRechecks:
             assert ws is not None
             assert ws.status == WorkspaceStatus.monitoring_pr.value
             assert ws.monitor_claimed_by == "worker-current"
-            assert ws.events[-1].reason_code == "EXECUTOR_STALE_CLAIM"
+            # Monitor-claim takeover before monitor.run records the distinct
+            # monitor-claim reason code, not the execution-claim one.
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_MONITOR_CLAIM"
 
     @pytest.mark.unit
     async def test_resume_threads_monitor_claim_owner_into_runner(

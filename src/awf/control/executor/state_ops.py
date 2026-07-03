@@ -226,7 +226,7 @@ async def _recheck_status(
     owner_id: str | None = None,
     owner_mismatch_reason_code: str = "EXECUTOR_STALE_CLAIM",
     monitor_owner_id: str | None = None,
-    monitor_owner_mismatch_reason_code: str = "EXECUTOR_STALE_CLAIM",
+    monitor_owner_mismatch_reason_code: str = "EXECUTOR_STALE_MONITOR_CLAIM",
 ) -> bool:
     """Confirm the row is still in ``expected`` (and, when ``owner_id`` is
     provided, still claimed by it) before resuming work.
@@ -238,7 +238,10 @@ async def _recheck_status(
     behind the new claimant's back.
 
     ``monitor_owner_id`` applies the same fence to ``monitor_claimed_by`` for
-    resumed PR-monitor loops."""
+    resumed PR-monitor loops; a monitor-claim mismatch records
+    ``monitor_owner_mismatch_reason_code`` (``EXECUTOR_STALE_MONITOR_CLAIM`` by
+    default) so a superseded monitor loop is distinguishable in events/logs from
+    a superseded execution claim (``EXECUTOR_STALE_CLAIM``)."""
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.get(workspace_id)
