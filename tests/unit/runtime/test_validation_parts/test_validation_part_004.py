@@ -170,6 +170,7 @@ class _SleepingRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         del input_bytes, cwd
         self.calls.append(list(args))
@@ -191,6 +192,7 @@ class _ImmediateTimeoutStreamingRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         del input_bytes, cwd
         self.calls.append(list(args))
@@ -224,6 +226,7 @@ class _CancellingRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         del input_bytes, cwd
         if "awf-cleanup" in args:
@@ -243,6 +246,7 @@ class _NonStreamingRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         del input_bytes, cwd
         self.calls.append(list(args))
@@ -260,6 +264,7 @@ class _StreamingRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         del input_bytes, cwd
         self.calls.append(list(args))

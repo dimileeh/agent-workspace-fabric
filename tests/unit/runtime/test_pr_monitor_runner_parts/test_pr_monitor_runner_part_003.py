@@ -9,6 +9,7 @@ specific merge-gate branch without running the full monitor integration loop.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +24,11 @@ from awf.adapters.provider_failures import AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.bitbucket_client import BitbucketAuth, BitbucketClient
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
+from awf.common.github_retry import (
+    GitHubRetryContext,
+    github_retry_context,
+    past_transport_deadline,
+)
 from awf.db.enums import (
     AgentRuntime,
     WorkspaceStatus,
@@ -102,6 +108,7 @@ class _CapturingGH:
         repo: RepoRef,
         pr_number: int,
         base_behind_count: int,
+        retry: bool = True,
     ) -> PRStatus:
         del repo, pr_number
         self.base_behind_counts.append(base_behind_count)
@@ -131,6 +138,40 @@ class _CapturingGH:
         # The runner closes its forge client in run()'s finally; record it so the
         # leak-fix regression test can assert the client was released.
         self.closed = True
+
+
+class _DeadlineCapturingGH(_CapturingGH):
+    """Records the transport cycle deadline visible when ``fetch_pr_status`` runs.
+
+    The real deadline gate lives in ``github_transport`` behind the live
+    ``GitHubClient``; a fake never trips it, so instead of asserting on the gate
+    we capture the deadline the retry context carried at the moment the gh call
+    was issued — after ``_fetch_status_for_decision`` finished the local base
+    refresh.
+    """
+
+    def __init__(self, status: PRStatus | None = None) -> None:
+        super().__init__(status=status)
+        self.seen_deadline: float | None = None
+        self.deadline_seen: bool = False
+
+    async def fetch_pr_status(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        base_behind_count: int,
+        retry: bool = True,
+    ) -> PRStatus:
+        ctx = github_retry_context.get()
+        self.seen_deadline = ctx.deadline if ctx is not None else None
+        self.deadline_seen = True
+        return await super().fetch_pr_status(
+            repo=repo,
+            pr_number=pr_number,
+            base_behind_count=base_behind_count,
+            retry=retry,
+        )
 
 
 def _provider_recovery_policy(
@@ -937,6 +978,146 @@ async def test_fetch_status_supplies_workspace_test_commands_to_ci_log_evidence(
             ),
         )
     ]
+
+
+@pytest.mark.unit
+async def test_fetch_status_skips_ci_log_fetch_under_fail_fast_recheck(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A ``retry=False`` recheck must not gather best-effort CI logs.
+
+    The pre-merge recheck runs inside the serialized merge critical section
+    with ``retry=False`` so a single forge blip fails fast. The FAILURE branch
+    used to still call ``fetch_failing_check_logs`` with its default retry
+    behaviour; on Bitbucket that paginates statuses/pipelines/steps and can
+    sleep on a 429/near-limit backoff, holding the merge coordinator lock
+    across the wait (PRRT_kwDOSJAM6s6OAtNZ). The freshly flipped FAILURE still
+    blocks the merge; the next ordinary ``retry=True`` poll gathers the logs.
+    """
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        test_commands=["ruff check ."],
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0, stdout="0\n")  # rev-list HEAD..origin/base
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    gh = _CapturingGH(status=replace(_green_status(), check_state=CheckState.FAILURE))
+    runner._deps.gh = gh  # type: ignore[assignment]
+
+    status = await runner._fetch_status_for_decision(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        workspace_id=workspace_id,
+        base_branch="development",
+        retry=False,
+    )
+
+    assert status.check_state is CheckState.FAILURE
+    assert gh.failing_log_requests == []
+
+
+@pytest.mark.unit
+async def test_fetch_status_refreshes_transport_deadline_after_base_refresh(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The gh transport cycle deadline must start after the local base refresh.
+
+    ``_fetch_status_for_decision`` runs the local ``_fetch_base`` /
+    ``_count_base_behind`` before any gh call. In a slow/large repo that base
+    refresh can outlast ``github_transport_cycle_deadline_seconds``; if the
+    deadline established at cycle start is left unrefreshed, the first retrying
+    ``fetch_pr_status`` sees an already-expired deadline and raises a fabricated
+    "cycle deadline exceeded" without ever contacting GitHub — a terminal
+    UNKNOWN GITHUB_API_ERROR (PRRT_kwDOSJAM6s6OBcIY). The retrying path refreshes
+    the deadline around the actual gh retry batch, so the gh call sees a live
+    (future) deadline.
+    """
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0, stdout="0\n")  # rev-list HEAD..origin/base
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    gh = _DeadlineCapturingGH()
+    runner._deps.gh = gh  # type: ignore[assignment]
+
+    # Simulate a cycle whose deadline was already consumed by the local base
+    # refresh: the runner set it at cycle start, but by the gh batch it is past.
+    expired = time.monotonic() - 1_000.0
+    token = github_retry_context.set(
+        GitHubRetryContext(workspace_id="ws_current", pr_number=42, deadline=expired)
+    )
+    try:
+        await runner._fetch_status_for_decision(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            workspace_id="ws_current",
+            base_branch="development",
+        )
+    finally:
+        github_retry_context.reset(token)
+
+    assert gh.deadline_seen is True
+    assert gh.seen_deadline is not None
+    assert gh.seen_deadline > expired
+    assert not past_transport_deadline(gh.seen_deadline)
+
+
+@pytest.mark.unit
+async def test_fetch_status_leaves_transport_deadline_untouched_under_recheck(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The ``retry=False`` pre-merge recheck must not reset the cycle deadline.
+
+    That recheck issues a ``RetryPolicy.NEVER`` fetch (exempt from the deadline
+    gate) inside the serialized merge critical section. Refreshing the shared
+    deadline there would silently extend the retry budget of subsequent merge
+    calls, so only the retrying poll refreshes it.
+    """
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0, stdout="0\n")  # rev-list HEAD..origin/base
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    gh = _DeadlineCapturingGH()
+    runner._deps.gh = gh  # type: ignore[assignment]
+
+    expired = time.monotonic() - 1_000.0
+    token = github_retry_context.set(
+        GitHubRetryContext(workspace_id="ws_current", pr_number=42, deadline=expired)
+    )
+    try:
+        await runner._fetch_status_for_decision(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            workspace_id="ws_current",
+            base_branch="development",
+            retry=False,
+        )
+    finally:
+        github_retry_context.reset(token)
+
+    assert gh.deadline_seen is True
+    assert gh.seen_deadline == expired
 
 
 @pytest.mark.unit

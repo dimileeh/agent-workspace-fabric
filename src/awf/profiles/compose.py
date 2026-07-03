@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlunsplit
 
+import yaml
+
 from awf.node.compose_manager import ComposeService
 from awf.profiles.lint import profile_service_volume_lint_errors
 from awf.profiles.models import (
@@ -70,6 +72,11 @@ AGENT_AUTH_ENV_VARS = (
 # ``_OLLAMA_BASE_URL_ENV_KEYS``; kept local so ``profiles`` does not import the
 # ``service`` layer.
 _OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
+
+# GitHub CLI token aliases in precedence order (highest first). ``gh`` reads
+# ``GH_TOKEN`` before ``GITHUB_TOKEN`` (https://cli.github.com/manual/gh_help_environment),
+# so injecting a worker token under an earlier alias shadows a profile-owned later one.
+_GITHUB_TOKEN_ALIAS_PRECEDENCE = ("GH_TOKEN", "GITHUB_TOKEN")
 
 
 class ProfileServiceValidationError(ValueError):
@@ -357,10 +364,21 @@ def agent_environment_with_github_token(
 
     merged: list[tuple[str, str]] = list(base_environment)
     existing = {key for key, _ in merged}
-    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
-        if name not in existing:
-            merged.append((name, token_placeholder))
-            existing.add(name)
+    # ``GH_TOKEN`` and ``GITHUB_TOKEN`` are read by the GitHub CLI "in order of
+    # precedence" (GH_TOKEN first — https://cli.github.com/manual/gh_help_environment).
+    # Treat the aliases as one group: when a profile already owns a lower-precedence
+    # alias (e.g. a secret lease that renders only ``GITHUB_TOKEN``), do NOT inject
+    # the worker token under a higher-precedence alias, or ``gh`` would use the
+    # worker credential instead of the profile-owned token. Injecting a lower-
+    # precedence worker alias alongside a profile-owned higher-precedence one stays
+    # harmless because the profile alias still wins.
+    for index, name in enumerate(_GITHUB_TOKEN_ALIAS_PRECEDENCE):
+        if name in existing:
+            continue
+        if any(lower in existing for lower in _GITHUB_TOKEN_ALIAS_PRECEDENCE[index + 1 :]):
+            continue
+        merged.append((name, token_placeholder))
+        existing.add(name)
     return tuple(merged)
 
 
@@ -419,3 +437,98 @@ def _shadowing_worker_ollama_keys(profile_keys: set[str]) -> frozenset[str]:
         return frozenset()
     top = min(declared)
     return frozenset(_OLLAMA_BASE_URL_ENV_KEYS[:top])
+
+
+def _try_agent_environment_from_compose_file(
+    compose_file: Path,
+) -> dict[str, str] | None:
+    """Return agent env pairs from compose, or ``None`` when the file is unreadable."""
+
+    try:
+        payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    services = payload.get("services")
+    if not isinstance(services, Mapping):
+        return None
+    agent = services.get("agent")
+    if not isinstance(agent, Mapping):
+        return None
+    return _compose_environment_mapping(agent.get("environment"))
+
+
+def _try_agent_environment_keys_from_compose_file(
+    compose_file: Path,
+) -> frozenset[str] | None:
+    """Return agent env keys from compose, or ``None`` when the file is unreadable."""
+
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        return None
+    return frozenset(compose_env)
+
+
+def agent_environment_keys_from_compose_file(compose_file: Path) -> frozenset[str]:
+    """Return env var names declared on the agent service in a rendered compose file."""
+
+    return _try_agent_environment_keys_from_compose_file(compose_file) or frozenset()
+
+
+def agent_exec_env_passthrough(
+    *,
+    compose_file: Path,
+    host_env: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return auth env var names safe to pass through on ``compose exec -e``.
+
+    Mirrors ``agent_environment_with_legacy_host_auth`` shadowing: when compose
+    generation omitted a higher-precedence worker Ollama key so a profile-owned
+    daemon wins, do not re-inject that key via exec-time ``-e`` passthrough.
+
+    Also skip keys already rendered into the agent service environment block.
+    ``docker compose exec -e NAME`` (no value) re-reads ``NAME`` from the worker
+    shell and overrides the running container's env, clobbering profile-owned or
+    lease-resolved credentials/endpoints — including declared env leases that
+    render as same-name ``${NAME}`` placeholders. Only auth keys absent from the
+    compose environment **and** configured in the worker env remain eligible for
+    exec-time passthrough.
+    """
+
+    source_env = os.environ if host_env is None else host_env
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        # Unreadable compose: assume profile-owned OLLAMA_HOST would shadow the worker
+        # base URL rather than treat a parse failure as "no profile Ollama keys".
+        shadowing = _shadowing_worker_ollama_keys({"OLLAMA_HOST"})
+        profile_owned = frozenset[str]()
+    else:
+        shadowing = _shadowing_worker_ollama_keys(set(compose_env))
+        profile_owned = _profile_owned_auth_keys(compose_env)
+    excluded = shadowing | profile_owned
+    return tuple(
+        name for name in AGENT_AUTH_ENV_VARS if name not in excluded and source_env.get(name)
+    )
+
+
+def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
+    """Return agent auth env keys already declared in the compose environment block."""
+    return frozenset(name for name in AGENT_AUTH_ENV_VARS if name in compose_env)
+
+
+def _compose_environment_mapping(environment: object) -> dict[str, str]:
+    """Normalize a compose ``environment`` scalar, list, or mapping into a string dict."""
+    if isinstance(environment, Mapping):
+        return {str(key): str(value) for key, value in environment.items()}
+    if isinstance(environment, list):
+        mapping: dict[str, str] = {}
+        for item in environment:
+            if isinstance(item, str):
+                key, sep, value = item.partition("=")
+                if key:
+                    mapping[key] = value if sep else ""
+            elif isinstance(item, Mapping):
+                mapping.update({str(key): str(value) for key, value in item.items()})
+        return mapping
+    return {}

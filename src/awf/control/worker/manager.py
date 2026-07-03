@@ -103,6 +103,7 @@ class ControlWorker(WorkerDelegatesMixin):
         auth_overlay_work_dir: Path | None = None,
         config: WorkerConfig,
     ) -> None:
+        """Wire dependencies and initialize claim-tracking, dispatch, and cooldown state."""
         self._session_factory = session_factory
         self._provisioner = provisioner
         self._executor = executor
@@ -138,6 +139,15 @@ class ControlWorker(WorkerDelegatesMixin):
         self._execution_claim_epochs: dict[str, int] = {}
         self._consecutive_saturated_cycles: int = 0
         self._monitor_recovery_operation_ids: dict[str, str] = {}
+        # Workspaces whose two-phase monitor handoff succeeded but the remonitor
+        # operation finalize write is still pending (see ``_safely_resume_pr_monitor``).
+        self._monitor_recovery_handoff_succeeded_workspace_ids: set[str] = set()
+        # Workspaces whose post-finalize start recheck bailed after handoff finalize
+        # succeeded; used to skip active-salvage monitor cooldown on immediate reclaim.
+        self._monitor_recovery_post_handoff_start_bailed_workspace_ids: set[str] = set()
+        # Detached monitor-claim refresh loops kept alive while a remonitor
+        # recovery operation is still pending DB finalization.
+        self._monitor_claim_heartbeat_tasks: dict[str, asyncio.Task[None]] = {}
         # Session-local advisory state; reset on restart and bounded below.
         self._active_salvage_monitor_recovery_operation_ids: dict[str, None] = {}
         self._active_salvage_monitor_resume_cooldowns: dict[str, float] = {}

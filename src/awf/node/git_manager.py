@@ -23,6 +23,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import weakref
 from collections.abc import Mapping
@@ -62,6 +63,7 @@ _POISONED_MIRROR_HOOKS_PATH_PATTERNS = {
 }
 AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
+_OWNER_WRITABLE_DIR_MODE = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
 
 
 @dataclass(frozen=True)
@@ -1193,6 +1195,7 @@ def _is_stale_linked_worktree_metadata_error(exc: GitOperationError) -> bool:
 
 
 def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> None:
+    """Apply ``chown``/``lchown`` to deduplicated mirror/worktree ownership targets."""
     seen: set[tuple[Path, bool, bool]] = set()
     for target in targets:
         resolved = target.path.resolve()
@@ -1206,6 +1209,8 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
             os.lchown(target.path, uid, gid)
         else:
             os.chown(target.path, uid, gid)
+            if target.path.is_dir():
+                _ensure_owner_writable_dir(target.path)
 
 
 async def _repair_mirror_hooks_path_once(mirror_path: Path) -> tuple[bool, bool]:
@@ -1403,6 +1408,7 @@ def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = Fals
     os.chown(path, uid, gid)
     if not path.is_dir():
         return
+    _ensure_owner_writable_dir(path)
 
     for root, dirs, files in os.walk(path, followlinks=False):
         for name in dirs:
@@ -1411,6 +1417,7 @@ def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = Fals
                 os.lchown(child, uid, gid)
             else:
                 os.chown(child, uid, gid)
+                _ensure_owner_writable_dir(child)
         if directories_only:
             continue
         for name in files:
@@ -1419,3 +1426,11 @@ def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = Fals
                 os.lchown(child, uid, gid)
             else:
                 os.chown(child, uid, gid)
+
+
+def _ensure_owner_writable_dir(path: Path) -> None:
+    """Ensure ``path`` is owner-writable without changing unrelated permission bits."""
+    mode = path.stat(follow_symlinks=False).st_mode
+    desired_mode = stat.S_IMODE(mode | _OWNER_WRITABLE_DIR_MODE)
+    if desired_mode != stat.S_IMODE(mode):
+        path.chmod(desired_mode)

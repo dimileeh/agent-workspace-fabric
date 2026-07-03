@@ -752,13 +752,17 @@
           "package_version": {
             "title": "Package Version",
             "type": "string"
+          },
+          "profile_capability_schema": {
+            "$ref": "#/components/schemas/ProfileCapabilitySchema"
           }
         },
         "required": [
           "package_name",
           "package_version",
           "git_commit",
-          "capabilities"
+          "capabilities",
+          "profile_capability_schema"
         ],
         "title": "CoreDiscoveryResponse",
         "type": "object"
@@ -2666,6 +2670,28 @@
         "title": "ProfileAppEndpointHealth",
         "type": "object"
       },
+      "ProfileCapabilitySchema": {
+        "description": "Public-safe description of the profile capability classification contract.\n\nSurfaced through Core discovery so a cloud substrate can interpret\nper-profile capability payloads without Core embedding cloud product\npolicy. Carries no secrets.",
+        "properties": {
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
+          "rule_summary": {
+            "title": "Rule Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "flags",
+          "rule_summary"
+        ],
+        "title": "ProfileCapabilitySchema",
+        "type": "object"
+      },
       "ProfileCommand": {
         "additionalProperties": false,
         "description": "A shell command executed inside the agent container.",
@@ -4221,6 +4247,7 @@
                 "type": "null"
               }
             ],
+            "description": "Optional issue/task key linked into the PR title and AWF-authored monitor commits. Accepts a Jira issue key (PROJ-123) or an Aira task entity key (PROJ-T123). Pass bare keys; bracketed [PROJ-T123] is accepted and normalized, but bare is recommended because [ is a shell glob character.",
             "title": "Task Tag"
           },
           "task_title": {
@@ -11640,6 +11667,7 @@
                 "type": "null"
               }
             ],
+            "description": "Optional issue/task key linked into the branch, PR title, and AWF-authored commits. Accepts a Jira issue key (PROJ-123) or an Aira task entity key (PROJ-T123). Pass bare keys; bracketed [PROJ-T123] is accepted and normalized, but bare is recommended because [ is a shell glob character.",
             "title": "Task Tag"
           },
           "title": {

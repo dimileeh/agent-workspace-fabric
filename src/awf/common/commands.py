@@ -50,6 +50,7 @@ class AsyncCommandRunner(Protocol):
         input_bytes: bytes | None = None,
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> CommandResult: ...
 
 
@@ -82,7 +83,11 @@ class AsyncioSubprocessRunner:
         input_bytes: bytes | None = None,
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> CommandResult:
+        # Validate before spawning: an invalid (non-positive) timeout must fail
+        # without launching — and then leaking — the child process.
+        _validate_timeout("timeout_seconds", timeout_seconds)
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.PIPE if input_bytes is not None else None,
@@ -91,16 +96,43 @@ class AsyncioSubprocessRunner:
             cwd=cwd,
             env=None if env is None else dict(env),
         )
+        wait_task = asyncio.create_task(proc.wait())
         try:
-            stdout_bytes, stderr_bytes = await proc.communicate(input=input_bytes)
+            if timeout_seconds is not None:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(input=input_bytes),
+                    timeout=timeout_seconds,
+                )
+            else:
+                stdout_bytes, stderr_bytes = await proc.communicate(input=input_bytes)
+        except TimeoutError:
+            await _terminate_process(proc, wait_task)
+            diagnostic = _timeout_diagnostic(
+                COMMAND_TIMEOUT_REASON,
+                wall_timeout_seconds=timeout_seconds,
+                idle_timeout_seconds=None,
+            )
+            return CommandResult(
+                returncode=_TIMEOUT_RETURN_CODE,
+                stdout="",
+                stderr=diagnostic,
+                reason_code=COMMAND_TIMEOUT_REASON,
+            )
         except asyncio.CancelledError:
             # A timeout wrapper (``asyncio.wait_for``) cancels this coroutine
             # mid-``communicate``. Without explicit teardown the spawned process
             # — e.g. a wedged ``docker compose exec`` client driving a toolchain
             # probe — would be left orphaned and accumulate across workspaces.
             # Terminate and reap it before propagating the cancellation.
-            await _terminate_process(proc, asyncio.create_task(proc.wait()))
+            await _terminate_process(proc, wait_task)
             raise
+        finally:
+            # On the success path ``wait_task`` is never awaited — ``communicate``
+            # reaps the process itself — so cancel the bookkeeping task rather
+            # than leave it orphaned in the event loop until GC. On the
+            # timeout/cancel paths ``_terminate_process`` has already reaped it,
+            # so this cancel is a no-op.
+            wait_task.cancel()
         assert proc.returncode is not None
         return CommandResult(
             returncode=proc.returncode,
@@ -253,6 +285,10 @@ class _RecordedCall:
     input_bytes: bytes | None
     cwd: str | None
     env: dict[str, str] | None
+    timeout_seconds: float | None
+
+
+_HANG_QUEUE_MARKER = object()
 
 
 class FakeCommandRunner:
@@ -264,7 +300,7 @@ class FakeCommandRunner:
 
     def __init__(self) -> None:
         self.calls: list[_RecordedCall] = []
-        self._queued: list[CommandResult] = []
+        self._queued: list[CommandResult | object] = []
 
     def queue_result(
         self,
@@ -276,6 +312,11 @@ class FakeCommandRunner:
     ) -> None:
         self._queued.append(CommandResult(returncode, stdout, stderr, reason_code))
 
+    def queue_hang(self) -> None:
+        """Queue a simulated hung subprocess for per-attempt timeout tests."""
+
+        self._queued.append(_HANG_QUEUE_MARKER)
+
     async def run(
         self,
         args: list[str],
@@ -283,18 +324,42 @@ class FakeCommandRunner:
         input_bytes: bytes | None = None,
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> CommandResult:
+        # Mirror AsyncioSubprocessRunner.run: reject a non-positive timeout so the
+        # fake enforces the same fail-before-spawn input contract as production
+        # and no invalid call is recorded.
+        _validate_timeout("timeout_seconds", timeout_seconds)
         self.calls.append(
             _RecordedCall(
                 args=list(args),
                 input_bytes=input_bytes,
                 cwd=cwd,
                 env=None if env is None else dict(env),
+                timeout_seconds=timeout_seconds,
             )
         )
         if not self._queued:
             return CommandResult(returncode=0, stdout="", stderr="")
-        return self._queued.pop(0)
+        queued = self._queued.pop(0)
+        if queued is _HANG_QUEUE_MARKER:
+            if timeout_seconds is not None:
+                await asyncio.sleep(timeout_seconds + 0.05)
+                diagnostic = _timeout_diagnostic(
+                    COMMAND_TIMEOUT_REASON,
+                    wall_timeout_seconds=timeout_seconds,
+                    idle_timeout_seconds=None,
+                )
+                return CommandResult(
+                    returncode=_TIMEOUT_RETURN_CODE,
+                    stdout="",
+                    stderr=diagnostic,
+                    reason_code=COMMAND_TIMEOUT_REASON,
+                )
+            await asyncio.sleep(3600.0)
+            return CommandResult(returncode=0, stdout="", stderr="")
+        assert isinstance(queued, CommandResult)
+        return queued
 
     async def run_streaming(
         self,
@@ -304,11 +369,17 @@ class FakeCommandRunner:
         on_stderr: StreamCallback | None = None,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
         wall_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
     ) -> CommandResult:
         del wall_timeout_seconds, idle_timeout_seconds
-        result = await self.run(args, input_bytes=input_bytes, cwd=cwd)
+        result = await self.run(
+            args,
+            input_bytes=input_bytes,
+            cwd=cwd,
+            env=env,
+        )
         if result.stdout and on_stdout is not None:
             maybe_awaitable = on_stdout(result.stdout)
             if inspect.isawaitable(maybe_awaitable):

@@ -594,14 +594,28 @@ class _RecordingExecutor:
         self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        """Test helper for execute."""
         self.calls.append(workspace_id)
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
+        del handoff
         self.resume_calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
 
 
 class _BlockingExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -614,18 +628,32 @@ class _BlockingExecutor(_RecordingExecutor):
 
 class _BlockingMonitorExecutor(_RecordingExecutor):
     def __init__(self) -> None:
+        """Test helper for __init__."""
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None:
+    async def resume_pr_monitor_handoff(self, workspace_id: str) -> object:
+        """Test helper for resume pr monitor handoff."""
+        del workspace_id
+        return object()
+
+    async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+        """Test helper for run resumed pr monitor."""
+        del handoff
         self.resume_calls.append(workspace_id)
         self.started.set()
         await self.release.wait()
 
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Test helper for resume pr monitor."""
+        handoff = await self.resume_pr_monitor_handoff(workspace_id)
+        await self.run_resumed_pr_monitor(workspace_id, handoff)
+
 
 class _RecordingRuntimeInspector:
     def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
+        """Test helper for __init__."""
         self._snapshots = snapshots
         self.calls: list[str | None] = []
 
@@ -1236,6 +1264,7 @@ class TestRunOnceMonitorRecoveryPart003:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Monitor resume and ready execution share the same execution-slot limit."""
         monitor_id = await _create_monitoring_pr(
             session_factory, origin_repo, "needs-monitor-resume"
         )
@@ -1244,7 +1273,9 @@ class TestRunOnceMonitorRecoveryPart003:
         release_monitor = asyncio.Event()
 
         class _BlockingExecutor(_RecordingExecutor):
-            async def resume_pr_monitor(self, workspace_id: str) -> None:
+            async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+                """Test helper for run resumed pr monitor."""
+                del handoff
                 self.resume_calls.append(workspace_id)
                 monitor_started.set()
                 await release_monitor.wait()
@@ -1329,6 +1360,7 @@ class TestRunOnceMonitorRecoveryPart003:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """An in-flight monitor resume must not spawn a duplicate execution task."""
         monitor_id = await _create_monitoring_pr(
             session_factory, origin_repo, "needs-monitor-resume"
         )
@@ -1336,7 +1368,9 @@ class TestRunOnceMonitorRecoveryPart003:
         release_monitor = asyncio.Event()
 
         class _BlockingExecutor(_RecordingExecutor):
-            async def resume_pr_monitor(self, workspace_id: str) -> None:
+            async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+                """Test helper for run resumed pr monitor."""
+                del handoff
                 self.resume_calls.append(workspace_id)
                 monitor_started.set()
                 await release_monitor.wait()
@@ -1371,12 +1405,15 @@ class TestRunOnceMonitorRecoveryPart003:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
+        """Concurrent workers must not claim the same monitoring_pr workspace."""
         monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "race-monitor")
         monitor_started = asyncio.Event()
         release_monitor = asyncio.Event()
 
         class _BlockingExecutor(_RecordingExecutor):
-            async def resume_pr_monitor(self, workspace_id: str) -> None:
+            async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+                """Test helper for run resumed pr monitor."""
+                del handoff
                 self.resume_calls.append(workspace_id)
                 monitor_started.set()
                 await release_monitor.wait()

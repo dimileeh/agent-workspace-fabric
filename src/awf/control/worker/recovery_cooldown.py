@@ -24,6 +24,7 @@ from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_SOURCE,
     _ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT,
     _ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT,
+    _MONITOR_RECOVERY_START_SKIPPED_ERROR_CODE,
 )
 from awf.control.worker.helpers import (
     _datetime_from_json,
@@ -31,12 +32,13 @@ from awf.control.worker.helpers import (
     _utc_datetime,
 )
 from awf.control.worker.logging import _log
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.db.models import WorkspaceEvent
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 
 
 def _remember_active_salvage_monitor_recovery_operation_id(self: Any, operation_id: str) -> None:
+    """Track a salvage monitor recovery operation id with bounded in-memory retention."""
     self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
     self._active_salvage_monitor_recovery_operation_ids[operation_id] = None
     while (
@@ -48,13 +50,69 @@ def _remember_active_salvage_monitor_recovery_operation_id(self: Any, operation_
 
 
 def _forget_active_salvage_monitor_recovery_operation_id(self: Any, operation_id: str) -> None:
+    """Drop a salvage monitor recovery operation id from in-memory tracking."""
     self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
+
+
+async def _should_apply_active_salvage_monitor_resume_cooldown(
+    self: Any,
+    workspace_id: str,
+    *,
+    resume_succeeded: bool,
+    recovery_operation_id: str | None,
+) -> bool:
+    """Return whether active-salvage remonitor should cool down after recovery dispatch."""
+    if recovery_operation_id is None:
+        return False
+    if recovery_operation_id not in self._active_salvage_monitor_recovery_operation_ids:
+        return False
+    if resume_succeeded:
+        post_handoff_start_bailed_workspace_ids = getattr(
+            self,
+            "_monitor_recovery_post_handoff_start_bailed_workspace_ids",
+            None,
+        )
+        if (
+            post_handoff_start_bailed_workspace_ids is not None
+            and workspace_id in post_handoff_start_bailed_workspace_ids
+        ):
+            post_handoff_start_bailed_workspace_ids.discard(workspace_id)
+            return False
+        return True
+    try:
+        async with self._session_factory() as session:
+            operation = await OperationRepository(session).get(recovery_operation_id)
+            if (
+                operation is not None
+                and operation.workspace_id == workspace_id
+                and operation.status == OperationStatus.succeeded.value
+            ):
+                # Handoff already succeeded; cancellation during the post-handoff
+                # monitor loop must not be treated as a failed recovery dispatch.
+                return False
+            if (
+                operation is not None
+                and operation.workspace_id == workspace_id
+                and operation.error_code == _MONITOR_RECOVERY_START_SKIPPED_ERROR_CODE
+            ):
+                # Pre-start verify bailed after handoff (e.g. monitor claim owner
+                # changed); do not suppress the next recovery attempt.
+                return False
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            return ws is not None and ws.status == WorkspaceStatus.monitoring_pr.value
+    except Exception:
+        _log.exception(
+            "worker.active_salvage_monitor_resume_cooldown_eligibility_lookup_failed",
+            workspace_id=workspace_id,
+        )
+        return False
 
 
 async def _active_salvage_monitor_resume_cooldown_blocks_claim(
     self: Any,
     workspace_id: str,
 ) -> bool:
+    """Return whether an active-salvage remonitor cooldown blocks claiming the workspace."""
     if self._active_salvage_monitor_resume_cooldown_active(workspace_id):
         return True
     return cast(

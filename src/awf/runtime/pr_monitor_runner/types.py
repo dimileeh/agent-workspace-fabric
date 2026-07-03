@@ -66,13 +66,43 @@ class _RunnerDeps:
 class ProviderRecoveryFallbackError(Exception):
     """Raised when a retryable provider failure triggers a fallback workspace."""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        """Store optional salvage/repair metadata for monitor operation results."""
+        super().__init__(message)
+        self.details = dict(details) if details is not None else None
+
 
 class ProviderRecoveryRetryError(Exception):
     """Raised when an operation should back off and retry later due to a provider error."""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        """Store optional salvage/repair metadata for monitor operation results."""
+        super().__init__(message)
+        self.details = dict(details) if details is not None else None
+
 
 class ProviderRecoveryAuthError(Exception):
     """Raised when PR-monitor repair cannot continue because provider auth is broken."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        """Store optional salvage/repair metadata for monitor operation results."""
+        super().__init__(message)
+        self.details = dict(details) if details is not None else None
 
 
 class _MonitorPolicyBlockedError(Exception):

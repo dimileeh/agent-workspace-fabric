@@ -30,6 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from awf.common.task_tag import task_tag_commit_prefix
+
 # The CLI needs enough context to diagnose but not so much that the
 # important signal scrolls off the top. 4 KB per stream is a practical
 # middle ground: long enough for a full pytest failure dump, short
@@ -215,10 +217,11 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
 
     task_tag_block = ""
     if context.task_tag:
+        tag_prefix = task_tag_commit_prefix(context.task_tag)
         task_tag_block = (
             f"\n\nIf you commit your fix yourself, prefix every commit subject "
-            f"you create with the task tag `{context.task_tag}` followed by a "
-            f"space (for example `{context.task_tag} fix: …`) so the commit "
+            f"you create with the task tag `{tag_prefix}` followed by a "
+            f"space (for example `{tag_prefix} fix: …`) so the commit "
             f"links to its tracking issue. If a subject already starts with that "
             f"tag, do not add it again."
         )

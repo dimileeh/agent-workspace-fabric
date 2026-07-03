@@ -111,6 +111,7 @@ def register_control_tools(
     service: WorkspaceService,
     safe_result: SafeResult,
 ) -> None:
+    """Register AWF control MCP tools on the given FastMCP server."""
     _safe_result = safe_result
 
     @mcp.tool(name="awf_adopt_pull_request_monitor")
@@ -197,8 +198,9 @@ def register_control_tools(
             default=None,
             max_length=64,
             description=(
-                "Optional Jira issue key (e.g. PROJ-123) prepended to every "
-                "AWF-authored monitor commit message so fixes link to the issue."
+                "Optional task tag: Jira issue key (e.g. PROJ-123) or Aira task "
+                "entity key (e.g. PROJ-T123). Pass bare keys; bracketed input is "
+                "accepted. Entity keys appear bracketed on AWF monitor commits."
             ),
         ),
         reason: str | None = Field(

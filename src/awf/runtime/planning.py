@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Final
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 from awf.common.redaction import redact_secrets
+from awf.common.task_tag import task_tag_commit_prefix
 from awf.runtime.git_porcelain import split_porcelain_rename_paths, unquote_porcelain_path
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
 
@@ -236,15 +237,17 @@ def render_coordination_warning_section(
 def render_task_tag_commit_guidance(task_tag: str | None) -> str:
     """Return a commit-message guidance section for the task tag, or empty.
 
-    Steers the agent's *own* commits to carry the Jira issue key so they link to
-    the issue. AWF-authored commits carry the tag deterministically; this is
-    best-effort guidance for the agent's commits.
+    Steers the agent's *own* commits to carry the task key so they link to the
+    tracking issue. Entity keys render bracketed (``[PROJ-T123] …``) and Jira
+    keys bare (``PROJ-123 …``), matching the form AWF-authored commits use; this
+    is best-effort guidance for the agent's commits.
     """
     if not task_tag:
         return ""
+    prefix = task_tag_commit_prefix(task_tag)
     return (
-        f"### Commit message tag\nPrefix every commit message with `{task_tag} ` "
-        "so commits link to the Jira issue.\n\n"
+        f"### Commit message tag\nPrefix every commit message with `{prefix} ` "
+        "so commits link to the tracking issue.\n\n"
     )
 
 

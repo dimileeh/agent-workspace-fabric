@@ -15,11 +15,12 @@ import json
 
 import pytest
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
     RepoRef,
+    _transient_graphql_payload_error,
 )
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
 
@@ -156,7 +157,89 @@ def _sample_pr_payload(
     )
 
 
+class _RecordedSleep:
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
 class TestFetchPrStatusPart002:
+    @pytest.mark.unit
+    async def test_pre_merge_recheck_fails_fast_on_paginated_page(self) -> None:
+        # Regression (PR #729): retry=False must reach page 2+ of every
+        # paginated connection with RetryPolicy.NEVER, not fall back to the
+        # READ default. A transient blip on the review-threads second page must
+        # raise on the first attempt (no transport backoff) so the merge
+        # critical section fails fast instead of holding the merge lock.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads_has_next_page=True,
+                threads_end_cursor="cursor-1",
+            ),
+        )
+        fake.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+        sleep = _RecordedSleep()
+        client = GitHubClient(fake, sleep=sleep)
+
+        with pytest.raises(GitHubClientError, match="502"):
+            await client.fetch_pr_status(
+                repo=RepoRef(owner="o", name="r"),
+                pr_number=1,
+                base_behind_count=0,
+                retry=False,
+            )
+
+        assert len(fake.calls) == 2  # page 1 ok, page 2 raises without retry
+        assert sleep.calls == []  # no transport backoff in the merge critical section
+
+    @pytest.mark.unit
+    async def test_polling_default_retries_transient_on_paginated_page(self) -> None:
+        # Contrast to the pre-merge recheck: ordinary polling (retry=True)
+        # keeps allow-by-default retry on later pages, so a transient page-2
+        # blip recovers in-cycle rather than surfacing to the monitor.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads_has_next_page=True,
+                threads_end_cursor="cursor-1",
+            ),
+        )
+        fake.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [],
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        sleep = _RecordedSleep()
+        client = GitHubClient(fake, sleep=sleep)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            base_behind_count=0,
+        )
+
+        assert status.number == 42
+        assert len(fake.calls) == 3  # page 2 retried after the transient blip
+        assert len(sleep.calls) == 1  # one backoff before the retry
+
     @pytest.mark.unit
     async def test_pr_files_pagination_requires_files_object_on_next_page(self) -> None:
         fake = FakeCommandRunner()
@@ -879,8 +962,11 @@ class TestFetchPrStatusPart002:
         fake.queue_result(returncode=1, stderr="rate limited")
         client = GitHubClient(fake)
         with pytest.raises(GitHubClientError) as exc:
+            # retry=False (the pre-merge-recheck contract) surfaces the single
+            # failure directly; with the polling default the transport would retry
+            # this transient in-cycle rather than raise on the first attempt.
             await client.fetch_pr_status(
-                repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+                repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0, retry=False
             )
         assert "rate limited" in str(exc.value)
 
@@ -917,6 +1003,57 @@ class TestFetchPrStatusPart002:
         assert "doesn't exist" in str(exc.value)
 
     @pytest.mark.unit
+    async def test_transient_graphql_payload_error_retries_then_succeeds(self) -> None:
+        # Regression (PR #729): a GraphQL HTTP-200 response carrying a transient
+        # errors array ("something went wrong") makes gh exit 0, so the payload
+        # error previously bypassed the transport retry. Under retry=True it must
+        # now be retried in-cycle like a stderr-surfaced transient blip.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {"errors": [{"message": "something went wrong while executing your query"}]}
+            ),
+        )
+        fake.queue_result(returncode=0, stdout=_sample_pr_payload())
+        sleep = _RecordedSleep()
+        client = GitHubClient(fake, sleep=sleep)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            base_behind_count=0,
+        )
+
+        assert status.number == 42
+        assert len(fake.calls) == 2  # transient payload retried after backoff
+        assert len(sleep.calls) == 1
+
+    @pytest.mark.unit
+    async def test_transient_graphql_payload_error_fails_fast_when_no_retry(self) -> None:
+        # The pre-merge recheck passes retry=False: a transient payload error must
+        # raise on the first attempt (no transport backoff) so the merge critical
+        # section fails fast, mirroring the stderr-surfaced transient contract.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps({"errors": [{"message": "something went wrong"}]}),
+        )
+        sleep = _RecordedSleep()
+        client = GitHubClient(fake, sleep=sleep)
+
+        with pytest.raises(GitHubClientError, match="something went wrong"):
+            await client.fetch_pr_status(
+                repo=RepoRef(owner="o", name="r"),
+                pr_number=1,
+                base_behind_count=0,
+                retry=False,
+            )
+
+        assert len(fake.calls) == 1  # no in-cycle retry under retry=False
+        assert sleep.calls == []
+
+    @pytest.mark.unit
     async def test_bad_json_raises(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="not json")
@@ -927,6 +1064,44 @@ class TestFetchPrStatusPart002:
                 pr_number=1,
                 base_behind_count=0,
             )
+
+
+class TestTransientGraphqlPayloadError:
+    """Unit contract for the ``_graphql`` transport response-validator hook."""
+
+    @staticmethod
+    def _result(stdout: str) -> CommandResult:
+        return CommandResult(returncode=0, stdout=stdout, stderr="")
+
+    @pytest.mark.unit
+    def test_transient_errors_payload_returns_text(self) -> None:
+        text = _transient_graphql_payload_error(
+            self._result(json.dumps({"errors": [{"message": "something went wrong"}]}))
+        )
+        assert text is not None and "something went wrong" in text
+
+    @pytest.mark.unit
+    def test_permanent_errors_payload_returns_none(self) -> None:
+        assert (
+            _transient_graphql_payload_error(
+                self._result(json.dumps({"errors": [{"message": "could not resolve to a node"}]}))
+            )
+            is None
+        )
+
+    @pytest.mark.unit
+    def test_non_dict_and_clean_payloads_return_none(self) -> None:
+        # A non-object JSON body (defensive) and a clean payload both pass through.
+        assert _transient_graphql_payload_error(self._result("[1, 2, 3]")) is None
+        assert (
+            _transient_graphql_payload_error(self._result(json.dumps({"data": {"ok": True}})))
+            is None
+        )
+
+    @pytest.mark.unit
+    def test_malformed_json_returns_none(self) -> None:
+        # Malformed bodies are left to _graphql's own JSON decode + raise.
+        assert _transient_graphql_payload_error(self._result("not json")) is None
 
 
 class TestCreatePullRequestUrlValidation:

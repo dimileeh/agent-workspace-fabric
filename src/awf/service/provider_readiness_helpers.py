@@ -674,6 +674,8 @@ def _normalize_host_local_host(host: str) -> str:
     except ValueError:
         # A DNS name (Compose service, the configured hostname) is not host-local.
         return host
+    if (mapped := getattr(address, "ipv4_mapped", None)) is not None:
+        address = mapped  # unwrap ::ffff: IPv4-mapped so mapped loopback/unspecified is seen
     if address.is_loopback or address.is_unspecified:
         return _HOST_GATEWAY
     return host

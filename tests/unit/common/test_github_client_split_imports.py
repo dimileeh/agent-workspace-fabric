@@ -15,13 +15,19 @@ def _clear_split_github_modules(monkeypatch: pytest.MonkeyPatch) -> None:
         "awf.common.github_client",
         "awf.common.github_client_adoption",
         "awf.common.github_client_parsing",
+        "awf.common.github_client_ref",
     ]:
         clear_cached_module(monkeypatch, module_name)
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "module_name", ["awf.common.github_client_adoption", "awf.common.github_client_parsing"]
+    "module_name",
+    [
+        "awf.common.github_client_adoption",
+        "awf.common.github_client_parsing",
+        "awf.common.github_client_ref",
+    ],
 )
 def test_github_client_split_modules_import_without_helper_cycle(
     module_name: str,

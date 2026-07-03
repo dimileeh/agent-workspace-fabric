@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -114,6 +116,49 @@ def test_cleanup_command_bounds_integer_sleep_fallback_wait() -> None:
     assert "sleep 0.1 2>/dev/null || sleep 1" not in script
     assert "awf_cleanup_wait_limit=20" in script
     assert "awf_cleanup_wait_limit=2" in script
+
+
+def test_agent_exec_can_passthrough_provider_auth_env_names_without_values() -> None:
+    invocation = build_tracked_compose_exec(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex", "exec", "-"],
+        source="agent",
+        label="codex",
+        invocation_id="awf_provider_env",
+        env_passthrough=[
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "OPENAI_API_KEY",
+        ],
+    )
+
+    args = invocation.args
+    exec_idx = args.index("exec")
+    service_idx = args.index("agent")
+
+    assert args[exec_idx : exec_idx + 4] == ["exec", "-T", "-w", "/workspace"]
+    assert args[service_idx - 4 : service_idx] == [
+        "-e",
+        "OPENAI_API_KEY",
+        "-e",
+        "CODEX_API_KEY",
+    ]
+    assert "sk-live-secret-value" not in " ".join(args)
+    assert args.count("OPENAI_API_KEY") == 1
+    assert args[service_idx + 1 : service_idx + 4] == ["sh", "-lc", invocation.wrapper_script]
+
+
+def test_rejects_unsafe_passthrough_env_names() -> None:
+    with pytest.raises(ValueError, match="env_passthrough"):
+        build_tracked_compose_exec(
+            compose_project="awf_ws_123",
+            compose_file=Path("/tmp/ws/compose.yml"),
+            cli_args=["codex"],
+            source="agent",
+            label="codex",
+            env_passthrough=["OPENAI_API_KEY=sk-live-secret-value"],
+        )
 
 
 def test_preserved_stdin_setsid_path_uses_open_fd_not_path_redirection() -> None:
@@ -341,6 +386,97 @@ def test_cleanup_failure_message_is_bounded() -> None:
 
     assert len(message) == 2000
     assert message.endswith("...")
+
+
+@pytest.mark.unit
+async def test_cleanup_raises_when_cleanup_command_fails() -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=1,
+        stdout="",
+        stderr="awf cleanup: tagged processes still alive for awf_fail:123\n",
+    )
+    invocation = build_tracked_compose_exec(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex"],
+        source="validation",
+        label="01_validate",
+        invocation_id="awf_fail",
+    )
+
+    with pytest.raises(ComposeExecCleanupError) as exc_info:
+        await cleanup_compose_exec_invocation(runner, invocation, workspace_id="ws_123")
+
+    err = exc_info.value
+    assert err.invocation_id == "awf_fail"
+    assert err.source == "validation"
+    assert err.label == "01_validate"
+    assert err.cleanup_result is not None
+    assert err.cleanup_result.returncode == 1
+    assert "tagged processes still alive" in str(err)
+
+
+@pytest.mark.unit
+async def test_cleanup_after_cancellation_keeps_shielding_until_task_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invocation = build_tracked_compose_exec(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex"],
+        source="agent",
+        label="codex",
+        invocation_id="awf_retry",
+    )
+
+    class _SlowRunner:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            cwd: str | None = None,
+            env: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            self.calls.append(args)
+            await asyncio.sleep(0.05)
+            return CommandResult(
+                returncode=0,
+                stdout="awf cleanup: killed awf_retry\n",
+                stderr="",
+            )
+
+    runner = _SlowRunner()
+    original_shield = compose_exec.asyncio.shield
+    cancellations = 0
+
+    async def shield_while_pending_then_finish(task: object) -> object:
+        nonlocal cancellations
+        cancellations += 1
+        if cancellations == 1:
+            # Raise without awaiting: the cleanup task stays pending, so the
+            # loop must swallow the cancellation and re-shield (branch 221->217).
+            raise compose_exec.asyncio.CancelledError
+        return await original_shield(task)
+
+    monkeypatch.setattr(compose_exec.asyncio, "shield", shield_while_pending_then_finish)
+
+    result = await cleanup_compose_exec_invocation_after_cancellation(
+        runner,
+        invocation,
+        workspace_id="ws_123",
+    )
+
+    assert result.ok
+    assert cancellations == 2
+
+
+def test_bounded_truncates_values_exceeding_default_limit() -> None:
+    assert compose_exec._bounded("x" * 1500, limit=1000) == "x" * 997 + "..."
 
 
 def test_compose_exec_prefix_unsets_dangerous_git_object_env_vars() -> None:

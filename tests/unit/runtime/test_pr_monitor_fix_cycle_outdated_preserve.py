@@ -74,9 +74,9 @@ class _SettleAndResolveClient(DefaultMergeMethodGitHubClient):
         self.attempts: list[str] = []
 
     async def fetch_pr_status(
-        self, *, repo: RepoRef, pr_number: int, base_behind_count: int
+        self, *, repo: RepoRef, pr_number: int, base_behind_count: int, retry: bool = True
     ) -> PRStatus:
-        del repo, pr_number, base_behind_count
+        del repo, pr_number, base_behind_count, retry
         return self._settle_status
 
     async def resolve_thread(self, *, thread_id: str) -> None:

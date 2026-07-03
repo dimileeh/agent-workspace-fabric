@@ -107,6 +107,47 @@ async def test_account_id_is_cached_across_status_fetches() -> None:
     assert sum(1 for r in fake.requests if r.url.path == "/2.0/user") == 1
 
 
+async def test_fetch_pr_status_retry_false_fails_fast_on_paginated_status_read() -> None:
+    # Regression (PR #729): retry=False (the pre-merge recheck) must reach every
+    # follow-up read in the status snapshot with retry suppressed, not just the
+    # initial PR GET. A transient 429 on the paginated commit-statuses read must
+    # raise on the first attempt (no Retry-After backoff) so the merge critical
+    # section fails fast instead of sleeping under the merge lock.
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, json=pr_payload())
+    fake.enqueue(
+        "GET", f"{_REPO}/commit/{_HEAD}/statuses", status=429, headers={"Retry-After": "5"}
+    )
+    sleep = RecordingSleep()
+    client = make_client(fake, sleep=sleep)
+    with pytest.raises(BitbucketClientError) as excinfo:
+        await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0, retry=False)
+    assert excinfo.value.status == 429
+    assert sleep.delays == []  # no 429 backoff inside the merge critical section
+
+
+async def test_fetch_pr_status_retry_true_retries_transient_paginated_status_read() -> None:
+    # Contrast to the pre-merge recheck: ordinary polling (retry=True) keeps
+    # allow-by-default retry on the follow-up paginated reads, so a transient 429
+    # on the commit-statuses read recovers in-cycle (one backoff) rather than
+    # surfacing to the monitor.
+    fake = FakeBitbucket()
+    fake.enqueue("GET", _PR, json=pr_payload())
+    fake.enqueue(
+        "GET", f"{_REPO}/commit/{_HEAD}/statuses", status=429, headers={"Retry-After": "5"}
+    )
+    fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
+    fake.page("GET", f"{_PR}/comments", values=[])
+    fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "v"})
+    sleep = RecordingSleep()
+    client = make_client(fake, sleep=sleep)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert status.number == 42
+    assert sleep.delays == [5.0]  # one backoff before the in-cycle retry
+
+
 async def test_fetch_pr_status_populates_review_activity_anchor() -> None:
     # A late external reviewer comment must populate latest_external_review_activity_at
     # and quiet_period_anchor_at so the non-check-reviewer settle gate anchors on the

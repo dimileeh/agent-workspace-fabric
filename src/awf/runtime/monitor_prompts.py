@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evidence
+from awf.common.task_tag import task_tag_commit_prefix
 from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
 
@@ -35,20 +36,22 @@ _FOOTER = (
 def _commit_footer(task_tag: str | None) -> str:
     """Closing git-hygiene reminder for prompts that have the agent commit.
 
-    When the workspace carries a task tag (a validated Jira issue key), the
-    monitor agent authors the pushed fix commit itself (the worktree is clean,
-    so AWF's ``_commit_dirty_worktree`` fallback never runs and never tags it).
-    Instruct the agent to prefix every commit subject with the tag so monitor
-    fix commits link to the tracking issue, matching the commits AWF authors.
-    The instruction is idempotent: a subject already starting with the tag is
-    left alone.
+    When the workspace carries a task tag (a validated Jira issue key or Aira
+    entity key), the monitor agent authors the pushed fix commit itself (the
+    worktree is clean, so AWF's ``_commit_dirty_worktree`` fallback never runs
+    and never tags it). Instruct the agent to prefix every commit subject with
+    the tag's commit form — bracketed ``[PROJ-T123]`` for entity keys, bare for
+    Jira keys — so monitor fix commits link to the tracking issue, matching the
+    commits AWF authors. The instruction is idempotent: a subject already
+    starting with the tag is left alone.
     """
     if not task_tag:
         return _FOOTER
+    prefix = task_tag_commit_prefix(task_tag)
     return (
         f"{_FOOTER}\n"
-        f"Prefix every commit subject you create with the task tag `{task_tag}` "
-        f"followed by a space (for example `{task_tag} fix: …`) so the commit "
+        f"Prefix every commit subject you create with the task tag `{prefix}` "
+        f"followed by a space (for example `{prefix} fix: …`) so the commit "
         f"links to its tracking issue. If a subject already starts with that "
         f"tag, do not add it again."
     )

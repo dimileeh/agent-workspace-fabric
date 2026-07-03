@@ -45,6 +45,7 @@ from awf.control.worker.constants import (
     QUEUE_DECISION_DEFERRED,
     QUEUE_DECISION_ORDERED,
 )
+from awf.control.worker.dispatch_methods import _monitor_recovery_handoff_failure_error
 from awf.control.worker.helpers import (
     _earliest_future_datetime,
     _latest_runtime_stranding_reason,
@@ -585,6 +586,7 @@ async def _record_monitor_recovery_deferred_active_execution_claim(
     fresh_execution_claim_owner_ids: set[str] | None = None,
     execution_claim_owner_id: str | None = None,
 ) -> None:
+    """Persist audit when monitor recovery defers reclaiming an active execution claim."""
     execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
         ws,
         claim_cutoff=claim_cutoff,
@@ -631,7 +633,36 @@ async def _record_monitor_recovery_deferred_active_execution_claim(
     )
 
 
+async def _active_worker_restart_remonitor_operation_id(
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    previous_monitor_claimed_by: str | None = None,
+    fresh_worker_ids: set[str] | frozenset[str] | None = None,
+) -> str | None:
+    """Return the id of an in-flight worker-restart remonitor recovery operation."""
+    operation = await OperationRepository(session).find_active_matching_payload(
+        workspace_id=workspace_id,
+        operation_type=OperationType.remonitor,
+        payload_identity={
+            "source": _MONITOR_RECOVERY_SOURCE,
+            "owner": _MONITOR_RECOVERY_OWNER,
+        },
+        prefer_newest=True,
+    )
+    if operation is None:
+        return None
+    if (
+        previous_monitor_claimed_by is not None
+        and fresh_worker_ids is not None
+        and previous_monitor_claimed_by in fresh_worker_ids
+    ):
+        return None
+    return operation.id
+
+
 async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
+    """Claim a ``monitoring_pr`` workspace lease and enqueue monitor recovery when needed."""
     now = datetime.now(UTC)
     lease_expires_at = now + timedelta(seconds=self._config.monitor_claim_lease_seconds)
     active_salvage_monitor_recovery_operation_id: str | None = None
@@ -659,6 +690,52 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
             clear_stale_execution_claim_cutoff=now,
         )
         if claimed:
+            pending_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)
+            pending_operation = None
+            if pending_operation_id is not None:
+                pending_operation = await OperationRepository(session).get(pending_operation_id)
+                pending_payload = (
+                    pending_operation.payload if pending_operation is not None else None
+                )
+                if (
+                    pending_operation is None
+                    or pending_operation.workspace_id != workspace_id
+                    or pending_operation.status
+                    not in (
+                        OperationStatus.pending.value,
+                        OperationStatus.running.value,
+                    )
+                    or not isinstance(pending_payload, dict)
+                    or pending_payload.get("source") != _MONITOR_RECOVERY_SOURCE
+                    or pending_payload.get("owner") != _MONITOR_RECOVERY_OWNER
+                ):
+                    self._monitor_recovery_operation_ids.pop(workspace_id, None)
+                    pending_operation_id = None
+                    pending_operation = None
+            if pending_operation_id is None:
+                pending_operation_id = await _active_worker_restart_remonitor_operation_id(
+                    session,
+                    workspace_id,
+                    previous_monitor_claimed_by=previous_claim.get("monitor_claimed_by"),
+                    fresh_worker_ids=fresh_execution_claim_owner_ids,
+                )
+                if pending_operation_id is not None:
+                    self._monitor_recovery_operation_ids[workspace_id] = pending_operation_id
+                    pending_operation = await OperationRepository(session).get(pending_operation_id)
+            if pending_operation_id is not None:
+                await session.commit()
+                pending_payload = (
+                    pending_operation.payload if pending_operation is not None else None
+                )
+                if (
+                    isinstance(pending_payload, dict)
+                    and pending_payload.get("active_execution_salvage_reason_code")
+                    == _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE
+                ):
+                    self._remember_active_salvage_monitor_recovery_operation_id(
+                        pending_operation_id
+                    )
+                return True
             await session.refresh(ws)
             if (
                 ws.execution_claimed_by is not None
@@ -996,12 +1073,110 @@ async def _claim_recovering_resume_ids(
     return await _claim_paused_resume_ids(self, workspace_ids, limit=limit, reason="recovering")
 
 
+async def _cancel_monitor_claim_heartbeat(
+    self: Any,
+    workspace_id: str,
+    *,
+    heartbeat: asyncio.Task[None] | None = None,
+) -> None:
+    """Stop and await the monitor-claim heartbeat task for ``workspace_id``."""
+    if heartbeat is None:
+        heartbeat = self._monitor_claim_heartbeat_tasks.pop(workspace_id, None)
+    elif self._monitor_claim_heartbeat_tasks.get(workspace_id) is heartbeat:
+        self._monitor_claim_heartbeat_tasks.pop(workspace_id, None)
+    if heartbeat is None:
+        return
+    heartbeat.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await heartbeat
+
+
+class _MonitorRecoveryStillMonitoringError(Exception):
+    """Workspace remains in ``monitoring_pr``; release the claim for retry instead."""
+
+
+async def _workspace_is_monitoring_pr(self: Any, workspace_id: str) -> bool:
+    """Return whether the workspace is still in ``monitoring_pr`` and claimable for retry."""
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            return ws is not None and ws.status == WorkspaceStatus.monitoring_pr.value
+    except Exception:
+        _log.exception(
+            "worker.monitor_recovery_retry_eligibility_lookup_failed",
+            workspace_id=workspace_id,
+        )
+        # Prefer terminal finalize over retry when status is unknown due to a
+        # transient DB failure; leaving a pending recovery operation visible is
+        # worse than a best-effort finalize via
+        # ``_monitor_recovery_terminal_finalize_status``.
+        return False
+
+
+async def _monitor_recovery_terminal_finalize_status(
+    self: Any,
+    workspace_id: str,
+    *,
+    after_successful_handoff: bool = False,
+) -> tuple[OperationStatus, str | None, str | None]:
+    """Best-effort remonitor terminal status when recovery cannot retry."""
+    default_message = (
+        "Monitor recovery could not be finalized while the workspace remained claimable."
+    )
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            if ws is None:
+                return (
+                    OperationStatus.failed,
+                    "MONITOR_RECOVERY_FAILED",
+                    default_message,
+                )
+            if ws.status == WorkspaceStatus.cancelled.value:
+                return (
+                    OperationStatus.cancelled,
+                    "MONITOR_RECOVERY_CANCELLED",
+                    "Monitor recovery abandoned after workspace cancellation.",
+                )
+            if ws.status == WorkspaceStatus.completed.value:
+                return OperationStatus.succeeded, None, None
+            if after_successful_handoff and ws.status == WorkspaceStatus.failed.value:
+                return OperationStatus.succeeded, None, None
+            if ws.status == WorkspaceStatus.failed.value:
+                error_code, error_message = await _monitor_recovery_handoff_failure_error(
+                    self,
+                    workspace_id,
+                )
+                return OperationStatus.failed, error_code, error_message
+            if ws.status == WorkspaceStatus.monitoring_pr.value:
+                raise _MonitorRecoveryStillMonitoringError()
+            return (
+                OperationStatus.cancelled,
+                "MONITOR_RECOVERY_CANCELLED",
+                "Monitor resume cancelled after workspace left monitoring_pr.",
+            )
+    except _MonitorRecoveryStillMonitoringError:
+        raise
+    except Exception:
+        _log.exception(
+            "worker.monitor_recovery_terminal_finalize_status_lookup_failed",
+            workspace_id=workspace_id,
+        )
+    return (
+        OperationStatus.failed,
+        "MONITOR_RECOVERY_FAILED",
+        default_message,
+    )
+
+
 async def _safely_resume_claimed_pr_monitor(
     self: Any,
     workspace_id: str,
     *,
     recovery_operation_id: str | None = None,
 ) -> None:
+    """Run monitor recovery under a refreshed claim lease and finalize bookkeeping."""
+    await _cancel_monitor_claim_heartbeat(self, workspace_id)
     heartbeat = asyncio.create_task(
         self._refresh_monitoring_pr_claim_loop(workspace_id),
         name=f"awf-monitor-claim-{workspace_id}",
@@ -1013,35 +1188,102 @@ async def _safely_resume_claimed_pr_monitor(
             recovery_operation_id=recovery_operation_id,
         )
     finally:
-        heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat
+        recovery_finalize_pending = workspace_id in self._monitor_recovery_operation_ids
         if (
-            resume_succeeded
-            and recovery_operation_id is not None
-            and recovery_operation_id in self._active_salvage_monitor_recovery_operation_ids
+            not recovery_finalize_pending
+            and await self._should_apply_active_salvage_monitor_resume_cooldown(
+                workspace_id,
+                resume_succeeded=resume_succeeded,
+                recovery_operation_id=recovery_operation_id,
+            )
         ):
             cooldown_seconds = max(0.0, self._config.monitor_claim_lease_seconds)
             self._remember_active_salvage_monitor_resume_cooldown(
                 workspace_id,
                 monotonic() + cooldown_seconds,
             )
-            if cooldown_seconds > 0:
+            if cooldown_seconds > 0 and recovery_operation_id is not None:
                 await self._record_active_salvage_monitor_resume_cooldown(
                     workspace_id,
                     recovery_operation_id=recovery_operation_id,
                     cooldown_until=datetime.now(UTC) + timedelta(seconds=cooldown_seconds),
                 )
-        await self._release_monitoring_pr_claim(workspace_id)
-        self._monitor_recovery_operation_ids.pop(workspace_id, None)
-        if recovery_operation_id is not None:
-            self._forget_active_salvage_monitor_recovery_operation_id(recovery_operation_id)
-        # Promptly release the terminal runtime when the monitor ended terminal
-        # (merge → ``completed``, abort → ``failed``), reclaiming the compose stack
-        # + per-ws auth overlay immediately rather than on the ~1h interval
-        # (#583, #584). A no-op for a still-monitoring exit and idempotent against
-        # the periodic backstop, which stays in place.
-        await self._release_terminal_runtime_promptly(workspace_id)
+        can_retry_recovery_finalize = (
+            not recovery_finalize_pending or await _workspace_is_monitoring_pr(self, workspace_id)
+        )
+        if recovery_finalize_pending and can_retry_recovery_finalize:
+            # Release the claim so the monitor-resume scheduler can reclaim and
+            # retry the pending recovery operation; retaining a fresh heartbeat
+            # would keep the row unlisted until lease expiry.
+            await _cancel_monitor_claim_heartbeat(self, workspace_id, heartbeat=heartbeat)
+            await self._release_monitoring_pr_claim(workspace_id)
+        else:
+            recovery_finalized = True
+            still_monitoring_for_retry = False
+            if recovery_finalize_pending:
+                pending_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)
+                after_successful_handoff = resume_succeeded or (
+                    workspace_id in self._monitor_recovery_handoff_succeeded_workspace_ids
+                )
+                try:
+                    (
+                        terminal_status,
+                        terminal_error_code,
+                        terminal_error_message,
+                    ) = await _monitor_recovery_terminal_finalize_status(
+                        self,
+                        workspace_id,
+                        after_successful_handoff=after_successful_handoff,
+                    )
+                except _MonitorRecoveryStillMonitoringError:
+                    still_monitoring_for_retry = True
+                else:
+                    recovery_finalized = await self._finish_monitor_recovery_operation(
+                        workspace_id,
+                        operation_id=pending_operation_id,
+                        status=terminal_status,
+                        error_code=terminal_error_code,
+                        error_message=terminal_error_message,
+                    )
+            await _cancel_monitor_claim_heartbeat(self, workspace_id, heartbeat=heartbeat)
+            await self._release_monitoring_pr_claim(workspace_id)
+            if recovery_finalized and not still_monitoring_for_retry:
+                self._monitor_recovery_operation_ids.pop(workspace_id, None)
+                self._monitor_recovery_handoff_succeeded_workspace_ids.discard(workspace_id)
+                if recovery_operation_id is not None:
+                    self._forget_active_salvage_monitor_recovery_operation_id(recovery_operation_id)
+                # Promptly release the terminal runtime when the monitor ended terminal
+                # (merge → ``completed``, abort → ``failed``), reclaiming the compose stack
+                # + per-ws auth overlay immediately rather than on the ~1h interval
+                # (#583, #584). A no-op for a still-monitoring exit and idempotent against
+                # the periodic backstop, which stays in place.
+                await self._release_terminal_runtime_promptly(workspace_id)
+
+
+async def _other_active_worker_restart_remonitor_operation_id(
+    operation_repo: OperationRepository,
+    *,
+    workspace_id: str,
+    operation_id: str,
+) -> str | None:
+    """Return another in-flight worker-restart remonitor recovery operation, if any."""
+    for status in (OperationStatus.pending, OperationStatus.running):
+        for candidate in await operation_repo.list_for_workspace(
+            workspace_id,
+            status=status,
+            operation_type=OperationType.remonitor,
+            limit=100,
+        ):
+            if candidate.id == operation_id:
+                continue
+            payload = candidate.payload
+            if (
+                isinstance(payload, dict)
+                and payload.get("source") == _MONITOR_RECOVERY_SOURCE
+                and payload.get("owner") == _MONITOR_RECOVERY_OWNER
+            ):
+                return candidate.id
+    return None
 
 
 async def _finish_monitor_recovery_operation(
@@ -1052,16 +1294,84 @@ async def _finish_monitor_recovery_operation(
     status: OperationStatus,
     error_code: str | None = None,
     error_message: str | None = None,
-) -> None:
+) -> bool:
+    """Persist terminal status for a worker restart ``remonitor`` recovery operation.
+
+    Returns ``True`` when the operation was absent, already terminal, superseded by
+    another worker's recovery operation, or successfully finished; ``False`` when the
+    row could not be loaded, the write failed, or the monitor claim was lost to
+    another worker with no replacement recovery operation yet (callers must retain
+    in-memory tracking and retry).
+    """
     if operation_id is None:
-        return
+        return True
     try:
         async with self._session_factory() as session:
             operation_repo = OperationRepository(session)
             operation = await operation_repo.get(operation_id)
             if operation is None or operation.workspace_id != workspace_id:
-                return
+                return False
+            if operation.status not in (
+                OperationStatus.pending.value,
+                OperationStatus.running.value,
+            ):
+                return True
             ws = await WorkspaceRepository(session).get(workspace_id)
+            if (
+                ws is not None
+                and ws.monitor_claimed_by is not None
+                and ws.monitor_claimed_by != self._worker_id
+            ):
+                replacement_operation_id = (
+                    await _other_active_worker_restart_remonitor_operation_id(
+                        operation_repo,
+                        workspace_id=workspace_id,
+                        operation_id=operation_id,
+                    )
+                )
+                if replacement_operation_id is not None:
+                    _log.info(
+                        "worker.monitor_recovery_operation_finish_superseded_lost_claim",
+                        workspace_id=workspace_id,
+                        operation_id=operation_id,
+                        worker_id=self._worker_id,
+                        monitor_claimed_by=ws.monitor_claimed_by,
+                        replacement_operation_id=replacement_operation_id,
+                    )
+                    superseded_result: dict[str, Any] = {
+                        "requested_action": OperationType.remonitor.value,
+                        "worker_id": self._worker_id,
+                        "outcome": "monitor_recovery_superseded_lost_claim",
+                        "replacement_operation_id": replacement_operation_id,
+                    }
+                    if ws is not None:
+                        superseded_result.update(
+                            {
+                                "status": ws.status,
+                                "pr_url": ws.pr_url,
+                                "pr_number": ws.pr_number,
+                            }
+                        )
+                    await operation_repo.finish(
+                        operation,
+                        status=OperationStatus.cancelled,
+                        result=superseded_result,
+                        error_code="MONITOR_RECOVERY_SUPERSEDED",
+                        error_message=(
+                            "Monitor recovery operation superseded after monitor claim was "
+                            "lost to a replacement recovery operation."
+                        ),
+                    )
+                    await session.commit()
+                    return True
+                _log.info(
+                    "worker.monitor_recovery_operation_finish_skipped_lost_claim",
+                    workspace_id=workspace_id,
+                    operation_id=operation_id,
+                    worker_id=self._worker_id,
+                    monitor_claimed_by=ws.monitor_claimed_by,
+                )
+                return False
             result: dict[str, Any] = {
                 "requested_action": OperationType.remonitor.value,
                 "worker_id": self._worker_id,
@@ -1082,6 +1392,7 @@ async def _finish_monitor_recovery_operation(
                 error_message=error_message,
             )
             await session.commit()
+            return True
     except Exception:
         _log.exception(
             "worker.monitor_recovery_operation_finish_failed",
@@ -1089,6 +1400,7 @@ async def _finish_monitor_recovery_operation(
             operation_id=operation_id,
             status=status.value,
         )
+        return False
 
 
 async def _finish_monitor_recovery_operation_after_cancellation(
@@ -1099,8 +1411,11 @@ async def _finish_monitor_recovery_operation_after_cancellation(
     status: OperationStatus,
     error_code: str | None = None,
     error_message: str | None = None,
-) -> None:
+) -> bool:
     """Finalize the recovery operation even if cancelled again mid-write.
+
+    Returns ``True`` when the shielded finalize completed successfully; ``False``
+    when the underlying write could not finish.
 
     The CancelledError handler must persist this status before re-raising,
     but the finalize is itself a cancellable DB write. A second cancellation
@@ -1123,15 +1438,17 @@ async def _finish_monitor_recovery_operation_after_cancellation(
     )
     while True:
         try:
-            await asyncio.shield(finalize_task)
-            return
+            return bool(await asyncio.shield(finalize_task))
         except asyncio.CancelledError:
             if finalize_task.done():
-                return
+                return bool(finalize_task.result())
 
 
 async def _refresh_monitoring_pr_claim(self: Any, workspace_id: str) -> bool:
+    """Extend the monitor claim lease for ``workspace_id``; return whether refresh succeeded."""
+
     async def _operation(session: AsyncSession) -> bool:
+        """Refresh the monitor claim lease inside a retried DB transaction."""
         lease_expires_at = datetime.now(UTC) + timedelta(
             seconds=self._config.monitor_claim_lease_seconds
         )
@@ -1148,121 +1465,3 @@ async def _refresh_monitoring_pr_claim(self: Any, workspace_id: str) -> bool:
         retry_commit_failures=True,
         on_retry=self._log_transient_db_retry,
     )
-
-
-async def _read_execution_claim_epoch(self: Any, workspace_id: str) -> int | None:
-    """Read this worker's current execution-claim epoch (D2).
-
-    Returns ``None`` when the claim is no longer held by this worker (a newer
-    claimant reclaimed it, or the row is gone), in which case the caller aborts
-    the provision before doing any work.
-    """
-    async with self._session_factory() as session:
-        return await WorkspaceRepository(session).read_execution_claim_epoch(
-            workspace_id,
-            owner_id=self._worker_id,
-        )
-
-
-async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
-    async def _operation(session: AsyncSession) -> bool:
-        lease_expires_at = self._execution_claim_expires_at()
-        return await WorkspaceRepository(session).refresh_execution_claim(
-            workspace_id,
-            owner_id=self._worker_id,
-            lease_expires_at=lease_expires_at,
-            execution_claim_epoch=self._execution_claim_epochs.get(workspace_id),
-        )
-
-    return await run_db_operation_with_retry(
-        self._session_factory,
-        _operation,
-        commit=True,
-        retry_commit_failures=True,
-        on_retry=self._log_transient_db_retry,
-    )
-
-
-async def _release_execution_claim(
-    self: Any, workspace_id: str, *, skip_if_blocked: bool = False
-) -> None:
-    try:
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            if skip_if_blocked:
-                ws = await repo.get(workspace_id)
-                if ws is not None and ws.status in {
-                    WorkspaceStatus.blocked.value,
-                    WorkspaceStatus.recovering.value,
-                }:
-                    # A ``blocked`` (operator pause) or ``recovering`` (auto-healing
-                    # provider-failure pause, #612) workspace keeps its worktree,
-                    # warm stack, and execution claim as the *durable lease* (see
-                    # ``enter_blocked_for_protected_violation`` /
-                    # ``enter_recovering_for_provider_failure`` and
-                    # ``tests/.../test_*_status_membership``). When a genuine
-                    # execution pauses into one of these statuses, this ``finally``
-                    # reaches here right after the pause; releasing the claim now
-                    # would leave the row paused with ``execution_claimed_by``
-                    # cleared, stranding it without the fencing/ownership the
-                    # membership contract and the resume path expect until a resume
-                    # re-stamps it. Skip the release so the warm-stack lease stays
-                    # held across the operator decision / provider cooldown.
-                    #
-                    # Only the execution dispatch passes ``skip_if_blocked``: the
-                    # paused-resume paths deliberately release when they revert to
-                    # the paused status after finding no executor, so a capable
-                    # worker can re-claim it (see
-                    # ``test_resume_blocked_claimed_releases_claim_when_executor_missing``).
-                    return
-            released = await repo.release_execution_claim(
-                workspace_id,
-                owner_id=self._worker_id,
-                execution_claim_epoch=self._execution_claim_epochs.get(workspace_id),
-            )
-            if released:
-                await session.commit()
-    except Exception:
-        _log.exception(
-            "worker.execution_claim_release_failed",
-            workspace_id=workspace_id,
-            worker_id=self._worker_id,
-        )
-
-
-async def _release_execution_claim_after_cancellation(self: Any, workspace_id: str) -> None:
-    """Release the execution claim and drop its epoch even if cancelled again.
-
-    ``_safely_provision_claimed``'s ``finally`` runs while an external cancel
-    (e.g. worker shutdown) is already propagating. The release is itself a
-    cancellable DB write and the in-memory epoch pop follows it; a second
-    cancellation landing mid-write would propagate out of the un-shielded
-    release (which only catches ``Exception``), skipping both and leaking the DB
-    lease plus the epoch entry. Shield the release and re-await across repeated
-    cancellations so it always runs to completion, then drop the epoch, mirroring
-    ``_finish_monitor_recovery_operation_after_cancellation``.
-    """
-    release_task = asyncio.create_task(
-        self._release_execution_claim(workspace_id),
-        name=f"awf-execution-claim-release-{workspace_id}",
-    )
-    while not release_task.done():
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.shield(release_task)
-    self._execution_claim_epochs.pop(workspace_id, None)
-
-
-async def _release_monitoring_pr_claim(self: Any, workspace_id: str) -> None:
-    try:
-        async with self._session_factory() as session:
-            await WorkspaceRepository(session).release_monitoring_pr_claim(
-                workspace_id,
-                owner_id=self._worker_id,
-            )
-            await session.commit()
-    except Exception:
-        _log.exception(
-            "worker.monitor_claim_release_failed",
-            workspace_id=workspace_id,
-            worker_id=self._worker_id,
-        )

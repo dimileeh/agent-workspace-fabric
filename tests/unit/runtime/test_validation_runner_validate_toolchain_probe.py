@@ -44,6 +44,7 @@ class _OSErrorRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         self.calls.append(list(args))
         raise OSError("cannot exec into container")
@@ -66,6 +67,7 @@ class _WedgedProbeRunner:
         *,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        **kwargs: object,
     ) -> CommandResult:
         self.calls.append(list(args))
         if "awf-cleanup" in args:

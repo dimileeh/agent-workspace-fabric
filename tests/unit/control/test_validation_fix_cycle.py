@@ -229,6 +229,18 @@ class TestBuildFixPrompt:
         assert "do not add it again" in prompt
 
     @pytest.mark.unit
+    def test_instructs_bracketed_prefix_for_entity_task_tag(self) -> None:
+        """Aira entity keys link only via the bracketed ``[AIRA-T299] …`` commit
+        form, so the self-commit guidance must render that form, not the bare key
+        (PRRT_kwDOSJAM6s6OHCyD)."""
+        prompt = build_fix_prompt(self._ctx(task_tag="AIRA-T299"))
+
+        assert "task tag `[AIRA-T299]`" in prompt
+        assert "`[AIRA-T299] fix: …`" in prompt
+        # The bare key must not be handed to the agent as the prefix to use.
+        assert "task tag `AIRA-T299`" not in prompt
+
+    @pytest.mark.unit
     def test_omits_tag_instruction_when_tag_absent(self) -> None:
         prompt = build_fix_prompt(self._ctx())
 

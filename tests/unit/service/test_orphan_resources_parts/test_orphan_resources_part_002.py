@@ -269,6 +269,73 @@ def test_reaper_falls_back_to_direct_delete_when_git_remover_skips_not_git_manag
 
 
 @pytest.mark.unit
+def test_reaper_fails_when_git_remover_skips_with_unexpected_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A git-aware remover that reports ``skipped`` with an unexpected reason is a failure.
+
+    ``ok`` covers both ``succeeded`` and ``skipped``, so a ``skipped`` outcome that is
+    neither ``WORKTREE_NOT_GIT_MANAGED`` (legitimate direct-delete fallback) nor
+    ``PATH_ALREADY_REMOVED`` (already-reaped) must surface as a loud failure rather
+    than a silent success or a destructive direct delete.
+    """
+    from awf.service.orphan_resources import reap_classified_orphans
+
+    worktree = tmp_path / "git" / "worktrees" / "ws_dead"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: ../mirrors/repo.git/worktrees/ws_dead\n")
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(),
+        auto_cleanup_orphans=True,
+        reaper_available=True,
+    )
+
+    async def _git_aware_remover(
+        *, workspace_id: str, path: Path, work_dir: Path
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="skipped",
+            reason_code="WORKTREE_LOCK_BUSY",
+            error="mirror lock contention",
+        )
+
+    def _direct_delete_forbidden(
+        kind: str, path: Path, *, work_dir: Path
+    ) -> tuple[bool, str | None, str | None]:
+        raise AssertionError(f"direct filesystem delete used for {kind}: {path}")
+
+    monkeypatch.setattr(
+        "awf.service.orphan_resources.build_and_delete_gc_path", _direct_delete_forbidden
+    )
+
+    result = asyncio.run(
+        reap_classified_orphans(
+            summary,
+            work_dir=tmp_path,
+            compose_teardown=_RecordingComposeTeardown(),
+            enabled=True,
+            min_age_hours=0,
+            worktree_remover=_git_aware_remover,
+        )
+    )
+
+    assert result.status == "partial"
+    assert [outcome.to_dict() for outcome in result.errors] == [
+        {
+            "kind": "worktree",
+            "workspace_id": "ws_dead",
+            "status": "failed",
+            "reason_code": "WORKTREE_LOCK_BUSY",
+            "error": "mirror lock contention",
+        }
+    ]
+    assert result.reaped == ()
+    assert worktree.exists()  # nothing was deleted
+
+
+@pytest.mark.unit
 def test_reaper_uses_git_aware_remover_for_stale_linked_mirror_gitfile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

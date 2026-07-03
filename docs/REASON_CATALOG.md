@@ -452,6 +452,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_cancelled](#monitor_recovery_cancelled)
 
+### MONITOR_RECOVERY_SUPERSEDED
+**Problem:** AWF cancelled a PR-monitor recovery operation because another worker claimed the monitor lease and started a replacement recovery operation.
+**Likely Cause:** This worker lost the monitoring_pr claim to another worker that registered a replacement remonitor recovery operation before this worker could finalize.
+**Operator Fix:** No action is usually required if another recovery operation is already running. If the workspace is stuck without an active monitor, remonitor it.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_superseded](#monitor_recovery_superseded)
+
 ### NETWORK_POSTURE_OPEN_ACTIVE
 **Problem:** One or more active workspaces have unrestricted internet access.
 **Likely Cause:** Workspaces were started with --network=open.

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.redaction import REDACTION_MARKER
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.control.worker.constants import ORDERED_RECOVERING_RESUME_REASON
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -156,6 +157,59 @@ async def test_list_resumable_recovering_cooldown_gate(
     # Only the workspace whose cooldown has elapsed is selected.
     selected = await worker._list_resumable_recovering(now=now, limit=10)  # noqa: SLF001
     assert selected == [cooled]
+
+
+@pytest.mark.unit
+async def test_list_resumable_recovering_returns_empty_when_limit_zero(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    now = datetime.now(UTC)
+    await _create_recovering(
+        session_factory, origin_repo, "cooled", not_before=now - timedelta(seconds=5)
+    )
+    worker = _worker(session_factory, _RecordingRecoveringExecutor())
+
+    assert await worker._list_resumable_recovering(now=now, limit=0) == []  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_run_once_restores_recovering_when_ordered_decision_write_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    ws_id = await _create_recovering(
+        session_factory,
+        origin_repo,
+        "ordered-decision-fails",
+        not_before=datetime.now(UTC) - timedelta(seconds=5),
+    )
+    executor = _RecordingRecoveringExecutor()
+    worker = _worker(session_factory, executor)
+
+    original_record = worker._record_ordered_decisions  # noqa: SLF001
+
+    async def _record_with_recovering_failure(
+        workspace_ids: list[str],
+        *,
+        reason_code: str,
+    ) -> None:
+        if reason_code == ORDERED_RECOVERING_RESUME_REASON:
+            raise RuntimeError("ordered decision write failed")
+        await original_record(workspace_ids, reason_code=reason_code)
+
+    worker._record_ordered_decisions = _record_with_recovering_failure  # type: ignore[method-assign]  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="ordered decision write failed"):
+        await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+    assert executor.resume_recovering_calls == []
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.recovering.value
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
 
 
 @pytest.mark.unit

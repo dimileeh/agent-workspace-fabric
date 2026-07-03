@@ -43,19 +43,22 @@ def test_git_error_indicates_missing_head_object() -> None:
 
 @pytest.mark.unit
 def test_agent_git_writability_preflight_script_exercises_object_and_ref_writes() -> None:
+    """Preflight shell script must exercise object write and ref update paths."""
     script = _agent_git_writability_preflight_script("ws_preflight")
 
-    assert "git status --porcelain" in script
-    assert "git hash-object -w --stdin" in script
-    assert 'git cat-file -e "$blob^{blob}"' in script
-    assert 'git update-ref "$ref" HEAD' in script
-    assert 'git update-ref -d "$ref"' in script
+    assert 'git -c "safe.directory=$(pwd -P)" "$@"' in script
+    assert "git_awf status --porcelain" in script
+    assert "git_awf hash-object -w --stdin" in script
+    assert 'git_awf cat-file -e "$blob^{blob}"' in script
+    assert 'git_awf update-ref "$ref" HEAD' in script
+    assert 'git_awf update-ref -d "$ref"' in script
 
 
 @pytest.mark.unit
 async def test_agent_git_writability_preflight_runs_inside_agent_container(
     tmp_path: Path,
 ) -> None:
+    """Preflight must run via compose exec inside the agent container."""
     runner = FakeCommandRunner()
     executor = _executor_with_runner(runner, tmp_path)
     worktree_path = tmp_path / "worktree"
@@ -79,7 +82,7 @@ async def test_agent_git_writability_preflight_runs_inside_agent_container(
     assert call.args[call.args.index("-p") + 1] == "awf_ws_preflight"
     assert call.args[call.args.index("-f") + 1] == str(compose_file)
     assert "agent_git_writability_preflight" not in " ".join(call.args[:10])
-    assert "git hash-object -w --stdin" in " ".join(call.args)
+    assert "git_awf hash-object -w --stdin" in " ".join(call.args)
 
 
 @pytest.mark.unit
@@ -169,6 +172,7 @@ async def test_repair_agent_git_ownership_reports_repair_exceptions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Regression coverage for repair agent git ownership reports repair exceptions."""
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
 
     def _raise(*_args: object, **_kwargs: object) -> None:
@@ -184,7 +188,32 @@ async def test_repair_agent_git_ownership_reports_repair_exceptions(
 
 
 @pytest.mark.unit
+async def test_repair_agent_git_ownership_repairs_linked_mirror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass the linked mirror path into worktree ownership repair."""
+    mirror, worktree = _fake_linked_worktree(tmp_path)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    captured: list[tuple[Path | None, Path]] = []
+
+    def _repair(layout_mirror: Path | None, worktree_path: Path) -> None:
+        """Capture repair inputs for assertions."""
+        captured.append((layout_mirror, worktree_path))
+
+    monkeypatch.setattr(executor_git_ops, "repair_agent_writable_worktree", _repair)
+
+    assert await executor._repair_agent_git_ownership(
+        workspace_id="ws_linked_mirror",
+        worktree_path=worktree,
+        reason="agent_git_writability_preflight",
+    )
+    assert captured == [(mirror.resolve(), worktree)]
+
+
+@pytest.mark.unit
 def test_read_ref_sha_returns_none_for_missing_ref(tmp_path: Path) -> None:
+    """Regression coverage for read ref sha returns none for missing ref."""
     assert _read_ref_sha(tmp_path, "refs/heads/missing") is None
 
 
