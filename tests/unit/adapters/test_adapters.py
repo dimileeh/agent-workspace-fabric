@@ -387,7 +387,7 @@ class TestCodexAdapter:
         expected = agent_exec_env_passthrough(compose_file=_COMPOSE_FILE)
         for name in expected:
             assert ["-e", name] == env_slice[env_slice.index(name) - 1 : env_slice.index(name) + 1]
-        assert not any("sk-live-secret-value" in arg for arg in args)
+        assert not any("sk-worker" in arg for arg in args)
 
     @pytest.mark.unit
     async def test_profile_ollama_host_exec_passthrough_skips_worker_base_url(
