@@ -971,6 +971,16 @@ class TestCommitTaskTagFooter:
             assert "do not add it again" in prompt
 
     @pytest.mark.unit
+    def test_every_committing_prompt_brackets_entity_task_tag(self) -> None:
+        # Aira entity keys link only via the bracketed `[AIRA-T299] …` commit
+        # form; the agent authors these monitor commits itself, so it must be
+        # told the bracketed prefix, not the bare key (PRRT_kwDOSJAM6s6OHCyD).
+        for prompt in self._tagged_prompts("AIRA-T299"):
+            assert "task tag `[AIRA-T299]`" in prompt
+            assert "`[AIRA-T299] fix: …`" in prompt
+            assert "task tag `AIRA-T299`" not in prompt
+
+    @pytest.mark.unit
     def test_no_tag_instruction_when_tag_absent(self) -> None:
         for prompt in self._tagged_prompts(None):
             assert "task tag" not in prompt

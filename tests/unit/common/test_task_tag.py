@@ -13,6 +13,7 @@ from awf.common.task_tag import (
     commit_message_with_task_tag,
     normalize_task_tag,
     strip_leading_task_tag,
+    task_tag_commit_prefix,
     title_with_task_tag,
     validate_task_tag,
 )
@@ -311,6 +312,28 @@ def test_commit_message_entity_longer_key_boundary_not_treated_as_tagged() -> No
     assert commit_message_with_task_tag("[AIRA-T2999] msg", "AIRA-T299") == (
         "[AIRA-T299] [AIRA-T2999] msg"
     )
+
+
+# --- Commit-prefix rendering for agent-facing prompts (T2) ---
+
+
+def test_task_tag_commit_prefix_brackets_entity_key() -> None:
+    # The agent must be told the bracketed form so its own commits link the task,
+    # matching commit_message_with_task_tag's emitted leading key.
+    assert task_tag_commit_prefix("AIRA-T299") == "[AIRA-T299]"
+
+
+def test_task_tag_commit_prefix_leaves_jira_key_bare() -> None:
+    assert task_tag_commit_prefix("PROJ-123") == "PROJ-123"
+    assert task_tag_commit_prefix("AIRA-299") == "AIRA-299"
+
+
+@pytest.mark.parametrize("tag", ["AIRA-T299", "PROJ-123", "AIRA-299"])
+def test_task_tag_commit_prefix_matches_emitted_leading_key(tag: str) -> None:
+    # The prefix an agent is told to use must equal the leading token AWF itself
+    # prepends, so agent- and AWF-authored commits carry an identical key.
+    emitted = commit_message_with_task_tag("do work", tag)
+    assert emitted.startswith(f"{task_tag_commit_prefix(tag)}{MESSAGE_SEP}")
 
 
 # --- Entity key branch (T2) ---

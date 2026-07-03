@@ -341,6 +341,25 @@ def test_agent_and_execution_prompts_render_task_tag_commit_guidance() -> None:
 
 
 @pytest.mark.unit
+def test_agent_and_execution_prompts_bracket_entity_task_tag() -> None:
+    # Aira entity keys link only via the bracketed `[AIRA-T299] …` commit form,
+    # so the agent's own-commit guidance must render that form, not the bare key
+    # (PRRT_kwDOSJAM6s6OHCyD).
+    plan = Path("docs/awf-plans/ws_123.md")
+    agent_prompt = build_agent_task_prompt(task_prompt="Add metrics", task_tag="AIRA-T299")
+    execution_prompt = build_execution_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        iteration=0,
+        gaps=(),
+        task_tag="AIRA-T299",
+    )
+    for prompt in (agent_prompt, execution_prompt):
+        assert "Prefix every commit message with `[AIRA-T299] `" in prompt
+        assert "Prefix every commit message with `AIRA-T299 `" not in prompt
+
+
+@pytest.mark.unit
 def test_prompts_omit_task_tag_guidance_when_absent() -> None:
     plan = Path("docs/awf-plans/ws_123.md")
     # No tag, no other sections → agent prompt is the bare task prompt (no-op).

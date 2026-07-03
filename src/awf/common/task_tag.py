@@ -176,3 +176,16 @@ def commit_message_with_task_tag(message: str, tag: str | None) -> str:
     if _is_entity_key(tag):
         return f"[{tag}]{MESSAGE_SEP}{message}"
     return f"{tag}{MESSAGE_SEP}{message}"
+
+
+def task_tag_commit_prefix(tag: str) -> str:
+    """Return the leading commit-subject token an agent should prepend for ``tag``.
+
+    Mirrors :func:`commit_message_with_task_tag`: entity keys are bracketed
+    (``"[PROJ-T123]"``) while Jira keys stay bare (``"PROJ-123"``). Prompt paths
+    that steer the agent's *own* commits render this form so agent-authored
+    commits carry the same leading key AWF authors — otherwise an entity-key
+    workspace would be told to write ``PROJ-T123 …`` and Aira's PR linker, which
+    needs the bracketed ``[PROJ-T123] …`` form, would fail to resolve the task.
+    """
+    return f"[{tag}]" if _is_entity_key(tag) else tag
