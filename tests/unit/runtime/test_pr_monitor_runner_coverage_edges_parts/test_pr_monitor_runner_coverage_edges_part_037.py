@@ -711,6 +711,45 @@ async def test_salvage_ci_repair_dirty_output_unexpected_exception_returns_salva
 
 
 @pytest.mark.unit
+async def test_salvage_ci_repair_dirty_output_programming_bug_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6ODx-0 — bugs surface, not reclassified as salvage.
+
+    The salvage boundary contains only concrete failure modes (OSError,
+    subprocess.SubprocessError, ValueError). A programming bug such as
+    ``KeyError`` must propagate so real defects are not masked as
+    ``REPAIR_SALVAGE_UNEXPECTED``.
+    """
+    from types import SimpleNamespace
+
+    worktrees_root = tmp_path / "worktrees"
+    worktrees_root.mkdir()
+    artifacts_root = tmp_path / "artifacts"
+    self = SimpleNamespace(_worktrees_root=worktrees_root, _artifacts_root=artifacts_root)
+
+    def _raising_capture(**kwargs: object) -> object:
+        del kwargs
+        raise KeyError("unexpected-key")
+
+    monkeypatch.setattr(
+        "awf.service.repair_salvage.capture_ci_repair_salvage",
+        _raising_capture,
+    )
+
+    with pytest.raises(KeyError, match="unexpected-key"):
+        await pr_ci_ops._salvage_ci_repair_dirty_output(
+            self,
+            workspace_id="ws-123",
+            operation_start_head="abc1234567890def",
+            operation_id=None,
+            operation_type="ci_repair",
+            phase="ci_repair_commit_sink",
+        )
+
+
+@pytest.mark.unit
 async def test_salvage_ci_repair_dirty_output_repair_salvage_error_returns_salvage_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

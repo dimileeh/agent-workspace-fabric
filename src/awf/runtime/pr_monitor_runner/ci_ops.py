@@ -11,6 +11,7 @@ import hashlib as hashlib
 import json as json
 import os as os
 import re as re
+import subprocess
 import time as time
 from dataclasses import dataclass
 from pathlib import Path
@@ -272,7 +273,14 @@ async def _salvage_ci_repair_dirty_output(
                 "message": str(exc),
             },
         }
-    except Exception as exc:
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        # Contain only the concrete failure modes of capture_ci_repair_salvage —
+        # filesystem/process-spawn I/O (OSError), subprocess failures, and
+        # value/decode errors raised while parsing raw git ``-z`` output
+        # (ValueError, incl. UnicodeDecodeError) — so provider-recovery rollback
+        # still runs (PRRT_kwDOSJAM6s6N6A4y). Programming bugs such as
+        # AttributeError/KeyError/TypeError deliberately propagate instead of
+        # being reclassified as salvage failures (PRRT_kwDOSJAM6s6ODx-0).
         _log.warning(
             "monitor.ci_repair_salvage_failed",
             workspace_id=workspace_id,
