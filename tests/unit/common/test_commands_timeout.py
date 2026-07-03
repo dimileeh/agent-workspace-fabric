@@ -15,6 +15,20 @@ from awf.common.commands import (
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("timeout_seconds", [0.0, -1.0])
+async def test_fake_runner_rejects_non_positive_timeout(timeout_seconds: float) -> None:
+    # The fake mirrors AsyncioSubprocessRunner.run: a non-positive timeout must
+    # fail before the call is recorded, so tests written against the fake catch
+    # the same invalid-input contract production enforces.
+    runner = FakeCommandRunner()
+
+    with pytest.raises(ValueError, match="timeout_seconds must be positive"):
+        await runner.run(["gh", "version"], timeout_seconds=timeout_seconds)
+
+    assert runner.calls == []
+
+
+@pytest.mark.unit
 async def test_runner_run_timeout_kills_hung_subprocess() -> None:
     runner = FakeCommandRunner()
     runner.queue_hang()

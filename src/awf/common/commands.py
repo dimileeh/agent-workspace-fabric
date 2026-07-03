@@ -326,6 +326,10 @@ class FakeCommandRunner:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
     ) -> CommandResult:
+        # Mirror AsyncioSubprocessRunner.run: reject a non-positive timeout so the
+        # fake enforces the same fail-before-spawn input contract as production
+        # and no invalid call is recorded.
+        _validate_timeout("timeout_seconds", timeout_seconds)
         self.calls.append(
             _RecordedCall(
                 args=list(args),
