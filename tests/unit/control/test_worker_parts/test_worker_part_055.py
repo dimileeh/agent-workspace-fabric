@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -18,6 +19,7 @@ from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
 )
+from awf.control.worker import dispatch_methods as worker_dispatch_methods
 from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -595,3 +597,11 @@ async def test_safely_resume_pr_monitor_pre_start_exception_before_handoff_fails
     assert finish_calls[0]["status"] == OperationStatus.failed
     assert finish_calls[0]["error_code"] == "MONITOR_RECOVERY_FAILED"
     assert "ws_monitor" not in worker._monitor_recovery_handoff_succeeded_workspace_ids  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_monitor_recovery_handoff_failure_error_code_rejects_missing_reason_code() -> None:
+    """A ``None`` reason_code raises explicitly, not a ``-O``-strippable assert."""
+    event = SimpleNamespace(reason_code=None, payload={})
+    with pytest.raises(ValueError, match="reason_code"):
+        worker_dispatch_methods._monitor_recovery_handoff_failure_error_code(event)  # noqa: SLF001

@@ -739,14 +739,6 @@ def test_monitor_recovery_handoff_failure_error_code_falls_back_to_event_reason(
 
 
 @pytest.mark.unit
-def test_monitor_recovery_handoff_failure_error_code_rejects_missing_reason_code() -> None:
-    """A ``None`` reason_code raises explicitly, not a ``-O``-strippable assert."""
-    event = SimpleNamespace(reason_code=None, payload={})
-    with pytest.raises(ValueError, match="reason_code"):
-        worker_dispatch_methods._monitor_recovery_handoff_failure_error_code(event)  # noqa: SLF001
-
-
-@pytest.mark.unit
 def test_monitor_recovery_handoff_failure_message_prefers_payload_message() -> None:
     """Verify monitor recovery handoff failure message prefers payload message."""
     event = SimpleNamespace(payload={"message": "  compose handoff rejected  "})
