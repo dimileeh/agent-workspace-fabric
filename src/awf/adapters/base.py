@@ -250,6 +250,12 @@ class AgentAdapter(ABC):
         prompt_input = wrapped_prompt.encode("utf-8")
         selected_model = self._selected_model_for_run(model=model)
         cli_args = self._cli_args(model=model)
+        # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
+        # synchronously; run it in a worker thread so the blocking I/O never
+        # stalls the event loop when concurrent agent runs overlap.
+        env_passthrough = await asyncio.to_thread(
+            agent_exec_env_passthrough, compose_file=compose_file
+        )
         invocation = build_tracked_compose_exec(
             compose_project=compose_project,
             compose_file=compose_file,
@@ -257,7 +263,7 @@ class AgentAdapter(ABC):
             source=log_source,
             label=self.name.value,
             preserve_stdin=True,
-            env_passthrough=agent_exec_env_passthrough(compose_file=compose_file),
+            env_passthrough=env_passthrough,
         )
         args = invocation.args
         _log.info(
