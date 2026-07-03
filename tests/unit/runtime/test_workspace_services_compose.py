@@ -269,6 +269,21 @@ def test_github_token_placeholder_preserves_profile_supplied_agent_env() -> None
 
 
 @pytest.mark.unit
+def test_github_token_group_not_overridden_when_profile_owns_github_token() -> None:
+    # The profile owns ONLY GITHUB_TOKEN (the lower-precedence alias, e.g. a generic
+    # ``env`` secret lease). The GitHub CLI reads GH_TOKEN, GITHUB_TOKEN "in order of
+    # precedence", so injecting the worker's higher-precedence GH_TOKEN would shadow
+    # the profile-owned token and make agent ``gh`` commands use the worker credential.
+    # Treat the aliases as a group: skip the worker GH_TOKEN so the profile token wins.
+    env = agent_environment_with_github_token(
+        (("GITHUB_TOKEN", "${MY_PROFILE_LEASE_TOKEN}"),),
+        host_env={"GH_TOKEN": "ghp_worker_secret"},
+    )
+
+    assert env == (("GITHUB_TOKEN", "${MY_PROFILE_LEASE_TOKEN}"),)
+
+
+@pytest.mark.unit
 def test_profile_ollama_host_suppresses_worker_base_url_placeholder() -> None:
     # The profile owns the daemon by declaring only the lower-precedence
     # OLLAMA_HOST. A stale higher-precedence AWF_OPENCODE_OLLAMA_BASE_URL in the

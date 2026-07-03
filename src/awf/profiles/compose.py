@@ -73,6 +73,11 @@ AGENT_AUTH_ENV_VARS = (
 # ``service`` layer.
 _OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
 
+# GitHub CLI token aliases in precedence order (highest first). ``gh`` reads
+# ``GH_TOKEN`` before ``GITHUB_TOKEN`` (https://cli.github.com/manual/gh_help_environment),
+# so injecting a worker token under an earlier alias shadows a profile-owned later one.
+_GITHUB_TOKEN_ALIAS_PRECEDENCE = ("GH_TOKEN", "GITHUB_TOKEN")
+
 
 class ProfileServiceValidationError(ValueError):
     """Raised when profile-declared services fail security validation."""
@@ -359,10 +364,21 @@ def agent_environment_with_github_token(
 
     merged: list[tuple[str, str]] = list(base_environment)
     existing = {key for key, _ in merged}
-    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
-        if name not in existing:
-            merged.append((name, token_placeholder))
-            existing.add(name)
+    # ``GH_TOKEN`` and ``GITHUB_TOKEN`` are read by the GitHub CLI "in order of
+    # precedence" (GH_TOKEN first — https://cli.github.com/manual/gh_help_environment).
+    # Treat the aliases as one group: when a profile already owns a lower-precedence
+    # alias (e.g. a secret lease that renders only ``GITHUB_TOKEN``), do NOT inject
+    # the worker token under a higher-precedence alias, or ``gh`` would use the
+    # worker credential instead of the profile-owned token. Injecting a lower-
+    # precedence worker alias alongside a profile-owned higher-precedence one stays
+    # harmless because the profile alias still wins.
+    for index, name in enumerate(_GITHUB_TOKEN_ALIAS_PRECEDENCE):
+        if name in existing:
+            continue
+        if any(lower in existing for lower in _GITHUB_TOKEN_ALIAS_PRECEDENCE[index + 1 :]):
+            continue
+        merged.append((name, token_placeholder))
+        existing.add(name)
     return tuple(merged)
 
 
