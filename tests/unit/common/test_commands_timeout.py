@@ -97,12 +97,20 @@ async def test_successful_run_cancels_wait_bookkeeping_task(
     real_create_task = commands_mod.asyncio.create_task
 
     def _spying_create_task(coro, **kwargs):  # type: ignore[no-untyped-def]
+        # ``AsyncioSubprocessRunner.run`` creates exactly one task through the
+        # module-level ``asyncio.create_task`` seam this monkeypatch replaces —
+        # the ``proc.wait()`` bookkeeping task. ``create_subprocess_exec`` /
+        # ``communicate`` use lower-level loop primitives, so they do not route
+        # through here. Wrap every intercepted task rather than matching an
+        # asyncio-internal coroutine name (``cr_code.co_name``): the
+        # ``assert len(spies) == 1`` below still pins that exactly one
+        # bookkeeping task is created — now catching a stray second one instead
+        # of silently ignoring it — and ``cancel_calls == 1`` that it is torn
+        # down once.
         task = real_create_task(coro, **kwargs)
-        if getattr(getattr(coro, "cr_code", None), "co_name", "") == "wait":
-            spy = _CancelSpy(task)
-            spies.append(spy)
-            return spy
-        return task
+        spy = _CancelSpy(task)
+        spies.append(spy)
+        return spy
 
     monkeypatch.setattr(commands_mod.asyncio, "create_task", _spying_create_task)
 
