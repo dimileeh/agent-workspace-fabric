@@ -23,14 +23,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeClient
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
     PullRequestAdoptionMetadata,
-    PullRequestMetadataError,
     RepoRef,
     fetch_pull_request_adoption_metadata,
     list_open_pull_requests_for_branch,
@@ -181,7 +179,6 @@ async def _find_open_same_repo_pr_number(
     repo: RepoRef,
     source_branch: str,
     target_branch: str,
-    retry: bool = False,
 ) -> int | None:
     """Number of an open same-repo ``source→target`` PR, or ``None`` if none.
 
@@ -190,9 +187,8 @@ async def _find_open_same_repo_pr_number(
     Only a PR whose head lives in the requested repo is eligible; fork
     collisions are ignored.
 
-    ``retry`` defaults to ``False``: the initial pre-check must surface a single
-    lookup failure cleanly. The post-create reconcile recheck passes ``retry=True``
-    so a transient blip there doesn't force a redundant second create.
+    The single pre-create lookup must surface a lookup failure cleanly, so the
+    read is never retried here.
     """
 
     repo_slug = repo.slug()
@@ -201,56 +197,10 @@ async def _find_open_same_repo_pr_number(
         repo=repo,
         branch_name=source_branch,
         base_branch=target_branch,
-        retry_policy=RetryPolicy.READ if retry else RetryPolicy.NEVER,
+        retry_policy=RetryPolicy.NEVER,
     )
     same_repo_existing = [pr for pr in existing if pr.head_repo_slug.lower() == repo_slug.lower()]
     return same_repo_existing[0].number if same_repo_existing else None
-
-
-async def _lookup_release_pr_after_create_failure(
-    *,
-    runner: AsyncCommandRunner,
-    repo: RepoRef,
-    source_branch: str,
-    target_branch: str,
-) -> tuple[int | None, dict[str, object]]:
-    try:
-        number = await _find_open_same_repo_pr_number(
-            runner=runner,
-            repo=repo,
-            source_branch=source_branch,
-            target_branch=target_branch,
-            # Post-create reconcile recheck: retry a transient lookup.
-            retry=True,
-        )
-    except GitHubClientError as exc:
-        return None, {
-            "status": "failed",
-            "operation": exc.operation,
-            "returncode": exc.returncode,
-            "error_message": exc.stderr.strip(),
-        }
-    except PullRequestMetadataError as exc:
-        # ``gh pr list`` (via ``list_open_pull_requests_for_branch``) raises this
-        # rather than ``GitHubClientError``. Treat it as a failed lookup so the
-        # bounded create-retry / duplicate-lookup-retry loop still runs instead
-        # of letting it escape and bypass the retry path entirely.
-        detail = exc.detail or {}
-        return None, {
-            "status": "failed",
-            "operation": "gh pr list",
-            "returncode": detail.get("returncode"),
-            # ``reason_code`` lives on the exception itself, not inside ``detail``;
-            # carry it into the reconcile-lookup record so the retry/audit metadata
-            # keeps the policy-relevant failure semantics (reason codes flow end-to-end).
-            "reason_code": exc.reason_code,
-            # ``exc.message`` is raw ``gh pr list`` stderr — unlike
-            # ``GitHubClientError.stderr`` it is *not* redacted at construction, so
-            # redact it here before it lands in ``reconcile_lookups`` and the
-            # retry/exhausted logs (no-secret logging rule).
-            "error_message": redact_audit_text(exc.message.strip()),
-        }
-    return number, {"status": "found" if number is not None else "not_found", "number": number}
 
 
 async def _create_release_pr_with_redundancy(

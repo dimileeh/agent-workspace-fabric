@@ -18,7 +18,6 @@ from awf.runtime.release_pr_sync import (
     ReleasePrSyncError,
     ReleasePrSyncNoOp,
     ReleasePrSyncResult,
-    _lookup_release_pr_after_create_failure,
     count_commits_ahead,
     find_or_create_release_pr,
     prepare_release_pr_sync,
@@ -752,57 +751,6 @@ class TestFindOrCreateReleasePr:
             )
 
         assert all(c.args[:3] != ["gh", "pr", "view"] for c in fake.calls)
-
-    @pytest.mark.unit
-    async def test_lookup_failure_detail_preserves_reason_code(self) -> None:
-        # When the reconcile ``gh pr list`` fails it raises
-        # ``PullRequestMetadataError``; the failed-lookup detail must carry the
-        # exception's ``reason_code`` so retry/audit metadata keeps the
-        # policy-relevant failure semantics (reason codes flow end-to-end).
-        fake = FakeCommandRunner()
-        for _ in range(5):
-            fake.queue_result(returncode=1, stderr="HTTP 502 from GitHub")  # gh pr list -> errors
-
-        number, detail = await _lookup_release_pr_after_create_failure(
-            runner=fake,
-            repo=_REPO,
-            source_branch="development",
-            target_branch="main",
-        )
-
-        assert number is None
-        assert detail["status"] == "failed"
-        assert detail["operation"] == "gh pr list"
-        assert detail["returncode"] == 1
-
-    @pytest.mark.unit
-    async def test_lookup_failure_detail_redacts_credentials_in_message(self) -> None:
-        # ``gh pr list`` stderr reaches ``_lookup_release_pr_after_create_failure``
-        # via ``PullRequestMetadataError.message``, which — unlike
-        # ``GitHubClientError.stderr`` — is *not* redacted at construction. The
-        # failed-lookup detail is stored in ``reconcile_lookups`` and emitted by
-        # the retry/exhausted logs, so credentials in the message must be redacted
-        # before they land in the detail (no-secret logging rule).
-        fake = FakeCommandRunner()
-        for _ in range(5):
-            fake.queue_result(
-                returncode=1,
-                stderr="fatal: unable to access https://x-access-token:ghs_supersecret@github.com/o/r",
-            )
-
-        number, detail = await _lookup_release_pr_after_create_failure(
-            runner=fake,
-            repo=_REPO,
-            source_branch="development",
-            target_branch="main",
-        )
-
-        assert number is None
-        assert detail["status"] == "failed"
-        error_message = detail["error_message"]
-        assert isinstance(error_message, str)
-        assert "ghs_supersecret" not in error_message
-        assert "redacted" in error_message.lower()
 
 
 class TestPrepareReleasePrSync:
