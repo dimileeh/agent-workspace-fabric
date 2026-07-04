@@ -34,7 +34,7 @@ dependencies = [
     "docker>=7.0.0",
     "mcp>=1.28.1,<2",
     "python-dotenv>=1.0.0",
-    "structlog>=24.4.0",
+    "structlog>=26.1.0",
     "pyyaml>=6.0.0",
 ]
 
