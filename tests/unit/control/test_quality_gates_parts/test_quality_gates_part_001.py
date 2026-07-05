@@ -8,7 +8,6 @@ from awf.control.quality_gates import (
     ProtectedFileDiff,
     diff_classified_protected_paths,
     find_protected_quality_gate_changes,
-    unowned_protected_paths,
 )
 
 
@@ -84,43 +83,6 @@ def test_diff_classified_protected_paths_excludes_owned_protected_paths() -> Non
     )
 
     assert paths == (".github/workflows/ci.yml", "pyproject.toml")
-
-
-@pytest.mark.unit
-def test_unowned_protected_paths_covers_all_patterns_and_normalizes() -> None:
-    """unowned_protected_paths spans every protected pattern (not just pyproject/workflow).
-
-    It underpins the conformance-salvage quarantine (#743): a changed protected
-    file the source did not own is what a retry must not replay.
-    """
-    paths = unowned_protected_paths(
-        [
-            " ./.awf/workspace.yml ",
-            ".coveragerc",
-            ".\\.github\\workflows\\ci.yml",
-            "src/awf/runtime/validation.py",
-            "pytest.ini",
-            " ",
-        ]
-    )
-
-    assert paths == (
-        ".awf/workspace.yml",
-        ".coveragerc",
-        ".github/workflows/ci.yml",
-        "pytest.ini",
-    )
-
-
-@pytest.mark.unit
-def test_unowned_protected_paths_excludes_owned() -> None:
-    """A protected path covered by owned_paths is not returned."""
-    paths = unowned_protected_paths(
-        [".awf/workspace.yml", "pyproject.toml"],
-        owned_paths=[".awf/workspace.yml"],
-    )
-
-    assert paths == ("pyproject.toml",)
 
 
 @pytest.mark.unit

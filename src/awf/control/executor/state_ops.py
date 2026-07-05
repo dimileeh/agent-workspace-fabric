@@ -12,6 +12,7 @@ from datetime import (
     UTC,
     datetime,
 )
+from pathlib import Path
 from typing import Any, Final
 
 from sqlalchemy import (
@@ -613,6 +614,73 @@ async def enter_blocked_for_resume_setup_failure(
         stale_action="enter_blocked_for_resume_setup_failure",
         recovery_finalize_reason_code=RESUME_SETUP_FAILED_REASON_CODE,
         recovery_finalize_message=("Profile setup failed on blocked-resume; paused for operator."),
+    )
+
+
+async def _blocked_resume_setup_phase_names(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    profile: WorkspaceProfile,
+    resume_from_blocked: bool,
+    resume_skip_agent: bool,
+) -> tuple[str, ...]:
+    """Return the profile-setup phase set to run on this ``execute`` entry (#743).
+
+    A *directive* blocked-resume (the agent re-runs) reuses the warm venv/stack and
+    SKIPS the flaky ``setup`` phase when an env-health probe confirms the validate
+    toolchain still resolves in the container; on ANY doubt (a missing tool, a
+    probe-infra error, a torn-down stack) it re-runs setup. Grant-resume and normal
+    runs always run setup, since an approved config/dep edit may have staled the env.
+    """
+    if not (resume_from_blocked and not resume_skip_agent):
+        return ("setup", "pre_agent")
+    env_probe = await self._validation.probe_validate_command_tools(
+        workspace_id=workspace_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        profile=profile,
+    )
+    if not env_probe.probe_errored and not env_probe.missing:
+        _log.info("executor.blocked_resume_setup_skipped_env_healthy", workspace_id=workspace_id)
+        return ("pre_agent",)
+    _log.info(
+        "executor.blocked_resume_setup_rerun_env_unhealthy",
+        workspace_id=workspace_id,
+        probe_errored=env_probe.probe_errored,
+        missing_tools=[target.tool for target in env_probe.missing],
+    )
+    return ("setup", "pre_agent")
+
+
+async def _reblock_on_resume_setup_failure(
+    self: Any,
+    *,
+    workspace_id: str,
+    execution_owner_id: str | None,
+    setup_failure_reason_code: str | None,
+    first_fail: Any,
+) -> None:
+    """Re-pause a blocked-resume into ``blocked`` on a setup failure (#743).
+
+    Terminally failing would discard the operator directive and the spent work; the
+    workspace stays operator-recoverable instead. The wrapper clears the directive
+    hint so the worker does not auto-resume straight back into the same failure.
+    """
+    reblocked = await self.enter_blocked_for_resume_setup_failure(
+        workspace_id=workspace_id,
+        from_status=WorkspaceStatus.running,
+        resume_phase="setup",
+        execution_owner_id=execution_owner_id,
+    )
+    _log.info(
+        "executor.blocked_resume_setup_failed_repaused",
+        workspace_id=workspace_id,
+        repaused=reblocked,
+        reason_code=setup_failure_reason_code,
+        command=first_fail.command if first_fail is not None else None,
     )
 
 

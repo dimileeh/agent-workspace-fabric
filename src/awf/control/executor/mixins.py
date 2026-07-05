@@ -153,6 +153,8 @@ class ExecutorDelegatesMixin:
     enter_blocked_for_protected_violation = _state_ops.enter_blocked_for_protected_violation
     enter_blocked_for_resume_setup_failure = _state_ops.enter_blocked_for_resume_setup_failure
     enter_recovering_for_provider_failure = _state_ops.enter_recovering_for_provider_failure
+    _blocked_resume_setup_phase_names = _state_ops._blocked_resume_setup_phase_names
+    _reblock_on_resume_setup_failure = _state_ops._reblock_on_resume_setup_failure
     _persist_block_baseline_coverage = _state_ops._persist_block_baseline_coverage
     _persist_block_planning_conformance_handoff = (
         _state_ops._persist_block_planning_conformance_handoff
