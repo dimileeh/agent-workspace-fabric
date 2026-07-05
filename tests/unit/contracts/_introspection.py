@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import NoneType
 from typing import Any, get_args, get_origin
 
-from fastapi.routing import APIRoute
+from fastapi.routing import APIRoute, APIWebSocketRoute, iter_route_contexts
 from typer.models import ArgumentInfo, OptionInfo
 
 from awf.api.app import create_app
@@ -48,13 +48,14 @@ def rest_routes() -> dict[tuple[str, str], RestRouteInfo]:
     """Return FastAPI route metadata keyed by ``(method, path)``."""
     app = create_app(use_lifespan=False)
     out: dict[tuple[str, str], RestRouteInfo] = {}
-    for route in app.routes:
+    for route_context in iter_route_contexts(app.routes):
+        route = route_context.original_route
         if not isinstance(route, APIRoute):
             continue
-        for method in route.methods or []:
-            out[(method, route.path)] = RestRouteInfo(
+        for method in route_context.methods or route.methods or []:
+            out[(method, route_context.path)] = RestRouteInfo(
                 method=method,
-                path=route.path,
+                path=route_context.path,
                 response_model=_model_name(route.response_model),
                 path_fields=frozenset(param.name for param in route.dependant.path_params),
                 query_fields=frozenset(
@@ -68,6 +69,20 @@ def rest_routes() -> dict[tuple[str, str], RestRouteInfo]:
                 ),
             )
     return out
+
+
+def rest_route_signatures(app: Any) -> set[str]:
+    """Return ``METHOD /path`` signatures for REST and WebSocket routes."""
+    signatures: set[str] = set()
+    for route_context in iter_route_contexts(app.routes):
+        route = route_context.original_route
+        path = route_context.path or getattr(route, "path", "")
+        if isinstance(route, APIWebSocketRoute):
+            signatures.add(f"WS {path}")
+        elif isinstance(route, APIRoute):
+            for method in route_context.methods or route.methods or []:
+                signatures.add(f"{method} {path}")
+    return signatures
 
 
 def cli_commands() -> dict[tuple[str, ...], CliCommandInfo]:
