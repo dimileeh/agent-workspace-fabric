@@ -11,6 +11,7 @@ import pytest
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_WORKTREE_ROOT,
+    CONFORMANCE_CI_DELEGATED_SATISFIED,
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
     MAX_CONFORMANCE_TEXT_CHARS,
     PLAN_CONFORMANCE_REPORTED,
@@ -575,6 +576,10 @@ def test_ci_delegated_validation_report_is_satisfied_when_only_validation_gaps()
     assert coerced.satisfied
     assert coerced.status is PlanConformanceStatus.satisfied
     assert "delegated to CI" in coerced.summary
+    # A satisfied outcome must carry a satisfied-flavour reason code, NOT the
+    # unsatisfied CONFORMANCE_REQUIRES_AWF_VALIDATION it was coerced from.
+    assert coerced.reason_code == CONFORMANCE_CI_DELEGATED_SATISFIED
+    assert coerced.reason_code != CONFORMANCE_REQUIRES_AWF_VALIDATION
     # Original report is untouched (frozen dataclass).
     assert not report.satisfied
 

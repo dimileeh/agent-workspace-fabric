@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
 PLAN_CONFORMANCE_REPORTED = "PLAN_CONFORMANCE_REPORTED"
 CONFORMANCE_REQUIRES_AWF_VALIDATION = "CONFORMANCE_REQUIRES_AWF_VALIDATION"
+CONFORMANCE_CI_DELEGATED_SATISFIED = "CONFORMANCE_CI_DELEGATED_SATISFIED"
+"""Satisfied-flavour reason code for a conformance outcome resolved as CI-delegated
+(AWF validation passed; the only remaining gaps are for commands AWF does not run)."""
 AGENT_PLAN_PHASE_SCOPE_VIOLATION = "AGENT_PLAN_PHASE_SCOPE_VIOLATION"
 AGENT_STALLED_IN_CONFORMANCE = "AGENT_STALLED_IN_CONFORMANCE"
 AGENT_IDLE_TIMEOUT_REASON_CODE = "AGENT_IDLE_TIMEOUT"
@@ -540,7 +543,9 @@ def satisfied_report_for_ci_delegated_validation(
             "AWF validation passed; remaining checks are delegated to CI and are "
             f"not part of the AWF validate set. {report.summary}".strip()
         ),
-        reason_code=report.reason_code,
+        # A satisfied outcome must not carry the unsatisfied-flavour reason code it
+        # was coerced from — downstream event/observability code reads this field.
+        reason_code=CONFORMANCE_CI_DELEGATED_SATISFIED,
     )
 
 
