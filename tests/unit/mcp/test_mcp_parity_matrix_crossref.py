@@ -4,8 +4,8 @@ import re
 from pathlib import Path
 
 import pytest
-from fastapi.routing import APIRoute, APIWebSocketRoute
 
+from tests.unit.contracts._introspection import rest_route_signatures
 from tests.unit.mcp._parity_utils import (
     MISSING_STATUS,
     PARTIAL_STATUS,
@@ -32,14 +32,7 @@ def _extract_rest_paths_from_app() -> dict[str, str]:
     from awf.api.app import create_app
 
     app = create_app(use_lifespan=False)
-    paths: dict[str, str] = {}
-    for route in app.routes:
-        if isinstance(route, APIWebSocketRoute):
-            paths[f"WS {route.path}"] = route.path
-        elif isinstance(route, APIRoute):
-            for method in route.methods or set():
-                paths[f"{method} {route.path}"] = route.path
-    return paths
+    return {signature: signature.split(" ", 1)[1] for signature in rest_route_signatures(app)}
 
 
 def _extract_mcp_tool_names() -> set[str]:

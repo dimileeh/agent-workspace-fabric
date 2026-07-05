@@ -33,14 +33,10 @@ def _adoption_docs() -> str:
 
 def _real_rest_routes() -> set[str]:
     from awf.api.app import create_app
+    from tests.unit.contracts._introspection import rest_route_signatures
 
     app = create_app(use_lifespan=False)
-    routes: set[str] = set()
-    for route in app.routes:
-        if hasattr(route, "methods") and hasattr(route, "path"):
-            for method in route.methods:
-                routes.add(f"{method} {route.path}")
-    return routes
+    return rest_route_signatures(app)
 
 
 def _real_cli_commands(app: typer.Typer, prefix: str = "awf") -> set[str]:
