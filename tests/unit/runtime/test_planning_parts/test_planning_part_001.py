@@ -33,6 +33,7 @@ from awf.runtime.planning import (
     parse_conformance_report,
     render_coordination_warning_section,
     render_workspace_path,
+    satisfied_report_for_ci_delegated_validation,
 )
 from awf.service.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 
@@ -399,6 +400,47 @@ def test_conformance_prompt_is_evidence_only_and_does_not_rerun_validation() -> 
         "git commit",
     ):
         assert command in prompt
+    # No validate-set was supplied here, so no AWF-validation-scope section.
+    assert "AWF validation scope" not in prompt
+
+
+@pytest.mark.unit
+def test_conformance_prompt_pins_validate_set_and_flags_ci_delegation() -> None:
+    """The prompt enumerates AWF's validate set so the agent stops flagging (#743).
+
+    A command absent from the set is CI-delegated; the agent must not raise an
+    awf_validation_evidence gap for it nor edit the protected workspace.yml.
+    """
+    prompt = build_conformance_prompt(
+        task_prompt="Add /link",
+        plan_path=Path("docs/awf-plans/ws_1.md"),
+        report_path=Path("docs/awf-plans/ws_1.conformance.json"),
+        iteration=0,
+        awf_validation_commands=["ruff check .", "python -m aira_agent.typecheck.mypy_budget"],
+    )
+
+    assert "AWF validation scope" in prompt
+    assert "ruff check ." in prompt
+    assert "python -m aira_agent.typecheck.mypy_budget" in prompt
+    assert "gated by CI, not AWF" in prompt
+    assert "delegates to GitHub CI" in prompt
+    assert ".awf/workspace.yml" in prompt
+
+
+@pytest.mark.unit
+def test_conformance_prompt_flags_empty_validate_set_as_fully_ci_delegated() -> None:
+    """An empty validate set means every gate is CI-owned — do not demand evidence."""
+    prompt = build_conformance_prompt(
+        task_prompt="Add /link",
+        plan_path=Path("docs/awf-plans/ws_1.md"),
+        report_path=Path("docs/awf-plans/ws_1.conformance.json"),
+        iteration=0,
+        awf_validation_commands=[],
+    )
+
+    assert "AWF validation scope" in prompt
+    assert "no agent-visible validation commands" in prompt
+    assert "delegated to GitHub CI" in prompt
 
 
 @pytest.mark.unit
@@ -507,6 +549,70 @@ def test_conformance_requires_awf_validation_accepts_hyphenated_reason_code() ->
     )
 
     assert conformance_requires_awf_validation(report, {Path("src/awf/runtime/planning.py")})
+
+
+@pytest.mark.unit
+def test_ci_delegated_validation_report_is_satisfied_when_only_validation_gaps() -> None:
+    """After AWF validation passed, awf_validation_evidence-only gaps are CI-delegated (#743).
+
+    They resolve to a satisfied report rather than PLAN_CONFORMANCE_UNSATISFIED.
+    """
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="pytest evidence was not produced by AWF validation.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(
+            ConformanceGap(
+                kind=GapKind.awf_validation_evidence,
+                detail="AWF-owned validation evidence is missing for pytest.",
+            ),
+        ),
+    )
+
+    coerced = satisfied_report_for_ci_delegated_validation(report)
+
+    assert coerced is not None
+    assert coerced.satisfied
+    assert coerced.status is PlanConformanceStatus.satisfied
+    assert "delegated to CI" in coerced.summary
+    # Original report is untouched (frozen dataclass).
+    assert not report.satisfied
+
+
+@pytest.mark.unit
+def test_ci_delegated_validation_report_none_when_a_real_gap_remains() -> None:
+    """A non-validation gap (implementation/test/docs) must still fail conformance."""
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Endpoint not wired.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(
+            ConformanceGap(
+                kind=GapKind.awf_validation_evidence,
+                detail="pytest evidence missing.",
+            ),
+            ConformanceGap(kind=GapKind.implementation, detail="POST /link not implemented."),
+        ),
+    )
+
+    assert satisfied_report_for_ci_delegated_validation(report) is None
+
+
+@pytest.mark.unit
+def test_ci_delegated_validation_report_none_for_satisfied_or_empty() -> None:
+    """No coercion for an already-satisfied report or a report with no gaps."""
+    already = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="done",
+    )
+    empty = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="no actionable gap",
+        gaps=(),
+    )
+
+    assert satisfied_report_for_ci_delegated_validation(already) is None
+    assert satisfied_report_for_ci_delegated_validation(empty) is None
 
 
 @pytest.mark.unit

@@ -173,6 +173,21 @@ _HTTP_HEALTHCHECK_SCRIPT = (
 )
 
 
+def validate_phase_command_strings(profile: WorkspaceProfile) -> list[str]:
+    """Return the resolved AWF ``validate:`` command strings for a profile.
+
+    This is the exact AWF-owned validation command set (``post_agent`` +
+    ``validate`` phases, in execution order) that AWF runs after the agent
+    completes. Callers use it to distinguish an AWF-owned validation gate from a
+    command the repo delegates to CI, so plan-conformance does not demand
+    AWF-internal evidence for a CI-delegated command (#743).
+    """
+    return [
+        step.command.command
+        for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
+    ]
+
+
 def profile_phase_command_plan(
     profile: WorkspaceProfile,
     phase_names: list[str] | tuple[str, ...],

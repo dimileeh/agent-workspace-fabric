@@ -381,6 +381,39 @@ def build_execution_prompt(
     )
 
 
+def _awf_validation_scope_section(awf_validation_commands: Sequence[str] | None) -> str:
+    """Render the conformance-prompt section that pins AWF's validation scope.
+
+    Passing the resolved ``validate:`` command set (empty tuple included) lets the
+    agent tell an AWF-owned gate from a CI-delegated one, so it stops raising
+    ``awf_validation_evidence`` for commands AWF never runs — and stops editing
+    the protected ``.awf/workspace.yml`` to force AWF to run them (#743). ``None``
+    means "caller did not supply the set" and renders nothing (back-compat).
+    """
+    if awf_validation_commands is None:
+        return ""
+    if awf_validation_commands:
+        command_lines = "\n".join(f"- `{command}`" for command in awf_validation_commands)
+        return (
+            "### AWF validation scope\n"
+            "AWF's validation phase for this workspace runs exactly these commands:\n"
+            f"{command_lines}\n"
+            "A validation command that is NOT in this set (for example a test "
+            "command the repo delegates to GitHub CI) is gated by CI, not AWF. Do "
+            "not report an `awf_validation_evidence` gap for a command outside this "
+            "set, and never edit `.awf/workspace.yml` to make AWF run it — that file "
+            "is a protected quality gate and its validation config is fixed at "
+            "dispatch time.\n\n"
+        )
+    return (
+        "### AWF validation scope\n"
+        "AWF's validation phase for this workspace runs no agent-visible validation "
+        "commands; all such gates are delegated to GitHub CI. Do not report an "
+        "`awf_validation_evidence` gap, and never edit `.awf/workspace.yml` to add "
+        "one.\n\n"
+    )
+
+
 def build_conformance_prompt(
     *,
     task_prompt: str,
@@ -388,12 +421,14 @@ def build_conformance_prompt(
     report_path: Path,
     iteration: int,
     validation_evidence: str | None = None,
+    awf_validation_commands: Sequence[str] | None = None,
 ) -> str:
     validation_evidence_section = (
         f"### Validation evidence\n{validation_evidence.strip()}\n\n"
         if validation_evidence and validation_evidence.strip()
         else ""
     )
+    awf_validation_scope_section = _awf_validation_scope_section(awf_validation_commands)
     gap_kind_lines = "\n".join(
         f"- `{kind.value}`: {_gap_kind_definition(kind)}" for kind in GapKind
     )
@@ -415,6 +450,7 @@ def build_conformance_prompt(
         "`CONFORMANCE_REQUIRES_AWF_VALIDATION` only when "
         "every remaining gap is missing, stale, or insufficient AWF-owned validation "
         "evidence. Do not use it for implementation, API, plan, or documentation gaps.\n\n"
+        f"{awf_validation_scope_section}"
         f"{validation_evidence_section}"
         f"Write a JSON object to `{report_path.as_posix()}` and also print the same JSON object "
         "as your final response. The object must have this shape:\n\n"
@@ -472,6 +508,40 @@ def conformance_requires_awf_validation(
     if not all(gap.kind is GapKind.awf_validation_evidence for gap in report.gaps):
         return False
     return bool(before_compare)
+
+
+def satisfied_report_for_ci_delegated_validation(
+    report: PlanConformanceReport,
+) -> PlanConformanceReport | None:
+    """Return a *satisfied* equivalent of ``report`` when every remaining gap is
+    an AWF-validation-evidence demand, else ``None``.
+
+    Callers invoke this only after AWF's validation phase has already passed all
+    of its resolved commands (the post-validation conformance recheck runs inside
+    the ``val_result.all_passed`` branch). At that point AWF has produced every
+    piece of evidence it is configured to produce, so a still-standing
+    ``awf_validation_evidence`` gap is necessarily a demand for a command AWF
+    does not run — a check the repo delegates to CI. Resolving conformance as
+    satisfied here stops the loop that otherwise fails with
+    ``PLAN_CONFORMANCE_UNSATISFIED`` and pushes the agent into editing the
+    protected ``.awf/workspace.yml`` to force AWF to run the CI-delegated command
+    (#743). Any non-validation gap (implementation, test, docs, …) still fails,
+    so genuine plan gaps are unaffected.
+    """
+    if report.satisfied:
+        return None
+    if not report.gaps:
+        return None
+    if not all(gap.kind is GapKind.awf_validation_evidence for gap in report.gaps):
+        return None
+    return PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary=(
+            "AWF validation passed; remaining checks are delegated to CI and are "
+            f"not part of the AWF validate set. {report.summary}".strip()
+        ),
+        reason_code=report.reason_code,
+    )
 
 
 def classify_conformance_stall(

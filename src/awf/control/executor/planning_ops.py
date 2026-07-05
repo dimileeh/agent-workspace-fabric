@@ -72,6 +72,9 @@ from awf.runtime.planning import (
     parse_conformance_report,
     render_workspace_path,
 )
+from awf.runtime.validation_setup import (
+    validate_phase_command_strings,
+)
 from awf.runtime.workspace_prompt_context import (
     render_workspace_runtime_context,
 )
@@ -1025,6 +1028,7 @@ async def _run_agent_task_with_optional_planning(
                     plan_path=agent_plan_path,
                     report_path=agent_report_path,
                     iteration=iteration,
+                    awf_validation_commands=validate_phase_command_strings(profile),
                 ),
                 model=model,
                 workspace_id=workspace.id,
