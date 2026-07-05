@@ -624,19 +624,15 @@ async def _blocked_resume_setup_phase_names(
     compose_project: str,
     compose_file: Path,
     profile: WorkspaceProfile,
-    resume_from_blocked: bool,
-    resume_skip_agent: bool,
 ) -> tuple[str, ...]:
-    """Return the profile-setup phase set to run on this ``execute`` entry (#743).
+    """Return the profile-setup phase set for a *directive* blocked-resume (#743).
 
-    A *directive* blocked-resume (the agent re-runs) reuses the warm venv/stack and
-    SKIPS the flaky ``setup`` phase when an env-health probe confirms the validate
-    toolchain still resolves in the container; on ANY doubt (a missing tool, a
-    probe-infra error, a torn-down stack) it re-runs setup. Grant-resume and normal
-    runs always run setup, since an approved config/dep edit may have staled the env.
+    The caller invokes this only on a directive resume (the agent re-runs). It
+    reuses the warm venv/stack and SKIPS the flaky ``setup`` phase when an
+    env-health probe confirms the validate toolchain still resolves in the
+    container; on ANY doubt (a missing tool, a probe-infra error, a torn-down
+    stack) it re-runs setup.
     """
-    if not (resume_from_blocked and not resume_skip_agent):
-        return ("setup", "pre_agent")
     env_probe = await self._validation.probe_validate_command_tools(
         workspace_id=workspace_id,
         compose_project=compose_project,
