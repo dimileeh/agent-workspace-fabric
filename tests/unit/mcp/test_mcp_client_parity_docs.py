@@ -390,7 +390,6 @@ def test_parity_matrix_matches_real_surfaces() -> None:
     from awf.cli.main import app as cli_app
     from awf.common.config import Settings
     from awf.mcp.server import build_mcp_server
-
     from tests.unit.contracts._introspection import rest_route_signatures
 
     # 1. Load real REST routes

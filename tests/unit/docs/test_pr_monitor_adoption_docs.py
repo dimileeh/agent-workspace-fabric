@@ -33,7 +33,6 @@ def _adoption_docs() -> str:
 
 def _real_rest_routes() -> set[str]:
     from awf.api.app import create_app
-
     from tests.unit.contracts._introspection import rest_route_signatures
 
     app = create_app(use_lifespan=False)
