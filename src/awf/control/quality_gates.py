@@ -32,8 +32,10 @@ class GrantSpec:
     approve_policy_downgrade: bool = False
 
 
+AWF_WORKSPACE_CONFIG_PATH: Final[str] = ".awf/workspace.yml"
+"""Repo-relative path of the AWF workspace config (a protected quality-gate file)."""
 PROTECTED_QUALITY_GATE_PATHS: Final[tuple[str, ...]] = (
-    ".awf/workspace.yml",
+    AWF_WORKSPACE_CONFIG_PATH,
     ".coveragerc",
     ".github/workflows/",
     "pyproject.toml",
@@ -418,13 +420,22 @@ def quality_gate_violation_message(violations: list[QualityGateViolation]) -> st
     """Build an operator-facing failure message for protected gate edits."""
     details = "\n".join(f"- {_format_violation_detail(v)}" for v in violations[:8])
     suffix = "" if len(violations) <= 8 else f"\n- ... and {len(violations) - 8} more"
-    return (
+    message = (
         "agent changed protected quality-gate file(s) outside declared owned_paths:\n"
         f"{details}{suffix}\n"
         "AWF only allows narrowly classified safe protected-file edits without "
         "explicit ownership. Add meaningful tests or declare explicit ownership "
         "of the policy file when an operator-approved policy change is required."
     )
+    if any(_normalize_path(v.path) == AWF_WORKSPACE_CONFIG_PATH for v in violations):
+        message += (
+            f"\nNote: editing AWF validation config in {AWF_WORKSPACE_CONFIG_PATH} "
+            "has no effect mid-run — `requested_tier` is set at dispatch "
+            "(validation.requested_tier) and `final_gate` is fixed at provision "
+            "time. Do not edit the file to raise the AWF validation level; a "
+            "validation command the repo delegates to CI is gated by CI, not AWF."
+        )
+    return message
 
 
 def quality_gate_violation_details(
@@ -462,6 +473,33 @@ def diff_classified_protected_paths(
     for raw_path in changed_paths:
         path = _normalize_path(raw_path)
         if path and requires_protected_file_diff(path) and not _is_owned(path, owned_paths):
+            paths.append(path)
+    return tuple(dict.fromkeys(paths))
+
+
+def unowned_protected_paths(
+    changed_paths: Sequence[str],
+    *,
+    owned_paths: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Return changed paths matching a protected quality-gate pattern that are not
+    covered by ``owned_paths`` (normalized, dedup-ordered).
+
+    Unlike :func:`diff_classified_protected_paths` (pyproject/workflow only, for
+    diff classification), this covers *every* protected pattern. Conformance
+    salvage uses it to drop a protected edit the agent never owned so a retry
+    cannot re-apply the exact change that caused the block (#743). Uses the same
+    normalization and ownership check as the gate itself, so the exclusion can
+    never drift from what the gate protects.
+    """
+    paths: list[str] = []
+    for raw_path in changed_paths:
+        path = _normalize_path(raw_path)
+        if (
+            path
+            and _matched_protected_pattern(path) is not None
+            and not _is_owned(path, owned_paths)
+        ):
             paths.append(path)
     return tuple(dict.fromkeys(paths))
 
@@ -534,6 +572,8 @@ __all__ = [
     "protected_quality_gate_pattern",
     "requires_protected_file_diff",
     "diff_classified_protected_paths",
+    "unowned_protected_paths",
+    "AWF_WORKSPACE_CONFIG_PATH",
     "changed_paths_are_only_internal_plan_artifacts",
     "plan_only_output_message",
 ]

@@ -1308,11 +1308,22 @@ def profile_with_requested_tier(
     profile: WorkspaceProfile,
     requested_tier: int,
 ) -> WorkspaceProfile:
-    """Return a profile copy with the validation requested_tier overridden."""
-    if profile.validation.requested_tier == requested_tier:
+    """Return a profile whose validation ``requested_tier`` is raised to the
+    dispatch value when the dispatch value is higher.
+
+    Dispatch ``requested_tier`` may only *raise* the profile's declared tier,
+    never lower it. The repo's ``.awf/workspace.yml`` declares a validation
+    floor, and the dispatch payload defaults ``requested_tier`` to ``1`` with no
+    "unset" sentinel (``api/schemas.py``); a hard replace therefore silently
+    downgraded a repo that asked for a higher tier (#743). Honoring the ``max``
+    matches the downstream ``max()`` tier resolution in
+    ``_validation_tier_for_workspace`` so the two agree.
+    """
+    effective_tier = max(profile.validation.requested_tier, requested_tier)
+    if profile.validation.requested_tier == effective_tier:
         return profile
     return profile.model_copy(
         update={
-            "validation": profile.validation.model_copy(update={"requested_tier": requested_tier})
+            "validation": profile.validation.model_copy(update={"requested_tier": effective_tier})
         }
     )

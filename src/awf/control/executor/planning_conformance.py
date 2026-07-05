@@ -61,6 +61,10 @@ from awf.runtime.planning import (
     build_conformance_failure_evidence,
     build_conformance_prompt,
     parse_conformance_report,
+    satisfied_report_for_ci_delegated_validation,
+)
+from awf.runtime.validation_setup import (
+    validate_phase_command_strings,
 )
 from awf.service.artifacts import (
     DEPOSITED_CONFORMANCE_NAME,
@@ -251,8 +255,9 @@ async def _run_post_validation_conformance_check(
     conformance_scope_baseline: _PostValidationConformanceScopeBaseline | None = None,
 ) -> _PlanningRunFailure | None:
     # Post-validation conformance is strictly report-only, regardless of
-    # ordinary planning unexplained-deviation policy.
-    del profile
+    # ordinary planning unexplained-deviation policy. ``profile`` is still needed
+    # to pin the AWF validation command set in the prompt (#743).
+    awf_validation_commands = validate_phase_command_strings(profile)
     evidence = await self._validation_run_evidence_for_conformance(validation_run_id)
     if conformance_scope_baseline is None:
         conformance_scope_baseline = await self._capture_post_validation_conformance_scope_baseline(
@@ -286,6 +291,7 @@ async def _run_post_validation_conformance_check(
             report_path=agent_report_path,
             iteration=handoff.iteration + 1,
             validation_evidence=evidence,
+            awf_validation_commands=awf_validation_commands,
         ),
         model=model,
         workspace_id=workspace.id,
@@ -324,7 +330,27 @@ async def _run_post_validation_conformance_check(
         report_text = compare_result.stdout
     report = parse_conformance_report(report_text or "")
     if not report.satisfied:
-        return _build_unsatisfied_failure(report, handoff, validation_run_id)
+        # This recheck runs only inside the ``val_result.all_passed`` branch, so
+        # AWF has produced every piece of evidence it is configured to produce.
+        # If the agent's only remaining gaps are awf_validation_evidence demands,
+        # they are for commands AWF does not run (delegated to CI) — resolve as
+        # satisfied instead of failing and pushing the agent into editing the
+        # protected ``.awf/workspace.yml`` to force AWF to run them (#743).
+        ci_delegated_report = satisfied_report_for_ci_delegated_validation(report)
+        if ci_delegated_report is None:
+            return _build_unsatisfied_failure(report, handoff, validation_run_id)
+        _log.info(
+            "executor.post_validation_conformance_ci_delegated_satisfied",
+            workspace_id=workspace.id,
+            validation_run_id=validation_run_id,
+            gaps=list(report.gaps),
+            reason_code=report.reason_code,
+        )
+        report = ci_delegated_report
+        # The agent's on-disk report is the not-satisfied one we just coerced, so
+        # it no longer matches the satisfied report we serve. Force the rewrite
+        # below so the served artifact and the recorded event agree.
+        report_from_fresh_file = False
     # Track whether the on-worktree report actually carries the satisfied
     # report we want to serve. A fresh file is already correct; an AWF-
     # synthesized rewrite from stdout/stale disk is correct only when the

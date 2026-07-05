@@ -291,6 +291,7 @@ async def retry_workspace_row(
                 ),
                 source_branch_name=source.branch_name,
                 source_remote_push_branch=source.remote_push_branch,
+                owned_paths=list(source.owned_paths),
                 run_subprocess=run_subprocess,
             )
         except ConformanceSalvageError as exc:
@@ -323,6 +324,7 @@ async def retry_workspace_row(
                 conformance_evidence_ref=agent_timeout_context.evidence_ref,
                 source_branch_name=source.branch_name,
                 source_remote_push_branch=source.remote_push_branch,
+                owned_paths=list(source.owned_paths),
                 run_subprocess=run_subprocess,
             )
         except ConformanceSalvageError as exc:

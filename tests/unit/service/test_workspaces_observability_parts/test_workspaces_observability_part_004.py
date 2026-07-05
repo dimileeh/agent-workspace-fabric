@@ -267,6 +267,29 @@ def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> Non
 
 
 @pytest.mark.unit
+def test_profile_with_requested_tier_honors_repo_floor_over_lower_dispatch() -> None:
+    """A repo-declared tier must survive a lower dispatch default (RC3-B, #743).
+
+    The dispatch payload defaults ``requested_tier`` to 1 with no "unset"
+    sentinel, so a hard replace silently downgraded a repo whose
+    ``.awf/workspace.yml`` declared a higher tier. Honor the max: dispatch can
+    only raise the repo's validation floor, never lower it (consistent with the
+    downstream ``max()`` tier resolution).
+    """
+    repo_tier_two = WorkspaceProfile(name="unit-profile", validation={"requested_tier": 2})
+
+    # A lower dispatch tier must not clobber the repo's declared floor.
+    kept = profile_with_requested_tier(repo_tier_two, 1)
+    assert kept is repo_tier_two
+    assert kept.validation.requested_tier == 2
+
+    # A higher dispatch tier still raises the floor.
+    raised = profile_with_requested_tier(repo_tier_two, 3)
+    assert raised.validation.requested_tier == 3
+    assert repo_tier_two.validation.requested_tier == 2
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("source_branch", "expected_source"),
     [("release/cut", "release/cut"), (None, "development")],

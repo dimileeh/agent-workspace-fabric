@@ -12,6 +12,7 @@ from awf.service import conformance_salvage as salvage_mod
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
     SALVAGE_BASE_UNAVAILABLE,
+    SALVAGE_NO_IMPLEMENTATION_DIFF,
     SALVAGE_SOURCE_UNAVAILABLE,
     ConformanceSalvageCapture,
     ConformanceSalvageError,
@@ -148,6 +149,130 @@ def test_capture_policy_includes_optional_source_and_string_gap(tmp_path: Path) 
     assert policy["remaining_gaps"] == ["add tests"]
     assert policy["plan_path"] == "docs/awf-plans/ws_capture.md"
     assert policy["report_path"] == "docs/awf-plans/ws_capture.conformance.json"
+
+
+def _seed_source_worktree_with_protected_edit(
+    work_dir: Path, workspace_id: str
+) -> tuple[Path, str]:
+    """Seed a worktree whose agent edited BOTH an impl file and .awf/workspace.yml."""
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    _git(["init", "-q"], worktree)
+    _git(["config", "user.name", "AWF Test"], worktree)
+    _git(["config", "user.email", "awf@test.local"], worktree)
+    (worktree / "src").mkdir()
+    (worktree / "src/app.py").write_text("VALUE = 'old'\n", encoding="utf-8")
+    (worktree / ".awf").mkdir()
+    (worktree / ".awf/workspace.yml").write_text(
+        "awf:\n  validation:\n    requested_tier: 1\n", encoding="utf-8"
+    )
+    _git(["add", "."], worktree)
+    _git(["commit", "-q", "-m", "base"], worktree)
+    base_commit = _git(["rev-parse", "HEAD"], worktree)
+    (worktree / "src/app.py").write_text("VALUE = 'new'\n", encoding="utf-8")
+    (worktree / ".awf/workspace.yml").write_text(
+        "awf:\n  validation:\n    requested_tier: 2\n", encoding="utf-8"
+    )
+    return worktree, base_commit
+
+
+@pytest.mark.unit
+def test_capture_quarantines_unowned_protected_workspace_yml(tmp_path: Path) -> None:
+    """An unowned .awf/workspace.yml edit is dropped from the salvage names AND patch (#743)."""
+    _, base_commit = _seed_source_worktree_with_protected_edit(tmp_path, "ws_quarantine")
+
+    capture = capture_conformance_salvage(
+        work_dir=tmp_path,
+        source_workspace_id="ws_quarantine",
+        source_base_commit=base_commit,
+        conformance_evidence={"gaps": "add tests"},
+        conformance_evidence_ref=None,
+        source_branch_name=None,
+        source_remote_push_branch=None,
+        owned_paths=[],
+    )
+
+    assert capture.quarantined_protected_paths == [".awf/workspace.yml"]
+    assert ".awf/workspace.yml" not in capture.implementation_paths
+    assert "src/app.py" in capture.implementation_paths
+    # The load-bearing part: the re-applied binary patch must not carry the edit.
+    patch_text = capture.patch_path.read_text(encoding="utf-8")
+    assert ".awf/workspace.yml" not in patch_text
+    assert "src/app.py" in patch_text
+    assert capture.as_policy()["quarantined_protected_paths"] == [".awf/workspace.yml"]
+
+
+@pytest.mark.unit
+def test_capture_keeps_owned_protected_edit(tmp_path: Path) -> None:
+    """A protected file the source explicitly owns is NOT quarantined."""
+    _, base_commit = _seed_source_worktree_with_protected_edit(tmp_path, "ws_owned")
+
+    capture = capture_conformance_salvage(
+        work_dir=tmp_path,
+        source_workspace_id="ws_owned",
+        source_base_commit=base_commit,
+        conformance_evidence=None,
+        conformance_evidence_ref=None,
+        source_branch_name=None,
+        source_remote_push_branch=None,
+        owned_paths=[".awf/workspace.yml"],
+    )
+
+    assert capture.quarantined_protected_paths == []
+    assert ".awf/workspace.yml" in capture.implementation_paths
+    patch_text = capture.patch_path.read_text(encoding="utf-8")
+    assert ".awf/workspace.yml" in patch_text
+    assert "quarantined_protected_paths" not in capture.as_policy()
+
+
+@pytest.mark.unit
+def test_capture_raises_when_only_unowned_protected_changed(tmp_path: Path) -> None:
+    """If the only change is an unowned protected file, there is nothing to salvage."""
+    worktree = tmp_path / "git" / "worktrees" / "ws_only_protected"
+    worktree.mkdir(parents=True)
+    _git(["init", "-q"], worktree)
+    _git(["config", "user.name", "AWF Test"], worktree)
+    _git(["config", "user.email", "awf@test.local"], worktree)
+    (worktree / "src").mkdir()
+    (worktree / "src/app.py").write_text("VALUE = 'x'\n", encoding="utf-8")
+    (worktree / ".awf").mkdir()
+    (worktree / ".awf/workspace.yml").write_text("awf: {}\n", encoding="utf-8")
+    _git(["add", "."], worktree)
+    _git(["commit", "-q", "-m", "base"], worktree)
+    base_commit = _git(["rev-parse", "HEAD"], worktree)
+    (worktree / ".awf/workspace.yml").write_text("awf:\n  changed: true\n", encoding="utf-8")
+
+    with pytest.raises(ConformanceSalvageError) as exc_info:
+        capture_conformance_salvage(
+            work_dir=tmp_path,
+            source_workspace_id="ws_only_protected",
+            source_base_commit=base_commit,
+            conformance_evidence=None,
+            conformance_evidence_ref=None,
+            source_branch_name=None,
+            source_remote_push_branch=None,
+            owned_paths=[],
+        )
+
+    assert exc_info.value.reason_code == SALVAGE_NO_IMPLEMENTATION_DIFF
+    assert exc_info.value.detail["quarantined_protected_paths"] == [".awf/workspace.yml"]
+
+
+@pytest.mark.unit
+def test_salvage_retry_prompt_flags_quarantined_protected_paths() -> None:
+    """The retry prompt tells the agent the protected edit was dropped (do not redo)."""
+    prompt = build_conformance_salvage_retry_prompt(
+        task_prompt="Add /link",
+        evidence={"gaps": "add tests"},
+        salvage={
+            "implementation_paths": ["src/app.py"],
+            "quarantined_protected_paths": [".awf/workspace.yml"],
+        },
+    )
+
+    assert "Quarantined protected quality-gate edits" in prompt
+    assert ".awf/workspace.yml" in prompt
+    assert "Do NOT re-create" in prompt
 
 
 @pytest.mark.unit
