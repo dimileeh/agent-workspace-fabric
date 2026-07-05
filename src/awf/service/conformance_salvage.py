@@ -7,12 +7,13 @@ import json
 import os
 import subprocess
 import tempfile
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from awf.control.quality_gates import unowned_protected_paths
 from awf.runtime.planning import build_conformance_retry_prompt
 from awf.service._git_salvage_utils import (
     CompletedProcessLike,
@@ -59,6 +60,7 @@ class ConformanceSalvageCapture:
     created_at: str
     plan_path: str | None = None
     report_path: str | None = None
+    quarantined_protected_paths: list[str] = field(default_factory=list)
 
     def as_policy(self) -> dict[str, Any]:
         """Convert capture metadata into a plan-policy payload."""
@@ -83,6 +85,8 @@ class ConformanceSalvageCapture:
             payload["plan_path"] = self.plan_path
         if self.report_path:
             payload["report_path"] = self.report_path
+        if self.quarantined_protected_paths:
+            payload["quarantined_protected_paths"] = self.quarantined_protected_paths
         return payload
 
 
@@ -111,9 +115,17 @@ def capture_conformance_salvage(
     conformance_evidence_ref: dict[str, str] | None,
     source_branch_name: str | None,
     source_remote_push_branch: str | None,
+    owned_paths: Sequence[str] = (),
     run_subprocess: SubprocessRun | None = None,
 ) -> ConformanceSalvageCapture:
-    """Capture a salvage patch and metadata from a failed workspace run."""
+    """Capture a salvage patch and metadata from a failed workspace run.
+
+    ``owned_paths`` is the source attempt's declared ownership. Any changed
+    protected quality-gate file NOT covered by it (e.g. an ``.awf/workspace.yml``
+    edit that caused a block) is quarantined: excluded from both the recorded
+    implementation paths and the re-applied binary patch, so a retry cannot
+    replay the exact protected change that caused the block (#743).
+    """
     if not source_base_commit:
         raise ConformanceSalvageError(
             reason_code=SALVAGE_BASE_UNAVAILABLE,
@@ -148,7 +160,7 @@ def capture_conformance_salvage(
         git_env = {**env_base, "GIT_INDEX_FILE": index_path}
         _run_git(source_worktree, ["read-tree", "HEAD"], run=run, env=git_env)
         _run_git(source_worktree, ["add", "-A", "--", "."], run=run, env=git_env)
-        implementation_paths = _git_lines(
+        all_implementation_paths = _git_lines(
             _run_git(
                 source_worktree,
                 [
@@ -179,15 +191,35 @@ def capture_conformance_salvage(
                 env=git_env,
             ).stdout
         )
+        # Quarantine any changed protected quality-gate file the source attempt did
+        # not own. Dropping it from BOTH the recorded implementation paths and the
+        # binary patch below is what stops a retry from replaying the exact
+        # protected change (e.g. the `.awf/workspace.yml` edit) that caused the
+        # block (#743). The name list alone is cosmetic; the patch exclusion is
+        # load-bearing, and both use the same quarantine set so they can't drift.
+        quarantined_protected_paths = list(
+            unowned_protected_paths(all_implementation_paths, owned_paths=owned_paths)
+        )
+        quarantined_set = set(quarantined_protected_paths)
+        implementation_paths = [
+            path for path in all_implementation_paths if path not in quarantined_set
+        ]
         if not implementation_paths:
             raise ConformanceSalvageError(
                 reason_code=SALVAGE_NO_IMPLEMENTATION_DIFF,
                 message=(
-                    "Conformance retry found no implementation diff to salvage; "
-                    "only AWF plan/conformance artifacts changed."
+                    "Conformance retry found no salvageable implementation diff; only "
+                    "AWF plan/conformance artifacts or quarantined protected "
+                    "quality-gate files changed."
                 ),
-                detail={"plan_artifact_paths": plan_artifact_paths},
+                detail={
+                    "plan_artifact_paths": plan_artifact_paths,
+                    "quarantined_protected_paths": quarantined_protected_paths,
+                },
             )
+        exclude_pathspecs = [f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**"] + [
+            f":(exclude){path}" for path in quarantined_protected_paths
+        ]
         patch = _run_git(
             source_worktree,
             [
@@ -197,7 +229,7 @@ def capture_conformance_salvage(
                 source_base_commit,
                 "--",
                 ".",
-                f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**",
+                *exclude_pathspecs,
             ],
             run=run,
             env=git_env,
@@ -223,6 +255,7 @@ def capture_conformance_salvage(
         created_at=datetime.now(UTC).isoformat(),
         plan_path=_optional_str(evidence.get("plan_path")),
         report_path=_optional_str(evidence.get("report_path")),
+        quarantined_protected_paths=quarantined_protected_paths,
     )
     metadata_path = patch_path.with_suffix(".json")
     metadata_path.write_text(
@@ -240,6 +273,19 @@ def build_conformance_salvage_retry_prompt(
 ) -> str:
     """Build a retry prompt that replays recovered conformance implementation diffs."""
     paths = _implementation_path_lines(salvage)
+    quarantined = salvage.get("quarantined_protected_paths") or []
+    quarantine_section = ""
+    if quarantined:
+        quarantine_lines = "\n".join(f"- `{path}`" for path in quarantined)
+        quarantine_section = (
+            "### Quarantined protected quality-gate edits\n"
+            "AWF intentionally DROPPED the following protected quality-gate file "
+            "edit(s) from the salvage because the prior attempt did not own them — "
+            "they caused a protected-file block. Do NOT re-create these edits. If a "
+            "policy change is genuinely required, ask the operator to grant explicit "
+            "ownership of the file instead of editing it yourself:\n"
+            f"{quarantine_lines}\n\n"
+        )
     return (
         "## Automatic AWF salvage\n\n"
         "AWF automatically captured the prior implementation diff from the failed "
@@ -247,6 +293,7 @@ def build_conformance_salvage_retry_prompt(
         "the agent runs. Continue from the recovered implementation; do not "
         "restart from scratch unless the recovered code is unusable.\n\n"
         f"### Salvaged implementation paths\n{paths}\n\n"
+        + quarantine_section
         + build_conformance_retry_prompt(task_prompt=task_prompt, evidence=evidence)
     )
 

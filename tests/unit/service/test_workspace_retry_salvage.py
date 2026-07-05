@@ -358,6 +358,53 @@ async def test_retry_conformance_unsatisfied_auto_salvages_implementation_diff(
     )
 
 
+@pytest.mark.unit
+async def test_retry_quarantines_unowned_protected_edit_from_salvage(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A retry must not replay an unowned ``.awf/workspace.yml`` edit from salvage (#743).
+
+    End-to-end regression for the cascade: the source attempt edited the protected
+    config (unowned), so the retry salvage quarantines it — it appears in neither
+    the recorded implementation paths nor the re-applied patch, so applying the
+    salvage can never re-create the exact change that caused the block.
+    """
+    settings = _settings_with_work_dir(tmp_path)
+    service = WorkspaceService(factory)
+    first = await service.create(_request())
+    base_commit = _create_conformance_source_worktree(settings, first.id, protected_edit=True)
+    await _mark_conformance_failed(factory, first.id, base_commit=base_commit)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry service test fixture",
+            settings=settings,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried = await WorkspaceRepository(session).get(retry.new_workspace.id)
+        assert retried is not None
+
+    salvage = retried.task_policy["conformance_salvage"]
+    assert salvage["quarantined_protected_paths"] == [".awf/workspace.yml"]
+    assert ".awf/workspace.yml" not in salvage["implementation_paths"]
+    assert salvage["implementation_paths"] == [
+        "src/awf/retry.py",
+        "tests/unit/test_retry.py",
+    ]
+    # The load-bearing guarantee: the re-applied patch carries no protected edit.
+    patch_text = Path(salvage["patch_path"]).read_text()
+    assert ".awf/workspace.yml" not in patch_text
+    # The retry prompt tells the agent the policy edit was intentionally dropped.
+    assert "Quarantined protected quality-gate edits" in retried.task_prompt
+    assert ".awf/workspace.yml" in retried.task_prompt
+
+
 async def test_retry_conformance_unsatisfied_without_evidence_still_salvages_diff(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
