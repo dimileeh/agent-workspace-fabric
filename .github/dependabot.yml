@@ -5,12 +5,20 @@ updates:
     schedule:
       interval: "weekly"
     target-branch: "development"
+    ignore:
+      # 6.156.x dropped sdist; breaks uv sync on platforms without a wheel.
+      - dependency-name: "hypothesis"
+        versions: [">=6.156.0"]
 
   - package-ecosystem: "npm"
     directory: "/apps/console"
     schedule:
       interval: "weekly"
     target-branch: "development"
+    ignore:
+      # eslint-config-next@16.x plugins still peer-cap at ESLint 9.
+      - dependency-name: "eslint"
+        versions: [">=10.0.0"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
