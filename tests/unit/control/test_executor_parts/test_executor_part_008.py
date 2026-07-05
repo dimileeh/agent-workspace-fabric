@@ -25,6 +25,10 @@ from awf.control.executor import (
 from awf.control.executor.constants import (
     POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
 )
+from awf.control.executor.state_ops import (
+    RESUME_SETUP_FAILED_REASON_CODE,
+    RESUME_SETUP_FAILURE_BLOCK_TYPE,
+)
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord
 from awf.db.repositories import WorkspaceRepository
@@ -32,6 +36,7 @@ from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import (
+    ValidateToolProbeResult,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
@@ -442,6 +447,152 @@ async def test_blocked_resume_grant_does_not_invoke_fix_agent_on_validation_fail
     assert validate_phase_calls == 1
     # The coding adapter was never invoked — no fix-pass agent run (which would
     # carry a fix prompt as ``input_bytes``) spent tokens or touched the change.
+    agent_calls = [call for call in fake.calls if call.input_bytes is not None]
+    assert agent_calls == []
+
+
+def _fake_env_probe(result: ValidateToolProbeResult) -> Any:
+    async def _probe(**_kwargs: Any) -> ValidateToolProbeResult:
+        return result
+
+    return _probe
+
+
+def _capture_profile_phase_names(
+    executor: WorkspaceExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, ...]]:
+    phase_calls: list[tuple[str, ...]] = []
+    real_run_profile_phases = executor._validation.run_profile_phases
+
+    async def _capture(
+        *, phase_names: tuple[str, ...] | list[str], **kwargs: Any
+    ) -> ValidationResult:
+        phase_calls.append(tuple(phase_names))
+        return await real_run_profile_phases(phase_names=phase_names, **kwargs)
+
+    monkeypatch.setattr(executor._validation, "run_profile_phases", _capture)
+    return phase_calls
+
+
+@pytest.mark.unit
+async def test_blocked_directive_resume_skips_setup_when_env_healthy(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directive resume with a healthy env skips the flaky ``setup`` phase (#743)."""
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory, grant_path=None, directive="revert the protected change"
+    )
+    fake.queue_result(returncode=0, stdout="codex finished")
+    _queue_blocked_resume_to_push(fake, ws_id=ws_id)
+
+    monkeypatch.setattr(
+        executor._validation,
+        "probe_validate_command_tools",
+        _fake_env_probe(ValidateToolProbeResult()),  # healthy: no missing, no error
+    )
+    phase_calls = _capture_profile_phase_names(executor, monkeypatch)
+
+    await executor.resume_blocked_execution(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+    # ``setup`` was skipped: the profile-phase call carried only ``pre_agent``.
+    assert ("setup", "pre_agent") not in phase_calls
+    assert ("pre_agent",) in phase_calls
+
+
+@pytest.mark.unit
+async def test_blocked_directive_resume_reruns_setup_when_env_unhealthy(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directive resume whose env probe reports trouble re-runs setup (safe fallback)."""
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory, grant_path=None, directive="revert the protected change"
+    )
+    fake.queue_result(returncode=0, stdout="codex finished")
+    _queue_blocked_resume_to_push(fake, ws_id=ws_id)
+
+    monkeypatch.setattr(
+        executor._validation,
+        "probe_validate_command_tools",
+        _fake_env_probe(ValidateToolProbeResult(probe_errored=True)),  # unhealthy
+    )
+    phase_calls = _capture_profile_phase_names(executor, monkeypatch)
+
+    await executor.resume_blocked_execution(ws_id)
+
+    # On any probe doubt, setup re-runs (the full setup+pre_agent phase set).
+    assert ("setup", "pre_agent") in phase_calls
+
+
+@pytest.mark.unit
+async def test_blocked_resume_setup_failure_reblocks_instead_of_failing(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A setup failure on a blocked-resume re-pauses into ``blocked``, not ``failed`` (#743).
+
+    Terminally failing would discard the operator directive and spent work; the
+    workspace stays operator-recoverable instead.
+    """
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory, grant_path=None, directive="revert the protected change"
+    )
+    # Unhealthy env → setup runs; then setup fails (e.g. uv venv --python 3.14).
+    monkeypatch.setattr(
+        executor._validation,
+        "probe_validate_command_tools",
+        _fake_env_probe(ValidateToolProbeResult(probe_errored=True)),
+    )
+    stdout_path = tmp_path / "setup.stdout"
+    stderr_path = tmp_path / "setup.stderr"
+    stdout_path.write_text("error: failed to fetch python 3.14\n", encoding="utf-8")
+    stderr_path.write_text("uv venv failed\n", encoding="utf-8")
+    failing_setup = ValidationResult(
+        commands=[
+            ValidationCommandResult(
+                command="uv venv --python 3.14 .venv",
+                returncode=1,
+                duration_seconds=0.1,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                reason_code="COMMAND_FAILED",
+            )
+        ]
+    )
+    real_run_profile_phases = executor._validation.run_profile_phases
+
+    async def _fail_setup(
+        *, phase_names: tuple[str, ...] | list[str], **kwargs: Any
+    ) -> ValidationResult:
+        if tuple(phase_names) == ("setup", "pre_agent"):
+            return failing_setup
+        return await real_run_profile_phases(phase_names=phase_names, **kwargs)
+
+    monkeypatch.setattr(executor._validation, "run_profile_phases", _fail_setup)
+
+    await executor.resume_blocked_execution(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        # Re-blocked (operator-recoverable), NOT terminally failed.
+        assert ws.status == WorkspaceStatus.blocked.value
+        assert ws.block_reason_code == RESUME_SETUP_FAILED_REASON_CODE
+        assert ws.block_type == RESUME_SETUP_FAILURE_BLOCK_TYPE
+    # No agent fix-pass ran (setup died before the agent).
     agent_calls = [call for call in fake.calls if call.input_bytes is not None]
     assert agent_calls == []
 

@@ -379,13 +379,43 @@ async def execute(
             return
         if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
             return
+        # On a *directive* blocked-resume (the agent re-runs to act on the operator
+        # directive) the warm venv/stack usually survives the block, so re-running
+        # the often-flaky profile ``setup`` phase is redundant and is the direct
+        # cause of #743 (``uv venv --python 3.14`` re-run dies terminally). Skip
+        # ``setup`` only when a health probe confirms the validate toolchain still
+        # resolves in the container; on ANY doubt (a missing tool, a probe-infra
+        # error, a torn-down stack) fall through to a normal setup run. A
+        # grant-resume (``resume_skip_agent``) always re-runs setup because an
+        # approved config/dep edit may have staled the env.
+        setup_phase_names: tuple[str, ...] = ("setup", "pre_agent")
+        if resume_from_blocked and not resume_skip_agent:
+            env_probe = await self._validation.probe_validate_command_tools(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+            )
+            if not env_probe.probe_errored and not env_probe.missing:
+                setup_phase_names = ("pre_agent",)
+                _log.info(
+                    "executor.blocked_resume_setup_skipped_env_healthy",
+                    workspace_id=workspace_id,
+                )
+            else:
+                _log.info(
+                    "executor.blocked_resume_setup_rerun_env_unhealthy",
+                    workspace_id=workspace_id,
+                    probe_errored=env_probe.probe_errored,
+                    missing_tools=[target.tool for target in env_probe.missing],
+                )
         try:
             setup_result = await self._validation.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
-                phase_names=("setup", "pre_agent"),
+                phase_names=setup_phase_names,
                 worktree_path=worktree_path,
             )
         except ComposeExecCleanupError as exc:
@@ -419,6 +449,28 @@ async def execute(
             setup_failure_reason_code = (
                 SETUP_DEPENDENCY_NETWORK_FAILURE if setup_dependency_details is not None else None
             )
+            if resume_from_blocked:
+                # A setup failure on a blocked-resume must not discard the operator
+                # directive and spent work by terminally failing. Re-pause into
+                # ``blocked`` (operator-recoverable) so the operator can resolve the
+                # provisioning issue and re-issue ``guide`` (#743). The wrapper
+                # finalizes any active recovery operations itself and clears the
+                # directive hint, so the worker will not auto-resume straight back
+                # into the same failure (no loop).
+                reblocked = await self.enter_blocked_for_resume_setup_failure(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    resume_phase="setup",
+                    execution_owner_id=execution_owner_id,
+                )
+                _log.info(
+                    "executor.blocked_resume_setup_failed_repaused",
+                    workspace_id=workspace_id,
+                    repaused=reblocked,
+                    reason_code=setup_failure_reason_code,
+                    command=first_fail.command if first_fail is not None else None,
+                )
+                return
             if recovery is not None:
                 recovery_setup_failure_reason_code = (
                     setup_failure_reason_code or "MONITOR_RECOVERY_SETUP_FAILED"
