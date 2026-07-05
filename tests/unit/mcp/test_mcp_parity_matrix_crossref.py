@@ -4,8 +4,8 @@ import re
 from pathlib import Path
 
 import pytest
-from tests.unit.contracts._introspection import rest_route_signatures
 
+from tests.unit.contracts._introspection import rest_route_signatures
 from tests.unit.mcp._parity_utils import (
     MISSING_STATUS,
     PARTIAL_STATUS,
