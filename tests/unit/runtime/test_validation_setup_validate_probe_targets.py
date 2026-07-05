@@ -17,6 +17,7 @@ from awf.runtime.validation import (
     _leading_executables,
     validate_command_probe_targets,
 )
+from awf.runtime.validation_setup import validate_phase_command_strings
 
 
 def _profile_with_validate(commands: list[str]) -> WorkspaceProfile:
@@ -917,3 +918,47 @@ class TestValidateCommandProbeTargets:
             ("ruff", "ruff check ."),
             ("coverage", "coverage run -m pytest"),
         ]
+
+
+class TestValidatePhaseCommandStrings:
+    """The AWF-owned validation command set the conformance prompt enumerates (#745)."""
+
+    @pytest.mark.unit
+    def test_includes_coverage_final_gate_command(self) -> None:
+        """A coverage ``final_gate`` command is part of what AWF runs, so it is listed."""
+        profile = _profile_with_coverage_gate(
+            validate=["ruff check ."],
+            final_gate="coverage",
+            coverage_command="coverage run -m pytest",
+        )
+
+        assert validate_phase_command_strings(profile) == [
+            "ruff check .",
+            "coverage run -m pytest",
+        ]
+
+    @pytest.mark.unit
+    def test_empty_validate_with_coverage_gate_is_not_reported_empty(self) -> None:
+        """The regression: empty ``validate`` + a coverage gate still runs coverage in AWF.
+
+        Reporting an empty set here would tell the agent AWF runs no validation and
+        wrongly treat the coverage gate as CI-delegated.
+        """
+        profile = _profile_with_coverage_gate(
+            validate=[],
+            final_gate="coverage",
+            coverage_command="coverage run -m pytest",
+        )
+
+        assert validate_phase_command_strings(profile) == ["coverage run -m pytest"]
+
+    @pytest.mark.unit
+    def test_excludes_coverage_command_when_final_gate_is_not_coverage(self) -> None:
+        """With ``final_gate`` other than coverage, AWF does not run the coverage command."""
+        profile = _profile_with_coverage_gate(
+            validate=["ruff check ."],
+            final_gate="none",
+            coverage_command="coverage run -m pytest",
+        )
+
+        assert validate_phase_command_strings(profile) == ["ruff check ."]

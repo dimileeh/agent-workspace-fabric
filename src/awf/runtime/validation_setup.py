@@ -174,18 +174,25 @@ _HTTP_HEALTHCHECK_SCRIPT = (
 
 
 def validate_phase_command_strings(profile: WorkspaceProfile) -> list[str]:
-    """Return the resolved AWF ``validate:`` command strings for a profile.
+    """Return the resolved AWF-owned validation command strings for a profile.
 
-    This is the exact AWF-owned validation command set (``post_agent`` +
-    ``validate`` phases, in execution order) that AWF runs after the agent
-    completes. Callers use it to distinguish an AWF-owned validation gate from a
-    command the repo delegates to CI, so plan-conformance does not demand
-    AWF-internal evidence for a CI-delegated command (#743).
+    This is the exact command set AWF runs after the agent completes: the
+    ``post_agent`` + ``validate`` phase commands (in execution order) PLUS the
+    profile's coverage ``final_gate`` command when ``final_gate == "coverage"``.
+    Callers use it to distinguish an AWF-owned validation gate from a command the
+    repo delegates to CI, so plan-conformance does not demand AWF-internal
+    evidence for a CI-delegated command (#743). The coverage final-gate command
+    must be included, or a profile with an empty ``validate:`` set + a local
+    coverage gate would be misreported as running no AWF validation at all.
     """
-    return [
+    commands = [
         step.command.command
         for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
     ]
+    coverage_command = profile.validation.coverage.command
+    if profile.validation.strategy.final_gate == "coverage" and coverage_command is not None:
+        commands.append(coverage_command.command)
+    return commands
 
 
 def profile_phase_command_plan(
