@@ -492,7 +492,9 @@ async def test_blocked_directive_resume_skips_setup_when_env_healthy(
     monkeypatch.setattr(
         executor._validation,
         "probe_validate_command_tools",
-        _fake_env_probe(ValidateToolProbeResult()),  # healthy: no missing, no error
+        _fake_env_probe(
+            ValidateToolProbeResult(probe_ran=True)
+        ),  # healthy: probe ran, no missing, no error
     )
     phase_calls = _capture_profile_phase_names(executor, monkeypatch)
 
@@ -532,6 +534,44 @@ async def test_blocked_directive_resume_reruns_setup_when_env_unhealthy(
 
     # On any probe doubt, setup re-runs (the full setup+pre_agent phase set).
     assert ("setup", "pre_agent") in phase_calls
+
+
+@pytest.mark.unit
+async def test_blocked_directive_resume_reruns_setup_when_probe_did_not_run(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directive resume whose profile yields no probeable validate targets
+    re-runs setup instead of skipping it (#746).
+
+    ``probe_validate_command_tools`` short-circuits without exec when the profile
+    has no probeable validate commands, returning a default result with both
+    ``probe_errored`` and ``missing`` empty. Treating that as a healthy env would
+    skip setup, so a torn-down venv/stack with no probe targets slips straight to
+    pre_agent/agent and re-blocks repeatedly instead of reprovisioning. A non-run
+    probe (``probe_ran=False``) must be treated as doubt.
+    """
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory, grant_path=None, directive="revert the protected change"
+    )
+    fake.queue_result(returncode=0, stdout="codex finished")
+    _queue_blocked_resume_to_push(fake, ws_id=ws_id)
+
+    monkeypatch.setattr(
+        executor._validation,
+        "probe_validate_command_tools",
+        _fake_env_probe(ValidateToolProbeResult()),  # no targets -> probe did not run
+    )
+    phase_calls = _capture_profile_phase_names(executor, monkeypatch)
+
+    await executor.resume_blocked_execution(ws_id)
+
+    # A non-run probe is doubt: setup re-runs (the full setup+pre_agent phase set)
+    # instead of skipping straight to pre_agent.
+    assert ("setup", "pre_agent") in phase_calls
+    assert ("pre_agent",) not in phase_calls
 
 
 @pytest.mark.unit

@@ -486,7 +486,7 @@ class ValidationRunner:
                     ),
                     timeout=_TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS,
                 )
-            return ValidateToolProbeResult(probe_errored=True)
+            return ValidateToolProbeResult(probe_errored=True, probe_ran=True)
         except asyncio.CancelledError:
             await cleanup_compose_exec_invocation_after_cancellation(
                 self._runner,
@@ -497,17 +497,17 @@ class ValidationRunner:
         except OSError:
             # The container exec could not spawn at all: a probe-infra failure,
             # not a genuine missing tool.
-            return ValidateToolProbeResult(probe_errored=True)
+            return ValidateToolProbeResult(probe_errored=True, probe_ran=True)
 
         if result.returncode != 0:
-            return ValidateToolProbeResult(probe_errored=True)
+            return ValidateToolProbeResult(probe_errored=True, probe_ran=True)
 
         missing_tools = {
             match.group("tool").strip()
             for match in _VALIDATE_TOOLCHAIN_PROBE_MISSING_RE.finditer(result.stdout)
         }
         missing_targets = tuple(target for target in targets if target.tool in missing_tools)
-        return ValidateToolProbeResult(missing=missing_targets)
+        return ValidateToolProbeResult(missing=missing_targets, probe_ran=True)
 
     async def run_profile_phases(
         self,

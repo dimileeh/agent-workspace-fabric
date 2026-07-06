@@ -631,7 +631,13 @@ async def _blocked_resume_setup_phase_names(
     reuses the warm venv/stack and SKIPS the flaky ``setup`` phase when an
     env-health probe confirms the validate toolchain still resolves in the
     container; on ANY doubt (a missing tool, a probe-infra error, a torn-down
-    stack) it re-runs setup.
+    stack, OR a profile with no probeable validate targets) it re-runs setup.
+
+    A profile that yields no probeable validate targets short-circuits the probe
+    without exec (``probe_ran=False``); that empty result is NOT evidence of a
+    healthy env, so a torn-down venv/stack with no probe targets would otherwise
+    slip straight to pre_agent/agent and re-block repeatedly instead of
+    reprovisioning. Treat a non-run probe as doubt and re-run setup (#746).
     """
     env_probe = await self._validation.probe_validate_command_tools(
         workspace_id=workspace_id,
@@ -639,13 +645,14 @@ async def _blocked_resume_setup_phase_names(
         compose_file=compose_file,
         profile=profile,
     )
-    if not env_probe.probe_errored and not env_probe.missing:
+    if env_probe.probe_ran and not env_probe.probe_errored and not env_probe.missing:
         _log.info("executor.blocked_resume_setup_skipped_env_healthy", workspace_id=workspace_id)
         return ("pre_agent",)
     _log.info(
         "executor.blocked_resume_setup_rerun_env_unhealthy",
         workspace_id=workspace_id,
         probe_errored=env_probe.probe_errored,
+        probe_ran=env_probe.probe_ran,
         missing_tools=[target.tool for target in env_probe.missing],
     )
     return ("setup", "pre_agent")
