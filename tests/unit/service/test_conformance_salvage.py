@@ -226,6 +226,114 @@ def test_capture_keeps_owned_protected_edit(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_capture_preserves_classified_safe_pyproject_dependency_addition(
+    tmp_path: Path,
+) -> None:
+    """A safe unowned pyproject.toml edit is NOT quarantined (#PRRT_kwDOSJAM6s6OhM1p).
+
+    A conformance/timeout retry is not necessarily a protected-file block: the
+    gate may have already classified the agent's unowned protected edit as safe
+    (e.g. a ``pyproject.toml`` dependency addition that the classifier permits)
+    and let the workspace proceed past it before failing for an unrelated
+    conformance/timeout reason. Re-running the gate's classifier over the
+    unowned protected paths keeps the safe edit in the salvage patch so the
+    retry still has the dependency update the agent made. Only edits the gate
+    would actually block (e.g. a dependency REMOVAL) are quarantined.
+    """
+    worktree = tmp_path / "git" / "worktrees" / "ws_safe_pyproject"
+    worktree.mkdir(parents=True)
+    _git(["init", "-q"], worktree)
+    _git(["config", "user.name", "AWF Test"], worktree)
+    _git(["config", "user.email", "awf@test.local"], worktree)
+    (worktree / "src").mkdir()
+    (worktree / "src/app.py").write_text("VALUE = 'old'\n", encoding="utf-8")
+    (worktree / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\ndependencies = ["requests"]\n',
+        encoding="utf-8",
+    )
+    _git(["add", "."], worktree)
+    _git(["commit", "-q", "-m", "base"], worktree)
+    base_commit = _git(["rev-parse", "HEAD"], worktree)
+    # Real implementation change + a safe unowned pyproject dependency ADDITION.
+    (worktree / "src/app.py").write_text("VALUE = 'new'\n", encoding="utf-8")
+    (worktree / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\ndependencies = ["requests", "httpx"]\n',
+        encoding="utf-8",
+    )
+
+    capture = capture_conformance_salvage(
+        work_dir=tmp_path,
+        source_workspace_id="ws_safe_pyproject",
+        source_base_commit=base_commit,
+        conformance_evidence={"gaps": "add tests"},
+        conformance_evidence_ref=None,
+        source_branch_name=None,
+        source_remote_push_branch=None,
+        owned_paths=[],
+    )
+
+    # The safe dependency addition is NOT quarantined — the classifier permits it.
+    assert capture.quarantined_protected_paths == []
+    assert "pyproject.toml" in capture.implementation_paths
+    assert "src/app.py" in capture.implementation_paths
+    # The load-bearing part: the re-applied binary patch carries the dependency
+    # update the retry needs to build the salvaged implementation.
+    patch_text = capture.patch_path.read_text(encoding="utf-8")
+    assert "httpx" in patch_text
+    assert "src/app.py" in patch_text
+    assert "quarantined_protected_paths" not in capture.as_policy()
+
+
+@pytest.mark.unit
+def test_capture_quarantines_pyproject_dependency_removal(tmp_path: Path) -> None:
+    """A weakening unowned pyproject edit (dependency removal) IS quarantined.
+
+    The classifier re-run must still quarantine edits the gate would actually
+    block — a dependency removal weakens validation, so the salvage drops it
+    from both the recorded implementation paths and the binary patch.
+    """
+    worktree = tmp_path / "git" / "worktrees" / "ws_unsafe_pyproject"
+    worktree.mkdir(parents=True)
+    _git(["init", "-q"], worktree)
+    _git(["config", "user.name", "AWF Test"], worktree)
+    _git(["config", "user.email", "awf@test.local"], worktree)
+    (worktree / "src").mkdir()
+    (worktree / "src/app.py").write_text("VALUE = 'old'\n", encoding="utf-8")
+    (worktree / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\ndependencies = ["requests"]\n',
+        encoding="utf-8",
+    )
+    _git(["add", "."], worktree)
+    _git(["commit", "-q", "-m", "base"], worktree)
+    base_commit = _git(["rev-parse", "HEAD"], worktree)
+    # Real implementation change + an unowned dependency REMOVAL (a weakening).
+    (worktree / "src/app.py").write_text("VALUE = 'new'\n", encoding="utf-8")
+    (worktree / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\ndependencies = []\n',
+        encoding="utf-8",
+    )
+
+    capture = capture_conformance_salvage(
+        work_dir=tmp_path,
+        source_workspace_id="ws_unsafe_pyproject",
+        source_base_commit=base_commit,
+        conformance_evidence={"gaps": "add tests"},
+        conformance_evidence_ref=None,
+        source_branch_name=None,
+        source_remote_push_branch=None,
+        owned_paths=[],
+    )
+
+    assert capture.quarantined_protected_paths == ["pyproject.toml"]
+    assert "pyproject.toml" not in capture.implementation_paths
+    assert "src/app.py" in capture.implementation_paths
+    patch_text = capture.patch_path.read_text(encoding="utf-8")
+    assert "pyproject.toml" not in patch_text
+    assert "src/app.py" in patch_text
+    assert capture.as_policy()["quarantined_protected_paths"] == ["pyproject.toml"]
+
+
+@pytest.mark.unit
 def test_capture_raises_when_only_unowned_protected_changed(tmp_path: Path) -> None:
     """If the only change is an unowned protected file, there is nothing to salvage."""
     worktree = tmp_path / "git" / "worktrees" / "ws_only_protected"
