@@ -7,19 +7,27 @@ import json
 import os
 import subprocess
 import tempfile
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from awf.common.git_identity import git_safe_directory_config_args
+from awf.control.quality_gates import (
+    find_protected_quality_gate_changes,
+    requires_protected_file_diff,
+    unowned_protected_paths,
+)
+from awf.control.quality_gates_common import ProtectedFileDiff
 from awf.runtime.planning import build_conformance_retry_prompt
 from awf.service._git_salvage_utils import (
+    GIT_TIMEOUT_SECONDS,
     CompletedProcessLike,
     SubprocessRun,
 )
 from awf.service._git_salvage_utils import (
-    git_lines as _git_lines,
+    paths_from_name_status as _paths_from_name_status,
 )
 from awf.service._git_salvage_utils import (
     run_git as _run_git_shared,
@@ -59,6 +67,7 @@ class ConformanceSalvageCapture:
     created_at: str
     plan_path: str | None = None
     report_path: str | None = None
+    quarantined_protected_paths: list[str] = field(default_factory=list)
 
     def as_policy(self) -> dict[str, Any]:
         """Convert capture metadata into a plan-policy payload."""
@@ -83,6 +92,8 @@ class ConformanceSalvageCapture:
             payload["plan_path"] = self.plan_path
         if self.report_path:
             payload["report_path"] = self.report_path
+        if self.quarantined_protected_paths:
+            payload["quarantined_protected_paths"] = self.quarantined_protected_paths
         return payload
 
 
@@ -111,9 +122,17 @@ def capture_conformance_salvage(
     conformance_evidence_ref: dict[str, str] | None,
     source_branch_name: str | None,
     source_remote_push_branch: str | None,
+    owned_paths: Sequence[str] = (),
     run_subprocess: SubprocessRun | None = None,
 ) -> ConformanceSalvageCapture:
-    """Capture a salvage patch and metadata from a failed workspace run."""
+    """Capture a salvage patch and metadata from a failed workspace run.
+
+    ``owned_paths`` is the source attempt's declared ownership. Any changed
+    protected quality-gate file NOT covered by it (e.g. an ``.awf/workspace.yml``
+    edit that caused a block) is quarantined: excluded from both the recorded
+    implementation paths and the re-applied binary patch, so a retry cannot
+    replay the exact protected change that caused the block (#743).
+    """
     if not source_base_commit:
         raise ConformanceSalvageError(
             reason_code=SALVAGE_BASE_UNAVAILABLE,
@@ -148,56 +167,119 @@ def capture_conformance_salvage(
         git_env = {**env_base, "GIT_INDEX_FILE": index_path}
         _run_git(source_worktree, ["read-tree", "HEAD"], run=run, env=git_env)
         _run_git(source_worktree, ["add", "-A", "--", "."], run=run, env=git_env)
-        implementation_paths = _git_lines(
+        # Build the changed-path set from rename-aware ``--name-status -z`` so a
+        # renamed protected source (e.g. ``git mv .awf/workspace.yml
+        # sub/workspace.yml``) appears on BOTH sides. ``--name-only`` would only
+        # record the destination, so the quarantine set built from it would miss
+        # the protected source and the binary patch below would still replay the
+        # protected rename into the retry workspace (#PRRT_kwDOSJAM6s6Og3Be).
+        name_status_args_common: list[str] = [
+            "diff",
+            "--cached",
+            "--name-status",
+            "-z",
+            source_base_commit,
+            "--",
+        ]
+        name_status_impl_stdout = _run_git(
+            source_worktree,
+            [
+                *name_status_args_common,
+                ".",
+                f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**",
+            ],
+            run=run,
+            env=git_env,
+        ).stdout
+        all_implementation_paths = _paths_from_name_status(name_status_impl_stdout)
+        plan_artifact_paths = _paths_from_name_status(
             _run_git(
                 source_worktree,
                 [
-                    "diff",
-                    "--cached",
-                    "--name-only",
-                    source_base_commit,
-                    "--",
-                    ".",
-                    f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**",
-                ],
-                run=run,
-                env=git_env,
-            ).stdout
-        )
-        plan_artifact_paths = _git_lines(
-            _run_git(
-                source_worktree,
-                [
-                    "diff",
-                    "--cached",
-                    "--name-only",
-                    source_base_commit,
-                    "--",
+                    *name_status_args_common,
                     INTERNAL_PLAN_ARTIFACT_PREFIX,
                 ],
                 run=run,
                 env=git_env,
             ).stdout
         )
+        # Quarantine the changed protected quality-gate files the source attempt
+        # did not own AND that the protected gate would actually block. Dropping
+        # them from BOTH the recorded implementation paths and the binary patch
+        # below is what stops a retry from replaying the exact protected change
+        # (e.g. the `.awf/workspace.yml` edit) that caused the block (#743). The
+        # name list alone is cosmetic; the patch exclusion is load-bearing, and
+        # both use the same quarantine set so they can't drift.
+        #
+        # A conformance/timeout failure is NOT necessarily a protected-file
+        # block: the gate may have already classified the agent's unowned
+        # protected edit as safe (e.g. a ``pyproject.toml`` dependency addition
+        # or a pinned workflow-action bump) and let the workspace proceed past
+        # it before failing for an unrelated conformance/timeout reason. Such a
+        # safe edit must NOT be quarantined — the retry needs the dependency/CI
+        # update the agent made, or the salvaged implementation diff will not
+        # build or pass. So before excluding anything from the patch, re-run the
+        # gate's own classifier over the unowned protected paths and keep only
+        # the ones that produce real violations. The classifier is the same one
+        # the gate runs at commit time, so the salvage can never quarantine a
+        # path the gate would have permitted (#PRRT_kwDOSJAM6s6OhM1p).
+        candidate_protected_paths = list(
+            unowned_protected_paths(all_implementation_paths, owned_paths=owned_paths)
+        )
+        quarantined_protected_paths = _quarantine_blocking_protected_paths(
+            candidate_protected_paths,
+            source_worktree=source_worktree,
+            source_base_commit=source_base_commit,
+            run=run,
+            git_env=git_env,
+            env_base=env_base,
+        )
+        quarantined_set = set(quarantined_protected_paths)
+        # A rename whose protected source is quarantined also has a
+        # non-protected destination that must be excluded from the binary patch
+        # (otherwise ``--no-renames`` below emits it as an unrelated add). Pair
+        # the destination back in so both sides are dropped (#PRRT_kwDOSJAM6s6Og3Be).
+        rename_partner_paths = _rename_partners(name_status_impl_stdout, quarantined_set)
+        for path in rename_partner_paths:
+            if path not in quarantined_set:
+                quarantined_protected_paths.append(path)
+                quarantined_set.add(path)
+        implementation_paths = [
+            path for path in all_implementation_paths if path not in quarantined_set
+        ]
         if not implementation_paths:
             raise ConformanceSalvageError(
                 reason_code=SALVAGE_NO_IMPLEMENTATION_DIFF,
                 message=(
-                    "Conformance retry found no implementation diff to salvage; "
-                    "only AWF plan/conformance artifacts changed."
+                    "Conformance retry found no salvageable implementation diff; only "
+                    "AWF plan/conformance artifacts or quarantined protected "
+                    "quality-gate files changed."
                 ),
-                detail={"plan_artifact_paths": plan_artifact_paths},
+                detail={
+                    "plan_artifact_paths": plan_artifact_paths,
+                    "quarantined_protected_paths": quarantined_protected_paths,
+                },
             )
+        exclude_pathspecs = [f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**"] + [
+            f":(exclude){path}" for path in quarantined_protected_paths
+        ]
+        # ``--no-renames`` forces git to treat a rename as a delete+add pair, so
+        # excluding the quarantined source AND destination pathspecs drops both
+        # halves of a renamed protected file. With rename detection on, excluding
+        # only the source would still emit the destination as an unrelated add,
+        # and excluding only the destination would still emit the source deletion
+        # — replaying the protected edit either way (#PRRT_kwDOSJAM6s6Og3Be).
         patch = _run_git(
             source_worktree,
             [
                 "diff",
                 "--cached",
                 "--binary",
+                "--no-renames",
                 source_base_commit,
                 "--",
                 ".",
-                f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**",
+                *exclude_pathspecs,
             ],
             run=run,
             env=git_env,
@@ -223,6 +305,7 @@ def capture_conformance_salvage(
         created_at=datetime.now(UTC).isoformat(),
         plan_path=_optional_str(evidence.get("plan_path")),
         report_path=_optional_str(evidence.get("report_path")),
+        quarantined_protected_paths=quarantined_protected_paths,
     )
     metadata_path = patch_path.with_suffix(".json")
     metadata_path.write_text(
@@ -240,6 +323,19 @@ def build_conformance_salvage_retry_prompt(
 ) -> str:
     """Build a retry prompt that replays recovered conformance implementation diffs."""
     paths = _implementation_path_lines(salvage)
+    quarantined = salvage.get("quarantined_protected_paths") or []
+    quarantine_section = ""
+    if quarantined:
+        quarantine_lines = "\n".join(f"- `{path}`" for path in quarantined)
+        quarantine_section = (
+            "### Quarantined protected quality-gate edits\n"
+            "AWF intentionally DROPPED the following protected quality-gate file "
+            "edit(s) from the salvage because the prior attempt did not own them — "
+            "they caused a protected-file block. Do NOT re-create these edits. If a "
+            "policy change is genuinely required, ask the operator to grant explicit "
+            "ownership of the file instead of editing it yourself:\n"
+            f"{quarantine_lines}\n\n"
+        )
     return (
         "## Automatic AWF salvage\n\n"
         "AWF automatically captured the prior implementation diff from the failed "
@@ -247,6 +343,7 @@ def build_conformance_salvage_retry_prompt(
         "the agent runs. Continue from the recovered implementation; do not "
         "restart from scratch unless the recovered code is unusable.\n\n"
         f"### Salvaged implementation paths\n{paths}\n\n"
+        + quarantine_section
         + build_conformance_retry_prompt(task_prompt=task_prompt, evidence=evidence)
     )
 
@@ -329,6 +426,30 @@ def _run_git(
     )
 
 
+def _run_git_nocheck(
+    worktree: Path,
+    args: list[str],
+    *,
+    run: SubprocessRun,
+    env: Mapping[str, str],
+) -> CompletedProcessLike:
+    """Run a git command for salvage WITHOUT raising on a nonzero exit.
+
+    Used for ``git cat-file -e <refspec>`` probes where a nonzero exit means a
+    path is absent (a normal case for a newly-added protected file), not a
+    salvage failure. The shared ``_run_git`` raises on nonzero exit, which would
+    conflate a missing path with a real git error.
+    """
+    return run(
+        ["git", *git_safe_directory_config_args(worktree), "-C", str(worktree), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=GIT_TIMEOUT_SECONDS,
+        env=env,
+    )
+
+
 def _evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
     """Convert salvage evidence gaps into a stable list of non-empty strings."""
     value = evidence.get("gaps")
@@ -361,3 +482,171 @@ def _optional_str(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _rename_partners(
+    name_status_z_stdout: str,
+    quarantined_set: set[str],
+) -> list[str]:
+    """Return rename destinations whose source is quarantined, and vice versa.
+
+    Parses ``git diff --name-status -z`` output to find rename/copy records
+    (status ``R``/``C``) where one side is in ``quarantined_set`` and returns the
+    other side so the binary patch exclusion can drop both halves of the
+    protected rename (#PRRT_kwDOSJAM6s6Og3Be). Destinations are appended in
+    first-seen order.
+    """
+    if not name_status_z_stdout or not quarantined_set:
+        return []
+    if "\0" not in name_status_z_stdout:
+        return []
+    fields = name_status_z_stdout.split("\0")
+    if not fields or fields[-1] != "":
+        return []
+    fields = fields[:-1]
+    partners: list[str] = []
+    seen: set[str] = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if not status:
+            continue
+        path_count = 2 if status.startswith(("R", "C")) else 1
+        if index + path_count > len(fields):
+            break
+        if path_count == 2:
+            source = fields[index]
+            destination = fields[index + 1]
+            if source in quarantined_set and destination not in seen:
+                partners.append(destination)
+                seen.add(destination)
+            elif destination in quarantined_set and source not in seen:
+                partners.append(source)
+                seen.add(source)
+        index += path_count
+    return partners
+
+
+def _quarantine_blocking_protected_paths(
+    candidate_paths: Sequence[str],
+    *,
+    source_worktree: Path,
+    source_base_commit: str,
+    run: SubprocessRun,
+    git_env: Mapping[str, str],
+    env_base: Mapping[str, str],
+) -> list[str]:
+    """Return the unowned protected paths the gate would actually block.
+
+    Re-runs the protected quality-gate classifier (the same one the executor
+    runs at commit time) over ``candidate_paths`` so a conformance/timeout
+    retry does not quarantine an unowned protected edit the gate already
+    classified as safe (e.g. a ``pyproject.toml`` dependency addition or a
+    pinned workflow-action bump). Only paths that produce real violations are
+    returned; the rest stay in the salvage patch so the retry keeps the
+    dependency/CI update the agent made (#PRRT_kwDOSJAM6s6OhM1p).
+
+    Paths that do not require diff classification (anything other than
+    ``pyproject.toml`` and workflow YAML) are always violations when unowned,
+    mirroring :func:`find_protected_quality_gate_changes` exactly, so they are
+    kept without invoking the classifier.
+    """
+    if not candidate_paths:
+        return []
+    classified_paths = [path for path in candidate_paths if requires_protected_file_diff(path)]
+    violation_paths: set[str] = set()
+    if classified_paths:
+        protected_file_diffs = _load_protected_file_diffs(
+            classified_paths,
+            source_worktree=source_worktree,
+            source_base_commit=source_base_commit,
+            run=run,
+            git_env=git_env,
+            env_base=env_base,
+        )
+        violations = find_protected_quality_gate_changes(
+            changed_paths=list(protected_file_diffs.keys()),
+            owned_paths=(),
+            protected_file_diffs=protected_file_diffs,
+        )
+        violation_paths = {violation.path for violation in violations}
+    quarantined: list[str] = []
+    for path in candidate_paths:
+        if requires_protected_file_diff(path):
+            if path in violation_paths:
+                quarantined.append(path)
+        else:
+            quarantined.append(path)
+    return quarantined
+
+
+def _load_protected_file_diffs(
+    paths: Sequence[str],
+    *,
+    source_worktree: Path,
+    source_base_commit: str,
+    run: SubprocessRun,
+    git_env: Mapping[str, str],
+    env_base: Mapping[str, str],
+) -> dict[str, ProtectedFileDiff]:
+    """Load old/new text for protected files using the salvage temp index.
+
+    ``:<path>`` reads the agent's staged content from the temp index (the same
+    index the patch is built from), and ``<source_base_commit>:<path>`` reads
+    the base content. This mirrors the executor's
+    ``_protected_file_diffs_for_staged_paths`` so the classifier sees the same
+    inputs the commit-time gate saw.
+    """
+    diffs: dict[str, ProtectedFileDiff] = {}
+    for path in paths:
+        old_text = _git_show_text(
+            source_worktree,
+            refspec=f"{source_base_commit}:{path}",
+            run=run,
+            env=env_base,
+            failure_reason=SALVAGE_BASE_UNAVAILABLE,
+        )
+        new_text = _git_show_text(
+            source_worktree,
+            refspec=f":{path}",
+            run=run,
+            env=git_env,
+            failure_reason=SALVAGE_SOURCE_UNAVAILABLE,
+        )
+        diffs[path] = ProtectedFileDiff(path=path, old_text=old_text, new_text=new_text)
+    return diffs
+
+
+def _git_show_text(
+    worktree: Path,
+    *,
+    refspec: str,
+    run: SubprocessRun,
+    env: Mapping[str, str],
+    failure_reason: str,
+) -> str | None:
+    """Return ``git show <refspec>`` text, treating a missing path as ``None``.
+
+    Mirrors the async ``git_show_text`` contract used by the commit-time gate:
+    ``git cat-file -e <refspec>`` decides whether the object exists (exit 0) or
+    the path is absent (nonzero), and ``git show <refspec>`` returns the content
+    only when it exists. A missing path (e.g. a newly-added protected file) maps
+    to ``None`` so the classifier can treat it as absent content.
+    """
+    probe = _run_git_nocheck(
+        worktree,
+        ["cat-file", "-e", refspec],
+        run=run,
+        env=env,
+    )
+    if probe.returncode != 0:
+        return None
+    show = _run_git(
+        worktree,
+        ["show", refspec],
+        run=run,
+        env=env,
+        failure_reason=failure_reason,
+    )
+    return show.stdout

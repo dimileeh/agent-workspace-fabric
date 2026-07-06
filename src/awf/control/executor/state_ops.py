@@ -12,7 +12,8 @@ from datetime import (
     UTC,
     datetime,
 )
-from typing import Any
+from pathlib import Path
+from typing import Any, Final
 
 from sqlalchemy import (
     String,
@@ -50,6 +51,7 @@ from awf.control.operator_grants import (
     consume_active_operator_grants_in_session,
 )
 from awf.control.quality_gates import (
+    PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
     GrantSpec,
     QualityGateViolation,
@@ -472,9 +474,24 @@ async def enter_blocked_for_protected_violation(
     violations: Sequence[QualityGateViolation],
     resume_phase: str,
     execution_owner_id: str | None = None,
+    block_type: str = PROTECTED_QUALITY_GATE_BLOCK_TYPE,
+    block_reason_code: str = QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
+    stale_action: str = "enter_blocked_for_protected_violation",
+    recovery_finalize_reason_code: str = QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
+    recovery_finalize_message: str = (
+        "Protected quality-gate violation paused the workspace mid-recovery."
+    ),
 ) -> bool:
     """Pause a workspace into ``blocked`` for an operator decision instead of
-    terminally failing on a protected quality-gate violation.
+    terminally failing.
+
+    Defaults describe the protected quality-gate pause (its original and primary
+    caller). The ``block_type`` / ``block_reason_code`` / ``stale_action`` /
+    ``recovery_finalize_*`` parameters let other non-terminal pause causes reuse
+    the exact same epoch-fenced CAS, warm-stack preservation, stale-skip, and
+    mid-recovery finalization — e.g. a resume-time profile-setup failure (#743),
+    which re-blocks (operator-recoverable) instead of terminally failing and
+    discarding the operator directive.
 
     This is the single entry point used at every pre-PR protected-gate fail site:
     it replaces ``_mark_failed(... QUALITY_GATE_POLICY_CHANGED ...)`` so the spent
@@ -502,6 +519,8 @@ async def enter_blocked_for_protected_violation(
             from_status=from_status,
             violations=violations,
             resume_phase=resume_phase,
+            block_type=block_type,
+            block_reason_code=block_reason_code,
             execution_owner_id=execution_owner_id,
         )
         if ws is None:
@@ -510,7 +529,7 @@ async def enter_blocked_for_protected_violation(
                 await self._record_stale_action_skip(
                     repo,
                     current,
-                    action="enter_blocked_for_protected_violation",
+                    action=stale_action,
                     expected=from_status,
                     reason_code="EXECUTOR_ENTER_BLOCKED_SKIPPED",
                 )
@@ -522,7 +541,7 @@ async def enter_blocked_for_protected_violation(
                         session,
                         workspace_id=workspace_id,
                         callback_source="executor",
-                        callback_action="enter_blocked_for_protected_violation",
+                        callback_action=stale_action,
                         expected_status=from_status,
                         actual_status=current.status,
                     )
@@ -550,11 +569,122 @@ async def enter_blocked_for_protected_violation(
             session,
             workspace_id=workspace_id,
             status=OperationStatus.failed,
-            reason_code=QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
-            error_message=("Protected quality-gate violation paused the workspace mid-recovery."),
+            reason_code=recovery_finalize_reason_code,
+            error_message=recovery_finalize_message,
         )
         await session.commit()
         return True
+
+
+RESUME_SETUP_FAILURE_BLOCK_TYPE: Final[str] = "resume_setup_failure"
+"""``block_type`` recorded when profile setup fails on a blocked-resume (#743)."""
+RESUME_SETUP_FAILED_REASON_CODE: Final[str] = "RESUME_SETUP_FAILED"
+"""Block reason code for a resume-time profile-setup failure."""
+
+
+async def enter_blocked_for_resume_setup_failure(
+    self: Any,
+    *,
+    workspace_id: str,
+    from_status: WorkspaceStatus,
+    resume_phase: str,
+    execution_owner_id: str | None = None,
+) -> bool:
+    """Re-pause a resumed workspace into ``blocked`` when profile setup fails on a
+    blocked-resume, instead of terminally failing (#743).
+
+    On a blocked-resume the warm venv/stack usually survives, so setup is skipped
+    when a health probe passes (see ``execute``). When setup DOES run on a resume
+    and fails — a genuinely torn-down env whose ``uv venv`` cannot rebuild —
+    terminally failing would discard the operator directive and the spent work.
+    Re-blocking keeps the workspace operator-recoverable: reusing the protected
+    pause's epoch-fenced CAS clears the directive hint (so the worker does not
+    auto-resume straight back into the same failure — no loop) and the operator
+    can re-issue ``guide`` once the underlying provisioning issue is resolved.
+    """
+    return await enter_blocked_for_protected_violation(
+        self,
+        workspace_id=workspace_id,
+        from_status=from_status,
+        violations=(),
+        resume_phase=resume_phase,
+        execution_owner_id=execution_owner_id,
+        block_type=RESUME_SETUP_FAILURE_BLOCK_TYPE,
+        block_reason_code=RESUME_SETUP_FAILED_REASON_CODE,
+        stale_action="enter_blocked_for_resume_setup_failure",
+        recovery_finalize_reason_code=RESUME_SETUP_FAILED_REASON_CODE,
+        recovery_finalize_message=("Profile setup failed on blocked-resume; paused for operator."),
+    )
+
+
+async def _blocked_resume_setup_phase_names(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    profile: WorkspaceProfile,
+) -> tuple[str, ...]:
+    """Return the profile-setup phase set for a *directive* blocked-resume (#743).
+
+    The caller invokes this only on a directive resume (the agent re-runs). It
+    reuses the warm venv/stack and SKIPS the flaky ``setup`` phase when an
+    env-health probe confirms the validate toolchain still resolves in the
+    container; on ANY doubt (a missing tool, a probe-infra error, a torn-down
+    stack, OR a profile with no probeable validate targets) it re-runs setup.
+
+    A profile that yields no probeable validate targets short-circuits the probe
+    without exec (``probe_ran=False``); that empty result is NOT evidence of a
+    healthy env, so a torn-down venv/stack with no probe targets would otherwise
+    slip straight to pre_agent/agent and re-block repeatedly instead of
+    reprovisioning. Treat a non-run probe as doubt and re-run setup (#746).
+    """
+    env_probe = await self._validation.probe_validate_command_tools(
+        workspace_id=workspace_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        profile=profile,
+    )
+    if env_probe.probe_ran and not env_probe.probe_errored and not env_probe.missing:
+        _log.info("executor.blocked_resume_setup_skipped_env_healthy", workspace_id=workspace_id)
+        return ("pre_agent",)
+    _log.info(
+        "executor.blocked_resume_setup_rerun_env_unhealthy",
+        workspace_id=workspace_id,
+        probe_errored=env_probe.probe_errored,
+        probe_ran=env_probe.probe_ran,
+        missing_tools=[target.tool for target in env_probe.missing],
+    )
+    return ("setup", "pre_agent")
+
+
+async def _reblock_on_resume_setup_failure(
+    self: Any,
+    *,
+    workspace_id: str,
+    execution_owner_id: str | None,
+    setup_failure_reason_code: str | None,
+    first_fail: Any,
+) -> None:
+    """Re-pause a blocked-resume into ``blocked`` on a setup failure (#743).
+
+    Terminally failing would discard the operator directive and the spent work; the
+    workspace stays operator-recoverable instead. The wrapper clears the directive
+    hint so the worker does not auto-resume straight back into the same failure.
+    """
+    reblocked = await self.enter_blocked_for_resume_setup_failure(
+        workspace_id=workspace_id,
+        from_status=WorkspaceStatus.running,
+        resume_phase="setup",
+        execution_owner_id=execution_owner_id,
+    )
+    _log.info(
+        "executor.blocked_resume_setup_failed_repaused",
+        workspace_id=workspace_id,
+        repaused=reblocked,
+        reason_code=setup_failure_reason_code,
+        command=first_fail.command if first_fail is not None else None,
+    )
 
 
 class ProviderFailureDivert(enum.Enum):

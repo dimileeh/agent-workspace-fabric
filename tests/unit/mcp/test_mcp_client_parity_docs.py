@@ -390,14 +390,11 @@ def test_parity_matrix_matches_real_surfaces() -> None:
     from awf.cli.main import app as cli_app
     from awf.common.config import Settings
     from awf.mcp.server import build_mcp_server
+    from tests.unit.contracts._introspection import rest_route_signatures
 
     # 1. Load real REST routes
     rest_app = create_app(use_lifespan=False)
-    real_rest_routes = set()
-    for route in rest_app.routes:
-        if hasattr(route, "methods") and hasattr(route, "path"):
-            for method in route.methods:
-                real_rest_routes.add(f"{method} {route.path}")
+    real_rest_routes = rest_route_signatures(rest_app)
 
     # 2. Load real CLI commands
     def get_cli_commands(app: typer.Typer, prefix: str = "awf") -> list[str]:

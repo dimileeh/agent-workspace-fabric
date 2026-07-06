@@ -59,10 +59,19 @@ class ValidateToolProbeResult:
     not run cleanly (compose-exec failure / timeout / OSError) — it must never be
     conflated with a genuine profile gap, so the caller proceeds in that case
     rather than failing the adoption.
+
+    ``probe_ran`` is ``True`` only when the probe actually executed an in-container
+    reachability check. It is ``False`` when the profile yielded no probeable
+    targets (the probe short-circuited without exec) — that result is NOT
+    evidence of a healthy env, so callers that use the probe to skip provisioning
+    (e.g. the blocked-resume setup-skip path) must treat a non-run probe as doubt
+    and re-run setup, while callers that only use it to fail early on a missing
+    tool (the adopt-pr handoff) proceed as before.
     """
 
     missing: tuple[ValidateCommandProbeTarget, ...] = ()
     probe_errored: bool = False
+    probe_ran: bool = False
 
 
 @dataclass(frozen=True)

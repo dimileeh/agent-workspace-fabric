@@ -609,6 +609,79 @@ async def test_satisfied_post_validation_conformance_report_is_written_not_commi
 
 
 @pytest.mark.unit
+async def test_post_validation_conformance_ci_delegated_gaps_resolve_satisfied(
+    tmp_path: Path,
+) -> None:
+    """After AWF validation passed, awf_validation_evidence-only gaps are CI-delegated
+    and resolve satisfied instead of PLAN_CONFORMANCE_UNSATISFIED (#743).
+
+    The agent, unable to produce AWF-internal evidence for a CI-delegated command,
+    returns a still-not-satisfied report whose only gaps are awf_validation_evidence.
+    Because this recheck runs only after ``val_result.all_passed``, AWF has produced
+    all the evidence it can, so the check coerces the outcome to satisfied rather than
+    failing the workspace (which pushed the agent to edit the protected config).
+    """
+    worktree_path = tmp_path / "worktree"
+    runner = _GitRestoreFakeRunner(worktree_path)
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    ci_delegated_report = (
+        '{"status":"needs_iteration","summary":"pytest evidence was not produced by AWF",'
+        '"gaps":[{"kind":"awf_validation_evidence","detail":"pytest evidence is missing"}],'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION"}'
+    )
+    report_file.write_text(ci_delegated_report, encoding="utf-8")
+    runner.queue_result(returncode=0, stdout="")  # changed paths before conformance
+    runner.queue_result(returncode=0, stdout="validated-head\n")
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    runner.queue_result(
+        returncode=128, stderr="fatal: pathspec '...' did not match any files\n"
+    )  # git restore report path (untracked -> fails, then plain unlink)
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    event_markers: list[str] = []
+
+    async def record_event(**_kwargs: object) -> None:
+        event_markers.append("record")
+
+    executor._record_post_validation_conformance_event = record_event  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(ci_delegated_report),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+    )
+
+    # Coerced to satisfied: no PLAN_CONFORMANCE_UNSATISFIED failure, event recorded.
+    assert failure is None
+    assert event_markers == ["record"]
+
+
+@pytest.mark.unit
 async def test_satisfied_post_validation_conformance_report_fails_when_unlink_leaves_dirty_index(
     tmp_path: Path,
 ) -> None:

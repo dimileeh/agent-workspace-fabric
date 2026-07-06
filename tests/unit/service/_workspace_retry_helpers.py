@@ -144,6 +144,7 @@ def _create_conformance_source_worktree(
     workspace_id: str,
     *,
     implementation_diff: bool = True,
+    protected_edit: bool = False,
 ) -> str:
     worktree = Path(settings.work_dir) / "git" / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
@@ -152,6 +153,9 @@ def _create_conformance_source_worktree(
     _git(["config", "user.email", "awf@test.local"], worktree)
     (worktree / "src/awf").mkdir(parents=True)
     (worktree / "src/awf/retry.py").write_text("def retry():\n    return 'old'\n")
+    if protected_edit:
+        (worktree / ".awf").mkdir(parents=True)
+        (worktree / ".awf/workspace.yml").write_text("awf:\n  validation:\n    requested_tier: 1\n")
     _git(["add", "."], worktree)
     _git(["commit", "-q", "-m", "base"], worktree)
     base_commit = _git(["rev-parse", "HEAD"], worktree)
@@ -165,6 +169,10 @@ def _create_conformance_source_worktree(
         (worktree / "src/awf/retry.py").write_text("def retry():\n    return 'new'\n")
         (worktree / "tests/unit").mkdir(parents=True)
         (worktree / "tests/unit/test_retry.py").write_text("def test_retry():\n    assert True\n")
+    if protected_edit:
+        # The agent edited the protected quality-gate config outside owned_paths —
+        # the change that caused the block. A retry must NOT replay it (#743).
+        (worktree / ".awf/workspace.yml").write_text("awf:\n  validation:\n    requested_tier: 2\n")
     return base_commit
 
 

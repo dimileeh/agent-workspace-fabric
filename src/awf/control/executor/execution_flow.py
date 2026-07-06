@@ -379,13 +379,23 @@ async def execute(
             return
         if not await _repair_mirror_hooks_path_or_mark_failed(failure_stage="before profile setup"):
             return
+        # A directive resume reuses the warm env + skips flaky ``setup`` when a
+        # probe passes; grant/normal runs re-run it (#743).
+        setup_phase_names: tuple[str, ...] = ("setup", "pre_agent")
+        if resume_from_blocked and not resume_skip_agent:
+            setup_phase_names = await self._blocked_resume_setup_phase_names(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+            )
         try:
             setup_result = await self._validation.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
-                phase_names=("setup", "pre_agent"),
+                phase_names=setup_phase_names,
                 worktree_path=worktree_path,
             )
         except ComposeExecCleanupError as exc:
@@ -419,6 +429,16 @@ async def execute(
             setup_failure_reason_code = (
                 SETUP_DEPENDENCY_NETWORK_FAILURE if setup_dependency_details is not None else None
             )
+            if resume_from_blocked:
+                # Setup failure on a blocked-resume re-pauses into ``blocked``
+                # instead of terminally failing (#743). See helper below.
+                await self._reblock_on_resume_setup_failure(
+                    workspace_id=workspace_id,
+                    execution_owner_id=execution_owner_id,
+                    setup_failure_reason_code=setup_failure_reason_code,
+                    first_fail=first_fail,
+                )
+                return
             if recovery is not None:
                 recovery_setup_failure_reason_code = (
                     setup_failure_reason_code or "MONITOR_RECOVERY_SETUP_FAILED"

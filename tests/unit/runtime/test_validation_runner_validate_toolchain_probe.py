@@ -95,6 +95,7 @@ class TestProbeValidateCommandTools:
         assert result.probe_errored is False
         assert [t.tool for t in result.missing] == ["mypy"]
         assert result.missing[0].command == "mypy src"
+        assert result.probe_ran is True
         # Reused the tracked compose-exec path tagged for the probe, and passed the
         # tool list as positional args to the reachability script.
         assert len(fake.calls) == 1
@@ -145,6 +146,7 @@ class TestProbeValidateCommandTools:
 
         assert result.missing == ()
         assert result.probe_errored is False
+        assert result.probe_ran is True
 
     async def test_probe_skips_without_probeable_validate(self, tmp_path: Path) -> None:
         fake = FakeCommandRunner()
@@ -160,6 +162,7 @@ class TestProbeValidateCommandTools:
 
         assert result.missing == ()
         assert result.probe_errored is False
+        assert result.probe_ran is False
         assert fake.calls == []
 
     async def test_probe_errored_on_runner_nonzero(self, tmp_path: Path) -> None:
@@ -176,6 +179,7 @@ class TestProbeValidateCommandTools:
 
         assert result.probe_errored is True
         assert result.missing == ()
+        assert result.probe_ran is True
 
     async def test_probe_errored_on_os_error(self, tmp_path: Path) -> None:
         fake = _OSErrorRunner()
@@ -190,6 +194,7 @@ class TestProbeValidateCommandTools:
 
         assert result.probe_errored is True
         assert result.missing == ()
+        assert result.probe_ran is True
         assert len(fake.calls) == 1
 
     async def test_probe_times_out_and_cleans_up(
@@ -211,6 +216,7 @@ class TestProbeValidateCommandTools:
 
         assert result.probe_errored is True
         assert result.missing == ()
+        assert result.probe_ran is True
         assert any("awf-exec" in call for call in fake.calls)
         assert any("awf-cleanup" in call for call in fake.calls)
 
