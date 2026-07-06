@@ -20,7 +20,7 @@ from awf.service._git_salvage_utils import (
     SubprocessRun,
 )
 from awf.service._git_salvage_utils import (
-    git_lines as _git_lines,
+    paths_from_name_status as _paths_from_name_status,
 )
 from awf.service._git_salvage_utils import (
     run_git as _run_git_shared,
@@ -160,31 +160,36 @@ def capture_conformance_salvage(
         git_env = {**env_base, "GIT_INDEX_FILE": index_path}
         _run_git(source_worktree, ["read-tree", "HEAD"], run=run, env=git_env)
         _run_git(source_worktree, ["add", "-A", "--", "."], run=run, env=git_env)
-        all_implementation_paths = _git_lines(
+        # Build the changed-path set from rename-aware ``--name-status -z`` so a
+        # renamed protected source (e.g. ``git mv .awf/workspace.yml
+        # sub/workspace.yml``) appears on BOTH sides. ``--name-only`` would only
+        # record the destination, so the quarantine set built from it would miss
+        # the protected source and the binary patch below would still replay the
+        # protected rename into the retry workspace (#PRRT_kwDOSJAM6s6Og3Be).
+        name_status_args_common: list[str] = [
+            "diff",
+            "--cached",
+            "--name-status",
+            "-z",
+            source_base_commit,
+            "--",
+        ]
+        name_status_impl_stdout = _run_git(
+            source_worktree,
+            [
+                *name_status_args_common,
+                ".",
+                f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**",
+            ],
+            run=run,
+            env=git_env,
+        ).stdout
+        all_implementation_paths = _paths_from_name_status(name_status_impl_stdout)
+        plan_artifact_paths = _paths_from_name_status(
             _run_git(
                 source_worktree,
                 [
-                    "diff",
-                    "--cached",
-                    "--name-only",
-                    source_base_commit,
-                    "--",
-                    ".",
-                    f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**",
-                ],
-                run=run,
-                env=git_env,
-            ).stdout
-        )
-        plan_artifact_paths = _git_lines(
-            _run_git(
-                source_worktree,
-                [
-                    "diff",
-                    "--cached",
-                    "--name-only",
-                    source_base_commit,
-                    "--",
+                    *name_status_args_common,
                     INTERNAL_PLAN_ARTIFACT_PREFIX,
                 ],
                 run=run,
@@ -197,10 +202,21 @@ def capture_conformance_salvage(
         # protected change (e.g. the `.awf/workspace.yml` edit) that caused the
         # block (#743). The name list alone is cosmetic; the patch exclusion is
         # load-bearing, and both use the same quarantine set so they can't drift.
+        # Because the set is rename-aware, a rename's source AND destination are
+        # both quarantined, so the patch exclusion below drops both sides.
         quarantined_protected_paths = list(
             unowned_protected_paths(all_implementation_paths, owned_paths=owned_paths)
         )
         quarantined_set = set(quarantined_protected_paths)
+        # A rename whose protected source is quarantined also has a
+        # non-protected destination that must be excluded from the binary patch
+        # (otherwise ``--no-renames`` below emits it as an unrelated add). Pair
+        # the destination back in so both sides are dropped (#PRRT_kwDOSJAM6s6Og3Be).
+        rename_partner_paths = _rename_partners(name_status_impl_stdout, quarantined_set)
+        for path in rename_partner_paths:
+            if path not in quarantined_set:
+                quarantined_protected_paths.append(path)
+                quarantined_set.add(path)
         implementation_paths = [
             path for path in all_implementation_paths if path not in quarantined_set
         ]
@@ -220,12 +236,19 @@ def capture_conformance_salvage(
         exclude_pathspecs = [f":(exclude){INTERNAL_PLAN_ARTIFACT_PREFIX}**"] + [
             f":(exclude){path}" for path in quarantined_protected_paths
         ]
+        # ``--no-renames`` forces git to treat a rename as a delete+add pair, so
+        # excluding the quarantined source AND destination pathspecs drops both
+        # halves of a renamed protected file. With rename detection on, excluding
+        # only the source would still emit the destination as an unrelated add,
+        # and excluding only the destination would still emit the source deletion
+        # — replaying the protected edit either way (#PRRT_kwDOSJAM6s6Og3Be).
         patch = _run_git(
             source_worktree,
             [
                 "diff",
                 "--cached",
                 "--binary",
+                "--no-renames",
                 source_base_commit,
                 "--",
                 ".",
@@ -408,3 +431,47 @@ def _optional_str(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _rename_partners(
+    name_status_z_stdout: str,
+    quarantined_set: set[str],
+) -> list[str]:
+    """Return rename destinations whose source is quarantined, and vice versa.
+
+    Parses ``git diff --name-status -z`` output to find rename/copy records
+    (status ``R``/``C``) where one side is in ``quarantined_set`` and returns the
+    other side so the binary patch exclusion can drop both halves of the
+    protected rename (#PRRT_kwDOSJAM6s6Og3Be). Destinations are appended in
+    first-seen order.
+    """
+    if not name_status_z_stdout or not quarantined_set:
+        return []
+    if "\0" not in name_status_z_stdout:
+        return []
+    fields = name_status_z_stdout.split("\0")
+    if not fields or fields[-1] != "":
+        return []
+    fields = fields[:-1]
+    partners: list[str] = []
+    seen: set[str] = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if not status:
+            continue
+        path_count = 2 if status.startswith(("R", "C")) else 1
+        if index + path_count > len(fields):
+            break
+        if path_count == 2:
+            source = fields[index]
+            destination = fields[index + 1]
+            if source in quarantined_set and destination not in seen:
+                partners.append(destination)
+                seen.add(destination)
+            elif destination in quarantined_set and source not in seen:
+                partners.append(source)
+                seen.add(source)
+        index += path_count
+    return partners

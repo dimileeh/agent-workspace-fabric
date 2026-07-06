@@ -276,6 +276,64 @@ def test_salvage_retry_prompt_flags_quarantined_protected_paths() -> None:
 
 
 @pytest.mark.unit
+def test_capture_quarantines_renamed_protected_source_path(tmp_path: Path) -> None:
+    """A renamed protected source path is quarantined on BOTH sides (#PRRT_kwDOSJAM6s6Og3Be).
+
+    When a prior attempt renames an unowned protected file (e.g.
+    ``git mv .awf/workspace.yml sub/workspace.yml``), ``git diff --name-only``
+    records only the destination path, so a quarantine set built from the
+    name-only list would miss the protected source. The re-applied binary patch
+    would then still replay the deletion/rename of the protected config into the
+    retry workspace — exactly the protected edit this salvage path is meant to
+    drop. The quarantine set must be rename-aware so both the source and
+    destination paths are excluded from the patch.
+    """
+    worktree = tmp_path / "git" / "worktrees" / "ws_rename"
+    worktree.mkdir(parents=True)
+    _git(["init", "-q"], worktree)
+    _git(["config", "user.name", "AWF Test"], worktree)
+    _git(["config", "user.email", "awf@test.local"], worktree)
+    (worktree / "src").mkdir()
+    (worktree / "src/app.py").write_text("VALUE = 'old'\n", encoding="utf-8")
+    (worktree / ".awf").mkdir()
+    (worktree / ".awf/workspace.yml").write_text(
+        "awf:\n  validation:\n    requested_tier: 1\n", encoding="utf-8"
+    )
+    _git(["add", "."], worktree)
+    _git(["commit", "-q", "-m", "base"], worktree)
+    base_commit = _git(["rev-parse", "HEAD"], worktree)
+    # Rename the protected config out of its protected location, then add a
+    # real implementation change alongside it.
+    (worktree / "sub").mkdir()
+    _git(["mv", ".awf/workspace.yml", "sub/workspace.yml"], worktree)
+    (worktree / "src/app.py").write_text("VALUE = 'new'\n", encoding="utf-8")
+
+    capture = capture_conformance_salvage(
+        work_dir=tmp_path,
+        source_workspace_id="ws_rename",
+        source_base_commit=base_commit,
+        conformance_evidence={"gaps": "add tests"},
+        conformance_evidence_ref=None,
+        source_branch_name=None,
+        source_remote_push_branch=None,
+        owned_paths=[],
+    )
+
+    # Both sides of the rename must be quarantined, not just the destination.
+    assert ".awf/workspace.yml" in capture.quarantined_protected_paths
+    assert "sub/workspace.yml" in capture.quarantined_protected_paths
+    assert ".awf/workspace.yml" not in capture.implementation_paths
+    assert "sub/workspace.yml" not in capture.implementation_paths
+    assert "src/app.py" in capture.implementation_paths
+    # The load-bearing part: the re-applied binary patch must not carry the
+    # protected rename on either side.
+    patch_text = capture.patch_path.read_text(encoding="utf-8")
+    assert ".awf/workspace.yml" not in patch_text
+    assert "sub/workspace.yml" not in patch_text
+    assert "src/app.py" in patch_text
+
+
+@pytest.mark.unit
 def test_capture_stages_tracked_files_under_ignored_parent_directory(tmp_path: Path) -> None:
     worktree = tmp_path / "git" / "worktrees" / "ws_ignored_parent"
     worktree.mkdir(parents=True)
