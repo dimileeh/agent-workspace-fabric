@@ -219,6 +219,16 @@ class AgentAdapter(ABC):
         """Return the implicit model identity provider recovery should attribute."""
         return self._selected_model_for_run(model=None)
 
+    @property
+    def is_hosted(self) -> bool:
+        """Return whether this adapter delegates to the injected runtime executor.
+
+        When true, agent runs go through the hosted path and there is no
+        Compose agent service to probe or restart — monitor recovery must
+        skip the Compose-service restart branch for timeouts in this mode.
+        """
+        return self._runtime_executor is not None
+
     @abstractmethod
     def get_provider(self, model: str | None) -> str:
         """Return the canonical provider identifier for a model."""

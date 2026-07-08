@@ -187,6 +187,14 @@ async def _recover_monitor_agent_service_after_error(
 ) -> int | None:
     if exc.reason_code not in _AGENT_SERVICE_TIMEOUT_REASON_CODES:
         return None
+    # In hosted mode (an agent runtime executor is injected) there is no
+    # docker compose agent service to probe or restart — the hosted runtime
+    # owns process lifecycle. Re-raising the timeout preserves the original
+    # failure reason; attempting Compose restarts here would misclassify the
+    # timeout as AGENT_SERVICE_UNHEALTHY and can fail/terminate monitor
+    # recovery on GKE. Local Core (executor is None) keeps the restart path.
+    if self._deps.adapter.is_hosted:
+        return None
     if not compose_file.is_file():
         return None
     service_healthy = await probe_agent_service_health(RuntimeInspector(), compose_project)
