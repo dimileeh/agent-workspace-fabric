@@ -769,6 +769,22 @@ def _collect_postgres_password(
         concrete = _compose_concrete_worker_password(raw_password, worker_env=worker_env)
         if concrete:
             postgres_passwords.add(concrete)
+    elif resolution is _ComposeEnvResolution.WORKER_RESOLVED_SLOT:
+        # A bare ``${NAME}`` / ``$NAME`` slot (no default operator) resolves to
+        # the worker value at stack launch too, so a rendered agent env DB URL
+        # embedding the *resolved* worker password carries the workspace
+        # credential. Tracking only the raw ``${...}`` placeholder string (added
+        # above) misses the expanded secret, and the URL slips past substring
+        # redaction into ``profile_env``. Recover the concrete worker value the
+        # same way the defaulted branch does so a bare-slot DB URL is redacted
+        # identically (PR #751 thread PRRT_kwDOSJAM6s6PaFeB). The redaction set is
+        # never carried in ``profile_env`` (worker-resolved values are skipped
+        # from carry), so recovering the worker secret here only marks which
+        # agent env values to skip — it does not violate the no-secret-values
+        # contract.
+        concrete = _compose_concrete_worker_password(raw_password, worker_env=worker_env)
+        if concrete:
+            postgres_passwords.add(concrete)
 
 
 def _try_agent_environment_keys_from_compose_file(
