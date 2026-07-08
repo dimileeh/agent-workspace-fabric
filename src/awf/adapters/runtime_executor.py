@@ -54,6 +54,18 @@ class AgentRuntimeExecRequest:
     systems, but ``codex exec`` itself must not require a workstation
     ``~/.codex`` directory in hosted mode.
 
+    Profile-owned env contract: ``profile_env`` carries literal
+    profile-owned env values the local ``docker compose exec`` path does
+    NOT forward (the running agent container already has them, substituted
+    from the compose env block at stack launch). The hosted (non-compose)
+    path has no compose env block, so the hosted executor must inject these
+    values directly or the job launches without them — e.g. a profile-owned
+    ``OLLAMA_HOST`` daemon the OpenCode launcher would otherwise fail to
+    resolve, falling back to the default daemon. Only literal values are
+    carried; Compose ``${NAME}`` interpolation placeholders are worker-resolved
+    secrets and stay in ``env_passthrough_names`` for out-of-band resolution
+    (never carried in ``profile_env``).
+
     Streaming contract: when ``on_stdout`` / ``on_stderr`` callbacks are
     supplied, implementations SHOULD invoke them with stdout/stderr chunks as
     they arrive so the log store fills *during* execution (mirroring the
@@ -73,6 +85,7 @@ class AgentRuntimeExecRequest:
     model: str | None
     effort: str | None
     env_passthrough_names: tuple[str, ...] = ()
+    profile_env: tuple[tuple[str, str], ...] = ()
     wall_timeout_seconds: float | None = None
     idle_timeout_seconds: float | None = None
     on_stdout: StreamCallback | None = None
@@ -108,6 +121,9 @@ class AgentRuntimeExecutor(Protocol):
     Core ships no Kubernetes implementation. Implementations MUST stream the
     prompt via stdin/context, never argv, and MUST NOT log or persist secret
     values (resolve them out-of-band from ``env_passthrough_names``).
+    ``request.profile_env`` carries literal profile-owned env values the
+    executor injects directly (not worker-resolved); those are non-secret
+    profile configuration (e.g. ``OLLAMA_HOST``) and may be set on the job env.
 
     Streaming contract: when the caller supplies ``request.on_stdout`` /
     ``request.on_stderr`` callbacks, implementations SHOULD invoke them with

@@ -182,6 +182,8 @@ class TestNonCodexHostedCredentials:
         assert request.agent_runtime is AgentRuntime.opencode
         for name in _OPENCODE_NAMES:
             assert name in request.env_passthrough_names, name
+        # No profile-owned env declared on the agent service -> empty profile_env.
+        assert request.profile_env == ()
 
     @pytest.mark.unit
     async def test_hosted_request_has_no_secret_values(self) -> None:
@@ -191,11 +193,16 @@ class TestNonCodexHostedCredentials:
             request.prompt_stdin.decode("utf-8", "replace")
             + "\x00".join(request.cli_args)
             + "\x00".join(request.env_passthrough_names)
+            + "\x00".join(f"{k}={v}" for k, v in request.profile_env)
         )
         assert _SECRET_VALUE not in blob
         assert "sk-" not in blob
         # Only the *names* are present, never an assigned value.
         assert not any("=" in name for name in request.env_passthrough_names)
+        # ``profile_env`` carries literal profile values, never worker-resolved
+        # ``${NAME}`` secret placeholders (those stay in env_passthrough_names
+        # for out-of-band resolution by the hosted executor).
+        assert not any("${" in value for _key, value in request.profile_env)
 
     @pytest.mark.unit
     async def test_hosted_passthrough_suppresses_profile_owned_auth_slot(
@@ -265,3 +272,9 @@ class TestNonCodexHostedCredentials:
         # The profile-owned lower-precedence key is itself profile-owned, so it
         # is excluded too — the hosted executor does not re-resolve it either.
         assert "OLLAMA_HOST" not in request.env_passthrough_names
+        # The hosted executor has no compose env block, so the literal
+        # profile-owned value the local container received at stack launch
+        # must be carried via ``profile_env`` or the hosted job launches with
+        # neither Ollama endpoint and OpenCode falls back to the default daemon
+        # instead of the profile-owned one.
+        assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env

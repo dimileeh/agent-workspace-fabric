@@ -799,6 +799,73 @@ def test_filter_hosted_env_passthrough_names_parses_compose_once(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_placeholders(
+    tmp_path: Path,
+) -> None:
+    """Literal profile-owned env values are carried to the hosted executor.
+
+    The local ``docker compose exec`` path does not forward profile-owned env
+    because the running container already has it (substituted from the compose
+    env block at stack launch). The hosted (non-compose) path has no compose
+    env block, so the hosted executor must inject the same literal values the
+    local container received. ``${NAME}`` placeholders are worker-resolved
+    secrets and must NOT be carried as values — the hosted executor resolves
+    those out-of-band from ``env_passthrough_names`` — so only literal
+    (non-placeholder) entries are surfaced.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Literal profile value -> carried.
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            # Worker-resolved secret placeholder -> skipped.
+                            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                            # Required placeholder -> skipped.
+                            "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY:?set}",
+                            # Literal default-bearing expression -> the value
+                            # itself is a placeholder reference, skipped.
+                            "AWS_REGION": "${AWS_REGION:-us-west-2}",
+                            # Escaped dollar literal -> carried (no interpolation).
+                            "LITERAL_DOLLAR": "$$NOT_A_VAR",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file)
+
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    assert ("LITERAL_DOLLAR", "$$NOT_A_VAR") in profile_env
+    # Worker-resolved placeholders are not carried as values.
+    assert "OPENAI_API_KEY" not in dict(profile_env)
+    assert "ANTHROPIC_API_KEY" not in dict(profile_env)
+    assert "AWS_REGION" not in dict(profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_unreadable_is_empty(
+    tmp_path: Path,
+) -> None:
+    """An unreadable compose yields no profile env (fail-closed, no values)."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    missing = tmp_path / "missing.yml"
+    assert not missing.exists()
+
+    assert literal_profile_env_from_compose(missing) == ()
+
+
+@pytest.mark.unit
 def test_agent_exec_env_passthrough_parses_compose_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

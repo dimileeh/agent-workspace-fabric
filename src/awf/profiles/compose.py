@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -562,8 +563,27 @@ def filter_hosted_env_passthrough_names(
     the broader set is unknown, so only the ``AGENT_AUTH_ENV_VARS``-territory /
     Ollama-shadowing exclusions apply (fail-closed the same way
     ``_compose_env_passthrough_exclusions`` does).
+
+    The profile-owned *names* stay filtered out of ``env_passthrough_names`` so
+    the hosted executor does not re-resolve them from the worker; their literal
+    *values* reach the hosted job via ``profile_env`` instead (see
+    ``literal_profile_env_from_compose``), mirroring the local container's
+    stack-launch env.
     """
     compose_env = _try_agent_environment_from_compose_file(compose_file)
+    return _filter_hosted_env_passthrough_names_from_compose_env(names, compose_env)
+
+
+def _filter_hosted_env_passthrough_names_from_compose_env(
+    names: tuple[str, ...],
+    compose_env: Mapping[str, str] | None,
+) -> tuple[str, ...]:
+    """Apply compose/profile-owned exclusions given a pre-parsed compose env.
+
+    Shared shape so a caller that already parsed the compose agent environment
+    (e.g. ``_run_hosted`` computing ``profile_env`` from the same parse) can
+    reuse the result and avoid a second read/parse of the file.
+    """
     excluded = _compose_env_passthrough_exclusions(compose_env)
     if compose_env is not None:
         excluded = excluded | frozenset(compose_env)
@@ -573,6 +593,73 @@ def filter_hosted_env_passthrough_names(
 def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
     """Return agent auth env keys already declared in the compose environment block."""
     return frozenset(name for name in AGENT_AUTH_ENV_VARS if name in compose_env)
+
+
+# Compose variable-interpolation reference, mirroring the interpolation pattern
+# in ``awf.service.environment`` (``${VAR}`` / ``${VAR:-...}`` / ``$VAR``). Kept
+# local so ``profiles`` does not import the ``service`` layer. An escaped ``$$``
+# is a literal dollar, not an interpolation reference.
+_COMPOSE_INTERPOLATION_REF_PATTERN = re.compile(
+    r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?=[}:?+\-])[^}]*\}|"
+    r"\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def _compose_value_has_interpolation_ref(value: str) -> bool:
+    """Return whether a compose env value references a worker env variable.
+
+    Detects Compose ``${VAR}`` / ``${VAR:-default}`` / ``${VAR:?error}`` /
+    ``$VAR`` interpolation references, honoring the ``$$`` escape (a literal
+    dollar, not a reference). A value that is itself a literal (e.g.
+    ``http://ollama.profile:11434``) has no reference; a value that is a
+    worker-resolved secret placeholder (``${OPENAI_API_KEY}``) or a mixed
+    interpolation (``prefix-${VAR}``) does.
+    """
+    escaped = value.replace("$$", "\0")
+    return any(
+        match.group("braced") or match.group("plain")
+        for match in _COMPOSE_INTERPOLATION_REF_PATTERN.finditer(escaped)
+    )
+
+
+def literal_profile_env_from_compose(
+    compose_file: Path,
+    *,
+    compose_env: Mapping[str, str] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Return literal profile-owned env values the hosted executor must inject.
+
+    The local ``docker compose exec`` path does not forward profile-owned env
+    because the running agent container already has it (Docker Compose
+    substitutes the compose env block at stack launch). The hosted (non-compose)
+    path has no compose env block, so the hosted executor must inject the same
+    literal values the local container received or it launches without them
+    (e.g. a profile-owned ``OLLAMA_HOST`` daemon the OpenCode launcher then
+    cannot resolve, falling back to the default daemon).
+
+    Only *literal* (non-placeholder) entries are surfaced. A value that
+    references a worker env variable via Compose interpolation
+    (``${NAME}`` / ``${NAME:-default}`` / ``$NAME``) is worker-resolved and
+    must NOT be carried as a value — the hosted executor resolves those
+    out-of-band from ``env_passthrough_names``, and carrying the placeholder
+    text would leak an unresolved reference instead of the secret. An entry
+    whose value is an escaped ``$$`` literal (no interpolation) is carried
+    verbatim. When the compose file is unreadable the result is empty
+    (fail-closed: no values), matching ``_compose_env_passthrough_exclusions``.
+
+    ``compose_env`` lets a caller that already parsed the compose agent
+    environment (e.g. ``_run_hosted`` computing the passthrough filter from the
+    same parse) reuse the result and avoid a second read/parse of the file.
+    """
+    if compose_env is None:
+        compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        return ()
+    return tuple(
+        (key, value)
+        for key, value in compose_env.items()
+        if not _compose_value_has_interpolation_ref(value)
+    )
 
 
 def _compose_environment_mapping(environment: object) -> dict[str, str]:

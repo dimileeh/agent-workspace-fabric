@@ -615,3 +615,6 @@ class TestAgentAdapterBaseDefaults:
         )
         request = adapter._runtime_executor.calls[0]  # type: ignore[attr-defined]
         assert request.env_passthrough_names == ()
+        # The profile_env field defaults to empty; an unreadable/absent compose
+        # yields no literal profile values (fail-closed).
+        assert request.profile_env == ()

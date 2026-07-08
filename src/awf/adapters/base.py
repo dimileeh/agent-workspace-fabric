@@ -38,7 +38,11 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
-from awf.profiles.compose import agent_exec_env_passthrough, filter_hosted_env_passthrough_names
+from awf.profiles.compose import (
+    agent_exec_env_passthrough,
+    filter_hosted_env_passthrough_names,
+    literal_profile_env_from_compose,
+)
 from awf.runtime.logs import CommandLogSinks, LogStore
 
 _log = get_logger(__name__)
@@ -445,6 +449,16 @@ class AgentAdapter(ABC):
         env_passthrough_names = filter_hosted_env_passthrough_names(
             self.hosted_env_passthrough_names, compose_file=compose_file
         )
+        # Carry literal profile-owned env values to the hosted executor. The
+        # local ``docker compose exec`` path does not forward profile-owned env
+        # because the running container already has it (substituted from the
+        # compose env block at stack launch); the hosted path has no compose env
+        # block, so without these values a profile-owned endpoint (e.g.
+        # ``OLLAMA_HOST``) never reaches the hosted job and OpenCode falls back to
+        # the default daemon. Worker-resolved ``${NAME}`` placeholders stay in
+        # ``env_passthrough_names`` for out-of-band resolution — only literal
+        # values are carried here.
+        profile_env = literal_profile_env_from_compose(compose_file)
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
@@ -487,6 +501,7 @@ class AgentAdapter(ABC):
             model=selected_model,
             effort=self._default_effort,
             env_passthrough_names=env_passthrough_names,
+            profile_env=profile_env,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
             on_stdout=on_stdout_cb,
@@ -503,6 +518,10 @@ class AgentAdapter(ABC):
             source=log_source,
             prompt_bytes=len(prompt_input),
             env_passthrough_names=list(env_passthrough_names),
+            # Log profile_env *keys* only — values are literal profile config
+            # (e.g. an Ollama daemon URL) but never secret placeholders; still,
+            # a value could be sensitive config, so do not log values.
+            profile_env_keys=[key for key, _ in profile_env],
         )
         try:
             sampler_ctx = None
