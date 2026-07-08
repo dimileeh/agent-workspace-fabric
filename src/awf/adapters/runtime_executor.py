@@ -24,6 +24,7 @@ from typing import Protocol
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
+    StreamCallback,
 )
 from awf.db.enums import AgentRuntime
 
@@ -52,6 +53,16 @@ class AgentRuntimeExecRequest:
     ``OPENAI_API_KEY`` may remain a *source* credential in deployment
     systems, but ``codex exec`` itself must not require a workstation
     ``~/.codex`` directory in hosted mode.
+
+    Streaming contract: when ``on_stdout`` / ``on_stderr`` callbacks are
+    supplied, implementations SHOULD invoke them with stdout/stderr chunks as
+    they arrive so the log store fills *during* execution (mirroring the
+    Compose ``run_streaming`` path). Implementations that do not stream may
+    leave these ``None`` / unused and rely on the buffered
+    ``AgentRuntimeExecResult`` returned from ``execute()`` — the adapter
+    writes the buffered output to the sinks after ``execute()`` returns when
+    and only when the corresponding callback was not invoked. Either way,
+    secret values MUST NEVER be passed to the callbacks or persisted.
     """
 
     workspace_id: str | None
@@ -64,6 +75,8 @@ class AgentRuntimeExecRequest:
     env_passthrough_names: tuple[str, ...] = ()
     wall_timeout_seconds: float | None = None
     idle_timeout_seconds: float | None = None
+    on_stdout: StreamCallback | None = None
+    on_stderr: StreamCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +108,16 @@ class AgentRuntimeExecutor(Protocol):
     Core ships no Kubernetes implementation. Implementations MUST stream the
     prompt via stdin/context, never argv, and MUST NOT log or persist secret
     values (resolve them out-of-band from ``env_passthrough_names``).
+
+    Streaming contract: when the caller supplies ``request.on_stdout`` /
+    ``request.on_stderr`` callbacks, implementations SHOULD invoke them with
+    stdout/stderr chunks as they arrive so operators and monitor diagnostics
+    see live output and last-progress evidence — not just buffered output
+    after ``execute()`` returns. An implementation that only returns buffered
+    output is still supported (the adapter writes the buffered output to the
+    sinks after ``execute()`` when the matching callback was not used), but a
+    long-running hosted run that does not stream leaves the log stream empty
+    during execution, which loses live output for long monitor repairs.
     """
 
     async def execute(

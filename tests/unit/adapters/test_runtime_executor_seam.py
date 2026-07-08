@@ -20,6 +20,7 @@ injected ``AgentRuntimeExecutor`` (hosted path). They assert:
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,38 @@ class _RecordingExecutor:
     async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
         self.calls.append(request)
         return self._result
+
+
+class _StreamingExecutor:
+    """A hosted executor that streams stdout/stderr chunks via the request's
+    callbacks during ``execute()`` and returns a buffered result mirroring the
+    streamed data, so the adapter's double-write guard can be exercised.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[AgentRuntimeExecRequest] = []
+        self.stdout_chunks: list[str] = ["partial-1\n", "partial-2\n"]
+        self.stderr_chunks: list[str] = ["warn-1\n"]
+
+    async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+        self.calls.append(request)
+        # Stream chunks live, the way a real streaming executor would.
+        if request.on_stdout is not None:
+            for chunk in self.stdout_chunks:
+                maybe = request.on_stdout(chunk)
+                if inspect.isawaitable(maybe):
+                    await maybe
+        if request.on_stderr is not None:
+            for chunk in self.stderr_chunks:
+                maybe = request.on_stderr(chunk)
+                if inspect.isawaitable(maybe):
+                    await maybe
+        # Return the same content buffered — the adapter must NOT re-write it.
+        return AgentRuntimeExecResult(
+            returncode=0,
+            stdout="".join(self.stdout_chunks),
+            stderr="".join(self.stderr_chunks),
+        )
 
 
 class _RecordingSinks:
@@ -337,6 +370,72 @@ class TestRuntimeExecutorSeam:
 
         assert log_store.sinks.stdout_data == ["line1\nline2\n"]
         assert log_store.sinks.stderr_data == ["warn\n"]
+        assert log_store.sinks.closed is True
+
+    @pytest.mark.unit
+    async def test_hosted_streaming_executor_writes_live_chunks_not_double_written(self) -> None:
+        # A streaming executor invokes the request's on_stdout/on_stderr
+        # callbacks during execute() so the log store fills live, and the
+        # adapter must NOT re-write the buffered result to the sinks (no
+        # double-write). This is the regression guard for the review thread
+        # that asked for live hosted log streaming.
+        executor = _StreamingExecutor()
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            runtime_executor=executor,
+        )
+
+        result = await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_stream",
+        )
+
+        assert result.ok
+        # The request carried streaming callbacks (not None) so a streaming
+        # executor can stream during execution.
+        request = executor.calls[0]
+        assert request.on_stdout is not None
+        assert request.on_stderr is not None
+        # Live chunks were streamed to the sinks during execution.
+        assert log_store.sinks.stdout_data == ["partial-1\n", "partial-2\n"]
+        assert log_store.sinks.stderr_data == ["warn-1\n"]
+        # Buffered result was NOT re-written (no duplicate entries).
+        assert len(log_store.sinks.stdout_data) == 2
+        assert len(log_store.sinks.stderr_data) == 1
+        assert log_store.sinks.closed is True
+
+    @pytest.mark.unit
+    async def test_hosted_non_streaming_executor_still_writes_buffered_result(self) -> None:
+        # Backward-compat: an executor that does not invoke the streaming
+        # callbacks still gets its buffered result written to the sinks after
+        # execute() returns — the prior buffered-output contract is
+        # preserved. (The request still carries callbacks so a future
+        # streaming executor can use them; a non-streaming one simply ignores
+        # them.)
+        executor = _RecordingExecutor(
+            result=AgentRuntimeExecResult(returncode=0, stdout="buffered\n", stderr="e\n")
+        )
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            runtime_executor=executor,
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_no_stream",
+        )
+
+        # Buffered result written exactly once (no streaming, no double-write).
+        assert log_store.sinks.stdout_data == ["buffered\n"]
+        assert log_store.sinks.stderr_data == ["e\n"]
         assert log_store.sinks.closed is True
 
     @pytest.mark.unit

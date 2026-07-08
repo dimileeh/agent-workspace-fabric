@@ -427,6 +427,16 @@ class AgentAdapter(ABC):
         classification apply so monitor decision semantics are unchanged. The
         hosted executor owns its own process cleanup; this path does NOT run
         the compose cleanup helpers.
+
+        Log-store streaming: when sinks are available, ``on_stdout`` /
+        ``on_stderr`` callbacks are passed into the request so a streaming
+        executor writes chunks to the log store *during* execution — mirroring
+        the Compose ``run_streaming`` path — so a long-running hosted run
+        (e.g. a monitor repair that idles until its watchdog fires) no longer
+        leaves the log stream empty until completion. When the executor does
+        not stream, the buffered ``AgentRuntimeExecResult`` stdout/stderr is
+        written to the sinks after ``execute()`` returns, preserving the prior
+        buffered-output contract for non-streaming executors.
         """
         del compose_project  # logging/audit only on hosted path
         runtime_executor = self._runtime_executor
@@ -434,6 +444,33 @@ class AgentAdapter(ABC):
         env_passthrough_names = filter_hosted_env_passthrough_names(
             self.hosted_env_passthrough_names, compose_file=compose_file
         )
+        sampler_ctx: UsageSampleContext | None = None
+        final_status = "failed"
+        sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
+        # Streaming callbacks: when sinks are available, forward stdout/stderr
+        # chunks to the log store *during* execution (mirroring the Compose
+        # ``run_streaming`` path) and track whether each fd was streamed. When
+        # the executor does not stream, the buffered ``AgentRuntimeExecResult``
+        # is written to the sinks after ``execute()`` returns instead — see
+        # the post-execute write guard below. Either way the log store ends up
+        # with the run's output; the streaming path additionally fills it
+        # live, so a long-running hosted monitor repair no longer leaves the
+        # log stream empty until completion.
+        streamed_stdout = False
+        streamed_stderr = False
+
+        async def _on_stdout(data: str) -> None:
+            nonlocal streamed_stdout
+            streamed_stdout = True
+            if sinks is not None:
+                await sinks.write_stdout(data)
+
+        async def _on_stderr(data: str) -> None:
+            nonlocal streamed_stderr
+            streamed_stderr = True
+            if sinks is not None:
+                await sinks.write_stderr(data)
+
         request = AgentRuntimeExecRequest(
             workspace_id=workspace_id,
             agent_runtime=self.name,
@@ -445,6 +482,8 @@ class AgentAdapter(ABC):
             env_passthrough_names=env_passthrough_names,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
+            on_stdout=_on_stdout if sinks is not None else None,
+            on_stderr=_on_stderr if sinks is not None else None,
         )
         _log.info(
             "agent.run.hosted.start",
@@ -458,9 +497,6 @@ class AgentAdapter(ABC):
             prompt_bytes=len(prompt_input),
             env_passthrough_names=list(env_passthrough_names),
         )
-        sampler_ctx: UsageSampleContext | None = None
-        final_status = "failed"
-        sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
         try:
             sampler_ctx = None
             if self._usage_sampler is not None:
@@ -471,9 +507,15 @@ class AgentAdapter(ABC):
                 )
             hosted_result = await runtime_executor.execute(request)
             if sinks is not None:
-                if hosted_result.stdout:
+                # Buffered fallback: write the hosted executor's buffered
+                # stdout/stderr to the sinks only when that fd was not already
+                # streamed during execution. This preserves the prior
+                # buffered-output contract for non-streaming executors while
+                # avoiding double-writes (one streamed chunk + one buffered
+                # copy) for executors that stream.
+                if hosted_result.stdout and not streamed_stdout:
                     await sinks.write_stdout(hosted_result.stdout)
-                if hosted_result.stderr:
+                if hosted_result.stderr and not streamed_stderr:
                     await sinks.write_stderr(hosted_result.stderr)
             result = self._classify_hosted_result(
                 hosted_result=hosted_result,
