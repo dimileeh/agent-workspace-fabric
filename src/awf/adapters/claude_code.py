@@ -26,6 +26,27 @@ class ClaudeCodeAdapter(AgentAdapter):
         # agent-runtime state from AWF's validation-cleanliness guard.
         return (".claude/worktrees/",)
 
+    @property
+    def hosted_env_passthrough_names(self) -> tuple[str, ...]:
+        """Claude Code hosted credential contract.
+
+        Names only — secret values are never transported. Mirrors the
+        ``ANTHROPIC_*`` / ``CLAUDE_CODE_*`` auth and endpoint entries in
+        ``AGENT_AUTH_ENV_VARS`` so a hosted executor can resolve and inject the
+        same credentials a local Compose run would surface, including the
+        Bedrock/Vertex backends. The hosted executor resolves values
+        out-of-band.
+        """
+        return (
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+        )
+
     def get_provider(self, model: str | None) -> str:
         del model
         return "anthropic"

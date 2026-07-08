@@ -46,6 +46,18 @@ class OpenCodeAdapter(AgentAdapter):
             return active_model.split("/", 1)[0]
         return "ollama"
 
+    @property
+    def hosted_env_passthrough_names(self) -> tuple[str, ...]:
+        """OpenCode hosted credential contract.
+
+        Names only — secret values are never transported. Mirrors the Ollama
+        base-URL / API-key entries in ``AGENT_AUTH_ENV_VARS`` so a hosted
+        executor can resolve and inject the same daemon endpoint and credential
+        a local Compose run would surface. The Ollama base URL is required for
+        the OpenCode launcher prelude to resolve the daemon out-of-band.
+        """
+        return ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST", "OLLAMA_API_KEY")
+
     def _cli_args(self, *, model: str | None) -> list[str]:
         requested_model = (model or self._default_model or OPENCODE_OLLAMA_CLOUD_MODELS[0]).strip()
         if not requested_model:

@@ -23,6 +23,28 @@ class GeminiAdapter(AgentAdapter):
         del model
         return "google"
 
+    @property
+    def hosted_env_passthrough_names(self) -> tuple[str, ...]:
+        """Gemini hosted credential contract.
+
+        Names only — secret values are never transported. Mirrors the
+        ``GEMINI_*`` / ``GOOGLE_*`` auth, Vertex, and ADC entries in
+        ``AGENT_AUTH_ENV_VARS`` so a hosted executor can resolve and inject the
+        same credentials a local Compose run would surface, including the
+        Vertex AI / Application Default Credentials backends.
+        """
+        return (
+            "GEMINI_API_KEY",
+            "GEMINI_API_KEY_AUTH_MECHANISM",
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_GCA",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_CLOUD_ACCESS_TOKEN",
+        )
+
     def _cli_args(self, *, model: str | None) -> list[str]:
         # Gemini CLI 0.41.2 documents -p/--prompt as non-interactive mode;
         # its value is appended to stdin, so AWF keeps the real prompt on
