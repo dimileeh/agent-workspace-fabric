@@ -29,6 +29,7 @@ from awf.common.commands import (
     COMMAND_TIMEOUT_REASON,
     AsyncCommandRunner,
     CommandResult,
+    StreamCallback,
 )
 from awf.common.compose_exec import (
     build_tracked_compose_exec,
@@ -459,17 +460,23 @@ class AgentAdapter(ABC):
         streamed_stdout = False
         streamed_stderr = False
 
-        async def _on_stdout(data: str) -> None:
-            nonlocal streamed_stdout
-            streamed_stdout = True
-            if sinks is not None:
-                await sinks.write_stdout(data)
+        on_stdout_cb: StreamCallback | None = None
+        on_stderr_cb: StreamCallback | None = None
+        if sinks is not None:
+            stream_sinks = sinks
 
-        async def _on_stderr(data: str) -> None:
-            nonlocal streamed_stderr
-            streamed_stderr = True
-            if sinks is not None:
-                await sinks.write_stderr(data)
+            async def _on_stdout(data: str) -> None:
+                nonlocal streamed_stdout
+                streamed_stdout = True
+                await stream_sinks.write_stdout(data)
+
+            async def _on_stderr(data: str) -> None:
+                nonlocal streamed_stderr
+                streamed_stderr = True
+                await stream_sinks.write_stderr(data)
+
+            on_stdout_cb = _on_stdout
+            on_stderr_cb = _on_stderr
 
         request = AgentRuntimeExecRequest(
             workspace_id=workspace_id,
@@ -482,8 +489,8 @@ class AgentAdapter(ABC):
             env_passthrough_names=env_passthrough_names,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
-            on_stdout=_on_stdout if sinks is not None else None,
-            on_stderr=_on_stderr if sinks is not None else None,
+            on_stdout=on_stdout_cb,
+            on_stderr=on_stderr_cb,
         )
         _log.info(
             "agent.run.hosted.start",
@@ -560,20 +567,16 @@ class AgentAdapter(ABC):
             else self.name.value,
         )
 
-    def _final_status_for_exception(self, exc: BaseException) -> str:
+    def _final_status_for_exception(self, exc: AgentRunError) -> str:
         """Map an agent-run exception to a usage-sampling final status.
 
-        Shared by ``run()``, ``_run_hosted`` so the
-        ``AgentRunError`` / ``asyncio.CancelledError`` → ``final_status``
-        mapping stays identical across execution paths.
+        Shared by ``run()`` and ``_run_hosted`` so the ``AgentRunError`` →
+        ``final_status`` mapping stays identical across execution paths. The
+        ``asyncio.CancelledError`` case is handled inline by each caller's own
+        ``except asyncio.CancelledError`` handler (``final_status = "cancelled"``),
+        so this helper only ever receives an ``AgentRunError``.
         """
-        if isinstance(exc, AgentRunError):
-            return (
-                "timeout"
-                if exc.reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
-                else "failed"
-            )
-        return "cancelled"
+        return "timeout" if exc.reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"} else "failed"
 
     def _classify_hosted_result(
         self,

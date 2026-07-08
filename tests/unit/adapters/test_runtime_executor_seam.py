@@ -20,6 +20,7 @@ injected ``AgentRuntimeExecutor`` (hosted path). They assert:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from pathlib import Path
 from typing import Any
@@ -522,3 +523,95 @@ class TestRuntimeExecutorSeam:
             + "\x00".join(request.env_passthrough_names)
         )
         assert _SECRET_VALUE not in request_blob
+
+    @pytest.mark.unit
+    async def test_hosted_cancellation_closes_sinks_and_propagates(self) -> None:
+        # A hosted run cancelled mid-execution must close the log-store sinks
+        # in the ``finally`` block and propagate ``CancelledError``. This
+        # exercises the hosted-path ``except asyncio.CancelledError`` handler
+        # (``final_status = "cancelled"``) and the ``finally`` sink close.
+        class _CancellingExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                raise asyncio.CancelledError
+
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            runtime_executor=_CancellingExecutor(),
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cancelled_hosted",
+            )
+
+        # Sinks opened then closed by the finally block even on cancellation.
+        assert len(log_store.open_calls) == 1
+        assert log_store.sinks.closed is True
+
+
+class TestAgentAdapterBaseDefaults:
+    """Base ``AgentAdapter`` property defaults that concrete adapters inherit.
+
+    These guard the extension contract: an adapter without an explicit default
+    model reports ``None``, the hosted env-passthrough default is empty (so an
+    adapter that does not override it surfaces no hosted credentials), and
+    ``provider_recovery_default_model`` delegates to the model-selection hook.
+    """
+
+    @pytest.mark.unit
+    def test_default_model_is_none_when_not_configured(self) -> None:
+        adapter = CodexAdapter(runner=FakeCommandRunner())
+        assert adapter.default_model is None
+
+    @pytest.mark.unit
+    def test_default_model_returns_configured_value(self) -> None:
+        adapter = CodexAdapter(runner=FakeCommandRunner(), default_model="gpt-5")
+        assert adapter.default_model == "gpt-5"
+
+    @pytest.mark.unit
+    def test_provider_recovery_default_model_delegates_to_model_selection(self) -> None:
+        # With no explicit default model, the recovery identity is None (the
+        # same value _selected_model_for_run returns for model=None).
+        adapter = CodexAdapter(runner=FakeCommandRunner())
+        assert adapter.provider_recovery_default_model is None
+        adapter_with_default = CodexAdapter(runner=FakeCommandRunner(), default_model="gpt-5")
+        assert adapter_with_default.provider_recovery_default_model == "gpt-5"
+
+    @pytest.mark.unit
+    async def test_base_hosted_env_passthrough_names_default_is_empty(self) -> None:
+        # A minimal adapter subclass that does NOT override
+        # ``hosted_env_passthrough_names`` exercises the base default (empty),
+        # so a hosted run for such an adapter arrives with no passthrough names.
+        from awf.adapters.base import AgentAdapter
+
+        class _MinimalAdapter(AgentAdapter):
+            @property
+            def name(self) -> AgentRuntime:
+                return AgentRuntime.codex
+
+            def get_provider(self, model: str | None) -> str:
+                return "openai"
+
+            def _cli_args(self, *, model: str | None) -> list[str]:
+                return []
+
+        adapter = _MinimalAdapter(
+            runner=FakeCommandRunner(),
+            runtime_executor=_RecordingExecutor(),
+        )
+        assert adapter.hosted_env_passthrough_names == ()
+        assert adapter.is_hosted is True
+        # The hosted path uses the empty default: the request carries no names.
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_base_default",
+        )
+        request = adapter._runtime_executor.calls[0]  # type: ignore[attr-defined]
+        assert request.env_passthrough_names == ()
