@@ -1455,27 +1455,15 @@ def literal_profile_env_from_compose(
 def _compose_environment_mapping(environment: object) -> dict[str, str]:
     """Normalize a compose ``environment`` scalar, list, or mapping into a string dict.
 
-    A Compose *pass-through* slot — ``environment: [NAME]`` (list item with no
-    ``=``) or ``NAME:`` / ``NAME: null`` (mapping value that is ``None``) —
-    declares no value; Docker Compose models it as a nil pointer resolved from
-    the worker shell at stack launch (compose-go ``TestEnvironmentMap`` /
-    ``TestEnvironmentList``: ``ZO:`` / ``ZO`` -> ``env["ZO"] == nil``), exactly
-    like a bare ``${NAME}`` reference. Such a slot is normalized to the
-    :data:`_COMPOSE_PASSTHROUGH` sentinel (not the literal ``"None"``) so the
-    carry / passthrough-filter call sites can recognize it and skip it from
-    ``profile_env`` while keeping it in ``env_passthrough_names`` for hosted
-    out-of-band resolution — carrying an empty/``"None"`` literal would override
-    the real worker value in the hosted request.
+    A *pass-through* slot (``[NAME]`` / ``NAME:`` / ``NAME: null``) declares no
+    value; Compose resolves it from the worker shell at stack launch, so it is
+    normalized to the :data:`_COMPOSE_PASSTHROUGH` sentinel (not ``"None"``) so
+    call sites skip it from ``profile_env`` and keep it in
+    ``env_passthrough_names`` for hosted out-of-band resolution.
 
-    An *explicit* empty value — ``NAME: ""`` (mapping empty string) or ``NAME=``
-    (list item WITH an ``=`` and an empty value) — is normalized to the plain
-    string ``""``. Docker Compose models it as a non-nil pointer to ``""``
-    (compose-go: ``BU: ""`` / ``BU=`` -> ``*env["BU"] == ""``), an empty literal
-    that OVERRIDES the worker shell value (Compose spec: ``environment``
-    overrides ``env_file`` even when empty). It is therefore CARRIED in
-    ``profile_env`` as a literal ``""`` (the local container received an explicit
-    blank, not the worker value) and EXCLUDED from ``env_passthrough_names`` (a
-    profile-owned literal, not a worker-resolved slot) — see
+    An *explicit* empty value (``NAME: ""`` / ``NAME=``) is a non-nil pointer to
+    ``""`` that OVERRIDES the worker shell value, so it is normalized to ``""``
+    and CARRIED in ``profile_env`` / EXCLUDED from passthrough — see
     ``literal_profile_env_from_compose`` and
     ``_filter_hosted_env_passthrough_names_from_compose_env``.
     """
