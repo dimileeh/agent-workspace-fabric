@@ -460,6 +460,71 @@ def _try_agent_environment_from_compose_file(
     return _compose_environment_mapping(agent.get("environment"))
 
 
+def _try_compose_agent_env_and_postgres_password(
+    compose_file: Path,
+) -> tuple[dict[str, str] | None, str | None]:
+    """Parse the compose file once, returning agent env and the postgres password.
+
+    Returns ``(agent_env, postgres_password)`` where ``agent_env`` is ``None``
+    when the compose is unreadable or has no agent service (mirrors
+    ``_try_agent_environment_from_compose_file``) and ``postgres_password`` is
+    ``None`` when there is no postgres service / ``POSTGRES_PASSWORD`` (mirrors
+    ``_postgres_password_from_compose_file``). Parsing once avoids a second
+    read/parse of the same file when ``literal_profile_env_from_compose`` needs
+    both the agent env and the rendered postgres password for redaction.
+    """
+    try:
+        payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return None, None
+    if not isinstance(payload, Mapping):
+        return None, None
+    services = payload.get("services")
+    if not isinstance(services, Mapping):
+        return None, None
+    agent = services.get("agent")
+    agent_env = (
+        _compose_environment_mapping(agent.get("environment"))
+        if isinstance(agent, Mapping)
+        else None
+    )
+    postgres = services.get("postgres")
+    postgres_password: str | None = None
+    if isinstance(postgres, Mapping):
+        postgres_env = _compose_environment_mapping(postgres.get("environment"))
+        password = postgres_env.get("POSTGRES_PASSWORD")
+        if password:
+            postgres_password = password
+    return agent_env, postgres_password
+
+
+def _postgres_password_from_compose_file(compose_file: Path) -> str | None:
+    """Return the rendered postgres service password, or ``None`` when absent.
+
+    ComposeManager bakes the generated/declared postgres password into the
+    rendered ``postgres`` service ``environment`` block (it expands
+    ``${AWF_POSTGRES_PASSWORD}`` at render time so the local container can
+    connect and so resume is self-contained). The agent service env is expanded
+    the same way, so a profile DB URL (e.g. ``DATABASE_URL`` /
+    ``AWF_DATABASE_URL``) lands in the rendered agent env as a literal
+    containing the password. ``literal_profile_env_from_compose`` must NOT carry
+    those expanded-secret-bearing values to the hosted executor: the runtime
+    seam's ``profile_env`` is a secret-free contract and the hosted path
+    resolves DB credentials via its own adapter contract, not from
+    ``profile_env``.
+
+    The rendered ``postgres`` service env is the authoritative source of the
+    secret ComposeManager expanded; redacting agent env values that contain it
+    keeps the secret out of the hosted request without weakening the local
+    container (which still gets the expanded value at stack launch) or resume
+    (which re-reads the self-contained rendered file). Returns ``None`` when the
+    compose is unreadable, has no postgres service, or the postgres service
+    declares no ``POSTGRES_PASSWORD`` (no secret to redact).
+    """
+    _agent_env, postgres_password = _try_compose_agent_env_and_postgres_password(compose_file)
+    return postgres_password
+
+
 def _try_agent_environment_keys_from_compose_file(
     compose_file: Path,
 ) -> frozenset[str] | None:
@@ -790,8 +855,15 @@ def literal_profile_env_from_compose(
 
     Skipping worker-resolved values preserves the no-secret-values contract:
     ``profile_env`` never carries a ``${...}`` placeholder nor a worker secret.
-    When the compose file is unreadable the result is empty (fail-closed: no
-    values), matching ``_compose_env_passthrough_exclusions``.
+    ComposeManager also expands ``${AWF_POSTGRES_PASSWORD}`` into profile DB URLs
+    (e.g. ``DATABASE_URL`` / ``AWF_DATABASE_URL``) at render time so the local
+    container can connect; those expanded literals embed the workspace DB
+    password and are NOT carried — the hosted path resolves DB credentials via
+    its own adapter contract, not from ``profile_env``. The rendered ``postgres``
+    service env is the authoritative source of that secret; agent env values
+    containing it are skipped so the password never reaches the hosted request
+    object. When the compose file is unreadable the result is empty (fail-closed:
+    no values), matching ``_compose_env_passthrough_exclusions``.
 
     ``compose_env`` lets a caller that already parsed the compose agent
     environment (e.g. ``_run_hosted`` computing the passthrough filter from the
@@ -800,15 +872,30 @@ def literal_profile_env_from_compose(
     interpolation (default ``os.environ``); mirroring
     ``agent_environment_with_*`` helpers.
     """
+    parsed_file = compose_env is None
     if compose_env is None:
-        compose_env = _try_agent_environment_from_compose_file(compose_file)
+        compose_env, file_postgres_password = _try_compose_agent_env_and_postgres_password(
+            compose_file
+        )
+    else:
+        file_postgres_password = None
     if compose_env is None:
         return ()
+    # Redact agent env values that embed the rendered postgres password so the
+    # generated workspace DB credential never reaches the hosted executor. Only
+    # re-read the compose file when this call parsed the agent env itself; a
+    # caller that supplied ``compose_env`` from a prior parse is responsible for
+    # the same redaction context (it already has the file open). Failing to
+    # locate a postgres password (no postgres service / no ``POSTGRES_PASSWORD``)
+    # redacts nothing, preserving carry for profiles without a DB sidecar.
+    postgres_password: str | None = file_postgres_password if parsed_file else None
     env = os.environ if worker_env is None else worker_env
     carried: list[tuple[str, str]] = []
     for key, raw in compose_env.items():
         expanded, worker_resolved = _compose_resolve_value(raw, worker_env=env)
         if worker_resolved:
+            continue
+        if postgres_password and postgres_password in expanded:
             continue
         carried.append((key, expanded))
     return tuple(carried)

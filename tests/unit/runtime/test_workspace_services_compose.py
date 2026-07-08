@@ -1001,6 +1001,113 @@ def test_literal_profile_env_from_compose_unreadable_is_empty(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_postgres_password_bearing_values(
+    tmp_path: Path,
+) -> None:
+    """A rendered compose bakes the generated postgres password into agent env
+    values (e.g. ``DATABASE_URL``/``AWF_DATABASE_URL``) so the local container
+    can connect. ``literal_profile_env_from_compose`` must NOT carry those
+    expanded-secret-bearing values to the hosted executor: the runtime seam's
+    ``profile_env`` is a secret-free contract (see
+    ``AgentRuntimeExecRequest``). The hosted path resolves DB credentials via
+    its own adapter contract, not from ``profile_env``.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PUp80: ComposeManager expands
+    ``${AWF_POSTGRES_PASSWORD}`` into the agent environment before writing the
+    rendered compose file, and ``literal_profile_env_from_compose`` would carry
+    the resulting literal verbatim, handing the workspace DB password to a
+    hosted executor / request object.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "postgres": {
+                        "image": "postgres:16-alpine",
+                        "environment": {
+                            "POSTGRES_USER": "awf",
+                            "POSTGRES_PASSWORD": "workspace-secret",
+                            "POSTGRES_DB": "awf",
+                        },
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Non-secret profile literal -> carried (must survive).
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            # AWF-expanded DB URLs embed the generated postgres
+                            # password -> must be skipped (secret-bearing).
+                            "DATABASE_URL": ("postgresql://awf:workspace-secret@postgres:5432/awf"),
+                            "AWF_DATABASE_URL": (
+                                "postgresql+asyncpg://awf:workspace-secret@postgres:5432/awf"
+                            ),
+                            "AWF_TEST_DATABASE_URL": (
+                                "postgresql+asyncpg://awf:workspace-secret@postgres:5432/awf"
+                            ),
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    # Non-secret profile literal is still carried to the hosted executor.
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    # Secret-bearing expanded values are NOT carried to the hosted executor.
+    carried = dict(profile_env)
+    assert "DATABASE_URL" not in carried
+    assert "AWF_DATABASE_URL" not in carried
+    assert "AWF_TEST_DATABASE_URL" not in carried
+    # The workspace DB password never reaches the hosted request object.
+    assert "workspace-secret" not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_carries_values_without_postgres_service(
+    tmp_path: Path,
+) -> None:
+    """When no postgres service declares a password, nothing is redacted.
+
+    A profile without a postgres sidecar (e.g. a pure-Ollama profile) has no
+    generated DB password to redact; its agent env literals are carried as
+    before. This guards against over-redacting when the postgres password is
+    absent.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            # A literal that merely contains a colon-separated
+                            # token must NOT be mistaken for a secret when no
+                            # postgres password is declared to redact.
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    assert ("APP_BASE_URL", "http://app:8080") in profile_env
+
+
+@pytest.mark.unit
 def test_agent_exec_env_passthrough_parses_compose_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
