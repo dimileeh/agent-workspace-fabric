@@ -38,7 +38,7 @@ from awf.common.compose_exec import (
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
 from awf.profiles.compose import agent_exec_env_passthrough
-from awf.runtime.logs import LogStore
+from awf.runtime.logs import CommandLogSinks, LogStore
 
 _log = get_logger(__name__)
 
@@ -347,11 +347,7 @@ class AgentAdapter(ABC):
             final_status = "success"
             return result
         except AgentRunError as exc:
-            final_status = (
-                "timeout"
-                if exc.reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
-                else "failed"
-            )
+            final_status = self._final_status_for_exception(exc)
             raise
         except asyncio.CancelledError:
             final_status = "cancelled"
@@ -458,55 +454,78 @@ class AgentAdapter(ABC):
         )
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
-        sinks = None
-        if self._log_store is not None and workspace_id is not None:
-            sinks = await self._log_store.open_command_streams(
-                workspace_id=workspace_id,
-                base_stream_id=log_source,
-                source=log_source,
-                name=f"{log_source.capitalize()} ({self.name.value})"
-                if log_source != "agent"
-                else self.name.value,
-            )
+        sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
         try:
-            try:
-                sampler_ctx = None
-                if self._usage_sampler is not None:
-                    _log.info(
-                        "agent.run.hosted.usage_sampling_skipped",
-                        agent=self.name.value,
-                        workspace_id=workspace_id,
-                    )
-                hosted_result = await runtime_executor.execute(request)
-                if sinks is not None:
-                    if hosted_result.stdout:
-                        await sinks.write_stdout(hosted_result.stdout)
-                    if hosted_result.stderr:
-                        await sinks.write_stderr(hosted_result.stderr)
-                result = self._classify_hosted_result(
-                    hosted_result=hosted_result,
-                    model=model,
+            sampler_ctx = None
+            if self._usage_sampler is not None:
+                _log.info(
+                    "agent.run.hosted.usage_sampling_skipped",
+                    agent=self.name.value,
                     workspace_id=workspace_id,
-                    log_source=log_source,
                 )
-                final_status = "success"
-                return result
-            except AgentRunError as exc:
-                final_status = (
-                    "timeout"
-                    if exc.reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
-                    else "failed"
-                )
-                raise
-            except asyncio.CancelledError:
-                final_status = "cancelled"
-                raise
+            hosted_result = await runtime_executor.execute(request)
+            if sinks is not None:
+                if hosted_result.stdout:
+                    await sinks.write_stdout(hosted_result.stdout)
+                if hosted_result.stderr:
+                    await sinks.write_stderr(hosted_result.stderr)
+            result = self._classify_hosted_result(
+                hosted_result=hosted_result,
+                model=model,
+                workspace_id=workspace_id,
+                log_source=log_source,
+            )
+            final_status = "success"
+            return result
+        except AgentRunError as exc:
+            final_status = self._final_status_for_exception(exc)
+            raise
+        except asyncio.CancelledError:
+            final_status = "cancelled"
+            raise
         finally:
             if sinks is not None:
                 await sinks.close()
             await self._finalize_usage_sampling(
                 sampler_ctx, status=final_status, workspace_id=workspace_id
             )
+
+    async def _open_command_streams(
+        self,
+        *,
+        workspace_id: str | None,
+        log_source: str,
+    ) -> CommandLogSinks | None:
+        """Open log-store command sinks for a run, or ``None`` when unavailable.
+
+        Shared by the Compose and hosted execution paths so both stream to the
+        same log-store sink with identical naming.
+        """
+        if self._log_store is None or workspace_id is None:
+            return None
+        return await self._log_store.open_command_streams(
+            workspace_id=workspace_id,
+            base_stream_id=log_source,
+            source=log_source,
+            name=f"{log_source.capitalize()} ({self.name.value})"
+            if log_source != "agent"
+            else self.name.value,
+        )
+
+    def _final_status_for_exception(self, exc: BaseException) -> str:
+        """Map an agent-run exception to a usage-sampling final status.
+
+        Shared by ``run()``, ``_run_hosted`` so the
+        ``AgentRunError`` / ``asyncio.CancelledError`` → ``final_status``
+        mapping stays identical across execution paths.
+        """
+        if isinstance(exc, AgentRunError):
+            return (
+                "timeout"
+                if exc.reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
+                else "failed"
+            )
+        return "cancelled"
 
     def _classify_hosted_result(
         self,
@@ -612,16 +631,7 @@ class AgentAdapter(ABC):
         # Stream the prompt on stdin and close it explicitly. This avoids OS
         # argv length limits for large review comments while still preventing
         # CLIs from waiting forever for inherited interactive input.
-        sinks = None
-        if self._log_store is not None and workspace_id is not None:
-            sinks = await self._log_store.open_command_streams(
-                workspace_id=workspace_id,
-                base_stream_id=log_source,
-                source=log_source,
-                name=f"{log_source.capitalize()} ({self.name.value})"
-                if log_source != "agent"
-                else self.name.value,
-            )
+        sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
 
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
