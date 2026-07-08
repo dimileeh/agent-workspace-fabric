@@ -18,10 +18,23 @@ resolves them out-of-band. Implementations MUST stream the prompt via stdin
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
+from awf.common.commands import (
+    COMMAND_IDLE_TIMEOUT_REASON,
+    COMMAND_TIMEOUT_REASON,
+)
 from awf.db.enums import AgentRuntime
+
+#: The conventional ``timeout(1)`` exit code the hosted executor uses to signal
+#: a watchdog termination, mirroring the Compose path.
+_HOSTED_TIMEOUT_RETURN_CODE = 124
+
+#: Reason codes a hosted executor may set on ``AgentRuntimeExecResult`` to
+#: distinguish wall-clock vs idle timeouts. Other values are reserved; the
+#: adapter treats any non-empty ``timeout_reason`` as authoritative.
+_HOSTED_TIMEOUT_REASONS = frozenset({COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON})
 
 
 @dataclass(frozen=True)
@@ -55,11 +68,23 @@ class AgentRuntimeExecRequest:
 
 @dataclass(frozen=True)
 class AgentRuntimeExecResult:
-    """Result of one hosted agent CLI run."""
+    """Result of one hosted agent CLI run.
+
+    Implementations signal a watchdog termination with ``returncode == 124``
+    (the conventional ``timeout(1)`` exit). Wall-clock and idle timeouts share
+    that exit code on the Compose path but are separated via ``reason_code``;
+    the hosted result carries the same distinction on the ``timeout_reason``
+    field so the adapter can map idle timeouts to ``AGENT_IDLE_TIMEOUT``
+    instead of collapsing every 124 into a wall-clock timeout.
+    ``timeout_reason`` defaults to wall-clock (``COMMAND_TIMEOUT_REASON``)
+    when unset to preserve the pre-existing contract for executors that only
+    set ``returncode``.
+    """
 
     returncode: int
     stdout: str
     stderr: str
+    timeout_reason: str = field(default=COMMAND_TIMEOUT_REASON)
 
 
 class AgentRuntimeExecutor(Protocol):

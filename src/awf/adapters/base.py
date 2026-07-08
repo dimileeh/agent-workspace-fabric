@@ -18,6 +18,7 @@ from typing import Any
 
 from awf.adapters.provider_failures import classify_provider_failure
 from awf.adapters.runtime_executor import (
+    _HOSTED_TIMEOUT_REASONS,
     AgentRuntimeExecRequest,
     AgentRuntimeExecResult,
     AgentRuntimeExecutor,
@@ -511,14 +512,25 @@ class AgentAdapter(ABC):
         provider auth failures classify identically to the Compose path —
         monitor recovery semantics stay unchanged. The hosted executor signals
         a timeout by returning ``returncode == 124`` (the conventional
-        ``timeout(1)`` exit), mapped to ``AGENT_TIMEOUT``.
+        ``timeout(1)`` exit) and carries the wall-vs-idle distinction on
+        ``AgentRuntimeExecResult.timeout_reason``; an idle timeout maps to
+        ``AGENT_IDLE_TIMEOUT`` while a wall-clock timeout maps to
+        ``AGENT_TIMEOUT``.
         """
         del log_source
+        timeout_reason = (
+            hosted_result.timeout_reason
+            if hosted_result.returncode == 124
+            and hosted_result.timeout_reason in _HOSTED_TIMEOUT_REASONS
+            else COMMAND_TIMEOUT_REASON
+            if hosted_result.returncode == 124
+            else None
+        )
         command_result = CommandResult(
             returncode=hosted_result.returncode,
             stdout=hosted_result.stdout,
             stderr=hosted_result.stderr,
-            reason_code=(COMMAND_TIMEOUT_REASON if hosted_result.returncode == 124 else None),
+            reason_code=timeout_reason,
         )
         if command_result.ok:
             _log.info(

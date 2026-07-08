@@ -250,6 +250,37 @@ class TestRuntimeExecutorSeam:
         assert exc.value.result.returncode == 124
 
     @pytest.mark.unit
+    async def test_hosted_idle_timeout_signal_maps_to_agent_idle_timeout(
+        self,
+    ) -> None:
+        from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON
+
+        executor = _RecordingExecutor(
+            result=AgentRuntimeExecResult(
+                returncode=124,
+                stdout="partial",
+                stderr="idle watchdog fired",
+                timeout_reason=COMMAND_IDLE_TIMEOUT_REASON,
+            )
+        )
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_idle_timeout",
+            )
+
+        assert exc.value.reason_code == "AGENT_IDLE_TIMEOUT"
+        assert exc.value.result.returncode == 124
+
+    @pytest.mark.unit
     async def test_hosted_path_streams_to_log_store(self) -> None:
         executor = _RecordingExecutor(
             result=AgentRuntimeExecResult(returncode=0, stdout="line1\nline2\n", stderr="warn\n")
