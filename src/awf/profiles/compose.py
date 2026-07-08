@@ -391,6 +391,77 @@ def _github_token_placeholder(source_env: Mapping[str, str]) -> str | None:
     return None
 
 
+def hosted_github_token_passthrough_names(
+    compose_file: Path,
+    *,
+    worker_env: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return GitHub token alias *names* a hosted executor should resolve.
+
+    Mirrors ``agent_environment_with_github_token``'s alias injection for the
+    local Compose path: when the worker env carries a GitHub token source
+    (``AWF_GITHUB_TOKEN`` / ``GH_TOKEN`` / ``GITHUB_TOKEN``), the local path
+    injects ``GH_TOKEN`` / ``GITHUB_TOKEN`` placeholders into the compose agent
+    env block so the local agent container can run ``gh``. The hosted
+    (non-compose) path has no compose env block substitution, so without these
+    names the hosted executor cannot resolve the credential and the hosted
+    monitor-repair agent loses GitHub CLI access even though the same
+    workspace has it under Compose (PR #751 thread PRRT_kwDOSJAM6s6PXFPz).
+
+    Names only — secret values are NEVER transported; the hosted executor
+    resolves them out-of-band, mirroring ``env_passthrough_names``. The
+    returned names carry no values, so this helper never embeds a worker
+    secret (the placeholder string itself is never returned).
+
+    A compose-declared GitHub token alias is surfaced only when its value
+    equals the worker token placeholder (the same AWF source
+    ``agent_environment_with_github_token`` would inject, or a GitHub secret
+    lease that renders to the same source). When a profile owns a GitHub
+    token alias with a *different* token (e.g. a generic ``env`` secret lease
+    rendering ``GITHUB_TOKEN: ${MY_PROFILE_LEASE_TOKEN}``), NO worker alias is
+    surfaced: the local Compose path's group-precedence rule
+    (``agent_environment_with_github_token``) ensures the profile-owned token
+    wins, and surfacing a worker alias on the hosted path would let ``gh``
+    fall back to the worker credential (the profile-owned alias cannot be
+    carried in ``env_passthrough_names`` — it is a worker-resolved secret
+    slot the hosted path resolves via its own adapter contract, not a name
+    the hosted executor re-resolves from the worker). Surfacing nothing
+    preserves the existing no-profile-credential limitation for that edge case
+    without introducing a worker-token shadow.
+
+    Returns an empty tuple when no worker GitHub token source is present
+    (mirroring the local path, which injects nothing) or when the compose
+    file is unreadable (fail-closed: assume the profile owns a distinct
+    GitHub token rather than surface a worker alias that could shadow a
+    profile-owned token the unreadable parse could not see).
+    """
+    source_env = os.environ if worker_env is None else worker_env
+    worker_placeholder = _github_token_placeholder(source_env)
+    if worker_placeholder is None:
+        return ()
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        return ()
+    # If any compose-declared GitHub token alias points at a different token
+    # than the worker source, the profile owns a distinct GitHub credential.
+    # Surface nothing so a worker alias cannot shadow it on the hosted path
+    # (the profile-owned alias itself is a worker-resolved secret slot the
+    # hosted path does not re-resolve from the worker env).
+    for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE:
+        if alias in compose_env and compose_env[alias] != worker_placeholder:
+            return ()
+    # Surface every alias whose value matches the worker token placeholder
+    # (AWF-injected, or a GitHub lease rendering to the same source). These
+    # are exactly the aliases the local Compose container receives the worker
+    # token in, so the hosted executor resolving them out-of-band reproduces
+    # the same credential.
+    return tuple(
+        alias
+        for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE
+        if compose_env.get(alias) == worker_placeholder
+    )
+
+
 def agent_environment_with_host_auth(
     base_environment: tuple[tuple[str, str], ...],
     *,

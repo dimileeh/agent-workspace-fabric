@@ -1242,6 +1242,159 @@ def test_filter_hosted_env_passthrough_names_keeps_required_set_worker_value(
 
 
 @pytest.mark.unit
+def test_hosted_github_token_passthrough_names_surfaces_worker_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hosted path surfaces the GitHub token alias names the local path injects.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PXFPz: when the worker env
+    carries a GitHub token source, the local Compose path injects
+    ``GH_TOKEN: ${AWF_GITHUB_TOKEN}`` and ``GITHUB_TOKEN: ${AWF_GITHUB_TOKEN}``
+    into the agent env block so the local agent container can run ``gh``. The
+    hosted (non-compose) path has no compose env block substitution, so
+    without surfacing these alias names the hosted executor cannot resolve the
+    credential and the hosted monitor-repair agent loses GitHub CLI access.
+    The helper returns the alias NAMES only (never the placeholder value),
+    applying the same group-precedence rule as
+    ``agent_environment_with_github_token``.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GH_TOKEN": "${AWF_GITHUB_TOKEN}",
+                            "GITHUB_TOKEN": "${AWF_GITHUB_TOKEN}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_worker_secret")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    names = hosted_github_token_passthrough_names(compose_file)
+
+    # Both aliases the local Compose path would inject are surfaced so the
+    # hosted executor can resolve them out-of-band. Names only — no value.
+    assert "GH_TOKEN" in names
+    assert "GITHUB_TOKEN" in names
+    assert all(not name.startswith("ghp_") for name in names)
+
+
+@pytest.mark.unit
+def test_hosted_github_token_passthrough_names_skips_profile_owned_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile-owned GitHub token alias is not shadowed by a worker alias.
+
+    Mirrors the local Compose path's group-precedence rule
+    (``agent_environment_with_github_token``): when the profile owns
+    ``GITHUB_TOKEN`` (e.g. via a secret lease rendering
+    ``GITHUB_TOKEN: ${MY_LEASE_TOKEN}``), the local path does NOT inject the
+    worker ``GH_TOKEN`` (higher precedence) or ``gh`` would use the worker
+    credential instead of the profile-owned token. The hosted path must apply
+    the same rule: only the worker alias that does not shadow a profile-owned
+    lower-precedence alias is surfaced.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Profile owns the lower-precedence alias.
+                            "GITHUB_TOKEN": "${MY_PROFILE_LEASE_TOKEN}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_worker_secret")
+
+    names = hosted_github_token_passthrough_names(compose_file)
+
+    # The higher-precedence worker GH_TOKEN is suppressed so the profile-owned
+    # GITHUB_TOKEN wins. The lower-precedence GITHUB_TOKEN is profile-owned so
+    # it is not surfaced either (the hosted executor does not re-resolve
+    # profile-owned slots). Nothing is surfaced.
+    assert names == ()
+
+
+@pytest.mark.unit
+def test_hosted_github_token_passthrough_names_empty_without_worker_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No worker GitHub token source -> no aliases surfaced.
+
+    Mirrors the local Compose path, which injects nothing when no GitHub
+    token source (``AWF_GITHUB_TOKEN`` / ``GH_TOKEN`` / ``GITHUB_TOKEN``) is
+    present in the worker env.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GH_TOKEN": "${AWF_GITHUB_TOKEN}",
+                            "GITHUB_TOKEN": "${AWF_GITHUB_TOKEN}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AWF_GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert hosted_github_token_passthrough_names(compose_file) == ()
+
+
+@pytest.mark.unit
+def test_hosted_github_token_passthrough_names_unreadable_compose_is_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable compose yields no aliases (fail-closed).
+
+    Mirrors ``literal_profile_env_from_compose`` / the hosted filter's
+    fail-closed behaviour: when the compose file cannot be parsed, assume the
+    profile owns both aliases rather than surface a worker alias that could
+    shadow a profile-owned token the unreadable parse could not see.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    missing = tmp_path / "missing.yml"
+    monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_worker_secret")
+
+    assert hosted_github_token_passthrough_names(missing) == ()
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_unreadable_is_empty(
     tmp_path: Path,
 ) -> None:

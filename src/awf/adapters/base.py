@@ -41,6 +41,7 @@ from awf.db.enums import AgentRuntime
 from awf.profiles.compose import (
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
+    hosted_github_token_passthrough_names,
     literal_profile_env_from_compose,
 )
 from awf.runtime.logs import CommandLogSinks, LogStore
@@ -457,6 +458,33 @@ class AgentAdapter(ABC):
             self.hosted_env_passthrough_names,
             compose_file=compose_file,
         )
+        # Surface GitHub token alias names the local Compose path would inject
+        # into the agent env block (``GH_TOKEN`` / ``GITHUB_TOKEN``) so the
+        # hosted executor can resolve and inject the worker token out-of-band.
+        # Without this the hosted monitor-repair agent loses GitHub CLI
+        # credentials even though the same workspace has them under Compose
+        # (PR #751 thread PRRT_kwDOSJAM6s6PXFPz). The helper applies the same
+        # alias group-precedence rule as ``agent_environment_with_github_token``
+        # so a profile-owned alias (e.g. a secret lease rendering
+        # ``GITHUB_TOKEN``) is not shadowed by a worker alias. Names only —
+        # secret values are never transported; the placeholder string is never
+        # returned. The compose file is immutable after ComposeManager renders
+        # it, so this independent parse is consistent with the filter /
+        # profile_env parses above (no TOCTOU). Offloaded to a worker thread
+        # for the same blocking-I/O reason as the filter / profile_env parses.
+        github_token_names = await asyncio.to_thread(
+            hosted_github_token_passthrough_names, compose_file
+        )
+        if github_token_names:
+            # Union after the filter: the filter excludes compose-declared
+            # profile-owned slots, and the helper already skips profile-owned
+            # aliases, so the union surfaces exactly the names the local
+            # Compose path would inject without reintroducing a profile-owned
+            # slot. De-duplicate preserving filter order.
+            existing_names = set(env_passthrough_names)
+            env_passthrough_names = env_passthrough_names + tuple(
+                name for name in github_token_names if name not in existing_names
+            )
         # Carry profile-owned env values to the hosted executor. The local
         # ``docker compose exec`` path does not forward profile-owned env
         # because the running container already has it (substituted from the
