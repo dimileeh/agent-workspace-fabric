@@ -824,26 +824,37 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     worker value at stack launch, so the hosted executor must resolve that value
     out-of-band rather than drop the name (which would leave the hosted job with
     neither the worker override nor the profile default). A name whose value
-    resolves to ``LITERAL`` (a pure literal, a defaulted form with the variable
-    unset, or an ``:+`` / ``+`` alternate form) IS excluded — its concrete value
-    reaches the hosted job via ``profile_env`` instead. See
+    resolves to ``WORKER_PASSTHROUGH`` (a pass-through slot — ``environment:
+    [NAME]``, ``NAME:`` / ``NAME: null``, or ``NAME=``) is likewise NOT excluded:
+    Docker Compose took its value from the worker shell at stack launch, so the
+    hosted executor must resolve the same worker value out-of-band. A name whose
+    value resolves to ``LITERAL`` (a pure literal, a defaulted form with the
+    variable unset, or an ``:+`` / ``+`` alternate form) IS excluded — its
+    concrete value reaches the hosted job via ``profile_env`` instead. See
     ``filter_hosted_env_passthrough_names`` and PR #751 threads
-    PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm.
+    PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm / PRRT_kwDOSJAM6s6PYnJJ.
     """
     excluded = _compose_env_passthrough_exclusions(compose_env)
     if compose_env is not None:
-        # Exclude compose-declared names UNLESS their value is a worker-resolved
-        # defaulted form (``:-`` / ``-`` with the variable set, or ``:?`` / ``?``
-        # with the variable set) — those stay in passthrough for hosted out-of-band
-        # resolution (the local container received the worker value at stack
-        # launch; carrying it in ``profile_env`` would embed a secret, and
-        # excluding the name would drop it entirely). Literal values (pure
-        # literals, unset defaults, ``:+`` / ``+`` alternates) are excluded —
-        # their concrete value reaches the hosted job via ``profile_env``.
+        # Exclude compose-declared names UNLESS their value is worker-resolved
+        # and the local container received the worker value at stack launch:
+        # ``WORKER_RESOLVED_DEFAULTED`` (``:-`` / ``-`` / ``:?`` / ``?`` with the
+        # variable set) and a pass-through slot (raw value ``""`` —
+        # ``environment: [NAME]``, ``NAME:`` / ``NAME: null``, or ``NAME=``;
+        # Docker Compose took the value from the worker shell) stay in passthrough
+        # for hosted out-of-band resolution. Carrying the worker value in
+        # ``profile_env`` would embed a secret (defaulted) or override the real
+        # worker value with an empty literal (pass-through), and excluding the
+        # name would drop it entirely. Literal values (pure literals, unset
+        # defaults, ``:+`` / ``+`` alternates) are excluded — their concrete value
+        # reaches the hosted job via ``profile_env``. Bare ``${NAME}`` / ``$NAME``
+        # (``WORKER_RESOLVED_SLOT``) stay excluded — profile-owned secret slots
+        # the hosted path resolves via its adapter contract.
         excluded = excluded | frozenset(
             name
             for name, raw in compose_env.items()
-            if _compose_resolve_value(raw, worker_env=worker_env)[1]
+            if raw != ""
+            and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is not _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
         )
     return tuple(name for name in names if name not in excluded)
@@ -1341,6 +1352,18 @@ def literal_profile_env_from_compose(
     postgres_passwords = file_postgres_passwords | (postgres_passwords or frozenset())
     carried: list[tuple[str, str]] = []
     for key, raw in compose_env.items():
+        # A Compose pass-through slot (``environment: [NAME]``, ``NAME:`` /
+        # ``NAME: null``, or ``NAME=``) is normalized to an empty string; Docker
+        # Compose takes its value from the worker shell at stack launch, exactly
+        # like a bare ``${NAME}`` reference. Carrying an empty literal would
+        # override the real worker value in the hosted request, so the slot is
+        # skipped here and kept in ``env_passthrough_names`` for hosted
+        # out-of-band resolution (see ``filter_hosted_env_passthrough_names``).
+        # A literal empty resolved from an interpolation default (e.g.
+        # ``${MISSING:-}`` with ``MISSING`` unset) has a non-empty raw form and
+        # is still carried as ``LITERAL``, matching the local container.
+        if raw == "":
+            continue
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)
         if resolution is not _ComposeEnvResolution.LITERAL:
             continue
@@ -1351,9 +1374,21 @@ def literal_profile_env_from_compose(
 
 
 def _compose_environment_mapping(environment: object) -> dict[str, str]:
-    """Normalize a compose ``environment`` scalar, list, or mapping into a string dict."""
+    """Normalize a compose ``environment`` scalar, list, or mapping into a string dict.
+
+    A Compose pass-through slot — ``environment: [NAME]`` (list item with no
+    ``=``), ``NAME:`` / ``NAME: null`` (mapping value that is ``None``), or
+    ``NAME=`` (explicit empty) — declares no value; Docker Compose takes the
+    value from the worker shell at stack launch, exactly like a bare
+    ``${NAME}`` reference. Such a slot is normalized to an empty string (not the
+    literal ``"None"``) so the carry / passthrough-filter call sites can
+    recognize it (raw value ``""``) and skip it from ``profile_env`` while
+    keeping it in ``env_passthrough_names`` for hosted out-of-band resolution —
+    carrying an empty/``"None"`` literal would override the real worker value in
+    the hosted request.
+    """
     if isinstance(environment, Mapping):
-        return {str(key): str(value) for key, value in environment.items()}
+        return {str(key): "" if value is None else str(value) for key, value in environment.items()}
     if isinstance(environment, list):
         mapping: dict[str, str] = {}
         for item in environment:
@@ -1362,6 +1397,8 @@ def _compose_environment_mapping(environment: object) -> dict[str, str]:
                 if key:
                     mapping[key] = value if sep else ""
             elif isinstance(item, Mapping):
-                mapping.update({str(key): str(value) for key, value in item.items()})
+                mapping.update(
+                    {str(key): "" if value is None else str(value) for key, value in item.items()}
+                )
         return mapping
     return {}
