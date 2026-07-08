@@ -13,7 +13,9 @@ injected ``AgentRuntimeExecutor`` (hosted path). They assert:
   codes (timeout → ``AGENT_TIMEOUT``, auth → ``AGENT_AUTH_FAILED``).
 - Secret values are never present in the request, argv, stdin, or captured
   logs.
-- Usage sampling + log-store streaming still run on the hosted path.
+- Usage sampling is skipped on the hosted path (the hosted executor owns
+  its own runtime; sampling via ``docker compose exec`` is invalid there),
+  while log-store streaming still runs.
 """
 
 from __future__ import annotations
@@ -294,36 +296,28 @@ class TestRuntimeExecutorSeam:
         assert "sk-" not in blob
 
     @pytest.mark.unit
-    async def test_hosted_usage_sampling_finalized_on_success(self) -> None:
-        from awf.adapters.usage import UsageSampleContext
-
-        finalized_statuses: list[str] = []
+    async def test_hosted_usage_sampling_skipped(self) -> None:
+        # The hosted executor owns its own runtime; the compose-based usage
+        # sampler must NOT be started on the hosted path (it would build an
+        # invalid ``docker compose -p "" -f "" exec`` invocation).
+        starts: list[dict[str, Any]] = []
 
         class _StubSampler:
-            async def start(self, **_kwargs: Any) -> UsageSampleContext:
-                ctx = UsageSampleContext.__new__(UsageSampleContext)
-                ctx.workspace_id = "ws_usage"
-                ctx.provider = AgentRuntime.codex
-                return ctx
+            async def start(self, **kwargs: Any) -> Any:
+                starts.append(kwargs)
+                raise AssertionError("usage sampler must not be started on hosted path")
 
-        class _StubSampleContext:
-            async def finalize(self, *, status: str) -> None:
-                finalized_statuses.append(status)
-
-        # Monkeypatch the sampler via a minimal stub that records finalize.
-        executor = _RecordingExecutor()
-        sampler = _StubSampler()
         adapter = CodexAdapter(
             runner=FakeCommandRunner(),
-            usage_sampler=sampler,  # type: ignore[arg-type]
-            runtime_executor=executor,
+            usage_sampler=_StubSampler(),  # type: ignore[arg-type]
+            runtime_executor=_RecordingExecutor(),
         )
 
-        # Replace the real UsageSampleContext start path with our stub context.
-        async def _stub_start(**_kwargs: Any) -> _StubSampleContext:
-            return _StubSampleContext()
+        async def _sentinel_start(**kwargs: Any) -> None:
+            starts.append(kwargs)
+            raise AssertionError("usage sampling must not start on hosted path")
 
-        adapter._start_usage_sampling = _stub_start  # type: ignore[method-assign]
+        adapter._start_usage_sampling = _sentinel_start  # type: ignore[method-assign]
 
         await adapter.run(
             compose_project=_COMPOSE_PROJECT,
@@ -332,7 +326,7 @@ class TestRuntimeExecutorSeam:
             workspace_id="ws_usage",
         )
 
-        assert finalized_statuses == ["success"]
+        assert starts == [], "usage sampling must not start on hosted path"
 
     @pytest.mark.unit
     async def test_hosted_failure_secret_not_in_command_result_payload(self) -> None:

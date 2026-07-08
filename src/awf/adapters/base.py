@@ -459,11 +459,13 @@ class AgentAdapter(ABC):
             )
         try:
             try:
-                sampler_ctx = await self._start_usage_sampling(
-                    compose_project="",
-                    compose_file=Path(),
-                    workspace_id=workspace_id,
-                )
+                sampler_ctx = None
+                if self._usage_sampler is not None:
+                    _log.info(
+                        "agent.run.hosted.usage_sampling_skipped",
+                        agent=self.name.value,
+                        workspace_id=workspace_id,
+                    )
                 hosted_result = await runtime_executor.execute(request)
                 if sinks is not None:
                     if hosted_result.stdout:
