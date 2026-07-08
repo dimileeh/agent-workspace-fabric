@@ -461,54 +461,96 @@ def _try_agent_environment_from_compose_file(
     return _compose_environment_mapping(agent.get("environment"))
 
 
-def _try_compose_agent_env_and_postgres_password(
+def _try_compose_agent_env_and_postgres_passwords(
     compose_file: Path,
-) -> tuple[dict[str, str] | None, str | None]:
-    """Parse the compose file once, returning agent env and the postgres password.
+    *,
+    worker_env: Mapping[str, str],
+) -> tuple[dict[str, str] | None, frozenset[str]]:
+    """Parse the compose file once, returning agent env and resolved DB passwords.
 
-    Returns ``(agent_env, postgres_password)`` where ``agent_env`` is ``None``
+    Returns ``(agent_env, postgres_passwords)`` where ``agent_env`` is ``None``
     when the compose is unreadable or has no agent service (mirrors
-    ``_try_agent_environment_from_compose_file``) and ``postgres_password`` is
-    ``None`` when no service declares ``POSTGRES_PASSWORD``). Parsing once avoids
+    ``_try_agent_environment_from_compose_file``) and ``postgres_passwords`` is
+    empty when no service declares ``POSTGRES_PASSWORD``). Parsing once avoids
     a second read/parse of the same file when ``literal_profile_env_from_compose``
     needs both the agent env and the rendered postgres password for redaction.
 
     ``POSTGRES_PASSWORD`` is collected from *every* compose service, not only a
-    service literally named ``postgres``. A valid custom profile may name its
-    database sidecar ``db`` / ``database`` (or anything else) while still setting
+    service literally named ``postgres``, and *all* distinct resolved values are
+    returned (not only the first). A valid custom profile may name its database
+    sidecar ``db`` / ``database`` (or anything else) while still setting
     ``POSTGRES_PASSWORD`` and expanding that same password into the agent env
     ``DATABASE_URL`` / ``AWF_DATABASE_URL``. Looking up only
-    ``services["postgres"]`` would leave ``postgres_password`` ``None`` for such a
-    profile and ``literal_profile_env_from_compose`` would carry the rendered DB
-    URL in ``profile_env``, leaking the workspace credential to the hosted
-    executor despite the secret-free contract. Scanning all services tracks the
-    rendered secret source independent of the service name.
+    ``services["postgres"]`` would leave the password set empty for such a profile
+    and ``literal_profile_env_from_compose`` would carry the rendered DB URL in
+    ``profile_env``, leaking the workspace credential to the hosted executor
+    despite the secret-free contract. Scanning all services tracks the rendered
+    secret source independent of the service name.
+
+    Keeping only the first declared password (the previous behaviour) is also
+    unsound when a profile runs several DB sidecars with *different* passwords:
+    a rendered agent env value (e.g. a second service's ``WAREHOUSE_URL``) that
+    embeds a later service's password would slip past a redaction that only
+    compares against the first service's password. Collecting every declared
+    value redacts each independently.
+
+    Each declared ``POSTGRES_PASSWORD`` is resolved against ``worker_env`` with
+    ``_compose_resolve_value`` before redaction so a service that expresses its
+    password via Compose interpolation/defaults (e.g.
+    ``${POSTGRES_PASSWORD:-fallback}`` or ``${POSTGRES_PASSWORD}``) redacts the
+    same concrete value Docker Compose injects into the local agent container at
+    stack launch. The raw ``${...}`` placeholder string is also tracked as a
+    redaction target so a rendered agent env value that still carries the
+    unexpanded placeholder (e.g. when ComposeManager did not expand that
+    particular reference) is still redacted. Worker-resolved forms whose concrete
+    value cannot be recovered here (``${NAME}`` with ``NAME`` set, or a defaulted
+    form with ``NAME`` set) contribute only the raw placeholder string: the
+    resolved secret is a worker value that must never be carried in
+    ``profile_env``, and the rendered compose file ComposeManager writes already
+    expands ``${AWF_POSTGRES_PASSWORD}`` into a literal for the common case.
     """
     try:
         payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError, UnicodeDecodeError):
-        return None, None
+        return None, frozenset()
     if not isinstance(payload, Mapping):
-        return None, None
+        return None, frozenset()
     services = payload.get("services")
     if not isinstance(services, Mapping):
-        return None, None
+        return None, frozenset()
     agent = services.get("agent")
     agent_env = (
         _compose_environment_mapping(agent.get("environment"))
         if isinstance(agent, Mapping)
         else None
     )
-    postgres_password: str | None = None
+    postgres_passwords: set[str] = set()
     for service in services.values():
         if not isinstance(service, Mapping):
             continue
         service_env = _compose_environment_mapping(service.get("environment"))
-        password = service_env.get("POSTGRES_PASSWORD")
-        if password:
-            postgres_password = password
-            break
-    return agent_env, postgres_password
+        raw_password = service_env.get("POSTGRES_PASSWORD")
+        if not raw_password:
+            continue
+        # The raw declared value (literal or ``${...}`` placeholder) is always a
+        # redaction target so an agent env value carrying the unexpanded form is
+        # still redacted.
+        postgres_passwords.add(raw_password)
+        resolved, resolution = _compose_resolve_value(raw_password, worker_env=worker_env)
+        if resolution is _ComposeEnvResolution.LITERAL and resolved:
+            postgres_passwords.add(resolved)
+        elif resolution is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED:
+            # A defaulted/required form with the variable *set* in the worker env
+            # resolves to the worker value at stack launch. The redaction set is
+            # only ever used for substring matching to *skip* agent env values —
+            # it is never carried in ``profile_env`` — so it is safe (and
+            # necessary) to include the concrete worker value here. Without it a
+            # rendered DB URL embedding the resolved worker password would slip
+            # past redaction.
+            concrete = _compose_concrete_worker_password(raw_password, worker_env=worker_env)
+            if concrete:
+                postgres_passwords.add(concrete)
+    return agent_env, frozenset(postgres_passwords)
 
 
 def _try_agent_environment_keys_from_compose_file(
@@ -956,11 +998,130 @@ def _compose_resolve_braced(
     return "", _ComposeEnvResolution.WORKER_RESOLVED_SLOT
 
 
+def _compose_concrete_worker_password(
+    value: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> str | None:
+    """Resolve a service ``POSTGRES_PASSWORD`` to its concrete worker-env value.
+
+    Unlike :func:`_compose_resolve_value`, this returns the concrete worker value
+    for *worker-resolved* forms (``${NAME:-default}`` / ``${NAME-default}`` /
+    ``${NAME:?err}`` / ``${NAME?err}`` with the variable set, and bare
+    ``${NAME}`` / ``$NAME``) — not the ``WORKER_RESOLVED_*`` classification. The
+    result is used only to build the redaction set in
+    ``_try_compose_agent_env_and_postgres_passwords``: a rendered agent env DB URL
+    embeds the *resolved* password the local container received at stack launch,
+    so redaction must match that concrete value. The redaction set is never
+    carried in ``profile_env`` (worker-resolved values are skipped from carry),
+    so recovering the concrete worker secret here does not violate the
+    no-secret-values contract — it only marks which agent env values to *skip*.
+
+    Returns ``None`` when the value does not resolve to a concrete worker value
+    (e.g. an unset required form, an unparseable expression, or a nested
+    reference the simple expansion below does not handle). The caller still
+    tracks the raw ``${...}`` placeholder string as a redaction target, so an
+    agent env value carrying the unexpanded form is still redacted.
+
+    The expansion mirrors Compose's interpolation for the forms a
+    ``POSTGRES_PASSWORD`` realistically uses: a single braced expression or bare
+    ``$NAME``. A value with mixed literal + reference text (e.g.
+    ``prefix-${NAME}``) is handled by expanding the whole value; if any piece is
+    worker-resolved the concrete worker value is substituted in place.
+    """
+    escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
+    expanded: list[str] = []
+    index = 0
+    while index < len(escaped):
+        char = escaped[index]
+        if char != "$":
+            expanded.append(char)
+            index += 1
+            continue
+        if index + 1 < len(escaped) and escaped[index + 1] == "{":
+            end = _compose_braced_expression_end(escaped, index + 1)
+            if end is None:
+                expanded.append(char)
+                index += 1
+                continue
+            piece = _compose_concrete_worker_password_braced(
+                escaped[index + 2 : end], worker_env=worker_env
+            )
+            if piece is None:
+                return None
+            expanded.append(piece)
+            index = end + 1
+            continue
+        plain_match = _COMPOSE_ENV_NAME_PATTERN.match(escaped, index + 1)
+        if plain_match is None:
+            expanded.append(char)
+            index += 1
+            continue
+        name = plain_match.group(0)
+        if name not in worker_env:
+            return None
+        expanded.append(worker_env[name])
+        index = plain_match.end()
+    return "".join(expanded).replace(_COMPOSE_ESCAPED_DOLLAR, "$")
+
+
+def _compose_concrete_worker_password_braced(
+    expression: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> str | None:
+    """Resolve a braced expression to its concrete worker value for redaction.
+
+    Mirrors the operator semantics in :func:`_compose_resolve_braced` but returns
+    the concrete value (including worker secrets) rather than a classification:
+
+    - ``:-`` / ``-`` (default): when the variable is set (non-empty for ``:-``)
+      return the worker value; otherwise return the recursively-expanded default.
+    - ``:+`` / ``+`` (alternate): when the variable is set (non-empty for ``:+``)
+      return the recursively-expanded alternate word; otherwise return ``""``.
+    - ``:?`` / ``?`` (required): when the variable is set (non-empty for ``:?``)
+      return the worker value; otherwise return ``None`` (the stack would fail
+      to launch).
+    - Bare ``${NAME}``: return the worker value, or ``None`` when unset.
+    """
+    name_match = _COMPOSE_ENV_NAME_PATTERN.match(expression)
+    if name_match is None:
+        return None
+    name = name_match.group(0)
+    remainder = expression[name_match.end() :]
+    if not remainder:
+        return worker_env.get(name, None)
+    operator = ""
+    word = ""
+    for candidate in _COMPOSE_BRACED_OPERATORS:
+        if remainder.startswith(candidate):
+            operator = candidate
+            word = remainder[len(candidate) :]
+            break
+    if not operator:
+        return None
+    worker_value = worker_env.get(name)
+    is_set = name in worker_env
+    is_non_empty = bool(worker_value)
+    if operator in _COMPOSE_DEFAULT_OPERATORS:
+        if (operator == ":-" and is_non_empty) or (operator == "-" and is_set):
+            return worker_value
+        return _compose_concrete_worker_password(word, worker_env=worker_env)
+    if operator in _COMPOSE_ALTERNATE_OPERATORS:
+        if (operator == ":+" and is_non_empty) or (operator == "+" and is_set):
+            return _compose_concrete_worker_password(word, worker_env=worker_env)
+        return ""
+    if (operator == ":?" and is_non_empty) or (operator == "?" and is_set):
+        return worker_value
+    return None
+
+
 def literal_profile_env_from_compose(
     compose_file: Path,
     *,
     compose_env: Mapping[str, str] | None = None,
     worker_env: Mapping[str, str] | None = None,
+    postgres_passwords: frozenset[str] | None = None,
 ) -> tuple[tuple[str, str], ...]:
     """Return profile-owned env values the hosted executor must inject.
 
@@ -1021,42 +1182,53 @@ def literal_profile_env_from_compose(
     declaring ``POSTGRES_PASSWORD`` is the authoritative source of that secret;
     ``POSTGRES_PASSWORD`` is collected from any service (not only one named
     ``postgres``) so custom profiles that name their DB sidecar ``db`` /
-    ``database`` are redacted too. Agent env values containing it are skipped so
-    the password never reaches the hosted request object. When the compose file
-    is unreadable the result is empty (fail-closed: no values), matching
-    ``_compose_env_passthrough_exclusions``.
+    ``database`` are redacted too, and *all* distinct declared values are tracked
+    (not only the first) so a profile running several DB sidecars with different
+    passwords redacts each one's rendered DB URL independently. Each declared
+    value is resolved against the worker env (mirroring Compose interpolation)
+    so a password expressed via ``${POSTGRES_PASSWORD:-fallback}`` /
+    ``${POSTGRES_PASSWORD}`` redacts the same concrete value the local container
+    receives at stack launch. Agent env values containing any tracked password
+    are skipped so the credential never reaches the hosted request object. When
+    the compose file is unreadable the result is empty (fail-closed: no values),
+    matching ``_compose_env_passthrough_exclusions``.
 
     ``compose_env`` lets a caller that already parsed the compose agent
     environment (e.g. ``_run_hosted`` computing the passthrough filter from the
-    same parse) reuse the result and avoid a second read/parse of the file.
+    same parse) reuse the result and avoid a second read/parse of the file. A
+    caller that supplies ``compose_env`` is responsible for the same redaction
+    context (it already has the file open): such a caller must perform its own
+    postgres-password collection and pass the set via ``postgres_passwords``;
+    otherwise no DB-credential redaction is applied for the pre-parsed path.
     ``worker_env`` lets a caller supply a deterministic worker environment for
     interpolation (default ``os.environ``); mirroring
     ``agent_environment_with_*`` helpers.
     """
-    parsed_file = compose_env is None
+    env = os.environ if worker_env is None else worker_env
     if compose_env is None:
-        compose_env, file_postgres_password = _try_compose_agent_env_and_postgres_password(
-            compose_file
+        compose_env, file_postgres_passwords = _try_compose_agent_env_and_postgres_passwords(
+            compose_file,
+            worker_env=env,
         )
     else:
-        file_postgres_password = None
+        file_postgres_passwords = frozenset()
     if compose_env is None:
         return ()
-    # Redact agent env values that embed the rendered postgres password so the
-    # generated workspace DB credential never reaches the hosted executor. Only
-    # re-read the compose file when this call parsed the agent env itself; a
-    # caller that supplied ``compose_env`` from a prior parse is responsible for
-    # the same redaction context (it already has the file open). Failing to
-    # locate a postgres password (no service declaring ``POSTGRES_PASSWORD``)
-    # redacts nothing, preserving carry for profiles without a DB sidecar.
-    postgres_password: str | None = file_postgres_password if parsed_file else None
-    env = os.environ if worker_env is None else worker_env
+    # Redact agent env values that embed any rendered postgres password so the
+    # generated workspace DB credential(s) never reach the hosted executor.
+    # ``file_postgres_passwords`` is populated only when this call parsed the
+    # compose file itself; a caller that supplied ``compose_env`` from a prior
+    # parse must pass ``postgres_passwords`` explicitly for the same redaction.
+    # Failing to locate a postgres password (no service declaring
+    # ``POSTGRES_PASSWORD``) redacts nothing, preserving carry for profiles
+    # without a DB sidecar.
+    postgres_passwords = file_postgres_passwords | (postgres_passwords or frozenset())
     carried: list[tuple[str, str]] = []
     for key, raw in compose_env.items():
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)
         if resolution is not _ComposeEnvResolution.LITERAL:
             continue
-        if postgres_password and postgres_password in expanded:
+        if any(password in expanded for password in postgres_passwords if password):
             continue
         carried.append((key, expanded))
     return tuple(carried)
