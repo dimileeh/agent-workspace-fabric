@@ -748,6 +748,99 @@ def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_backend_su
 
 
 @pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_parses_compose_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The credential-suppression path reads/parses the compose file exactly once.
+
+    Regression for the TOCTOU double-parse in
+    ``filter_hosted_env_passthrough_names``: the exclusion set and the
+    compose-env union must derive from a single read of the file so a change
+    between two reads cannot make them disagree.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                            "AWS_REGION": "us-west-2",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    import awf.profiles.compose as compose_module
+
+    real_parse = compose_module._try_agent_environment_from_compose_file
+    parse_calls = 0
+
+    def _counting_parse(path: Path) -> dict[str, str] | None:
+        nonlocal parse_calls
+        parse_calls += 1
+        return real_parse(path)
+
+    monkeypatch.setattr(compose_module, "_try_agent_environment_from_compose_file", _counting_parse)
+
+    names = ("OPENAI_API_KEY", "AWS_REGION", "ANTHROPIC_API_KEY")
+    filtered = filter_hosted_env_passthrough_names(names, compose_file=compose_file)
+
+    assert parse_calls == 1
+    assert "OPENAI_API_KEY" not in filtered
+    assert "AWS_REGION" not in filtered
+    assert "ANTHROPIC_API_KEY" in filtered
+
+
+@pytest.mark.unit
+def test_agent_exec_env_passthrough_parses_compose_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exec-time passthrough reads/parses the compose file exactly once."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {"OPENAI_API_KEY": "${OPENAI_API_KEY}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    import awf.profiles.compose as compose_module
+
+    real_parse = compose_module._try_agent_environment_from_compose_file
+    parse_calls = 0
+
+    def _counting_parse(path: Path) -> dict[str, str] | None:
+        nonlocal parse_calls
+        parse_calls += 1
+        return real_parse(path)
+
+    monkeypatch.setattr(compose_module, "_try_agent_environment_from_compose_file", _counting_parse)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-worker")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-worker")
+
+    passthrough = agent_exec_env_passthrough(compose_file=compose_file)
+
+    assert parse_calls == 1
+    assert "OPENAI_API_KEY" not in passthrough
+    assert "ANTHROPIC_API_KEY" in passthrough
+
+
+@pytest.mark.unit
 def test_opencode_bash_timeout_env_reaches_agent_as_placeholder() -> None:
     env = agent_environment_with_legacy_host_auth(
         (),

@@ -476,7 +476,9 @@ def agent_environment_keys_from_compose_file(compose_file: Path) -> frozenset[st
     return _try_agent_environment_keys_from_compose_file(compose_file) or frozenset()
 
 
-def _compose_env_passthrough_exclusions(compose_file: Path) -> frozenset[str]:
+def _compose_env_passthrough_exclusions(
+    compose_env: Mapping[str, str] | None,
+) -> frozenset[str]:
     """Return auth env var names a compose exec/passthrough must not re-inject.
 
     Shared by the local ``docker compose exec -e`` path and the hosted (non-
@@ -485,8 +487,12 @@ def _compose_env_passthrough_exclusions(compose_file: Path) -> frozenset[str]:
     compose fails closed the same way ``agent_exec_env_passthrough`` does:
     assume a profile-owned ``OLLAMA_HOST`` would shadow the worker base URL
     rather than treat a parse failure as "no profile Ollama keys".
+
+    Takes the already-parsed compose agent environment (``None`` when the
+    compose file was unreadable) so callers can read/parse the file once and
+    reuse the result for both this exclusion set and the compose-env union,
+    avoiding a TOCTOU window between two reads of the same file.
     """
-    compose_env = _try_agent_environment_from_compose_file(compose_file)
     if compose_env is None:
         shadowing = _shadowing_worker_ollama_keys({"OLLAMA_HOST"})
         profile_owned = frozenset[str]()
@@ -517,7 +523,8 @@ def agent_exec_env_passthrough(
     """
 
     source_env = os.environ if host_env is None else host_env
-    excluded = _compose_env_passthrough_exclusions(compose_file)
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    excluded = _compose_env_passthrough_exclusions(compose_env)
     return tuple(
         name for name in AGENT_AUTH_ENV_VARS if name not in excluded and source_env.get(name)
     )
@@ -556,8 +563,8 @@ def filter_hosted_env_passthrough_names(
     Ollama-shadowing exclusions apply (fail-closed the same way
     ``_compose_env_passthrough_exclusions`` does).
     """
-    excluded = _compose_env_passthrough_exclusions(compose_file)
     compose_env = _try_agent_environment_from_compose_file(compose_file)
+    excluded = _compose_env_passthrough_exclusions(compose_env)
     if compose_env is not None:
         excluded = excluded | frozenset(compose_env)
     return tuple(name for name in names if name not in excluded)
