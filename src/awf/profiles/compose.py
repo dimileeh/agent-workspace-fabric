@@ -543,12 +543,23 @@ def filter_hosted_env_passthrough_names(
     lets the hosted executor resolve an inherited worker credential/endpoint the
     local path and readiness overlay keep out of the agent environment.
 
-    Only names in ``AGENT_AUTH_ENV_VARS`` territory can be excluded — adapter
-    backend-credential supplements (e.g. Claude Code ``AWS_*`` / Vertex project /
-    region) are not profile-owned slots, so they always pass through and the
-    hosted executor still resolves only the names whose backing values exist.
+    The local ``docker compose exec`` path only forwards ``AGENT_AUTH_ENV_VARS``
+    and skips compose-declared ones, so *any* env key declared on the agent
+    service's environment block is profile-owned at stack launch and never
+    re-injected from the worker — including adapter backend-credential
+    supplements (e.g. Claude Code ``AWS_*`` / Vertex project / region) that are
+    not in ``AGENT_AUTH_ENV_VARS``. The hosted path must apply the same
+    broader exclusion or a profile-owned backend credential/endpoint declared in
+    the compose env block would be re-resolved from the worker by the hosted
+    executor, diverging from the local run. When the compose file is unreadable
+    the broader set is unknown, so only the ``AGENT_AUTH_ENV_VARS``-territory /
+    Ollama-shadowing exclusions apply (fail-closed the same way
+    ``_compose_env_passthrough_exclusions`` does).
     """
     excluded = _compose_env_passthrough_exclusions(compose_file)
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is not None:
+        excluded = excluded | frozenset(compose_env)
     return tuple(name for name in names if name not in excluded)
 
 
