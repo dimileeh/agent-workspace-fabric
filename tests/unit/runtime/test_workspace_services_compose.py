@@ -1103,6 +1103,145 @@ def test_literal_profile_env_from_compose_dash_dash_tests_non_empty(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_alternate_carries_word_when_set(
+    tmp_path: Path,
+) -> None:
+    """``:+`` / ``+`` carry the alternate word when the variable is worker-set.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PVhhm: for an agent env value
+    such as ``ENDPOINT: ${FLAG:+https://eu.example.com}``, Docker Compose resolves
+    the alternate word (``https://eu.example.com``) into the local agent container
+    at stack launch when ``FLAG`` is set (non-empty for ``:+``, set for ``+``) and
+    resolves to ``""`` when ``FLAG`` is unset/empty. The previous code classified
+    every ``:+`` / ``+`` form as ``WORKER_RESOLVED_SLOT``, dropping the key from
+    ``profile_env`` and excluding it from ``env_passthrough_names`` — so the
+    hosted job received neither the alternate word nor the worker value, while the
+    local container received the alternate word. The alternate word is profile-owned
+    config (literal text in the compose file), so it is carried as ``LITERAL`` so
+    the hosted job receives the same concrete value the local container got; when
+    the variable is unset/empty the local container receives ``""``, which is also
+    carried so the hosted job matches. The alternate word is recursively expanded
+    against the worker env (mirroring ``awf.service.environment``'s expander) so a
+    word that itself references a worker secret (e.g. ``${FLAG:+${SECRET}}``) does
+    not embed that secret in ``profile_env``.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # :+ with FLAG set & non-empty -> alternate word carried.
+                            "ENDPOINT_SET": "${FLAG_SET:+https://eu.example.com}",
+                            # :+ with FLAG unset -> local container gets "", carried.
+                            "ENDPOINT_UNSET": "${FLAG_UNSET:+https://eu.example.com}",
+                            # :+ with FLAG present-but-empty -> local gets "", carried.
+                            "ENDPOINT_EMPTY": "${FLAG_EMPTY:+https://eu.example.com}",
+                            # + with FLAG set (even empty) -> alternate word carried.
+                            "ENDPOINT_PLUS_SET": "${FLAG_PLUS_SET+https://eu.example.com}",
+                            # + with FLAG unset -> local container gets "", carried.
+                            "ENDPOINT_PLUS_UNSET": "${FLAG_PLUS_UNSET+https://eu.example.com}",
+                            # :+ whose alternate word references a worker secret:
+                            # when FLAG is set the word ${SECRET} expands to the
+                            # worker value (a secret), so the whole value must NOT
+                            # be carried as a literal — it stays worker-resolved.
+                            "SECRET_BEARING": "${FLAG_SET:+${SECRET}}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    worker_env = {
+        "FLAG_SET": "true",
+        "FLAG_EMPTY": "",
+        "FLAG_PLUS_SET": "",
+    }
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env=worker_env)
+    carried = dict(profile_env)
+
+    # :+ set & non-empty -> alternate word carried (local container got the word).
+    assert carried.get("ENDPOINT_SET") == "https://eu.example.com"
+    # :+ unset -> local container got "", carried as empty.
+    assert carried.get("ENDPOINT_UNSET") == ""
+    # :+ present-but-empty -> local container got "", carried as empty.
+    assert carried.get("ENDPOINT_EMPTY") == ""
+    # + set (even empty) -> alternate word carried.
+    assert carried.get("ENDPOINT_PLUS_SET") == "https://eu.example.com"
+    # + unset -> local container got "", carried as empty.
+    assert carried.get("ENDPOINT_PLUS_UNSET") == ""
+    # :+ whose word references a worker secret -> not carried (worker-resolved).
+    assert "SECRET_BEARING" not in carried
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_keeps_required_set_worker_value(
+    tmp_path: Path,
+) -> None:
+    """``:?`` / ``?`` with the variable set keep the name in hosted passthrough.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PVhhm: for an agent env value
+    such as ``API_KEY: ${API_KEY:?set}``, Docker Compose resolves the worker value
+    of ``API_KEY`` into the local agent container at stack launch when ``API_KEY``
+    is set (non-empty for ``:?``, set for ``?``). The previous code classified every
+    ``:?`` / ``?`` form as ``WORKER_RESOLVED_SLOT``, dropping the key from
+    ``profile_env`` (correct — carrying the worker value would embed a secret) AND
+    excluding it from ``env_passthrough_names`` — so the hosted job received
+    neither the worker value nor any profile default, while the local container
+    received the worker value. Such a name is classified
+    ``WORKER_RESOLVED_DEFAULTED`` so it stays in ``env_passthrough_names`` for
+    hosted out-of-band resolution, mirroring the local Compose container. When the
+    variable is unset the local stack would fail to launch (``:?`` / ``?`` raise),
+    so that branch is unreachable for a running container and stays classified as a
+    worker-resolved slot.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # :? with API_KEY set & non-empty -> worker value
+                            # resolved out-of-band on the hosted path.
+                            "API_KEY": "${API_KEY:?set}",
+                            # ? with API_KEY_Q set (even empty) -> worker value
+                            # resolved out-of-band on the hosted path.
+                            "API_KEY_Q": "${API_KEY_Q?set}",
+                            # Pure literal -> excluded (carried via profile_env).
+                            "LITERAL_CONFIG": "static-value",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = ("API_KEY", "API_KEY_Q", "LITERAL_CONFIG", "OPENAI_API_KEY")
+    worker_env = {"API_KEY": "sk-worker", "API_KEY_Q": ""}
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env=worker_env
+    )
+
+    # :? / ? with variable set -> stays in passthrough for hosted out-of-band
+    # resolution (the local container received the worker value at stack launch).
+    assert "API_KEY" in filtered
+    assert "API_KEY_Q" in filtered
+    # Pure literal -> excluded (carried via profile_env instead).
+    assert "LITERAL_CONFIG" not in filtered
+    # A name absent from the compose env block still passes through.
+    assert "OPENAI_API_KEY" in filtered
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_unreadable_is_empty(
     tmp_path: Path,
 ) -> None:

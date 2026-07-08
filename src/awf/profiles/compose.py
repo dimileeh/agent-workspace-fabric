@@ -647,12 +647,15 @@ def filter_hosted_env_passthrough_names(
     received neither, diverging from the local run. Such a name is therefore
     kept in ``env_passthrough_names`` (classified
     ``WORKER_RESOLVED_DEFAULTED``) so the hosted executor resolves the same
-    worker value out-of-band, mirroring the local Compose container. Pure
-    literals and bare ``${NAME}`` / ``${NAME:?...}`` / ``${NAME:+...}`` slots
-    stay excluded (carried via ``profile_env`` or suppressed as profile-owned
-    secret slots). ``worker_env`` (default ``os.environ``) supplies the worker
-    environment used to classify defaulted forms, mirroring
-    ``literal_profile_env_from_compose``.
+    worker value out-of-band, mirroring the local Compose container. The same
+    applies to ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME`` set (the local
+    container received the worker value). Pure literals, unset defaults, and
+    ``${NAME:+alt}`` / ``${NAME+alt}`` alternates stay excluded (their concrete
+    value reaches the hosted job via ``profile_env``), and bare ``${NAME}`` /
+    ``$NAME`` slots stay excluded (profile-owned secret slots resolved via the
+    adapter contract). ``worker_env`` (default ``os.environ``) supplies the worker
+    environment used to classify defaulted / required / alternate forms,
+    mirroring ``literal_profile_env_from_compose``.
     """
     compose_env = _try_agent_environment_from_compose_file(compose_file)
     env = os.environ if worker_env is None else worker_env
@@ -673,20 +676,27 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
 
     A compose-declared name whose value resolves to
     ``WORKER_RESOLVED_DEFAULTED`` (a ``${NAME:-default}`` / ``${NAME-default}``
-    form with ``NAME`` set in the worker env) is NOT excluded: the local
-    Compose container received the worker value at stack launch, so the hosted
-    executor must resolve that value out-of-band rather than drop the name
-    (which would leave the hosted job with neither the worker override nor the
-    profile default). See ``filter_hosted_env_passthrough_names`` and PR #751
-    thread PRRT_kwDOSJAM6s6PVH0t.
+    form with ``NAME`` set, or a ``${NAME:?err}`` / ``${NAME?err}`` required form
+    with ``NAME`` set) is NOT excluded: the local Compose container received the
+    worker value at stack launch, so the hosted executor must resolve that value
+    out-of-band rather than drop the name (which would leave the hosted job with
+    neither the worker override nor the profile default). A name whose value
+    resolves to ``LITERAL`` (a pure literal, a defaulted form with the variable
+    unset, or an ``:+`` / ``+`` alternate form) IS excluded — its concrete value
+    reaches the hosted job via ``profile_env`` instead. See
+    ``filter_hosted_env_passthrough_names`` and PR #751 threads
+    PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm.
     """
     excluded = _compose_env_passthrough_exclusions(compose_env)
     if compose_env is not None:
         # Exclude compose-declared names UNLESS their value is a worker-resolved
-        # defaulted form — those stay in passthrough for hosted out-of-band
+        # defaulted form (``:-`` / ``-`` with the variable set, or ``:?`` / ``?``
+        # with the variable set) — those stay in passthrough for hosted out-of-band
         # resolution (the local container received the worker value at stack
         # launch; carrying it in ``profile_env`` would embed a secret, and
-        # excluding the name would drop it entirely).
+        # excluding the name would drop it entirely). Literal values (pure
+        # literals, unset defaults, ``:+`` / ``+`` alternates) are excluded —
+        # their concrete value reaches the hosted job via ``profile_env``.
         excluded = excluded | frozenset(
             name
             for name, raw in compose_env.items()
@@ -724,22 +734,41 @@ class _ComposeEnvResolution(StrEnum):
     # ``env_passthrough_names`` — that would drop it entirely, diverging from the
     # local run). See PR #751 thread PRRT_kwDOSJAM6s6PVH0t.
     WORKER_RESOLVED_DEFAULTED = "worker_resolved_defaulted"
-    # Worker-resolved via bare ``${NAME}`` / ``$NAME`` / ``${NAME:?...}`` /
-    # ``${NAME:+...}`` / ``${NAME+...}`` — profile-owned secret slots the local
-    # path keeps out of exec-time passthrough; the hosted path resolves them via
-    # its own adapter contract, not by re-resolving ``${NAME}`` from the worker.
+    # Worker-resolved via bare ``${NAME}`` / ``$NAME`` and ``${NAME:?...}`` /
+    # ``${NAME?...}`` with the variable unset (the local stack would fail to
+    # launch, so this is unreachable for a running container) — profile-owned
+    # secret slots the local path keeps out of exec-time passthrough; the hosted
+    # path resolves them via its own adapter contract, not by re-resolving
+    # ``${NAME}`` from the worker. ``${NAME:?...}`` / ``${NAME?...}`` with the
+    # variable set resolve to the worker value and are classified
+    # ``WORKER_RESOLVED_DEFAULTED`` (kept in passthrough). ``${NAME:+...}`` /
+    # ``${NAME+...}`` with the variable set carry the profile-owned alternate word
+    # as ``LITERAL`` (the local container received the alternate, not a worker
+    # value).
     WORKER_RESOLVED_SLOT = "worker_resolved_slot"
 
 
-# Compose braced-expression operators that supply a concrete default when the
-# referenced variable is unset (``:-`` tests non-empty, ``-`` tests set-ness).
-# Only these forms can carry a profile-owned concrete value to the hosted job
-# when the variable is absent (or empty, for ``:-``) from the worker env; every
-# other operator (``:?`` / ``?`` / ``:+`` / ``+``) and a bare ``${NAME}`` /
-# ``$NAME`` resolves the slot from the worker and is treated as worker-resolved
-# (skipped). The non-empty vs set-ness distinction is handled in
-# ``_compose_resolve_braced`` to mirror ``awf.service.environment``'s expander.
+# Compose braced-expression operators, ordered longest-first so ``:-`` is
+# matched before ``-`` (and ``:+`` before ``+``, ``:?`` before ``?``). Mirrors
+# ``awf.service.environment._compose_expand_braced_expression``'s scan order.
+_COMPOSE_BRACED_OPERATORS = (":-", "-", ":+", "+", ":?", "?")
+
+# ``:-`` / ``-`` supply a concrete default when the referenced variable is unset
+# (``:-`` tests non-empty, ``-`` tests set-ness). Only these forms carry a
+# profile-owned concrete value to the hosted job when the variable is absent
+# (or empty, for ``:-``) from the worker env; when the variable is set the slot
+# is worker-resolved-defaulted. The non-empty vs set-ness distinction is handled
+# in ``_compose_resolve_braced`` to mirror ``awf.service.environment``'s expander.
 _COMPOSE_DEFAULT_OPERATORS = (":-", "-")
+
+# ``:+`` / ``+`` supply an alternate word when the referenced variable is set
+# (``:+`` tests non-empty, ``+`` tests set-ness). The alternate word is
+# profile-owned config (literal text in the compose file), so it is carried as a
+# literal when the test passes (the local container received the alternate word);
+# when the test fails Compose resolves to "" and that empty literal is carried.
+# An alternate word that references a worker secret propagates the worker-resolved
+# classification so the secret never reaches ``profile_env``.
+_COMPOSE_ALTERNATE_OPERATORS = (":+", "+")
 
 # Sentinel used to mask ``$$`` escapes before interpolation scanning so an
 # escaped dollar is never mistaken for a reference start.
@@ -775,9 +804,10 @@ def _compose_resolve_value(
 
     Returns ``(expanded, resolution)`` where ``resolution`` classifies whether the
     value carries a concrete profile-owned literal (``LITERAL``) or pulls a
-    worker-resolved value (``WORKER_RESOLVED_DEFAULTED`` for defaulted forms with
-    the variable set; ``WORKER_RESOLVED_SLOT`` for bare / ``:?`` / ``:+`` / ``+``
-    forms). See :class:`_ComposeEnvResolution` for the carry vs passthrough rules.
+    worker-resolved value (``WORKER_RESOLVED_DEFAULTED`` for defaulted / required
+    forms with the variable set; ``WORKER_RESOLVED_SLOT`` for bare ``${NAME}`` /
+    ``$NAME`` and unset required forms). See :class:`_ComposeEnvResolution` for the
+    carry vs passthrough rules.
 
     Carry rule (mirrors what the local agent container receives at stack
     launch, without embedding worker secrets in ``profile_env``):
@@ -799,15 +829,27 @@ def _compose_resolve_value(
     - ``${NAME-default}`` with ``NAME`` set in the worker env (even empty) is
       ``WORKER_RESOLVED_DEFAULTED`` — ``-`` tests set-ness, so a present value is
       worker-resolved.
-    - A bare ``${NAME}`` / ``$NAME`` (no default operator), and
-      ``${NAME:?...}`` / ``${NAME:+...}`` / ``${NAME+...}`` forms, are
-      ``WORKER_RESOLVED_SLOT``: worker-resolved slots the profile owns locally;
-      the hosted path resolves credentials via its own adapter contract, not by
-      re-resolving ``${NAME}`` from the worker, and an unset required form
-      (``${NAME:?err}``) would fail Compose at stack launch anyway.
+    - ``${NAME:+alternate}`` / ``${NAME+alternate}`` with ``NAME`` set (non-empty
+      for ``:+``) resolves to the concrete ``alternate`` and is carried — the
+      local container received the alternate word (profile-owned config, not a
+      worker value), so the hosted job must too. When ``NAME`` is unset (or empty
+      for ``:+``) Compose resolves to ``""`` and that empty literal is carried. An
+      alternate word that references a worker secret propagates the worker-resolved
+      classification so the secret never reaches ``profile_env``.
+    - ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME`` set (non-empty for ``:?``)
+      resolves to the worker value and is ``WORKER_RESOLVED_DEFAULTED`` — kept in
+      ``env_passthrough_names`` for hosted out-of-band resolution (the local
+      container received the worker value) and skipped from ``profile_env`` (it
+      would embed a secret). An unset required form would fail Compose at stack
+      launch, so that branch is ``WORKER_RESOLVED_SLOT`` (unreachable for a
+      running container).
+    - A bare ``${NAME}`` / ``$NAME`` (no operator) is ``WORKER_RESOLVED_SLOT``: a
+      worker-resolved slot the profile owns locally; the hosted path resolves
+      credentials via its own adapter contract, not by re-resolving ``${NAME}``
+      from the worker.
 
-    The default word is itself recursively expanded against the worker env,
-    mirroring ``awf.service.environment``'s env-file interpolator.
+    The default / alternate word is itself recursively expanded against the
+    worker env, mirroring ``awf.service.environment``'s env-file interpolator.
     """
     escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
     expanded: list[str] = []
@@ -850,7 +892,30 @@ def _compose_resolve_braced(
     """Resolve a Compose ``${...}`` braced expression.
 
     Returns ``(expanded, resolution)``; see :class:`_ComposeEnvResolution` and
-    ``_compose_resolve_value``.
+    ``_compose_resolve_value``. Operator semantics mirror
+    ``awf.service.environment._compose_expand_braced_expression`` so the hosted
+    job receives the same value the local agent container gets at stack launch:
+
+    - ``:-`` / ``-`` (default): when the variable is unset (or empty for ``:-``)
+      the default word is recursively expanded and carried as ``LITERAL``
+      (profile-owned concrete config); when the variable is set (non-empty for
+      ``:-``) the worker value is used and the slot is ``WORKER_RESOLVED_DEFAULTED``
+      (kept in passthrough, dropped from ``profile_env``).
+    - ``:+`` / ``+`` (alternate): when the variable is set (non-empty for ``:+``)
+      the alternate word is recursively expanded; if that expansion is a literal
+      it is carried as ``LITERAL`` (the local container received the alternate
+      word, which is profile-owned config, not a worker value). When the variable
+      is unset (or empty for ``:+``) Compose resolves to ``""`` and that empty
+      literal is carried so the hosted job matches the local container. An
+      alternate word that itself references a worker secret (e.g.
+      ``${FLAG:+${SECRET}}``) propagates the worker-resolved classification so the
+      secret is never embedded in ``profile_env``.
+    - ``:?`` / ``?`` (required): when the variable is set (non-empty for ``:?``)
+      Compose resolves the worker value, so the slot is ``WORKER_RESOLVED_DEFAULTED``
+      (kept in passthrough for hosted out-of-band resolution, dropped from
+      ``profile_env``). When the variable is unset/empty the local stack would fail
+      to launch, so that branch is unreachable for a running container and stays
+      ``WORKER_RESOLVED_SLOT``.
     """
     name_match = _COMPOSE_ENV_NAME_PATTERN.match(expression)
     if name_match is None:
@@ -861,30 +926,48 @@ def _compose_resolve_braced(
     if not remainder:
         # Bare ``${NAME}`` -> worker-resolved slot, skip.
         return "", _ComposeEnvResolution.WORKER_RESOLVED_SLOT
-    for candidate in _COMPOSE_DEFAULT_OPERATORS:
+    operator = ""
+    word = ""
+    for candidate in _COMPOSE_BRACED_OPERATORS:
         if remainder.startswith(candidate):
-            default_word = remainder[len(candidate) :]
-            worker_value = worker_env.get(name)
-            if candidate == ":-":
-                # :- tests non-empty: a present-but-empty value still injects the
-                # default, mirroring ``awf.service.environment``'s expander so the
-                # hosted job receives the same value the local container gets.
-                if worker_value:
-                    return "", _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
-            elif name in worker_env:
-                # - tests set-ness: a present value (even empty) is worker-resolved.
-                return "", _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
-            # Variable unset (or empty for :-) -> expand the default word and carry.
-            default, default_resolution = _compose_resolve_value(
-                default_word, worker_env=worker_env
-            )
-            if default_resolution is not _ComposeEnvResolution.LITERAL:
-                return "", default_resolution
-            return default, _ComposeEnvResolution.LITERAL
-    # ``:?`` / ``?`` / ``:+`` / ``+`` and any other operator -> worker-resolved,
-    # skip (a set variable pulls a worker value; an unset required form would
-    # fail Compose at stack launch; an unset ``:+``/``+`` resolves to "" which
-    # is still a worker-gated slot, not a profile-owned concrete value).
+            operator = candidate
+            word = remainder[len(candidate) :]
+            break
+    if not operator:
+        # Unknown operator -> carry verbatim (no reference).
+        return f"${{{expression}}}", _ComposeEnvResolution.LITERAL
+    worker_value = worker_env.get(name)
+    is_set = name in worker_env
+    is_non_empty = bool(worker_value)
+    if operator in _COMPOSE_DEFAULT_OPERATORS:
+        # ``:-`` tests non-empty; ``-`` tests set-ness.
+        if (operator == ":-" and is_non_empty) or (operator == "-" and is_set):
+            return "", _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
+        # Variable unset (or empty for :-) -> expand the default word and carry.
+        default, default_resolution = _compose_resolve_value(word, worker_env=worker_env)
+        if default_resolution is not _ComposeEnvResolution.LITERAL:
+            return "", default_resolution
+        return default, _ComposeEnvResolution.LITERAL
+    if operator in _COMPOSE_ALTERNATE_OPERATORS:
+        # ``:+`` tests non-empty; ``+`` tests set-ness. When the test passes the
+        # alternate word is what the local container receives (profile-owned
+        # config, not a worker value), so it is carried as a literal — unless the
+        # word itself references a worker secret, in which case the worker-resolved
+        # classification propagates. When the test fails Compose resolves to "".
+        if (operator == ":+" and is_non_empty) or (operator == "+" and is_set):
+            alternate, alternate_resolution = _compose_resolve_value(word, worker_env=worker_env)
+            if alternate_resolution is not _ComposeEnvResolution.LITERAL:
+                return "", alternate_resolution
+            return alternate, _ComposeEnvResolution.LITERAL
+        # Variable unset (or empty for :+) -> Compose resolves to "", carried.
+        return "", _ComposeEnvResolution.LITERAL
+    # ``:?`` / ``?`` (required): a set variable resolves to the worker value
+    # (a secret), so the slot is worker-resolved-defaulted — kept in passthrough
+    # for hosted out-of-band resolution and dropped from ``profile_env``. An
+    # unset required form would fail Compose at stack launch, so that branch is
+    # unreachable for a running container and stays a worker-resolved slot.
+    if (operator == ":?" and is_non_empty) or (operator == "?" and is_set):
+        return "", _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
     return "", _ComposeEnvResolution.WORKER_RESOLVED_SLOT
 
 
@@ -927,10 +1010,21 @@ def literal_profile_env_from_compose(
       skipped (``-`` tests set-ness; a present value is worker-resolved). As
       above, the name stays in ``env_passthrough_names`` for hosted out-of-band
       resolution.
-    - Bare ``${NAME}`` / ``$NAME`` and ``${NAME:?...}`` / ``${NAME:+...}`` /
-      ``${NAME+...}`` forms are skipped (worker-resolved slots the profile owns
-      locally; the hosted path resolves credentials via its own adapter
-      contract, not by re-resolving ``${NAME}`` from the worker).
+    - ``${NAME:+alternate}`` / ``${NAME+alternate}`` with ``NAME`` set (non-empty
+      for ``:+``) resolves to the concrete ``alternate`` and is carried — the
+      local container received the alternate word (profile-owned config), so the
+      hosted job must too. With ``NAME`` unset (or empty for ``:+``) Compose
+      resolves to ``""`` and that empty literal is carried. An alternate word that
+      references a worker secret propagates the worker-resolved classification and
+      is skipped (the secret never reaches ``profile_env``).
+    - ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME`` set (non-empty for ``:?``)
+      is skipped (worker-resolved; the local container received the worker value,
+      which is a secret). The name stays in ``env_passthrough_names`` for hosted
+      out-of-band resolution. An unset required form would fail Compose at stack
+      launch, so that branch is unreachable for a running container.
+    - Bare ``${NAME}`` / ``$NAME`` forms are skipped (worker-resolved slots the
+      profile owns locally; the hosted path resolves credentials via its own
+      adapter contract, not by re-resolving ``${NAME}`` from the worker).
 
     Skipping worker-resolved values preserves the no-secret-values contract:
     ``profile_env`` never carries a ``${...}`` placeholder nor a worker secret.
