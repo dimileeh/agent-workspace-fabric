@@ -281,6 +281,42 @@ class TestRuntimeExecutorSeam:
         assert exc.value.result.returncode == 124
 
     @pytest.mark.unit
+    async def test_hosted_124_without_explicit_timeout_reason_is_cli_failure(
+        self,
+    ) -> None:
+        # Regression guard: a hosted ``124`` that does NOT carry an explicit,
+        # valid timeout reason must NOT be misclassified as a wall-clock
+        # timeout. The Compose path only reports ``AGENT_TIMEOUT`` when the
+        # watchdog sets ``reason_code``; the hosted path mirrors that, so a
+        # real CLI failure that happens to exit 124 (with an explicit non-
+        # timeout ``timeout_reason``) classifies as an ordinary CLI failure
+        # instead of triggering timeout recovery.
+        executor = _RecordingExecutor(
+            result=AgentRuntimeExecResult(
+                returncode=124,
+                stdout="",
+                stderr="cli exited 124 for its own reason",
+                timeout_reason="",
+            )
+        )
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_124_cli_failure",
+            )
+
+        assert exc.value.result.returncode == 124
+        assert exc.value.reason_code == "AGENT_CLI_FAILED"
+
+    @pytest.mark.unit
     async def test_hosted_path_streams_to_log_store(self) -> None:
         executor = _RecordingExecutor(
             result=AgentRuntimeExecResult(returncode=0, stdout="line1\nline2\n", stderr="warn\n")

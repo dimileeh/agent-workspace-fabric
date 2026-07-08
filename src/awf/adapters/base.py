@@ -550,15 +550,22 @@ class AgentAdapter(ABC):
         ``timeout(1)`` exit) and carries the wall-vs-idle distinction on
         ``AgentRuntimeExecResult.timeout_reason``; an idle timeout maps to
         ``AGENT_IDLE_TIMEOUT`` while a wall-clock timeout maps to
-        ``AGENT_TIMEOUT``.
+        ``AGENT_TIMEOUT``. A ``124`` without an explicit, valid
+        ``timeout_reason`` is NOT classified as a timeout — it falls through to
+        ordinary CLI-failure classification, mirroring the Compose path where
+        only a watchdog-set ``reason_code`` yields ``AGENT_TIMEOUT``.
         """
         del log_source
+        # Only classify a hosted ``124`` as a timeout when the executor
+        # signals an explicit, valid timeout reason. A ``124`` with an
+        # unset-default (``COMMAND_TIMEOUT_REASON``) still maps to a wall-clock
+        # timeout (backwards-compat for executors that only set ``returncode``),
+        # but a ``124`` carrying any other value is treated as an ordinary CLI
+        # failure instead of being forced into ``COMMAND_TIMEOUT``.
         timeout_reason = (
             hosted_result.timeout_reason
             if hosted_result.returncode == 124
             and hosted_result.timeout_reason in _HOSTED_TIMEOUT_REASONS
-            else COMMAND_TIMEOUT_REASON
-            if hosted_result.returncode == 124
             else None
         )
         command_result = CommandResult(
