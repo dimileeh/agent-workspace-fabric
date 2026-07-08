@@ -419,6 +419,69 @@ class TestNonCodexHostedCredentials:
         assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
 
     @pytest.mark.unit
+    async def test_hosted_request_surfaces_github_token_source_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The hosted request carries the GitHub token SOURCE name so hosted ``gh`` works.
+
+        Regression for PR #751 thread PRRT_kwDOSJAM6s6PYNGv: when the worker only
+        has ``AWF_GITHUB_TOKEN`` set (the documented service token), the local
+        Compose path injects ``GH_TOKEN: ${AWF_GITHUB_TOKEN}`` /
+        ``GITHUB_TOKEN: ${AWF_GITHUB_TOKEN}`` and Docker substitutes the
+        placeholder at stack launch, so the local agent container can run ``gh``.
+        The hosted (non-compose) path resolves ``env_passthrough_names`` by name
+        out-of-band, so resolving ``GH_TOKEN`` / ``GITHUB_TOKEN`` finds nothing in
+        that setup and the hosted monitor-repair agent loses GitHub CLI access.
+
+        The hosted request's ``env_passthrough_names`` must therefore include
+        the chosen source name (``AWF_GITHUB_TOKEN``) so the hosted executor can
+        resolve the credential from the source name and mirror it into the
+        gh-visible aliases (the same ``AWF_GITHUB_TOKEN`` -> ``GH_TOKEN`` /
+        ``GITHUB_TOKEN`` mirroring ``_service_git_environment`` /
+        ``_check_github`` / ``_gh_probe_environ`` already apply). Names only —
+        secret values are never transported, and the placeholder value never
+        appears in the request.
+        """
+        compose_file = _write_compose(
+            tmp_path,
+            environment={
+                "GH_TOKEN": "${AWF_GITHUB_TOKEN}",
+                "GITHUB_TOKEN": "${AWF_GITHUB_TOKEN}",
+                "OLLAMA_HOST": "http://ollama.profile:11434",
+            },
+        )
+        # The common setup: only the documented AWF source token is set; the
+        # gh-visible aliases are absent from the worker env.
+        monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_worker_secret")
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        # The chosen source name is surfaced so the hosted executor can resolve
+        # the credential from it (the aliases alone would resolve to nothing in
+        # this setup). The aliases are still surfaced for hosted executors that
+        # resolve them directly when present.
+        assert "AWF_GITHUB_TOKEN" in request.env_passthrough_names
+        assert "GH_TOKEN" in request.env_passthrough_names
+        assert "GITHUB_TOKEN" in request.env_passthrough_names
+        # No secret value reaches the request: names only carry no value, and
+        # profile_env never carries the worker-resolved slot.
+        blob = (
+            request.prompt_stdin.decode("utf-8", "replace")
+            + "\x00".join(request.cli_args)
+            + "\x00".join(request.env_passthrough_names)
+            + "\x00".join(f"{k}={v}" for k, v in request.profile_env)
+        )
+        assert "ghp_worker_secret" not in blob
+        assert "${AWF_GITHUB_TOKEN}" not in blob
+        assert "AWF_GITHUB_TOKEN" not in dict(request.profile_env)
+        assert "GH_TOKEN" not in dict(request.profile_env)
+        assert "GITHUB_TOKEN" not in dict(request.profile_env)
+        # The non-GitHub profile-owned literal still carries via profile_env.
+        assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
+
+    @pytest.mark.unit
     async def test_hosted_request_skips_worker_github_token_when_profile_owns_alias(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

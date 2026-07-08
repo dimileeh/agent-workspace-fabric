@@ -149,6 +149,117 @@ def test_hosted_github_token_passthrough_names_surfaces_worker_aliases(
 
 
 @pytest.mark.unit
+def test_hosted_github_token_passthrough_names_surfaces_source_when_worker_only_has_awf_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hosted path surfaces the chosen token SOURCE name so hosted ``gh`` works.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PYNGv: ``_github_token_placeholder``
+    orders ``AWF_GITHUB_TOKEN`` first, so a worker that only has
+    ``AWF_GITHUB_TOKEN`` set (the documented service token) returns the
+    ``${AWF_GITHUB_TOKEN}`` placeholder. Local Compose substitutes that
+    placeholder into the ``GH_TOKEN`` / ``GITHUB_TOKEN`` aliases at stack
+    launch, so the local agent container can run ``gh``. The hosted (non-compose)
+    path has no compose env-block substitution: the hosted executor resolves
+    ``env_passthrough_names`` out-of-band *by name*, so resolving ``GH_TOKEN`` /
+    ``GITHUB_TOKEN`` finds nothing when the worker only has ``AWF_GITHUB_TOKEN``.
+    Without the source name the hosted executor cannot resolve the credential
+    and the hosted monitor-repair agent loses GitHub CLI access even though the
+    same workspace has it under Compose.
+
+    The helper must therefore surface the chosen source name
+    (``AWF_GITHUB_TOKEN``) alongside the aliases so the hosted executor can
+    resolve the credential from the source name and mirror it into the aliases
+    (the same ``AWF_GITHUB_TOKEN`` -> ``GH_TOKEN`` / ``GITHUB_TOKEN`` mirroring
+    ``_service_git_environment`` / ``_check_github`` / ``_gh_probe_environ``
+    already apply). Names only — never the placeholder value or the secret.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GH_TOKEN": "${AWF_GITHUB_TOKEN}",
+                            "GITHUB_TOKEN": "${AWF_GITHUB_TOKEN}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # The common setup: only the documented AWF source token is set; the
+    # gh-visible aliases are absent from the worker env.
+    monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_worker_secret")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    names = hosted_github_token_passthrough_names(compose_file)
+
+    # The chosen source name is surfaced so the hosted executor can resolve the
+    # credential from it (the aliases alone would resolve to nothing in this
+    # setup). The aliases are still surfaced for hosted executors that resolve
+    # them directly when present.
+    assert "AWF_GITHUB_TOKEN" in names
+    assert "GH_TOKEN" in names
+    assert "GITHUB_TOKEN" in names
+    # Names only — no secret value and no placeholder string is returned.
+    assert "ghp_worker_secret" not in names
+    assert "${AWF_GITHUB_TOKEN}" not in names
+
+
+@pytest.mark.unit
+def test_hosted_github_token_passthrough_names_surfaces_source_once_when_source_is_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source name is surfaced once even when it is also a surfaced alias.
+
+    When the worker token source is ``GH_TOKEN`` (the first gh-visible alias in
+    ``_github_token_placeholder``'s order after ``AWF_GITHUB_TOKEN``), the source
+    name is the same as a surfaced alias. The result must contain it exactly
+    once (de-duplicated), not twice.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GH_TOKEN": "${GH_TOKEN}",
+                            "GITHUB_TOKEN": "${GH_TOKEN}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AWF_GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "ghp_worker_secret")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    names = hosted_github_token_passthrough_names(compose_file)
+
+    # GH_TOKEN is both the chosen source and a surfaced alias; it appears once.
+    assert names.count("GH_TOKEN") == 1
+    assert "GH_TOKEN" in names
+    assert "GITHUB_TOKEN" in names
+    # The AWF source name is not surfaced (it is not the chosen source here).
+    assert "AWF_GITHUB_TOKEN" not in names
+
+
+@pytest.mark.unit
 def test_hosted_github_token_passthrough_names_skips_profile_owned_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

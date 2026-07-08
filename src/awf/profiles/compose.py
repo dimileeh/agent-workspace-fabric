@@ -391,12 +391,29 @@ def _github_token_placeholder(source_env: Mapping[str, str]) -> str | None:
     return None
 
 
+def _github_token_source_name(source_env: Mapping[str, str]) -> str | None:
+    """Return the env name of the first present GitHub token source.
+
+    Mirrors :func:`_github_token_placeholder`'s scan order
+    (``AWF_GITHUB_TOKEN`` first), but returns the bare *name* (e.g.
+    ``AWF_GITHUB_TOKEN``) rather than the ``${NAME}`` placeholder. Used by the
+    hosted path to surface the chosen source *name* so a hosted executor can
+    resolve the credential out-of-band when the worker only carries the AWF
+    source and not the ``gh``-visible aliases (see
+    :func:`hosted_github_token_passthrough_names`).
+    """
+    for name in ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        if source_env.get(name):
+            return name
+    return None
+
+
 def hosted_github_token_passthrough_names(
     compose_file: Path,
     *,
     worker_env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
-    """Return GitHub token alias *names* a hosted executor should resolve.
+    """Return GitHub token *names* a hosted executor should resolve.
 
     Mirrors ``agent_environment_with_github_token``'s alias injection for the
     local Compose path: when the worker env carries a GitHub token source
@@ -408,6 +425,23 @@ def hosted_github_token_passthrough_names(
     monitor-repair agent loses GitHub CLI access even though the same
     workspace has it under Compose (PR #751 thread PRRT_kwDOSJAM6s6PXFPz).
 
+    Source-name surfacing (PR #751 thread PRRT_kwDOSJAM6s6PYNGv):
+    ``_github_token_placeholder`` orders ``AWF_GITHUB_TOKEN`` first, so a worker
+    that only has ``AWF_GITHUB_TOKEN`` set (the documented service token) yields
+    the ``${AWF_GITHUB_TOKEN}`` placeholder. Local Compose substitutes that
+    placeholder into the ``GH_TOKEN`` / ``GITHUB_TOKEN`` aliases at stack launch,
+    so the local agent container can run ``gh``; the hosted path has no
+    equivalent substitution — it resolves ``env_passthrough_names`` by name
+    out-of-band, so resolving ``GH_TOKEN`` / ``GITHUB_TOKEN`` finds nothing in
+    that common setup. The helper therefore also surfaces the chosen source
+    *name* so the hosted executor can resolve the credential from the source
+    name and mirror it into the gh-visible aliases (the same
+    ``AWF_GITHUB_TOKEN`` -> ``GH_TOKEN`` / ``GITHUB_TOKEN`` mirroring
+    ``_service_git_environment`` / ``_check_github`` / ``_gh_probe_environ``
+    already apply). The source name is de-duplicated against the surfaced
+    aliases (when the source is itself a gh-visible alias, e.g. ``GH_TOKEN``, it
+    appears once).
+
     Names only — secret values are NEVER transported; the hosted executor
     resolves them out-of-band, mirroring ``env_passthrough_names``. The
     returned names carry no values, so this helper never embeds a worker
@@ -418,12 +452,12 @@ def hosted_github_token_passthrough_names(
     ``agent_environment_with_github_token`` would inject, or a GitHub secret
     lease that renders to the same source). When a profile owns a GitHub
     token alias with a *different* token (e.g. a generic ``env`` secret lease
-    rendering ``GITHUB_TOKEN: ${MY_PROFILE_LEASE_TOKEN}``), NO worker alias is
-    surfaced: the local Compose path's group-precedence rule
+    rendering ``GITHUB_TOKEN: ${MY_PROFILE_LEASE_TOKEN}``), NO worker alias or
+    source name is surfaced: the local Compose path's group-precedence rule
     (``agent_environment_with_github_token``) ensures the profile-owned token
-    wins, and surfacing a worker alias on the hosted path would let ``gh``
-    fall back to the worker credential (the profile-owned alias cannot be
-    carried in ``env_passthrough_names`` — it is a worker-resolved secret
+    wins, and surfacing a worker alias/source on the hosted path would let
+    ``gh`` fall back to the worker credential (the profile-owned alias cannot
+    be carried in ``env_passthrough_names`` — it is a worker-resolved secret
     slot the hosted path resolves via its own adapter contract, not a name
     the hosted executor re-resolves from the worker). Surfacing nothing
     preserves the existing no-profile-credential limitation for that edge case
@@ -455,11 +489,22 @@ def hosted_github_token_passthrough_names(
     # are exactly the aliases the local Compose container receives the worker
     # token in, so the hosted executor resolving them out-of-band reproduces
     # the same credential.
-    return tuple(
+    aliases = tuple(
         alias
         for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE
         if compose_env.get(alias) == worker_placeholder
     )
+    # Surface the chosen source name first so a hosted executor can resolve the
+    # credential from the source name when the worker only carries the AWF
+    # source (local Compose substitutes the placeholder into the aliases at
+    # stack launch; the hosted path has no equivalent substitution). De-duplicate
+    # against the surfaced aliases so a source that is itself a gh-visible alias
+    # (e.g. ``GH_TOKEN``) appears exactly once. Source first preserves the scan
+    # order's precedence intent (``AWF_GITHUB_TOKEN`` before the aliases).
+    source_name = _github_token_source_name(source_env)
+    if source_name is not None and source_name not in aliases:
+        return (source_name, *aliases)
+    return aliases
 
 
 def agent_environment_with_host_auth(
