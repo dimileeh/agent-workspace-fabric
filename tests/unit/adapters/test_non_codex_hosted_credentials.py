@@ -133,6 +133,28 @@ async def _run(
     return executor.calls[0]
 
 
+def _write_compose(
+    tmp_path: Path,
+    environment: dict[str, str] | None = None,
+) -> Path:
+    """Write a minimal readable compose file with a single ``agent`` service.
+
+    ``environment=None`` (default) writes a service with no env block so
+    compose/profile-owned exclusions do not suppress any passthrough names. A
+    mapping writes each key/value pair into the agent service's
+    ``environment`` block.
+    """
+    services: dict[str, dict[str, object]] = {"agent": {"image": "agent:latest"}}
+    if environment is not None:
+        services["agent"]["environment"] = environment
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump({"services": services}),
+        encoding="utf-8",
+    )
+    return compose_file
+
+
 class TestNonCodexHostedCredentials:
     @pytest.mark.unit
     async def test_claude_code_surfaces_anthropic_env_names(self) -> None:
@@ -172,11 +194,7 @@ class TestNonCodexHostedCredentials:
         # names. An unreadable compose fails closed and would drop
         # ``AWF_OPENCODE_OLLAMA_BASE_URL`` — the same conservatism the local
         # ``agent_exec_env_passthrough`` applies.
-        compose_file = tmp_path / "compose.yml"
-        compose_file.write_text(
-            yaml.safe_dump({"services": {"agent": {"image": "agent:latest"}}}),
-            encoding="utf-8",
-        )
+        compose_file = _write_compose(tmp_path)
         adapter = _build(OpenCodeAdapter)
         request = await _run(adapter, compose_file=compose_file)
         assert request.agent_runtime is AgentRuntime.opencode
@@ -186,9 +204,17 @@ class TestNonCodexHostedCredentials:
         assert request.profile_env == ()
 
     @pytest.mark.unit
-    async def test_hosted_request_has_no_secret_values(self) -> None:
+    async def test_hosted_request_has_no_secret_values(self, tmp_path: Path) -> None:
+        # Run ClaudeCodeAdapter against a populated ``profile_env`` so the leak
+        # path is exercised for real profile-owned values (not just the empty
+        # ``profile_env`` case). ``OLLAMA_HOST`` is a non-secret profile-owned
+        # literal; the secret-safety assertions must still hold against it, and
+        # the literal value is carried via ``profile_env``.
+        compose_file = _write_compose(
+            tmp_path, environment={"OLLAMA_HOST": "http://ollama.profile:11434"}
+        )
         adapter = _build(ClaudeCodeAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         blob = (
             request.prompt_stdin.decode("utf-8", "replace")
             + "\x00".join(request.cli_args)
@@ -203,6 +229,10 @@ class TestNonCodexHostedCredentials:
         # ``${NAME}`` secret placeholders (those stay in env_passthrough_names
         # for out-of-band resolution by the hosted executor).
         assert not any("${" in value for _key, value in request.profile_env)
+        # The populated profile-owned literal is actually carried so the leak
+        # path is real (an empty ``profile_env`` would make the ${...} assertion
+        # vacuously pass).
+        assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
 
     @pytest.mark.unit
     async def test_hosted_passthrough_suppresses_profile_owned_auth_slot(
@@ -217,22 +247,7 @@ class TestNonCodexHostedCredentials:
         executor resolves an inherited worker credential the local path and
         readiness overlay deliberately keep out of the agent environment.
         """
-        compose_file = tmp_path / "compose.yml"
-        compose_file.write_text(
-            yaml.safe_dump(
-                {
-                    "services": {
-                        "agent": {
-                            "image": "agent:latest",
-                            "environment": {
-                                "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-                            },
-                        }
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
+        compose_file = _write_compose(tmp_path, environment={"OPENAI_API_KEY": "${OPENAI_API_KEY}"})
         adapter = _build(OpenCodeAdapter)
         request = await _run(adapter, compose_file=compose_file)
         assert "OPENAI_API_KEY" not in request.env_passthrough_names
@@ -250,21 +265,8 @@ class TestNonCodexHostedCredentials:
         suppresses the higher-precedence key so the profile-owned daemon wins.
         The hosted path must apply the same shadowing exclusion.
         """
-        compose_file = tmp_path / "compose.yml"
-        compose_file.write_text(
-            yaml.safe_dump(
-                {
-                    "services": {
-                        "agent": {
-                            "image": "agent:latest",
-                            "environment": {
-                                "OLLAMA_HOST": "http://ollama.profile:11434",
-                            },
-                        }
-                    }
-                }
-            ),
-            encoding="utf-8",
+        compose_file = _write_compose(
+            tmp_path, environment={"OLLAMA_HOST": "http://ollama.profile:11434"}
         )
         adapter = _build(OpenCodeAdapter)
         request = await _run(adapter, compose_file=compose_file)
