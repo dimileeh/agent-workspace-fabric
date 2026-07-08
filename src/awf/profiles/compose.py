@@ -469,10 +469,9 @@ def _try_compose_agent_env_and_postgres_password(
     Returns ``(agent_env, postgres_password)`` where ``agent_env`` is ``None``
     when the compose is unreadable or has no agent service (mirrors
     ``_try_agent_environment_from_compose_file``) and ``postgres_password`` is
-    ``None`` when no service declares ``POSTGRES_PASSWORD`` (mirrors
-    ``_postgres_password_from_compose_file``). Parsing once avoids a second
-    read/parse of the same file when ``literal_profile_env_from_compose`` needs
-    both the agent env and the rendered postgres password for redaction.
+    ``None`` when no service declares ``POSTGRES_PASSWORD``). Parsing once avoids
+    a second read/parse of the same file when ``literal_profile_env_from_compose``
+    needs both the agent env and the rendered postgres password for redaction.
 
     ``POSTGRES_PASSWORD`` is collected from *every* compose service, not only a
     service literally named ``postgres``. A valid custom profile may name its
@@ -510,36 +509,6 @@ def _try_compose_agent_env_and_postgres_password(
             postgres_password = password
             break
     return agent_env, postgres_password
-
-
-def _postgres_password_from_compose_file(compose_file: Path) -> str | None:
-    """Return the rendered postgres service password, or ``None`` when absent.
-
-    ComposeManager bakes the generated/declared postgres password into the
-    rendered ``postgres`` service ``environment`` block (it expands
-    ``${AWF_POSTGRES_PASSWORD}`` at render time so the local container can
-    connect and so resume is self-contained). The agent service env is expanded
-    the same way, so a profile DB URL (e.g. ``DATABASE_URL`` /
-    ``AWF_DATABASE_URL``) lands in the rendered agent env as a literal
-    containing the password. ``literal_profile_env_from_compose`` must NOT carry
-    those expanded-secret-bearing values to the hosted executor: the runtime
-    seam's ``profile_env`` is a secret-free contract and the hosted path
-    resolves DB credentials via its own adapter contract, not from
-    ``profile_env``.
-
-    The rendered service env declaring ``POSTGRES_PASSWORD`` is the
-    authoritative source of the secret ComposeManager expanded; redacting agent
-    env values that contain it keeps the secret out of the hosted request
-    without weakening the local container (which still gets the expanded value
-    at stack launch) or resume (which re-reads the self-contained rendered
-    file). ``POSTGRES_PASSWORD`` is collected from any service (not only one
-    named ``postgres``) so custom profiles that name their DB sidecar ``db`` /
-    ``database`` are redacted too. Returns ``None`` when the compose is
-    unreadable, has no service declaring ``POSTGRES_PASSWORD`` (no secret to
-    redact).
-    """
-    _agent_env, postgres_password = _try_compose_agent_env_and_postgres_password(compose_file)
-    return postgres_password
 
 
 def _try_agent_environment_keys_from_compose_file(
