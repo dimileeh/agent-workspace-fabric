@@ -646,7 +646,13 @@ def _try_compose_agent_env_and_postgres_passwords(
             continue
         service_env = _compose_environment_mapping(service.get("environment"))
         raw_password = service_env.get("POSTGRES_PASSWORD")
-        if not raw_password:
+        # A pass-through slot (``POSTGRES_PASSWORD:`` / ``: null`` / list bare
+        # name) declares no value — Docker Compose resolves it from the worker
+        # shell — so it has no profile-declared literal/placeholder to redact.
+        # An explicit empty (``POSTGRES_PASSWORD: ""`` / ``=``) likewise carries
+        # no secret. Both are skipped (``not raw_password`` covers the explicit
+        # empty ``""``; the sentinel covers the pass-through slot).
+        if not raw_password or raw_password == _COMPOSE_PASSTHROUGH:
             continue
         # The raw declared value (literal or ``${...}`` placeholder) is always a
         # redaction target so an agent env value carrying the unexpanded form is
@@ -823,54 +829,72 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     with ``NAME`` set) is NOT excluded: the local Compose container received the
     worker value at stack launch, so the hosted executor must resolve that value
     out-of-band rather than drop the name (which would leave the hosted job with
-    neither the worker override nor the profile default). A name whose value
-    resolves to ``WORKER_PASSTHROUGH`` (a pass-through slot — ``environment:
-    [NAME]``, ``NAME:`` / ``NAME: null``, or ``NAME=``) is likewise NOT excluded:
-    Docker Compose took its value from the worker shell at stack launch, so the
-    hosted executor must resolve the same worker value out-of-band. A name whose
-    value resolves to ``LITERAL`` (a pure literal, a defaulted form with the
-    variable unset, or an ``:+`` / ``+`` alternate form) IS excluded — its
-    concrete value reaches the hosted job via ``profile_env`` instead. See
+    neither the worker override nor the profile default). A name whose value is
+    a pass-through slot (``environment: [NAME]`` with no ``=``, ``NAME:`` /
+    ``NAME: null``) is likewise NOT excluded: Docker Compose took its value from
+    the worker shell at stack launch, so the hosted executor must resolve the same
+    worker value out-of-band. A name whose value resolves to ``LITERAL`` (a pure
+    literal, an *explicit* empty value ``NAME: ""`` / ``NAME=``, a defaulted form
+    with the variable unset, or an ``:+`` / ``+`` alternate form) IS excluded —
+    its concrete value reaches the hosted job via ``profile_env`` instead. See
     ``filter_hosted_env_passthrough_names`` and PR #751 threads
     PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm / PRRT_kwDOSJAM6s6PYnJJ /
-    PRRT_kwDOSJAM6s6PY6Rn. A pass-through slot is removed from the baseline
-    ``_compose_env_passthrough_exclusions`` set even when its name is in
-    ``AGENT_AUTH_ENV_VARS`` (``_profile_owned_auth_keys`` treats any auth key
-    declared on the agent service as profile-owned regardless of value); the local
-    Compose container received the worker shell value, so the hosted executor must
-    resolve it out-of-band (PRRT_kwDOSJAM6s6PY6Rn).
+    PRRT_kwDOSJAM6s6PY6Rn / PRRT_kwDOSJAM6s6PY8zB. A pass-through slot is removed
+    from the baseline ``_compose_env_passthrough_exclusions`` set even when its
+    name is in ``AGENT_AUTH_ENV_VARS`` (``_profile_owned_auth_keys`` treats any
+    auth key declared on the agent service as profile-owned regardless of
+    value); the local Compose container received the worker shell value, so the
+    hosted executor must resolve it out-of-band (PRRT_kwDOSJAM6s6PY6Rn). An
+    explicit empty value is NOT a pass-through slot (compose-go models it as a
+    non-nil pointer to ``""`` that overrides the worker value), so it stays
+    excluded and its literal ``""`` reaches the hosted job via ``profile_env``
+    (PRRT_kwDOSJAM6s6PY8zB).
     """
     excluded = _compose_env_passthrough_exclusions(compose_env)
     if compose_env is not None:
         # Exclude compose-declared names UNLESS their value is worker-resolved
         # and the local container received the worker value at stack launch:
         # ``WORKER_RESOLVED_DEFAULTED`` (``:-`` / ``-`` / ``:?`` / ``?`` with the
-        # variable set) and a pass-through slot (raw value ``""`` —
-        # ``environment: [NAME]``, ``NAME:`` / ``NAME: null``, or ``NAME=``;
-        # Docker Compose took the value from the worker shell) stay in passthrough
-        # for hosted out-of-band resolution. Carrying the worker value in
-        # ``profile_env`` would embed a secret (defaulted) or override the real
-        # worker value with an empty literal (pass-through), and excluding the
-        # name would drop it entirely. Literal values (pure literals, unset
+        # variable set) and a pass-through slot (raw value ==
+        # :data:`_COMPOSE_PASSTHROUGH` — ``environment: [NAME]`` with no ``=``,
+        # ``NAME:`` / ``NAME: null``; Docker Compose took the value from the
+        # worker shell) stay in passthrough for hosted out-of-band resolution.
+        # Carrying the worker value in ``profile_env`` would embed a secret
+        # (defaulted) or override the real worker value with an empty literal
+        # (pass-through), and excluding the name would drop it entirely. Literal
+        # values (pure literals, an *explicit* empty ``NAME: ""`` / ``NAME=``
+        # which Compose sets as a non-nil empty literal overriding the worker
+        # value, unset defaults, ``:+`` / ``+`` alternates) are excluded — their
         # defaults, ``:+`` / ``+`` alternates) are excluded — their concrete value
         # reaches the hosted job via ``profile_env``. Bare ``${NAME}`` / ``$NAME``
         # (``WORKER_RESOLVED_SLOT``) stay excluded — profile-owned secret slots
         # the hosted path resolves via its adapter contract.
         #
-        # A pass-through slot (raw value ``""``) is removed from the baseline
-        # ``_compose_env_passthrough_exclusions`` set first: that set treats any
-        # ``AGENT_AUTH_ENV_VARS`` key declared on the agent service as
-        # profile-owned (``_profile_owned_auth_keys``) regardless of value, so an
-        # auth pass-through slot would be excluded before the worker-resolved
-        # exception below (which only prevents *adding* a name) could keep it.
-        # The local Compose container received the worker shell value for such a
-        # slot, so the hosted executor must resolve it out-of-band too (PR #751
-        # thread PRRT_kwDOSJAM6s6PY6Rn).
-        passthrough_slots = frozenset(name for name, raw in compose_env.items() if raw == "")
+        # A pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH`) is
+        # removed from the baseline ``_compose_env_passthrough_exclusions`` set
+        # first: that set treats any ``AGENT_AUTH_ENV_VARS`` key declared on the
+        # agent service as profile-owned (``_profile_owned_auth_keys``)
+        # regardless of value, so an auth pass-through slot would be excluded
+        # before the worker-resolved exception below (which only prevents
+        # *adding* a name) could keep it. The local Compose container received
+        # the worker shell value for such a slot, so the hosted executor must
+        # resolve it out-of-band too (PR #751 thread PRRT_kwDOSJAM6s6PY6Rn).
+        #
+        # An *explicit* empty value (``NAME: ""`` / ``NAME=``) is normalized to
+        # the plain string ``""`` (NOT the sentinel): Docker Compose sets a
+        # non-nil empty literal that OVERRIDES the worker shell value, so it is a
+        # profile-owned LITERAL — excluded from passthrough (its concrete ``""``
+        # reaches the hosted job via ``profile_env``), NOT a worker-resolved slot
+        # (PR #751 thread PRRT_kwDOSJAM6s6PY8zB). Only the sentinel marks a true
+        # pass-through slot; ``_compose_resolve_value("")`` -> ``("", LITERAL)``
+        # so an explicit empty is excluded by the LITERAL branch below.
+        passthrough_slots = frozenset(
+            name for name, raw in compose_env.items() if raw == _COMPOSE_PASSTHROUGH
+        )
         excluded = (excluded - passthrough_slots) | frozenset(
             name
             for name, raw in compose_env.items()
-            if raw != ""
+            if raw != _COMPOSE_PASSTHROUGH
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is not _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
         )
@@ -944,6 +968,25 @@ _COMPOSE_ALTERNATE_OPERATORS = (":+", "+")
 # Sentinel used to mask ``$$`` escapes before interpolation scanning so an
 # escaped dollar is never mistaken for a reference start.
 _COMPOSE_ESCAPED_DOLLAR = "\0AWF_PROFILE_ESCAPED_DOLLAR\0"
+
+# Sentinel value used in the normalized compose-env dict to mark a genuine
+# Compose *pass-through* slot — ``environment: [NAME]`` (list item with no
+# ``=``), ``NAME:`` / ``NAME: null`` (mapping value that is ``None``). Docker
+# Compose models these as a nil pointer resolved from the worker shell at
+# stack launch (compose-go ``TestEnvironmentMap`` / ``TestEnvironmentList``:
+# ``ZO:`` / ``ZO`` -> ``env["ZO"] == nil``), exactly like a bare ``${NAME}``
+# reference. This is distinct from an *explicit* empty value — ``NAME: ""``
+# (mapping) or ``NAME=`` (list with an ``=`` and empty value) — which Compose
+# models as a non-nil pointer to ``""`` (compose-go: ``BU: ""`` / ``BU=`` ->
+# ``*env["BU"] == ""``): an empty literal that OVERRIDES the worker shell
+# value. ``_compose_environment_mapping`` normalizes a pass-through slot to
+# this sentinel and an explicit-empty value to the plain string ``""`` so the
+# carry / passthrough-filter call sites can tell them apart: a pass-through
+# slot is skipped from ``profile_env`` and kept in ``env_passthrough_names``
+# (worker-resolved), while an explicit empty is CARRIED in ``profile_env`` as a
+# literal ``""`` and excluded from passthrough (profile-owned). A NUL byte is
+# used so the sentinel can never collide with a real env value.
+_COMPOSE_PASSTHROUGH = "\0AWF_PROFILE_COMPOSE_PASSTHROUGH\0"
 
 _COMPOSE_ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -1315,6 +1358,16 @@ def literal_profile_env_from_compose(
     - Bare ``${NAME}`` / ``$NAME`` forms are skipped (worker-resolved slots the
       profile owns locally; the hosted path resolves credentials via its own
       adapter contract, not by re-resolving ``${NAME}`` from the worker).
+    - A Compose *pass-through* slot (``environment: [NAME]`` with no ``=``,
+      ``NAME:`` / ``NAME: null``) is skipped (worker-resolved; Docker Compose
+      took the value from the worker shell at stack launch) and the name stays
+      in ``env_passthrough_names`` for hosted out-of-band resolution. An
+      *explicit* empty value (``NAME: ""`` / ``NAME=``) is distinct: Docker
+      Compose sets a non-nil empty literal that OVERRIDES the worker shell
+      value, so it is carried here as a literal ``""`` (the local container
+      received an explicit blank, not the worker value) and the name is excluded
+      from passthrough (profile-owned). See ``_compose_environment_mapping`` /
+      PR #751 thread PRRT_kwDOSJAM6s6PY8zB.
 
     Skipping worker-resolved values preserves the no-secret-values contract:
     ``profile_env`` never carries a ``${...}`` placeholder nor a worker secret.
@@ -1370,16 +1423,25 @@ def literal_profile_env_from_compose(
     carried: list[tuple[str, str]] = []
     for key, raw in compose_env.items():
         # A Compose pass-through slot (``environment: [NAME]``, ``NAME:`` /
-        # ``NAME: null``, or ``NAME=``) is normalized to an empty string; Docker
-        # Compose takes its value from the worker shell at stack launch, exactly
-        # like a bare ``${NAME}`` reference. Carrying an empty literal would
-        # override the real worker value in the hosted request, so the slot is
-        # skipped here and kept in ``env_passthrough_names`` for hosted
-        # out-of-band resolution (see ``filter_hosted_env_passthrough_names``).
-        # A literal empty resolved from an interpolation default (e.g.
-        # ``${MISSING:-}`` with ``MISSING`` unset) has a non-empty raw form and
-        # is still carried as ``LITERAL``, matching the local container.
-        if raw == "":
+        # ``NAME: null``) is normalized to the :data:`_COMPOSE_PASSTHROUGH`
+        # sentinel; Docker Compose takes its value from the worker shell at
+        # stack launch, exactly like a bare ``${NAME}`` reference. Carrying an
+        # empty literal would override the real worker value in the hosted
+        # request, so the slot is skipped here and kept in
+        # ``env_passthrough_names`` for hosted out-of-band resolution (see
+        # ``filter_hosted_env_passthrough_names``).
+        #
+        # An *explicit* empty value (``NAME: ""`` / ``NAME=``) is normalized to
+        # the plain string ``""`` (NOT the sentinel): Docker Compose sets it as a
+        # non-nil empty literal that OVERRIDES the worker shell value, so the
+        # local container received an explicit blank, not the worker value. It
+        # flows through ``_compose_resolve_value("")`` -> ``("", LITERAL)`` and is
+        # carried as a literal ``""`` so the hosted job mirrors the local
+        # container instead of inheriting a worker value it never had. A literal
+        # empty resolved from an interpolation default (e.g. ``${MISSING:-}`` with
+        # ``MISSING`` unset) has a non-empty raw form and is likewise carried as
+        # ``LITERAL``, matching the local container.
+        if raw == _COMPOSE_PASSTHROUGH:
             continue
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)
         if resolution is not _ComposeEnvResolution.LITERAL:
@@ -1393,29 +1455,51 @@ def literal_profile_env_from_compose(
 def _compose_environment_mapping(environment: object) -> dict[str, str]:
     """Normalize a compose ``environment`` scalar, list, or mapping into a string dict.
 
-    A Compose pass-through slot — ``environment: [NAME]`` (list item with no
-    ``=``), ``NAME:`` / ``NAME: null`` (mapping value that is ``None``), or
-    ``NAME=`` (explicit empty) — declares no value; Docker Compose takes the
-    value from the worker shell at stack launch, exactly like a bare
-    ``${NAME}`` reference. Such a slot is normalized to an empty string (not the
-    literal ``"None"``) so the carry / passthrough-filter call sites can
-    recognize it (raw value ``""``) and skip it from ``profile_env`` while
-    keeping it in ``env_passthrough_names`` for hosted out-of-band resolution —
-    carrying an empty/``"None"`` literal would override the real worker value in
-    the hosted request.
+    A Compose *pass-through* slot — ``environment: [NAME]`` (list item with no
+    ``=``) or ``NAME:`` / ``NAME: null`` (mapping value that is ``None``) —
+    declares no value; Docker Compose models it as a nil pointer resolved from
+    the worker shell at stack launch (compose-go ``TestEnvironmentMap`` /
+    ``TestEnvironmentList``: ``ZO:`` / ``ZO`` -> ``env["ZO"] == nil``), exactly
+    like a bare ``${NAME}`` reference. Such a slot is normalized to the
+    :data:`_COMPOSE_PASSTHROUGH` sentinel (not the literal ``"None"``) so the
+    carry / passthrough-filter call sites can recognize it and skip it from
+    ``profile_env`` while keeping it in ``env_passthrough_names`` for hosted
+    out-of-band resolution — carrying an empty/``"None"`` literal would override
+    the real worker value in the hosted request.
+
+    An *explicit* empty value — ``NAME: ""`` (mapping empty string) or ``NAME=``
+    (list item WITH an ``=`` and an empty value) — is normalized to the plain
+    string ``""``. Docker Compose models it as a non-nil pointer to ``""``
+    (compose-go: ``BU: ""`` / ``BU=`` -> ``*env["BU"] == ""``), an empty literal
+    that OVERRIDES the worker shell value (Compose spec: ``environment``
+    overrides ``env_file`` even when empty). It is therefore CARRIED in
+    ``profile_env`` as a literal ``""`` (the local container received an explicit
+    blank, not the worker value) and EXCLUDED from ``env_passthrough_names`` (a
+    profile-owned literal, not a worker-resolved slot) — see
+    ``literal_profile_env_from_compose`` and
+    ``_filter_hosted_env_passthrough_names_from_compose_env``.
     """
     if isinstance(environment, Mapping):
-        return {str(key): "" if value is None else str(value) for key, value in environment.items()}
+        return {
+            str(key): _COMPOSE_PASSTHROUGH if value is None else str(value)
+            for key, value in environment.items()
+        }
     if isinstance(environment, list):
         mapping: dict[str, str] = {}
         for item in environment:
             if isinstance(item, str):
                 key, sep, value = item.partition("=")
                 if key:
-                    mapping[key] = value if sep else ""
+                    # ``sep`` is ``"="`` when an ``=`` was present (even with an
+                    # empty value -> explicit empty literal ``""``); absent
+                    # (``""``) for a bare-name pass-through slot.
+                    mapping[key] = value if sep else _COMPOSE_PASSTHROUGH
             elif isinstance(item, Mapping):
                 mapping.update(
-                    {str(key): "" if value is None else str(value) for key, value in item.items()}
+                    {
+                        str(key): _COMPOSE_PASSTHROUGH if value is None else str(value)
+                        for key, value in item.items()
+                    }
                 )
         return mapping
     return {}

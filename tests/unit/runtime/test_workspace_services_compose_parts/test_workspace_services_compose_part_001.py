@@ -652,9 +652,9 @@ def test_filter_hosted_env_passthrough_names_keeps_auth_pass_through_slot(
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PY6Rn: a Compose pass-through
     slot for an ``AGENT_AUTH_ENV_VARS`` key (``OPENAI_API_KEY:`` / ``: null`` /
-    ``environment: [OPENAI_API_KEY]`` / ``OPENAI_API_KEY=``) declares no value;
-    Docker Compose takes the value from the worker shell at stack launch, exactly
-    like the non-auth pass-through slots handled in
+    ``environment: [OPENAI_API_KEY]`` — no ``=``) declares no value; Docker
+    Compose takes the value from the worker shell at stack launch, exactly like
+    the non-auth pass-through slots handled in
     ``test_compose_passthrough_env_slot_not_carried_kept_in_passthrough``.
     ``_compose_env_passthrough_exclusions`` -> ``_profile_owned_auth_keys``
     treated any ``AGENT_AUTH_ENV_VARS`` key declared on the agent service as
@@ -665,7 +665,11 @@ def test_filter_hosted_env_passthrough_names_keeps_auth_pass_through_slot(
     *removes* a name already excluded by the first pass. The hosted job therefore
     missed a worker credential the local stack already injected at launch. An
     auth pass-through slot must stay in ``env_passthrough_names`` (resolved
-    out-of-band), like any other pass-through slot.
+    out-of-band), like any other pass-through slot. (An *explicit* empty auth
+    value — ``ANTHROPIC_API_KEY: ""`` — is a separate case: Compose sets an
+    empty literal that overrides the worker value, so it is carried in
+    ``profile_env`` and excluded from passthrough; see
+    ``test_compose_explicit_empty_value_carried_not_passthrough``.)
     """
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -677,7 +681,9 @@ def test_filter_hosted_env_passthrough_names_keeps_auth_pass_through_slot(
                         "environment": {
                             # Mapping null value -> pass-through slot.
                             "OPENAI_API_KEY": None,
-                            # Explicit empty -> pass-through slot too.
+                            # Explicit empty (mapping "") -> CARRIED literal
+                            # "" that overrides the worker value; NOT a
+                            # pass-through slot (compose-go: non-nil pointer).
                             "ANTHROPIC_API_KEY": "",
                         },
                     }
@@ -693,10 +699,14 @@ def test_filter_hosted_env_passthrough_names_keeps_auth_pass_through_slot(
         names, compose_file=compose_file, worker_env=worker_env
     )
 
-    # Auth pass-through slots stay in passthrough for hosted out-of-band
-    # resolution (Docker Compose took them from the worker shell at launch).
+    # Auth pass-through slot (null) stays in passthrough for hosted out-of-band
+    # resolution (Docker Compose took it from the worker shell at launch).
     assert "OPENAI_API_KEY" in filtered
-    assert "ANTHROPIC_API_KEY" in filtered
+    # Explicit-empty auth value is EXCLUDED — it is a profile-owned literal
+    # (carried as "" via profile_env), NOT a worker-resolved slot; the local
+    # container received an explicit blank, so the hosted executor must not
+    # re-resolve a worker value the local container never had.
+    assert "ANTHROPIC_API_KEY" not in filtered
     # An auth name absent from the compose env block still passes through.
     assert "ANTHROPIC_BASE_URL" in filtered
 
@@ -981,25 +991,29 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
     """A Compose pass-through env slot is resolved from the worker, not carried.
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PYnJJ: a Compose pass-through
-    slot — ``environment: [NAME]`` (list item with no ``=``), ``NAME:`` /
-    ``NAME: null`` (mapping value that is ``None``), or ``NAME=`` (explicit
-    empty) — declares no value; Docker Compose takes the value from the worker
-    shell at stack launch, exactly like a bare ``${NAME}`` reference. The local
-    agent container receives the worker's ``AWS_REGION`` when it is set.
+    slot — ``environment: [NAME]`` (list item with no ``=``) or ``NAME:`` /
+    ``NAME: null`` (mapping value that is ``None``) — declares no value; Docker
+    Compose takes the value from the worker shell at stack launch, exactly like
+    a bare ``${NAME}`` reference. The local agent container receives the
+    worker's ``AWS_REGION`` when it is set. (An *explicit* empty value —
+    mapping ``NAME: ""`` or list ``NAME=`` — is a separate case covered by
+    ``test_compose_explicit_empty_value_carried_not_passthrough``: Compose sets
+    an empty literal that overrides the worker value, so it is carried in
+    ``profile_env`` and excluded from passthrough.)
 
-    Previously ``_compose_environment_mapping`` normalized such a slot to ``""``
-    (or ``"None"`` for a YAML null value) and ``literal_profile_env_from_compose``
-    carried it as a literal empty/``"None"`` value into ``profile_env``, which
-    overrode the real worker region in the hosted request, while
-    ``filter_hosted_env_passthrough_names`` excluded the name from passthrough
-    (it resolved to ``LITERAL``), so the hosted job received neither the worker
-    value nor the passthrough slot.
+    Previously ``_compose_environment_mapping`` normalized a pass-through slot
+    to ``""`` (or ``"None"`` for a YAML null value) and
+    ``literal_profile_env_from_compose`` carried it as a literal empty/
+    ``"None"`` value into ``profile_env``, which overrode the real worker region
+    in the hosted request, while ``filter_hosted_env_passthrough_names`` excluded
+    the name from passthrough (it resolved to ``LITERAL``), so the hosted job
+    received neither the worker value nor the passthrough slot.
 
-    Now the slot is skipped from ``profile_env`` (an empty literal would clobber
-    the real worker value) and kept in ``env_passthrough_names`` for hosted
-    out-of-band resolution, mirroring the local Compose container. A literal
-    empty resolved from an interpolation default (e.g. ``${MISSING:-}`` with
-    ``MISSING`` unset) is still carried as ``LITERAL`` (the local container
+    Now a pass-through slot is skipped from ``profile_env`` (an empty literal
+    would clobber the real worker value) and kept in ``env_passthrough_names``
+    for hosted out-of-band resolution, mirroring the local Compose container. A
+    literal empty resolved from an interpolation default (e.g. ``${MISSING:-}``
+    with ``MISSING`` unset) is still carried as ``LITERAL`` (the local container
     received that empty default, not a worker shell value).
     """
     from awf.profiles.compose import literal_profile_env_from_compose
@@ -1015,7 +1029,8 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
                             # Pass-through slots (mapping form): no value / null.
                             "AWS_REGION": None,
                             "AWS_NULL_REGION": None,
-                            # Explicit empty -> pass-through too.
+                            # Explicit empty (mapping "") -> CARRIED literal ""
+                            # (overrides the worker value; NOT a pass-through).
                             "AWS_EMPTY_REGION": "",
                             # Pure literal -> carried via profile_env.
                             "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
@@ -1041,7 +1056,11 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
     # override the real worker value in the hosted request).
     assert "AWS_REGION" not in carried
     assert "AWS_NULL_REGION" not in carried
-    assert "AWS_EMPTY_REGION" not in carried
+    # Explicit empty (mapping "") IS carried as a literal "" — the local
+    # container received an explicit empty value that overrides the worker
+    # shell value, so the hosted job must mirror that blank (NOT inherit a
+    # worker value the local container never had).
+    assert carried.get("AWS_EMPTY_REGION") == ""
     # The string "None" must never appear as a carried value (regression for the
     # YAML null normalization defect).
     assert "None" not in carried.values()
@@ -1069,7 +1088,9 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
     # Pass-through slots stay available for hosted out-of-band resolution.
     assert "AWS_REGION" in filtered
     assert "AWS_NULL_REGION" in filtered
-    assert "AWS_EMPTY_REGION" in filtered
+    # Explicit empty (mapping "") is EXCLUDED — it is a profile-owned literal
+    # carried via profile_env, not a worker-resolved slot.
+    assert "AWS_EMPTY_REGION" not in filtered
     # Pure literal -> excluded (carried via profile_env).
     assert "ANTHROPIC_VERTEX_PROJECT_ID" not in filtered
     # Bare ${NAME} -> excluded (profile-owned secret slot).
@@ -1132,6 +1153,128 @@ def test_compose_passthrough_env_slot_list_form_not_carried(
     assert "AWS_REGION" in filtered
     assert "OTHER" not in filtered
     assert "ANTHROPIC_API_KEY" in filtered
+
+
+@pytest.mark.unit
+def test_compose_explicit_empty_value_carried_not_passthrough(
+    tmp_path: Path,
+) -> None:
+    """An explicit empty compose env value is carried, not a pass-through slot.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PY8zB: Docker Compose treats an
+    *explicit* empty value — mapping ``NAME: ""`` or list ``NAME=`` — as a
+    non-nil pointer to ``""`` (an empty literal that OVERRIDES the worker shell
+    value), while only a *pass-through* slot — mapping ``NAME:`` /
+    ``NAME: null`` or list ``NAME`` (no ``=``) — is a nil pointer resolved from
+    the worker shell at stack launch (see compose-go
+    ``loader/tests/environment_test.go`` ``TestEnvironmentMap`` /
+    ``TestEnvironmentList``: ``BU: ""`` -> ``*env["BU"] == ""``, ``ZO:`` ->
+    ``env["ZO"] == nil``).
+
+    So the local agent container receives an explicit ``""`` for
+    ``AWS_REGION: ""`` / ``AWS_EMPTY_REGION=`` EVEN when the worker shell has a
+    non-empty ``AWS_REGION``. The hosted path must mirror that:
+    - ``profile_env`` CARRIES ``""`` (the local container had the var blank, not
+      the worker value); an empty literal would otherwise be skipped by the old
+      ``raw == ""`` sentinel, dropping the explicit blank and letting the hosted
+      job inherit a worker value the local container never had.
+    - ``env_passthrough_names`` EXCLUDES the name (it is a profile-owned literal,
+      not a worker-resolved slot); keeping it would make the hosted executor
+      re-resolve a worker value the local container never received.
+
+    Genuine pass-through slots (``NAME:``, list ``NAME``) keep the old behavior:
+    skipped from ``profile_env`` and kept in ``env_passthrough_names``.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Explicit empty (mapping) -> carried literal "".
+                            "AWS_REGION": "",
+                            # Pass-through (mapping null) -> worker-resolved.
+                            "AWS_NULL_REGION": None,
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_env = {"AWS_REGION": "us-west-2", "AWS_NULL_REGION": "us-west-2"}
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+
+    # Explicit empty is CARRIED as a literal "" (mirrors the local container,
+    # which had the var explicitly blank, not the worker "us-west-2").
+    assert carried.get("AWS_REGION") == ""
+    # Pass-through slot is NOT carried (worker-resolved; carrying would embed the
+    # worker value / override the real worker resolution).
+    assert "AWS_NULL_REGION" not in carried
+
+    names = ("AWS_REGION", "AWS_NULL_REGION", "ANTHROPIC_API_KEY")
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env=worker_env
+    )
+    # Explicit empty -> EXCLUDED (profile-owned literal, not worker-resolved).
+    assert "AWS_REGION" not in filtered
+    # Pass-through slot -> kept for hosted out-of-band resolution.
+    assert "AWS_NULL_REGION" in filtered
+    # Name absent from the compose env block still passes through.
+    assert "ANTHROPIC_API_KEY" in filtered
+
+
+@pytest.mark.unit
+def test_compose_explicit_empty_list_form_carried_not_passthrough(
+    tmp_path: Path,
+) -> None:
+    """The list-form explicit empty ``NAME=`` is carried, not a pass-through slot.
+
+    Companion to ``test_compose_explicit_empty_value_carried_not_passthrough``:
+    ``environment: [NAME=]`` (a list item WITH an ``=`` and an empty value) is an
+    explicit empty literal in Docker Compose (compose-go ``TestEnvironmentList``:
+    ``BU=`` -> ``*env["BU"] == ""``), distinct from ``environment: [NAME]`` (no
+    ``=``), which is a worker-resolved pass-through slot. The explicit-empty form
+    is CARRIED in ``profile_env`` and EXCLUDED from ``env_passthrough_names``;
+    the no-``=`` form is skipped from ``profile_env`` and kept in passthrough.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": [
+                            "AWS_REGION=",  # explicit empty (has '=')
+                            "AWS_NULL_REGION",  # pass-through (no '=')
+                        ],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_env = {"AWS_REGION": "us-west-2", "AWS_NULL_REGION": "us-west-2"}
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+
+    # Explicit empty (list form) -> CARRIED as literal "".
+    assert carried.get("AWS_REGION") == ""
+    # Pass-through (list no '=') -> NOT carried.
+    assert "AWS_NULL_REGION" not in carried
+
+    names = ("AWS_REGION", "AWS_NULL_REGION")
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env=worker_env
+    )
+    assert "AWS_REGION" not in filtered
+    assert "AWS_NULL_REGION" in filtered
 
 
 @pytest.mark.unit
