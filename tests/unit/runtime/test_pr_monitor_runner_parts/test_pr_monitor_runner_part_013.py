@@ -308,6 +308,69 @@ async def test_monitor_agent_hosted_timeout_skips_compose_recovery(
 
 
 @pytest.mark.unit
+async def test_monitor_agent_hosted_cleanup_failure_skips_compose_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """Hosted cleanup-failure cases must not probe/restart the Compose agent service.
+
+    Regression for PRRT_kwDOSJAM6s6POJS1: in hosted mode an injected runtime
+    executor owns process lifecycle, so there is no Compose agent service to
+    probe or restart. A ``ComposeExecCleanupError`` must re-raise unchanged
+    instead of being remapped to ``AGENT_SERVICE_UNHEALTHY`` and triggering
+    Compose restarts that can fail/terminate monitor recovery on GKE.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="awf-test-cleanup",
+        source="agent",
+        label="monitor",
+        message='service "agent" is not running',
+        cleanup_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr='service "agent" is not running',
+        ),
+    )
+    # A non-None runtime_executor marks the adapter as hosted.
+    adapter = FakeAdapter(runtime_executor=object())
+    assert adapter.is_hosted is True
+    adapter.queue(exc=cleanup_error)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    probe = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.probe_agent_service_health",
+        return_value=False,
+    )
+    ensure_project_up = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery.ComposeManager.ensure_project_up",
+        return_value=None,
+    )
+    command_evidence: list[str] = []
+
+    with pytest.raises(ComposeExecCleanupError) as raised:
+        await runner._run_monitor_agent_with_service_recovery(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=_write_compose_file(tmp_path),
+            prompt="fix the comment",
+            log_source="recovery",
+            command_evidence=command_evidence,
+        )
+
+    assert raised.value is cleanup_error
+    assert command_evidence == []
+    probe.assert_not_awaited()
+    ensure_project_up.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_monitor_agent_service_recovery_reruns_pre_launch_guards_before_retry(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

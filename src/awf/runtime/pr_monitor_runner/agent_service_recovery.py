@@ -235,6 +235,16 @@ async def _recover_monitor_agent_service_after_cleanup_error(
     command_evidence: list[str] | None,
     operation_start_head: str | None,
 ) -> int | None:
+    # In hosted mode (an agent runtime executor is injected) there is no
+    # docker compose agent service to probe or restart — the hosted runtime
+    # owns process lifecycle. Re-raising preserves the original cleanup
+    # failure reason; probing/restarting Compose here would remap a hosted
+    # ComposeExecCleanupError to AGENT_SERVICE_UNHEALTHY and can fail/terminate
+    # monitor recovery on GKE. Local Core (executor is None) keeps the
+    # recovery path. Mirrors the hosted guard in
+    # _recover_monitor_agent_service_after_error.
+    if self._deps.adapter.is_hosted:
+        return None
     service_healthy = await probe_agent_service_health(RuntimeInspector(), compose_project)
     if service_healthy is not False or not _cleanup_failure_indicates_agent_service_down(exc):
         return None
