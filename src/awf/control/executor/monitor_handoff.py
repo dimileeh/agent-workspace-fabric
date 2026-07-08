@@ -244,72 +244,71 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     ):
         return None
 
-    # In hosted mode (an agent runtime executor is injected) there is no
-    # docker compose project to restart — the hosted runtime owns process
-    # lifecycle. Skip the compose restart + companion env precheck so monitor
-    # repair can advance via the injected executor. Local Core (executor is
-    # None) keeps the exact restart behavior unchanged.
-    if self._agent_runtime_executor is None:
-        try:
-            _precheck_required_companion_env_secrets_for_resume(
-                companion_specs=companion_specs,
-                environ=os.environ,
-            )
-            _refresh_optional_companion_env_secrets_for_resume(
-                workspace_id=workspace_id,
-                compose_file=Path(compose_file_path),
-                companion_specs=companion_specs,
-                environ=os.environ,
-            )
-            await self._compose.ensure_project_up(
-                project_name=compose_project,
-                compose_file=Path(compose_file_path),
-                workspace_id=workspace_id,
-                wait=True,
-                compose_up_timeout_seconds=compose_up_timeout_seconds,
-                force_recreate=True,
-            )
-        except CompanionEnvSecretPrecheckError as exc:
-            _log.error(
-                "executor.resume_companion_env_secret_precheck_failed",
-                workspace_id=workspace_id,
-                reason_code=exc.reason_code,
-                stderr=exc.stderr[:1000],
-            )
-            await self._record_monitor_runtime_restart_failed(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file_path=compose_file_path,
-                error=exc,
-                event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
-            )
-            return None
-        except ComposeOperationError as exc:
-            _log.error(
-                "executor.resume_compose_up_failed",
-                workspace_id=workspace_id,
-                reason_code=exc.reason_code,
-                stderr=exc.stderr[:1000],
-            )
-            await self._record_monitor_runtime_restart_failed(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file_path=compose_file_path,
-                error=exc,
-            )
-            if not await _compose_runtime_usable_after_restart_failure(compose_project):
-                return None
-            _log.warning(
-                "executor.resume_compose_up_failed_runtime_still_usable",
-                workspace_id=workspace_id,
-                compose_project_name=compose_project,
-                reason_code=exc.reason_code,
-            )
-    else:
-        _log.info(
-            "executor.resume_pr_monitor_hosted_skip_compose_restart",
+    # The agent runtime executor seam only hostifies agent CLI runs (wired
+    # through the adapter below); it does NOT hostify validation. The resumed
+    # monitor's ValidationRunner still builds ``docker compose exec`` commands
+    # for pre-push validation, and companion services (e.g. postgres) still run
+    # in the compose stack. So even when an agent runtime executor is injected,
+    # keep the compose stack available for validation — otherwise a worker that
+    # resumes a monitor after the compose project was stopped would see a
+    # hosted agent repair succeed and then validation fail as infrastructure
+    # because the validation/companion stack was never brought back up. A future
+    # hosted validation runner seam would allow skipping this; until then the
+    # restart + companion env precheck runs unconditionally.
+    try:
+        _precheck_required_companion_env_secrets_for_resume(
+            companion_specs=companion_specs,
+            environ=os.environ,
+        )
+        _refresh_optional_companion_env_secrets_for_resume(
+            workspace_id=workspace_id,
+            compose_file=Path(compose_file_path),
+            companion_specs=companion_specs,
+            environ=os.environ,
+        )
+        await self._compose.ensure_project_up(
+            project_name=compose_project,
+            compose_file=Path(compose_file_path),
+            workspace_id=workspace_id,
+            wait=True,
+            compose_up_timeout_seconds=compose_up_timeout_seconds,
+            force_recreate=True,
+        )
+    except CompanionEnvSecretPrecheckError as exc:
+        _log.error(
+            "executor.resume_companion_env_secret_precheck_failed",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+            stderr=exc.stderr[:1000],
+        )
+        await self._record_monitor_runtime_restart_failed(
             workspace_id=workspace_id,
             compose_project=compose_project,
+            compose_file_path=compose_file_path,
+            error=exc,
+            event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
+        )
+        return None
+    except ComposeOperationError as exc:
+        _log.error(
+            "executor.resume_compose_up_failed",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+            stderr=exc.stderr[:1000],
+        )
+        await self._record_monitor_runtime_restart_failed(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file_path=compose_file_path,
+            error=exc,
+        )
+        if not await _compose_runtime_usable_after_restart_failure(compose_project):
+            return None
+        _log.warning(
+            "executor.resume_compose_up_failed_runtime_still_usable",
+            workspace_id=workspace_id,
+            compose_project_name=compose_project,
+            reason_code=exc.reason_code,
         )
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor

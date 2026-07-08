@@ -1,11 +1,15 @@
 """Hosted runtime execution seam — PR monitor resume handoff.
 
 When an ``AgentRuntimeExecutor`` is injected into the ``WorkspaceExecutor``,
-``resume_pr_monitor_handoff`` must skip the docker compose restart block
-(there is no compose project to restart in hosted mode) and still build the
-monitor + return a ``ResumeHandoff`` whose ``monitor.run`` drives the loop
-via the injected executor. Local Core (executor is None) keeps the exact
-compose restart behavior.
+``resume_pr_monitor_handoff`` still restarts the docker compose project and
+runs the companion env precheck: the agent runtime executor seam only
+hostifies agent CLI runs (wired through the adapter), it does NOT hostify
+validation. The resumed monitor's ValidationRunner still builds
+``docker compose exec`` commands for pre-push validation, and companion
+services still run in the compose stack, so the stack must be available even
+on the hosted path. ``monitor.run`` drives the loop via the injected
+executor (wired through ``get_adapter``). Local Core (executor is None) keeps
+the exact compose restart behavior.
 """
 
 from __future__ import annotations
@@ -162,7 +166,7 @@ def _make_executor(
 
 class TestResumeHandoffHostedSeam:
     @pytest.mark.unit
-    async def test_injected_executor_skips_compose_restart(
+    async def test_injected_executor_still_restarts_compose_for_validation(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -173,7 +177,7 @@ class TestResumeHandoffHostedSeam:
         executor = _RecordingExecutor()
         monitor = _RecordingMonitor()
         # Use a ComposeManager-compatible compose for the constructor (the
-        # recording compose is only used to assert restart is skipped).
+        # recording compose is only used to assert restart is preserved).
         real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
         executor_obj = _make_executor(
             fake=fake,
@@ -184,12 +188,15 @@ class TestResumeHandoffHostedSeam:
             agent_runtime_executor=executor,
         )
         # Swap in the recording compose so we can assert ensure_project_up
-        # was NOT called on the hosted path.
-        executor_obj._compose = compose  # type: ignore[method-assign]
+        # is still called on the hosted path (validation needs the stack).
+        executor_obj._compose = compose  # type: ignore[method=assign]
 
         await executor_obj.resume_pr_monitor(ws_id)
 
-        assert compose.ensure_project_up_calls == []
+        # The agent runtime executor only hostifies agent CLI runs; validation
+        # still uses docker compose exec, so the compose stack must be brought
+        # back up even when an executor is injected.
+        assert compose.ensure_project_up_calls == [ws_id]
         assert len(monitor.run_calls) == 1
         assert monitor.run_calls[0]["workspace_id"] == ws_id
 
