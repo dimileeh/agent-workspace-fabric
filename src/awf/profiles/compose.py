@@ -469,10 +469,21 @@ def _try_compose_agent_env_and_postgres_password(
     Returns ``(agent_env, postgres_password)`` where ``agent_env`` is ``None``
     when the compose is unreadable or has no agent service (mirrors
     ``_try_agent_environment_from_compose_file``) and ``postgres_password`` is
-    ``None`` when there is no postgres service / ``POSTGRES_PASSWORD`` (mirrors
+    ``None`` when no service declares ``POSTGRES_PASSWORD`` (mirrors
     ``_postgres_password_from_compose_file``). Parsing once avoids a second
     read/parse of the same file when ``literal_profile_env_from_compose`` needs
     both the agent env and the rendered postgres password for redaction.
+
+    ``POSTGRES_PASSWORD`` is collected from *every* compose service, not only a
+    service literally named ``postgres``. A valid custom profile may name its
+    database sidecar ``db`` / ``database`` (or anything else) while still setting
+    ``POSTGRES_PASSWORD`` and expanding that same password into the agent env
+    ``DATABASE_URL`` / ``AWF_DATABASE_URL``. Looking up only
+    ``services["postgres"]`` would leave ``postgres_password`` ``None`` for such a
+    profile and ``literal_profile_env_from_compose`` would carry the rendered DB
+    URL in ``profile_env``, leaking the workspace credential to the hosted
+    executor despite the secret-free contract. Scanning all services tracks the
+    rendered secret source independent of the service name.
     """
     try:
         payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -489,13 +500,15 @@ def _try_compose_agent_env_and_postgres_password(
         if isinstance(agent, Mapping)
         else None
     )
-    postgres = services.get("postgres")
     postgres_password: str | None = None
-    if isinstance(postgres, Mapping):
-        postgres_env = _compose_environment_mapping(postgres.get("environment"))
-        password = postgres_env.get("POSTGRES_PASSWORD")
+    for service in services.values():
+        if not isinstance(service, Mapping):
+            continue
+        service_env = _compose_environment_mapping(service.get("environment"))
+        password = service_env.get("POSTGRES_PASSWORD")
         if password:
             postgres_password = password
+            break
     return agent_env, postgres_password
 
 
@@ -514,13 +527,16 @@ def _postgres_password_from_compose_file(compose_file: Path) -> str | None:
     resolves DB credentials via its own adapter contract, not from
     ``profile_env``.
 
-    The rendered ``postgres`` service env is the authoritative source of the
-    secret ComposeManager expanded; redacting agent env values that contain it
-    keeps the secret out of the hosted request without weakening the local
-    container (which still gets the expanded value at stack launch) or resume
-    (which re-reads the self-contained rendered file). Returns ``None`` when the
-    compose is unreadable, has no postgres service, or the postgres service
-    declares no ``POSTGRES_PASSWORD`` (no secret to redact).
+    The rendered service env declaring ``POSTGRES_PASSWORD`` is the
+    authoritative source of the secret ComposeManager expanded; redacting agent
+    env values that contain it keeps the secret out of the hosted request
+    without weakening the local container (which still gets the expanded value
+    at stack launch) or resume (which re-reads the self-contained rendered
+    file). ``POSTGRES_PASSWORD`` is collected from any service (not only one
+    named ``postgres``) so custom profiles that name their DB sidecar ``db`` /
+    ``database`` are redacted too. Returns ``None`` when the compose is
+    unreadable, has no service declaring ``POSTGRES_PASSWORD`` (no secret to
+    redact).
     """
     _agent_env, postgres_password = _try_compose_agent_env_and_postgres_password(compose_file)
     return postgres_password
@@ -1032,11 +1048,14 @@ def literal_profile_env_from_compose(
     (e.g. ``DATABASE_URL`` / ``AWF_DATABASE_URL``) at render time so the local
     container can connect; those expanded literals embed the workspace DB
     password and are NOT carried — the hosted path resolves DB credentials via
-    its own adapter contract, not from ``profile_env``. The rendered ``postgres``
-    service env is the authoritative source of that secret; agent env values
-    containing it are skipped so the password never reaches the hosted request
-    object. When the compose file is unreadable the result is empty (fail-closed:
-    no values), matching ``_compose_env_passthrough_exclusions``.
+    its own adapter contract, not from ``profile_env``. The rendered service env
+    declaring ``POSTGRES_PASSWORD`` is the authoritative source of that secret;
+    ``POSTGRES_PASSWORD`` is collected from any service (not only one named
+    ``postgres``) so custom profiles that name their DB sidecar ``db`` /
+    ``database`` are redacted too. Agent env values containing it are skipped so
+    the password never reaches the hosted request object. When the compose file
+    is unreadable the result is empty (fail-closed: no values), matching
+    ``_compose_env_passthrough_exclusions``.
 
     ``compose_env`` lets a caller that already parsed the compose agent
     environment (e.g. ``_run_hosted`` computing the passthrough filter from the
@@ -1059,7 +1078,7 @@ def literal_profile_env_from_compose(
     # re-read the compose file when this call parsed the agent env itself; a
     # caller that supplied ``compose_env`` from a prior parse is responsible for
     # the same redaction context (it already has the file open). Failing to
-    # locate a postgres password (no postgres service / no ``POSTGRES_PASSWORD``)
+    # locate a postgres password (no service declaring ``POSTGRES_PASSWORD``)
     # redacts nothing, preserving carry for profiles without a DB sidecar.
     postgres_password: str | None = file_postgres_password if parsed_file else None
     env = os.environ if worker_env is None else worker_env

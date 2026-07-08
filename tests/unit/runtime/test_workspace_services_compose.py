@@ -1362,6 +1362,76 @@ def test_literal_profile_env_from_compose_carries_values_without_postgres_servic
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_postgres_password_under_nonstandard_service_name(
+    tmp_path: Path,
+) -> None:
+    """A custom profile may name its database service ``db`` / ``database``
+    (or anything else) while still setting ``POSTGRES_PASSWORD`` and expanding
+    that same password into the agent env ``DATABASE_URL`` /
+    ``AWF_DATABASE_URL``. The redaction source must collect
+    ``POSTGRES_PASSWORD`` from every compose service, not only from a service
+    literally named ``postgres``; otherwise ``file_postgres_password`` stays
+    ``None`` for a valid custom profile and ``literal_profile_env_from_compose``
+    carries the rendered DB URL in ``AgentRuntimeExecRequest.profile_env``,
+    leaking the workspace credential to the hosted executor despite the
+    secret-free contract.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PWUIl.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    # A custom-profile DB sidecar named ``db`` (not ``postgres``)
+                    # still declares ``POSTGRES_PASSWORD`` and shares it with
+                    # the agent env DB URLs below.
+                    "db": {
+                        "image": "postgres:16-alpine",
+                        "environment": {
+                            "POSTGRES_USER": "awf",
+                            "POSTGRES_PASSWORD": "workspace-secret",
+                            "POSTGRES_DB": "awf",
+                        },
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Non-secret profile literal -> carried (must survive).
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            # AWF-expanded DB URLs embed the shared postgres
+                            # password -> must be skipped (secret-bearing).
+                            "DATABASE_URL": ("postgresql://awf:workspace-secret@db:5432/awf"),
+                            "AWF_DATABASE_URL": (
+                                "postgresql+asyncpg://awf:workspace-secret@db:5432/awf"
+                            ),
+                            "AWF_TEST_DATABASE_URL": (
+                                "postgresql+asyncpg://awf:workspace-secret@db:5432/awf"
+                            ),
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    # Non-secret profile literal is still carried to the hosted executor.
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    # Secret-bearing expanded values are NOT carried to the hosted executor.
+    carried = dict(profile_env)
+    assert "DATABASE_URL" not in carried
+    assert "AWF_DATABASE_URL" not in carried
+    assert "AWF_TEST_DATABASE_URL" not in carried
+    # The workspace DB password never reaches the hosted request object.
+    assert "workspace-secret" not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_agent_exec_env_passthrough_parses_compose_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
