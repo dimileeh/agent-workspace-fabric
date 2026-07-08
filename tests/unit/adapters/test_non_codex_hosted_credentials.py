@@ -60,6 +60,17 @@ _OPENCODE_NAMES = (
     "AWF_OPENCODE_OLLAMA_BASE_URL",
     "OLLAMA_HOST",
     "OLLAMA_API_KEY",
+    # Provider-qualified non-Ollama models (openai/..., anthropic/...,
+    # google/..., xai/...) are admitted at create time when the matching
+    # provider API key is present and passed locally via AGENT_AUTH_ENV_VARS;
+    # the hosted path must surface the same names or the hosted job launches
+    # without auth for such a model.
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "XAI_API_KEY",
 )
 
 
