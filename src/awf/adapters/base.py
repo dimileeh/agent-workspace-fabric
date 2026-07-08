@@ -518,7 +518,7 @@ class AgentAdapter(ABC):
     ) -> AgentRunResult:
         """Map a hosted executor result through the same failure classification.
 
-        Reuses ``_failure_reason_for_output`` so non-zero exits, timeouts, and
+        Reuses ``_failure_reason_for_result`` so non-zero exits, timeouts, and
         provider auth failures classify identically to the Compose path —
         monitor recovery semantics stay unchanged. The hosted executor signals
         a timeout by returning ``returncode == 124`` (the conventional
