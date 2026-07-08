@@ -645,6 +645,103 @@ def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_auth_keys(
 
 
 @pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_keeps_auth_pass_through_slot(
+    tmp_path: Path,
+) -> None:
+    """An auth pass-through slot stays in hosted passthrough for out-of-band resolution.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PY6Rn: a Compose pass-through
+    slot for an ``AGENT_AUTH_ENV_VARS`` key (``OPENAI_API_KEY:`` / ``: null`` /
+    ``environment: [OPENAI_API_KEY]`` / ``OPENAI_API_KEY=``) declares no value;
+    Docker Compose takes the value from the worker shell at stack launch, exactly
+    like the non-auth pass-through slots handled in
+    ``test_compose_passthrough_env_slot_not_carried_kept_in_passthrough``.
+    ``_compose_env_passthrough_exclusions`` -> ``_profile_owned_auth_keys``
+    treated any ``AGENT_AUTH_ENV_VARS`` key declared on the agent service as
+    profile-owned regardless of its value, so the name was removed from the
+    exclusion set before the pass-through exception in
+    ``_filter_hosted_env_passthrough_names_from_compose_env`` could apply — the
+    exception only prevents *adding* worker-resolved-defaulted names, it never
+    *removes* a name already excluded by the first pass. The hosted job therefore
+    missed a worker credential the local stack already injected at launch. An
+    auth pass-through slot must stay in ``env_passthrough_names`` (resolved
+    out-of-band), like any other pass-through slot.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Mapping null value -> pass-through slot.
+                            "OPENAI_API_KEY": None,
+                            # Explicit empty -> pass-through slot too.
+                            "ANTHROPIC_API_KEY": "",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
+    worker_env = {"OPENAI_API_KEY": "sk-secret", "ANTHROPIC_API_KEY": "sk-ant"}
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env=worker_env
+    )
+
+    # Auth pass-through slots stay in passthrough for hosted out-of-band
+    # resolution (Docker Compose took them from the worker shell at launch).
+    assert "OPENAI_API_KEY" in filtered
+    assert "ANTHROPIC_API_KEY" in filtered
+    # An auth name absent from the compose env block still passes through.
+    assert "ANTHROPIC_BASE_URL" in filtered
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_keeps_auth_pass_through_slot_list_form(
+    tmp_path: Path,
+) -> None:
+    """List-form auth pass-through slot stays in hosted passthrough.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PY6Rn: the list-form pass-through
+    syntax ``environment: [OPENAI_API_KEY]`` is an ``AGENT_AUTH_ENV_VARS`` key
+    declared with no value; Docker Compose takes it from the worker shell at stack
+    launch. It must stay in ``env_passthrough_names`` like any other pass-through
+    slot, not be treated as profile-owned merely because the name is in
+    ``AGENT_AUTH_ENV_VARS``.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": ["OPENAI_API_KEY", "CODEX_API_KEY=sk-profile"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = ("OPENAI_API_KEY", "CODEX_API_KEY")
+    worker_env = {"OPENAI_API_KEY": "sk-secret"}
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env=worker_env
+    )
+
+    # List-form pass-through slot -> stays in passthrough (worker-resolved).
+    assert "OPENAI_API_KEY" in filtered
+    # List-form literal value -> profile-owned, excluded (carried via profile_env).
+    assert "CODEX_API_KEY" not in filtered
+
+
+@pytest.mark.unit
 def test_filter_hosted_env_passthrough_names_suppresses_shadowing_worker_ollama_key(
     tmp_path: Path,
 ) -> None:

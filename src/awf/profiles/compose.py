@@ -832,7 +832,13 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     variable unset, or an ``:+`` / ``+`` alternate form) IS excluded — its
     concrete value reaches the hosted job via ``profile_env`` instead. See
     ``filter_hosted_env_passthrough_names`` and PR #751 threads
-    PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm / PRRT_kwDOSJAM6s6PYnJJ.
+    PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm / PRRT_kwDOSJAM6s6PYnJJ /
+    PRRT_kwDOSJAM6s6PY6Rn. A pass-through slot is removed from the baseline
+    ``_compose_env_passthrough_exclusions`` set even when its name is in
+    ``AGENT_AUTH_ENV_VARS`` (``_profile_owned_auth_keys`` treats any auth key
+    declared on the agent service as profile-owned regardless of value); the local
+    Compose container received the worker shell value, so the hosted executor must
+    resolve it out-of-band (PRRT_kwDOSJAM6s6PY6Rn).
     """
     excluded = _compose_env_passthrough_exclusions(compose_env)
     if compose_env is not None:
@@ -850,7 +856,18 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # reaches the hosted job via ``profile_env``. Bare ``${NAME}`` / ``$NAME``
         # (``WORKER_RESOLVED_SLOT``) stay excluded — profile-owned secret slots
         # the hosted path resolves via its adapter contract.
-        excluded = excluded | frozenset(
+        #
+        # A pass-through slot (raw value ``""``) is removed from the baseline
+        # ``_compose_env_passthrough_exclusions`` set first: that set treats any
+        # ``AGENT_AUTH_ENV_VARS`` key declared on the agent service as
+        # profile-owned (``_profile_owned_auth_keys``) regardless of value, so an
+        # auth pass-through slot would be excluded before the worker-resolved
+        # exception below (which only prevents *adding* a name) could keep it.
+        # The local Compose container received the worker shell value for such a
+        # slot, so the hosted executor must resolve it out-of-band too (PR #751
+        # thread PRRT_kwDOSJAM6s6PY6Rn).
+        passthrough_slots = frozenset(name for name, raw in compose_env.items() if raw == "")
+        excluded = (excluded - passthrough_slots) | frozenset(
             name
             for name, raw in compose_env.items()
             if raw != ""
