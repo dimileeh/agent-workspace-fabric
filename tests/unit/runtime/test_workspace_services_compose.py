@@ -806,12 +806,24 @@ def test_literal_profile_env_from_compose_skips_placeholders(
 
     The local ``docker compose exec`` path does not forward profile-owned env
     because the running container already has it (substituted from the compose
-    env block at stack launch). The hosted (non-compose) path has no compose
-    env block, so the hosted executor must inject the same literal values the
-    local container received. ``${NAME}`` placeholders are worker-resolved
-    secrets and must NOT be carried as values — the hosted executor resolves
-    those out-of-band from ``env_passthrough_names`` — so only literal
-    (non-placeholder) entries are surfaced.
+    env block at stack launch). The hosted (non-compose) path has no compose env
+    block, so the hosted executor must inject the same values the local
+    container received. Compose interpolation is rendered against the worker env
+    so the hosted job gets the concrete value:
+
+    - Pure literals -> carried verbatim.
+    - ``${NAME:-default}`` / ``${NAME-default}`` with ``NAME`` unset -> the
+      concrete default is carried (the local container receives it; dropping
+      it leaves the hosted job missing the profile-owned value).
+    - ``$$`` escapes -> collapsed to a single ``$`` and carried (Compose models
+      ``$$`` as a literal dollar, not a reference).
+    - Bare ``${NAME}`` / ``$NAME`` / ``${NAME:?...}`` / ``${NAME:+...}``
+      references -> skipped (worker-resolved secrets the profile owns locally;
+      the hosted path resolves credentials via its own adapter contract, not by
+      re-resolving ``${NAME}`` from the worker, and carrying the worker value
+      would embed a secret in ``profile_env``).
+    - ``${NAME:-default}`` with ``NAME`` set in the worker env -> skipped
+      (worker-resolved value; carrying it would embed a worker secret).
     """
     from awf.profiles.compose import literal_profile_env_from_compose
 
@@ -829,10 +841,13 @@ def test_literal_profile_env_from_compose_skips_placeholders(
                             "OPENAI_API_KEY": "${OPENAI_API_KEY}",
                             # Required placeholder -> skipped.
                             "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY:?set}",
-                            # Literal default-bearing expression -> the value
-                            # itself is a placeholder reference, skipped.
+                            # Defaulted expression with the variable unset -> the
+                            # concrete default reaches the local container, so the
+                            # hosted job must receive it too (regression for the
+                            # drop-defaulted-expression defect).
                             "AWS_REGION": "${AWS_REGION:-us-west-2}",
-                            # Escaped dollar literal -> carried (no interpolation).
+                            # Escaped dollar literal -> collapsed to a single "$"
+                            # and carried (regression for the verbatim-$$ defect).
                             "LITERAL_DOLLAR": "$$NOT_A_VAR",
                         },
                     }
@@ -842,14 +857,78 @@ def test_literal_profile_env_from_compose_skips_placeholders(
         encoding="utf-8",
     )
 
-    profile_env = literal_profile_env_from_compose(compose_file)
+    # Explicit empty worker env so AWS_REGION is unset -> default carried.
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
 
     assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
-    assert ("LITERAL_DOLLAR", "$$NOT_A_VAR") in profile_env
+    # $$ collapses to a single $, matching the local container's stack-launch env.
+    assert ("LITERAL_DOLLAR", "$NOT_A_VAR") in profile_env
+    # Defaulted expression with the variable unset -> concrete default carried.
+    assert ("AWS_REGION", "us-west-2") in profile_env
     # Worker-resolved placeholders are not carried as values.
     assert "OPENAI_API_KEY" not in dict(profile_env)
     assert "ANTHROPIC_API_KEY" not in dict(profile_env)
-    assert "AWS_REGION" not in dict(profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_resolves_defaults_and_escapes(
+    tmp_path: Path,
+) -> None:
+    """Compose interpolation is rendered against the worker env before carry.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PT7KL: a defaulted
+    ``${NAME:-default}`` whose variable is set in the worker env resolves to the
+    worker value and is skipped (worker-resolved; carrying it would embed a
+    secret in ``profile_env``); one whose variable is unset resolves to the
+    concrete default and is carried. Mixed literal+default values and multiple
+    ``$$`` escapes are carried as the expanded form.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Variable set in worker env -> worker-resolved, skipped.
+                            "AWS_REGION_SET": "${AWS_REGION_SET:-us-west-2}",
+                            # Variable unset -> concrete default carried.
+                            "AWS_REGION_UNSET": "${AWS_REGION_UNSET:-us-west-2}",
+                            # Mixed literal + unset-var default -> carried expanded.
+                            "ENDPOINT": "https://${API_HOST:-api.example.com}/v1",
+                            # Multiple $$ escapes collapse to single $ each.
+                            "PASSWORD": "pa$$word",
+                            # :- with empty default and unset var -> carried as "".
+                            "EMPTY_DEFAULT": "${MISSING:-}",
+                            # Bare $NAME (no braces) worker-resolved -> skipped.
+                            "BARE_PLAIN": "$BARE_PLAIN_VAR",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    worker_env = {"AWS_REGION_SET": "eu-central-1"}
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env=worker_env)
+    carried = dict(profile_env)
+
+    # Set-var default -> worker-resolved, skipped (no secret value carried).
+    assert "AWS_REGION_SET" not in carried
+    # Unset-var default -> concrete default carried.
+    assert carried.get("AWS_REGION_UNSET") == "us-west-2"
+    # Mixed literal + unset default -> expanded form carried.
+    assert carried.get("ENDPOINT") == "https://api.example.com/v1"
+    # $$ collapses to a single $.
+    assert carried.get("PASSWORD") == "pa$word"
+    # Empty default with unset var -> carried as empty string (matches local).
+    assert carried.get("EMPTY_DEFAULT") == ""
+    # Bare $NAME worker-resolved -> skipped.
+    assert "BARE_PLAIN" not in carried
 
 
 @pytest.mark.unit

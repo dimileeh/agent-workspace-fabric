@@ -595,71 +595,203 @@ def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
     return frozenset(name for name in AGENT_AUTH_ENV_VARS if name in compose_env)
 
 
-# Compose variable-interpolation reference, mirroring the interpolation pattern
-# in ``awf.service.environment`` (``${VAR}`` / ``${VAR:-...}`` / ``$VAR``). Kept
+# Compose variable-interpolation resolver, mirroring the interpolation model in
+# ``awf.service.environment`` (``${VAR}`` / ``${VAR:-...}`` / ``$VAR``). Kept
 # local so ``profiles`` does not import the ``service`` layer. An escaped ``$$``
 # is a literal dollar, not an interpolation reference.
-_COMPOSE_INTERPOLATION_REF_PATTERN = re.compile(
-    r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?=[}:?+\-])[^}]*\}|"
-    r"\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
-)
+
+# Compose braced-expression operators that supply a concrete default when the
+# referenced variable is unset (``:-`` tests non-empty, ``-`` tests set-ness).
+# Only these forms can carry a profile-owned concrete value to the hosted job
+# when the variable is absent from the worker env; every other operator
+# (``:?`` / ``?`` / ``:+`` / ``+``) and a bare ``${NAME}`` / ``$NAME`` resolves
+# the slot from the worker and is treated as worker-resolved (skipped).
+_COMPOSE_DEFAULT_OPERATORS = (":-", "-")
+
+# Sentinel used to mask ``$$`` escapes before interpolation scanning so an
+# escaped dollar is never mistaken for a reference start.
+_COMPOSE_ESCAPED_DOLLAR = "\0AWF_PROFILE_ESCAPED_DOLLAR\0"
+
+_COMPOSE_ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-def _compose_value_has_interpolation_ref(value: str) -> bool:
-    """Return whether a compose env value references a worker env variable.
+def _compose_braced_expression_end(value: str, open_brace_index: int) -> int | None:
+    """Return the index of the matching ``}`` for a ``${`` at ``open_brace_index``."""
+    depth = 1
+    index = open_brace_index + 1
+    while index < len(value):
+        char = value[index]
+        if char == "$" and index + 1 < len(value) and value[index + 1] == "{":
+            depth += 1
+            index += 2
+            continue
+        if char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
 
-    Detects Compose ``${VAR}`` / ``${VAR:-default}`` / ``${VAR:?error}`` /
-    ``$VAR`` interpolation references, honoring the ``$$`` escape (a literal
-    dollar, not a reference). A value that is itself a literal (e.g.
-    ``http://ollama.profile:11434``) has no reference; a value that is a
-    worker-resolved secret placeholder (``${OPENAI_API_KEY}``) or a mixed
-    interpolation (``prefix-${VAR}``) does.
+
+def _compose_resolve_value(
+    value: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> tuple[str, bool]:
+    """Resolve a Compose env value against the worker env.
+
+    Returns ``(expanded, worker_resolved)`` where ``worker_resolved`` is
+    ``True`` when the value must NOT be carried to the hosted executor because
+    it pulls a worker-resolved value (a secret) from the worker environment.
+
+    Carry rule (mirrors what the local agent container receives at stack
+    launch, without embedding worker secrets in ``profile_env``):
+
+    - A pure literal (no interpolation reference) is carried verbatim.
+    - An escaped ``$$`` collapses to a single literal ``$`` and is carried.
+    - ``${NAME:-default}`` / ``${NAME-default}`` with ``NAME`` unset in the
+      worker env resolves to the concrete ``default`` and is carried — the
+      local container receives that default, so the hosted job must too
+      (dropping it leaves the hosted job missing the profile-owned value).
+    - ``${NAME:-default}`` / ``${NAME-default}`` with ``NAME`` set in the
+      worker env resolves to the worker value and is skipped (carrying it
+      would embed a worker secret in ``profile_env``).
+    - A bare ``${NAME}`` / ``$NAME`` (no default operator), and
+      ``${NAME:?...}`` / ``${NAME:+...}`` / ``${NAME+...}`` forms, are always
+      skipped: they are worker-resolved slots the profile owns locally; the
+      hosted path resolves credentials via its own adapter contract, not by
+      re-resolving ``${NAME}`` from the worker, and an unset required form
+      (``${NAME:?err}``) would fail Compose at stack launch anyway.
+
+    The default word is itself recursively expanded against the worker env,
+    mirroring ``awf.service.environment``'s env-file interpolator.
     """
-    escaped = value.replace("$$", "\0")
-    return any(
-        match.group("braced") or match.group("plain")
-        for match in _COMPOSE_INTERPOLATION_REF_PATTERN.finditer(escaped)
-    )
+    escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
+    expanded: list[str] = []
+    index = 0
+    while index < len(escaped):
+        char = escaped[index]
+        if char != "$":
+            expanded.append(char)
+            index += 1
+            continue
+        if index + 1 < len(escaped) and escaped[index + 1] == "{":
+            end = _compose_braced_expression_end(escaped, index + 1)
+            if end is None:
+                expanded.append(char)
+                index += 1
+                continue
+            piece, piece_worker_resolved = _compose_resolve_braced(
+                escaped[index + 2 : end], worker_env=worker_env
+            )
+            if piece_worker_resolved:
+                return "", True
+            expanded.append(piece)
+            index = end + 1
+            continue
+        plain_match = _COMPOSE_ENV_NAME_PATTERN.match(escaped, index + 1)
+        if plain_match is None:
+            expanded.append(char)
+            index += 1
+            continue
+        # Bare ``$NAME`` (no default operator) -> worker-resolved slot, skip.
+        return "", True
+    return "".join(expanded).replace(_COMPOSE_ESCAPED_DOLLAR, "$"), False
+
+
+def _compose_resolve_braced(
+    expression: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> tuple[str, bool]:
+    """Resolve a Compose ``${...}`` braced expression.
+
+    Returns ``(expanded, worker_resolved)``; see ``_compose_resolve_value``.
+    """
+    name_match = _COMPOSE_ENV_NAME_PATTERN.match(expression)
+    if name_match is None:
+        # Unparseable braced text is carried through verbatim (no reference).
+        return f"${{{expression}}}", False
+    name = name_match.group(0)
+    remainder = expression[name_match.end() :]
+    if not remainder:
+        # Bare ``${NAME}`` -> worker-resolved slot, skip.
+        return "", True
+    for candidate in _COMPOSE_DEFAULT_OPERATORS:
+        if remainder.startswith(candidate):
+            default_word = remainder[len(candidate) :]
+            if name in worker_env:
+                # Variable set -> worker-resolved value, skip.
+                return "", True
+            # Variable unset -> expand the default word recursively and carry.
+            default, default_resolved = _compose_resolve_value(default_word, worker_env=worker_env)
+            if default_resolved:
+                return "", True
+            return default, False
+    # ``:?`` / ``?`` / ``:+`` / ``+`` and any other operator -> worker-resolved,
+    # skip (a set variable pulls a worker value; an unset required form would
+    # fail Compose at stack launch; an unset ``:+``/``+`` resolves to "" which
+    # is still a worker-gated slot, not a profile-owned concrete value).
+    return "", True
 
 
 def literal_profile_env_from_compose(
     compose_file: Path,
     *,
     compose_env: Mapping[str, str] | None = None,
+    worker_env: Mapping[str, str] | None = None,
 ) -> tuple[tuple[str, str], ...]:
-    """Return literal profile-owned env values the hosted executor must inject.
+    """Return profile-owned env values the hosted executor must inject.
 
     The local ``docker compose exec`` path does not forward profile-owned env
     because the running agent container already has it (Docker Compose
     substitutes the compose env block at stack launch). The hosted (non-compose)
     path has no compose env block, so the hosted executor must inject the same
-    literal values the local container received or it launches without them
-    (e.g. a profile-owned ``OLLAMA_HOST`` daemon the OpenCode launcher then
-    cannot resolve, falling back to the default daemon).
+    values the local container received or it launches without them (e.g. a
+    profile-owned ``OLLAMA_HOST`` daemon the OpenCode launcher then cannot
+    resolve, falling back to the default daemon).
 
-    Only *literal* (non-placeholder) entries are surfaced. A value that
-    references a worker env variable via Compose interpolation
-    (``${NAME}`` / ``${NAME:-default}`` / ``$NAME``) is worker-resolved and
-    must NOT be carried as a value — the hosted executor resolves those
-    out-of-band from ``env_passthrough_names``, and carrying the placeholder
-    text would leak an unresolved reference instead of the secret. An entry
-    whose value is an escaped ``$$`` literal (no interpolation) is carried
-    verbatim. When the compose file is unreadable the result is empty
-    (fail-closed: no values), matching ``_compose_env_passthrough_exclusions``.
+    Compose interpolation is rendered against ``worker_env`` (default
+    ``os.environ``) so the hosted job receives the concrete value the local
+    container gets at stack launch:
+
+    - Pure literals are carried verbatim.
+    - An escaped ``$$`` collapses to a single literal ``$`` and is carried
+      (Compose models ``$$`` as a literal dollar, not a reference).
+    - ``${NAME:-default}`` / ``${NAME-default}`` with ``NAME`` unset in the
+      worker env resolves to the concrete ``default`` and is carried.
+    - ``${NAME:-default}`` / ``${NAME-default}`` with ``NAME`` set in the worker
+      env is skipped (worker-resolved; carrying the worker value would embed a
+      secret in ``profile_env``).
+    - Bare ``${NAME}`` / ``$NAME`` and ``${NAME:?...}`` / ``${NAME:+...}`` /
+      ``${NAME+...}`` forms are skipped (worker-resolved slots the profile owns
+      locally; the hosted path resolves credentials via its own adapter
+      contract, not by re-resolving ``${NAME}`` from the worker).
+
+    Skipping worker-resolved values preserves the no-secret-values contract:
+    ``profile_env`` never carries a ``${...}`` placeholder nor a worker secret.
+    When the compose file is unreadable the result is empty (fail-closed: no
+    values), matching ``_compose_env_passthrough_exclusions``.
 
     ``compose_env`` lets a caller that already parsed the compose agent
     environment (e.g. ``_run_hosted`` computing the passthrough filter from the
     same parse) reuse the result and avoid a second read/parse of the file.
+    ``worker_env`` lets a caller supply a deterministic worker environment for
+    interpolation (default ``os.environ``); mirroring
+    ``agent_environment_with_*`` helpers.
     """
     if compose_env is None:
         compose_env = _try_agent_environment_from_compose_file(compose_file)
     if compose_env is None:
         return ()
-    return tuple(
-        (key, value)
-        for key, value in compose_env.items()
-        if not _compose_value_has_interpolation_ref(value)
-    )
+    env = os.environ if worker_env is None else worker_env
+    carried: list[tuple[str, str]] = []
+    for key, raw in compose_env.items():
+        expanded, worker_resolved = _compose_resolve_value(raw, worker_env=env)
+        if worker_resolved:
+            continue
+        carried.append((key, expanded))
+    return tuple(carried)
 
 
 def _compose_environment_mapping(environment: object) -> dict[str, str]:

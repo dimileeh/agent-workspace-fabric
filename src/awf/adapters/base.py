@@ -449,15 +449,20 @@ class AgentAdapter(ABC):
         env_passthrough_names = filter_hosted_env_passthrough_names(
             self.hosted_env_passthrough_names, compose_file=compose_file
         )
-        # Carry literal profile-owned env values to the hosted executor. The
-        # local ``docker compose exec`` path does not forward profile-owned env
+        # Carry profile-owned env values to the hosted executor. The local
+        # ``docker compose exec`` path does not forward profile-owned env
         # because the running container already has it (substituted from the
         # compose env block at stack launch); the hosted path has no compose env
         # block, so without these values a profile-owned endpoint (e.g.
         # ``OLLAMA_HOST``) never reaches the hosted job and OpenCode falls back to
-        # the default daemon. Worker-resolved ``${NAME}`` placeholders stay in
-        # ``env_passthrough_names`` for out-of-band resolution — only literal
-        # values are carried here.
+        # the default daemon. Compose interpolation is rendered against the
+        # worker env so the hosted job receives the same concrete value the
+        # local container gets at stack launch: a defaulted
+        # ``${NAME:-default}`` with ``NAME`` unset is carried as the default, an
+        # escaped ``$$`` is carried as a single ``$``, and a pure literal is
+        # carried verbatim. Bare ``${NAME}`` / ``$NAME`` worker-resolved slots are
+        # skipped (the profile owns them locally; the hosted path resolves
+        # credentials via its own adapter contract, not from the worker).
         profile_env = literal_profile_env_from_compose(compose_file)
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
