@@ -36,6 +36,14 @@ class ClaudeCodeAdapter(AgentAdapter):
         same credentials a local Compose run would surface, including the
         Bedrock/Vertex backends. The hosted executor resolves values
         out-of-band.
+
+        ``AGENT_AUTH_ENV_VARS`` exposes the ``CLAUDE_CODE_USE_BEDROCK`` /
+        ``CLAUDE_CODE_USE_VERTEX`` backend toggles but not the AWS / Vertex
+        credentials those modes require to actually authenticate. Surface the
+        backend-specific auth env vars here too — without them a hosted run can
+        flip the toggle and still fail to authenticate against Bedrock or
+        Vertex. The hosted executor only resolves names whose backing values
+        exist, so the union is safe regardless of which backend is active.
         """
         return (
             "ANTHROPIC_API_KEY",
@@ -45,6 +53,25 @@ class ClaudeCodeAdapter(AgentAdapter):
             "CLAUDE_CODE_OAUTH_TOKEN",
             "CLAUDE_CODE_USE_BEDROCK",
             "CLAUDE_CODE_USE_VERTEX",
+            # Amazon Bedrock backend auth (used when CLAUDE_CODE_USE_BEDROCK=1).
+            # The AWS SDK credential chain resolves region via AWS_REGION then
+            # AWS_DEFAULT_REGION then the active profile; AWS_PROFILE selects a
+            # shared-credentials profile. AWS_BEARER_TOKEN_BEDROCK is the
+            # Bedrock API-key auth path that needs no IAM credentials.
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            # Google Vertex AI / Agent Platform backend auth (used when
+            # CLAUDE_CODE_USE_VERTEX=1). ANTHROPIC_VERTEX_PROJECT_ID selects the
+            # GCP project and CLOUD_ML_REGION selects the endpoint region;
+            # GOOGLE_APPLICATION_CREDENTIALS supplies ADC for the GCP SDK chain.
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "CLOUD_ML_REGION",
+            "GOOGLE_APPLICATION_CREDENTIALS",
         )
 
     def get_provider(self, model: str | None) -> str:

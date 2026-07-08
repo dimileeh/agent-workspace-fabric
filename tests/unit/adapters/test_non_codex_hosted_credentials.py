@@ -42,6 +42,20 @@ _CLAUDE_NAMES = (
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
+    # Bedrock backend auth — AGENT_AUTH_ENV_VARS exposes the toggle but not the
+    # AWS credentials the toggle requires, so the hosted passthrough must surface
+    # them itself or a hosted run can flip the toggle and still fail to auth.
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    # Vertex AI / Agent Platform backend auth — same gap as Bedrock.
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "CLOUD_ML_REGION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
 )
 _CURSOR_NAMES = ("CURSOR_API_KEY",)
 _GEMINI_NAMES = (
