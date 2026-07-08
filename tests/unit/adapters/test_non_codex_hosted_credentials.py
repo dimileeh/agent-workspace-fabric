@@ -71,6 +71,11 @@ _OPENCODE_NAMES = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "XAI_API_KEY",
+    # Non-secret OpenCode shell-tool runtime tuning (bash-tool timeout). The
+    # local Compose path carries this via AGENT_AUTH_ENV_VARS; the hosted path
+    # must surface the same name or the hosted job falls back to OpenCode's own
+    # bash timeout while the same workspace behaves differently under Compose.
+    "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
 )
 
 

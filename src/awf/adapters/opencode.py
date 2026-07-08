@@ -92,6 +92,13 @@ class OpenCodeAdapter(AgentAdapter):
             "OLLAMA_HOST",
             "OLLAMA_API_KEY",
             *OPENCODE_PROVIDER_API_KEY_NAMES,
+            # Non-secret OpenCode shell-tool runtime tuning. The local Compose
+            # path carries this name via ``AGENT_AUTH_ENV_VARS`` so the agent
+            # container receives the bash-tool timeout default; the hosted path
+            # must surface the same name or an injected hosted executor cannot
+            # inject it and OpenCode falls back to its own bash timeout while the
+            # same workspace behaves differently under Compose. Not a secret.
+            "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
         )
 
     def _cli_args(self, *, model: str | None) -> list[str]:
