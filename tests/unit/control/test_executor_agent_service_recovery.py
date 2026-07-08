@@ -695,6 +695,51 @@ async def test_agent_service_down_conformance_timeout_exhausts_to_infra_failure(
 
 
 @pytest.mark.unit
+async def test_hosted_conformance_timeout_stall_skips_compose_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted conformance-stall timeouts must not probe/restart Compose agent service.
+
+    Regression for PRRT_kwDOSJAM6s6POO1n: a hosted conformance timeout can be
+    returned as ``_PlanningRunFailure`` rather than raised as ``AgentRunError``,
+    so ``_restart_after_conformance_timeout_failure`` runs before the
+    ``except AgentRunError`` hosted guard. In hosted mode there is no Compose
+    agent service, so probing/restarting would misclassify the hosted timeout as
+    ``AGENT_SERVICE_UNHEALTHY``. The stall result must be preserved unchanged.
+    """
+    failure = _conformance_timeout_failure("AGENT_IDLE_TIMEOUT")
+    executor = _executor(side_effect=[failure])
+
+    probe = AsyncMock(return_value=False)
+    monkeypatch.setattr(agent_service_recovery, "probe_agent_service_health", probe)
+
+    hosted_adapter = SimpleNamespace(is_hosted=True)
+
+    (
+        recovered,
+        planning_failure,
+    ) = await agent_service_recovery._run_agent_task_with_service_recovery(
+        executor,
+        adapter=hosted_adapter,
+        workspace=SimpleNamespace(id="ws_agent_service", task_prompt="do it", task_tag=None),
+        profile=WorkspaceProfile(name="test"),
+        compose_project="awf_ws_agent_service",
+        compose_file=_compose_file(tmp_path),
+        worktree_path=tmp_path,
+        model="gpt-5.3-codex",
+        command_evidence=[],
+        workspace_id="ws_agent_service",
+    )
+
+    assert recovered is True
+    assert planning_failure is failure
+    probe.assert_not_awaited()
+    executor._compose.ensure_project_up.assert_not_awaited()
+    executor._mark_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
 async def test_agent_service_down_timeout_cleanup_failure_restarts_and_retries(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

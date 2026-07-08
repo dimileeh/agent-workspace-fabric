@@ -246,6 +246,7 @@ async def _run_agent_callable_with_service_recovery(
             planning_result = await run_agent(restart_attempts > 0)
             restart_result = await _restart_after_conformance_timeout_failure(
                 self,
+                adapter=adapter,
                 planning_result=planning_result,
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -437,6 +438,7 @@ def _agent_service_restart_timeout_seconds(
 async def _restart_after_conformance_timeout_failure(
     self: Any,
     *,
+    adapter: AgentAdapter | None,
     planning_result: Any,
     workspace_id: str,
     compose_project: str,
@@ -452,6 +454,15 @@ async def _restart_after_conformance_timeout_failure(
 ) -> tuple[int, bool] | None:
     source_reason_code = _conformance_stall_timeout_source_reason_code(planning_result)
     if source_reason_code is None:
+        return None
+    # In hosted mode (an agent runtime executor is injected) there is no
+    # Compose agent service to probe or restart — the hosted runtime owns
+    # process lifecycle. Returning None preserves the original conformance
+    # stall result; probing/restarting Compose would misclassify a hosted
+    # conformance timeout as AGENT_SERVICE_UNHEALTHY even though no Compose
+    # service ran the CLI. Mirrors the timeout-branch guard in
+    # ``_run_agent_callable_with_service_recovery`` (PRRT_kwDOSJAM6s6PNKHp).
+    if _should_skip_compose_recovery(adapter):
         return None
     if not compose_file.is_file():
         return None
