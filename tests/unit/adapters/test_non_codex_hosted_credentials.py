@@ -28,23 +28,34 @@ from awf.adapters.runtime_executor import (
 )
 from awf.common.commands import FakeCommandRunner
 from awf.db.enums import AgentRuntime
+from awf.profiles.compose import AGENT_AUTH_ENV_VARS
 
 _PROMPT = "Fix the typo in README."
 _COMPOSE_PROJECT = "awf_ws_xyz"
 _COMPOSE_FILE = Path("/fake/path/compose.yml")
 _SECRET_VALUE = "sk-non-codex-secret-do-not-leak"
 
-_CLAUDE_NAMES = (
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_SMALL_FAST_MODEL",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    # Bedrock backend auth — AGENT_AUTH_ENV_VARS exposes the toggle but not the
-    # AWS credentials the toggle requires, so the hosted passthrough must surface
-    # them itself or a hosted run can flip the toggle and still fail to auth.
+# Claude Code auth / backend-toggle names are derived from AGENT_AUTH_ENV_VARS so
+# the hosted contract cannot drift from the shared source of truth. The Bedrock /
+# Vertex *backend* credentials (AWS_*, ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION,
+# GOOGLE_APPLICATION_CREDENTIALS) are NOT in AGENT_AUTH_ENV_VARS — the toggle is,
+# the credentials it requires are not — so they stay a static supplement asserted
+# alongside the derived set.
+_CLAUDE_CODE_DERIVED_AUTH_NAMES = frozenset(
+    name
+    for name in AGENT_AUTH_ENV_VARS
+    if name
+    in {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+    }
+)
+_CLAUDE_CODE_BACKEND_AUTH_NAMES = (
     "AWS_REGION",
     "AWS_DEFAULT_REGION",
     "AWS_ACCESS_KEY_ID",
@@ -52,11 +63,11 @@ _CLAUDE_NAMES = (
     "AWS_SESSION_TOKEN",
     "AWS_PROFILE",
     "AWS_BEARER_TOKEN_BEDROCK",
-    # Vertex AI / Agent Platform backend auth — same gap as Bedrock.
     "ANTHROPIC_VERTEX_PROJECT_ID",
     "CLOUD_ML_REGION",
     "GOOGLE_APPLICATION_CREDENTIALS",
 )
+_CLAUDE_NAMES = _CLAUDE_CODE_DERIVED_AUTH_NAMES | frozenset(_CLAUDE_CODE_BACKEND_AUTH_NAMES)
 _CURSOR_NAMES = ("CURSOR_API_KEY",)
 _GEMINI_NAMES = (
     "GEMINI_API_KEY",
