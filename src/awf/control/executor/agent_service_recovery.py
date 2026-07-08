@@ -173,6 +173,7 @@ async def _run_agent_task_with_service_recovery(
     return await _run_agent_callable_with_service_recovery(
         self,
         run_agent=_run_initial_agent,
+        adapter=adapter,
         workspace=workspace,
         profile=profile,
         compose_project=compose_project,
@@ -191,6 +192,7 @@ async def _run_agent_callable_with_service_recovery(
     self: Any,
     *,
     run_agent: Callable[[bool], Awaitable[Any]],
+    adapter: AgentAdapter | None = None,
     workspace: Any,
     profile: WorkspaceProfile,
     compose_project: str,
@@ -254,6 +256,14 @@ async def _run_agent_callable_with_service_recovery(
         except AgentRunError as exc:
             if exc.reason_code not in _AGENT_SERVICE_TIMEOUT_REASON_CODES:
                 raise
+            # In hosted mode (an agent runtime executor is injected) there is no
+            # Compose agent service to probe or restart — the hosted runtime owns
+            # process lifecycle. Re-raising preserves the original timeout reason;
+            # probing/restarting Compose would misclassify the timeout as
+            # AGENT_SERVICE_UNHEALTHY and can fail recovery when no Compose agent
+            # ran the CLI. Mirrors the monitor fix in PRRT_kwDOSJAM6s6PNKHp.
+            if adapter is not None and adapter.is_hosted:
+                raise
             if not compose_file.is_file():
                 raise
             service_healthy = await probe_agent_service_health(
@@ -291,6 +301,12 @@ async def _run_agent_callable_with_service_recovery(
                 return False, None
             run_before_retry = True
         except ComposeExecCleanupError as exc:
+            # Hosted mode has no Compose agent service to probe or restart; a
+            # cleanup failure here means the hosted runtime leaked a Compose
+            # exec, so re-raise unchanged rather than misclassify as
+            # AGENT_SERVICE_UNHEALTHY. Mirrors the timeout-branch guard above.
+            if adapter is not None and adapter.is_hosted:
+                raise
             service_healthy = await probe_agent_service_health(
                 RuntimeInspector(),
                 compose_project,
