@@ -12,6 +12,7 @@ values are never transported.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -308,3 +309,53 @@ class TestNonCodexHostedCredentials:
         assert "AWS_REGION" not in dict(request.profile_env)
         # No ${...} placeholder leaks into profile_env.
         assert not any("${" in value for _key, value in request.profile_env)
+
+    @pytest.mark.unit
+    async def test_hosted_offloads_blocking_compose_parse_to_worker_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The hosted path must not block the event loop on compose-file I/O.
+
+        Regression for PR #751 thread PRRT_kwDOSJAM6s6PWZD1: the Compose path
+        wraps ``agent_exec_env_passthrough`` (synchronous compose read/parse)
+        in ``asyncio.to_thread`` so concurrent agent runs do not stall the event
+        loop. The hosted path's ``filter_hosted_env_passthrough_names`` and
+        ``literal_profile_env_from_compose`` perform the same synchronous
+        read/YAML-parse and must be offloaded the same way, or concurrent
+        hosted runs serialize on blocking I/O. This test asserts both calls run
+        off the event loop thread.
+        """
+        import awf.adapters.base as base_module
+
+        loop_thread_id = threading.get_ident()
+
+        seen_thread_ids: dict[str, int] = {}
+
+        real_filter = base_module.filter_hosted_env_passthrough_names
+        real_literal = base_module.literal_profile_env_from_compose
+
+        def _tracked_filter(names, *, compose_file):
+            seen_thread_ids["filter"] = threading.get_ident()
+            return real_filter(names, compose_file=compose_file)
+
+        def _tracked_literal(compose_file):
+            seen_thread_ids["literal"] = threading.get_ident()
+            return real_literal(compose_file)
+
+        monkeypatch.setattr(base_module, "filter_hosted_env_passthrough_names", _tracked_filter)
+        monkeypatch.setattr(base_module, "literal_profile_env_from_compose", _tracked_literal)
+
+        compose_file = _write_compose(
+            tmp_path, environment={"OLLAMA_HOST": "http://ollama.profile:11434"}
+        )
+        adapter = _build(ClaudeCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        # Both blocking compose-file parses ran, and neither ran on the event
+        # loop's thread (asyncio.to_thread dispatches to a worker thread).
+        assert "filter" in seen_thread_ids, "hosted filter parse was not dispatched off-loop"
+        assert "literal" in seen_thread_ids, "hosted literal parse was not dispatched off-loop"
+        assert seen_thread_ids["filter"] != loop_thread_id
+        assert seen_thread_ids["literal"] != loop_thread_id
+        # The offloaded parse result still flows through to the hosted request.
+        assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env

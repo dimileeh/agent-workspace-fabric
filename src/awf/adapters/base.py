@@ -446,8 +446,16 @@ class AgentAdapter(ABC):
         del compose_project  # logging/audit only on hosted path
         runtime_executor = self._runtime_executor
         assert runtime_executor is not None  # guarded by run() dispatch
-        env_passthrough_names = filter_hosted_env_passthrough_names(
-            self.hosted_env_passthrough_names, compose_file=compose_file
+        # ``filter_hosted_env_passthrough_names`` and
+        # ``literal_profile_env_from_compose`` both read + YAML-parse the compose
+        # file synchronously; run them in worker threads so the blocking I/O
+        # never stalls the event loop when concurrent agent runs overlap,
+        # mirroring the ``agent_exec_env_passthrough`` offload on the Compose
+        # path above.
+        env_passthrough_names = await asyncio.to_thread(
+            filter_hosted_env_passthrough_names,
+            self.hosted_env_passthrough_names,
+            compose_file=compose_file,
         )
         # Carry profile-owned env values to the hosted executor. The local
         # ``docker compose exec`` path does not forward profile-owned env
@@ -463,7 +471,7 @@ class AgentAdapter(ABC):
         # carried verbatim. Bare ``${NAME}`` / ``$NAME`` worker-resolved slots are
         # skipped (the profile owns them locally; the hosted path resolves
         # credentials via its own adapter contract, not from the worker).
-        profile_env = literal_profile_env_from_compose(compose_file)
+        profile_env = await asyncio.to_thread(literal_profile_env_from_compose, compose_file)
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
