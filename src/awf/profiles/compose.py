@@ -468,6 +468,15 @@ def hosted_github_token_passthrough_names(
     file is unreadable (fail-closed: assume the profile owns a distinct
     GitHub token rather than surface a worker alias that could shadow a
     profile-owned token the unreadable parse could not see).
+
+    A compose *pass-through* slot (``environment: [GH_TOKEN]`` with no ``=``,
+    ``GH_TOKEN:`` / ``GH_TOKEN: null``) declares no value — Docker Compose
+    takes it from the worker shell at stack launch — so it is worker-resolved
+    and is treated as matching the corresponding worker source (the local
+    Compose agent received the worker value for that name), NOT as a distinct
+    profile-owned token. The pass-through alias name is surfaced so the hosted
+    executor resolves it out-of-band, mirroring the local container (PR #751
+    thread PRRT_kwDOSJAM6s6PZkRH).
     """
     source_env = os.environ if worker_env is None else worker_env
     worker_placeholder = _github_token_placeholder(source_env)
@@ -480,19 +489,28 @@ def hosted_github_token_passthrough_names(
     # than the worker source, the profile owns a distinct GitHub credential.
     # Surface nothing so a worker alias cannot shadow it on the hosted path
     # (the profile-owned alias itself is a worker-resolved secret slot the
-    # hosted path does not re-resolve from the worker env).
+    # hosted path does not re-resolve from the worker env). A pass-through slot
+    # (raw value == :data:`_COMPOSE_PASSTHROUGH`) is worker-resolved, not
+    # profile-owned — the local Compose container received the worker shell
+    # value for that name — so it is NOT a distinct profile-owned token and
+    # does not trigger the group-suppression branch (PR #751 thread
+    # PRRT_kwDOSJAM6s6PZkRH).
     for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE:
-        if alias in compose_env and compose_env[alias] != worker_placeholder:
+        raw = compose_env.get(alias)
+        if alias in compose_env and raw != worker_placeholder and raw != _COMPOSE_PASSTHROUGH:
             return ()
     # Surface every alias whose value matches the worker token placeholder
-    # (AWF-injected, or a GitHub lease rendering to the same source). These
-    # are exactly the aliases the local Compose container receives the worker
-    # token in, so the hosted executor resolving them out-of-band reproduces
-    # the same credential.
+    # (AWF-injected, or a GitHub lease rendering to the same source), plus
+    # pass-through slots (worker-resolved — the local Compose container received
+    # the worker shell value for that name, so the hosted executor resolves the
+    # same worker value out-of-band). These are exactly the aliases the local
+    # Compose container receives the worker token in, so the hosted executor
+    # resolving them out-of-band reproduces the same credential.
     aliases = tuple(
         alias
         for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE
         if compose_env.get(alias) == worker_placeholder
+        or compose_env.get(alias) == _COMPOSE_PASSTHROUGH
     )
     # Surface the chosen source name first so a hosted executor can resolve the
     # credential from the source name when the worker only carries the AWF

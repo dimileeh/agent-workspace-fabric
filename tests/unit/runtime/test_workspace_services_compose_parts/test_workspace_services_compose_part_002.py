@@ -363,6 +363,69 @@ def test_hosted_github_token_passthrough_names_unreadable_compose_is_empty(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "compose_alias_value",
+    [
+        None,  # ``GH_TOKEN:`` / ``GH_TOKEN: null`` — pass-through slot
+        "list",  # ``environment: [GH_TOKEN]`` — bare-name pass-through slot
+    ],
+)
+def test_hosted_github_token_passthrough_names_pass_through_alias_matches_worker_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    compose_alias_value: object,
+) -> None:
+    """A pass-through GitHub alias is treated as the worker source, not suppressed.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PZkRH: when a compose-declared
+    GitHub alias is a true pass-through slot (``environment: [GH_TOKEN]`` with
+    no ``=``, ``GH_TOKEN:`` / ``GH_TOKEN: null``), ``_compose_environment_mapping``
+    normalizes it to the :data:`_COMPOSE_PASSTHROUGH` sentinel. The local Compose
+    agent still receives the worker token at stack launch (Docker Compose takes
+    the pass-through slot's value from the worker shell), so the hosted path must
+    treat the pass-through alias as matching the corresponding worker source
+    rather than suppressing the whole group. Without this, hosted monitor-repair
+    loses ``gh`` auth in that pass-through configuration.
+
+    The pass-through alias itself is a worker-resolved slot the hosted executor
+    resolves out-of-band (its name is surfaced so the hosted executor mirrors
+    the worker shell value, the same way local Compose took it from the worker
+    shell); it is NOT a profile-owned distinct token, so it does not trigger the
+    group-suppression branch.
+    """
+    from awf.profiles.compose import _COMPOSE_PASSTHROUGH, hosted_github_token_passthrough_names
+
+    if compose_alias_value == "list":
+        compose_env_block: object = ["GH_TOKEN", "GITHUB_TOKEN=${AWF_GITHUB_TOKEN}"]
+    else:
+        compose_env_block = {"GH_TOKEN": compose_alias_value, "GITHUB_TOKEN": "${AWF_GITHUB_TOKEN}"}
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {"services": {"agent": {"image": "agent:latest", "environment": compose_env_block}}}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_worker_secret")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    names = hosted_github_token_passthrough_names(compose_file)
+
+    # The pass-through GH_TOKEN is worker-resolved (the local container received
+    # the worker shell value), so it does NOT suppress the group. The matching
+    # GITHUB_TOKEN alias and the AWF source name are surfaced so the hosted
+    # executor can resolve the credential out-of-band. The pass-through sentinel
+    # value itself is never returned (names only).
+    assert "AWF_GITHUB_TOKEN" in names
+    assert "GITHUB_TOKEN" in names
+    assert "GH_TOKEN" in names
+    assert _COMPOSE_PASSTHROUGH not in names
+    assert "ghp_worker_secret" not in names
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_unreadable_is_empty(
     tmp_path: Path,
 ) -> None:
