@@ -603,9 +603,11 @@ def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
 # Compose braced-expression operators that supply a concrete default when the
 # referenced variable is unset (``:-`` tests non-empty, ``-`` tests set-ness).
 # Only these forms can carry a profile-owned concrete value to the hosted job
-# when the variable is absent from the worker env; every other operator
-# (``:?`` / ``?`` / ``:+`` / ``+``) and a bare ``${NAME}`` / ``$NAME`` resolves
-# the slot from the worker and is treated as worker-resolved (skipped).
+# when the variable is absent (or empty, for ``:-``) from the worker env; every
+# other operator (``:?`` / ``?`` / ``:+`` / ``+``) and a bare ``${NAME}`` /
+# ``$NAME`` resolves the slot from the worker and is treated as worker-resolved
+# (skipped). The non-empty vs set-ness distinction is handled in
+# ``_compose_resolve_braced`` to mirror ``awf.service.environment``'s expander.
 _COMPOSE_DEFAULT_OPERATORS = (":-", "-")
 
 # Sentinel used to mask ``$$`` escapes before interpolation scanning so an
@@ -653,9 +655,14 @@ def _compose_resolve_value(
       worker env resolves to the concrete ``default`` and is carried — the
       local container receives that default, so the hosted job must too
       (dropping it leaves the hosted job missing the profile-owned value).
-    - ``${NAME:-default}`` / ``${NAME-default}`` with ``NAME`` set in the
-      worker env resolves to the worker value and is skipped (carrying it
-      would embed a worker secret in ``profile_env``).
+    - ``${NAME:-default}`` with ``NAME`` present-but-empty in the worker env
+      resolves to the concrete ``default`` and is carried — ``:-`` tests
+      non-empty, so Compose injects the default into the local container and
+      the hosted job must receive it too.
+    - ``${NAME:-default}`` with ``NAME`` set to a non-empty worker value is
+      skipped (worker-resolved; carrying it would embed a worker secret).
+    - ``${NAME-default}`` with ``NAME`` set in the worker env (even empty) is
+      skipped — ``-`` tests set-ness, so a present value is worker-resolved.
     - A bare ``${NAME}`` / ``$NAME`` (no default operator), and
       ``${NAME:?...}`` / ``${NAME:+...}`` / ``${NAME+...}`` forms, are always
       skipped: they are worker-resolved slots the profile owns locally; the
@@ -720,10 +727,17 @@ def _compose_resolve_braced(
     for candidate in _COMPOSE_DEFAULT_OPERATORS:
         if remainder.startswith(candidate):
             default_word = remainder[len(candidate) :]
-            if name in worker_env:
-                # Variable set -> worker-resolved value, skip.
+            worker_value = worker_env.get(name)
+            if candidate == ":-":
+                # :- tests non-empty: a present-but-empty value still injects the
+                # default, mirroring ``awf.service.environment``'s expander so the
+                # hosted job receives the same value the local container gets.
+                if worker_value:
+                    return "", True
+            elif name in worker_env:
+                # - tests set-ness: a present value (even empty) is worker-resolved.
                 return "", True
-            # Variable unset -> expand the default word recursively and carry.
+            # Variable unset (or empty for :-) -> expand the default word and carry.
             default, default_resolved = _compose_resolve_value(default_word, worker_env=worker_env)
             if default_resolved:
                 return "", True
@@ -760,9 +774,15 @@ def literal_profile_env_from_compose(
       (Compose models ``$$`` as a literal dollar, not a reference).
     - ``${NAME:-default}`` / ``${NAME-default}`` with ``NAME`` unset in the
       worker env resolves to the concrete ``default`` and is carried.
-    - ``${NAME:-default}`` / ``${NAME-default}`` with ``NAME`` set in the worker
-      env is skipped (worker-resolved; carrying the worker value would embed a
+    - ``${NAME:-default}`` with ``NAME`` present-but-empty in the worker env
+      resolves to the concrete ``default`` and is carried (``:-`` tests
+      non-empty, matching ``awf.service.environment``'s expander so the hosted
+      job receives the default the local container gets).
+    - ``${NAME:-default}`` with ``NAME`` set to a non-empty worker value is
+      skipped (worker-resolved; carrying the worker value would embed a
       secret in ``profile_env``).
+    - ``${NAME-default}`` with ``NAME`` set in the worker env (even empty) is
+      skipped (``-`` tests set-ness; a present value is worker-resolved).
     - Bare ``${NAME}`` / ``$NAME`` and ``${NAME:?...}`` / ``${NAME:+...}`` /
       ``${NAME+...}`` forms are skipped (worker-resolved slots the profile owns
       locally; the hosted path resolves credentials via its own adapter

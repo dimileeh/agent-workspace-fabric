@@ -932,6 +932,62 @@ def test_literal_profile_env_from_compose_resolves_defaults_and_escapes(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_dash_dash_tests_non_empty(
+    tmp_path: Path,
+) -> None:
+    """``:-`` tests non-empty, ``-`` tests set-ness, matching Compose.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PUZLe: when the worker env
+    contains an empty string (``AWS_REGION=""``), ``${AWS_REGION:-us-west-2}``
+    injects the default because ``:-`` tests non-empty (mirroring
+    ``awf.service.environment._compose_expand_braced_expression``). The local
+    Compose container receives ``us-west-2``, so the hosted job must too. The
+    previous code used a presence check for both ``:-`` and ``-``, so an empty
+    worker value was treated as worker-resolved and the default was dropped,
+    leaving hosted runs without ``AWS_REGION``. ``-`` tests set-ness, so an
+    empty-but-present value resolves to the empty value (worker-resolved, skip).
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # :- with empty worker value -> default carried.
+                            "AWS_REGION": "${AWS_REGION:-us-west-2}",
+                            # - with empty worker value -> worker-resolved, skip.
+                            "AWS_REGION_DASH": "${AWS_REGION-us-west-2}",
+                            # :- with non-empty worker value -> worker-resolved, skip.
+                            "AWS_REGION_SET": "${AWS_REGION_SET:-us-west-2}",
+                            # - with non-empty worker value -> worker-resolved, skip.
+                            "AWS_REGION_SET_DASH": "${AWS_REGION_SET-us-west-2}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    worker_env = {"AWS_REGION": "", "AWS_REGION_DASH": "", "AWS_REGION_SET": "eu-central-1"}
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env=worker_env)
+    carried = dict(profile_env)
+
+    # :-) empty worker value -> default carried (local container gets us-west-2).
+    assert carried.get("AWS_REGION") == "us-west-2"
+    # - : empty-but-present -> worker-resolved empty value, skip (no carry).
+    assert "AWS_REGION_DASH" not in carried
+    # :-) non-empty worker value -> worker-resolved, skip.
+    assert "AWS_REGION_SET" not in carried
+    # - : non-empty worker value -> worker-resolved, skip.
+    assert "AWS_REGION_SET_DASH" not in carried
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_unreadable_is_empty(
     tmp_path: Path,
 ) -> None:
