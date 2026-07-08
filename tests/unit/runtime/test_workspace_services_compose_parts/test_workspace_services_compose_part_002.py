@@ -749,6 +749,77 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_interpolatio
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_postgres_password_from_service_env_file(
+    tmp_path: Path,
+) -> None:
+    """A profile may keep its DB service's ``POSTGRES_PASSWORD`` in an ``env_file``
+    referenced by the compose service instead of the inline ``environment`` map.
+    ComposeManager renders the profile's ``env_file`` declaration verbatim into
+    the rendered compose file, and Docker Compose loads that file to populate the
+    service's environment at stack launch — including ``POSTGRES_PASSWORD``.
+
+    ``_try_compose_agent_env_and_postgres_passwords`` previously inspected only
+    the inline ``environment`` map, so a DB service that keeps its password in an
+    ``env_file`` left ``postgres_passwords`` empty. ``literal_profile_env_from_compose``
+    then carried the rendered agent env ``DATABASE_URL`` / ``AWF_DATABASE_URL``
+    (which embed the same password) in ``AgentRuntimeExecRequest.profile_env``,
+    leaking the workspace credential to a hosted executor despite the secret-free
+    contract. The redaction source must also read each service's ``env_file`` and
+    collect any ``POSTGRES_PASSWORD`` declared there.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PZuE2.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text("POSTGRES_PASSWORD=env-file-secret\n", encoding="utf-8")
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "postgres": {
+                        "image": "postgres:16-alpine",
+                        # The password lives in the env_file, NOT the inline env.
+                        "env_file": [str(env_file)],
+                        "environment": {
+                            "POSTGRES_USER": "awf",
+                            "POSTGRES_DB": "awf",
+                        },
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Non-secret profile literal -> carried (must survive).
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            # AWF-expanded DB URLs embed the env-file password
+                            # -> must be skipped (secret-bearing).
+                            "DATABASE_URL": "postgresql://awf:env-file-secret@postgres:5432/awf",
+                            "AWF_DATABASE_URL": (
+                                "postgresql+asyncpg://awf:env-file-secret@postgres:5432/awf"
+                            ),
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    # Non-secret profile literal is still carried to the hosted executor.
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    # Secret-bearing expanded values are NOT carried to the hosted executor.
+    carried = dict(profile_env)
+    assert "DATABASE_URL" not in carried
+    assert "AWF_DATABASE_URL" not in carried
+    # The env-file DB password never reaches the hosted request object.
+    assert "env-file-secret" not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_agent_exec_env_passthrough_parses_compose_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
