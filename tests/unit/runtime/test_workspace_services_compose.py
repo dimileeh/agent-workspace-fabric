@@ -19,6 +19,7 @@ from awf.profiles.compose import (
     agent_environment_with_github_token,
     agent_environment_with_legacy_host_auth,
     agent_exec_env_passthrough,
+    filter_hosted_env_passthrough_names,
     profile_agent_environment,
     profile_app_endpoint_environment,
     profile_services,
@@ -596,6 +597,94 @@ def test_profile_base_url_still_allows_worker_ollama_host_exec_passthrough(
 
     assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in passthrough
     assert "OLLAMA_HOST" in passthrough
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_auth_keys(
+    tmp_path: Path,
+) -> None:
+    """Hosted passthrough names are filtered by the same profile-owned exclusions."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                            "CODEX_API_KEY": "sk-profile",
+                            "ANTHROPIC_BASE_URL": "https://anthropic.profile/v1",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = (
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        # A backend-credential supplement (not in AGENT_AUTH_ENV_VARS) always
+        # passes through — it is not a profile-owned slot.
+        "AWS_REGION",
+    )
+    filtered = filter_hosted_env_passthrough_names(names, compose_file=compose_file)
+
+    assert "OPENAI_API_KEY" not in filtered
+    assert "CODEX_API_KEY" not in filtered
+    assert "ANTHROPIC_BASE_URL" not in filtered
+    assert "ANTHROPIC_API_KEY" in filtered
+    assert "AWS_REGION" in filtered
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_suppresses_shadowing_worker_ollama_key(
+    tmp_path: Path,
+) -> None:
+    """Higher-precedence worker Ollama base URL key is suppressed when profile owns the lower one."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST", "OLLAMA_API_KEY")
+    filtered = filter_hosted_env_passthrough_names(names, compose_file=compose_file)
+
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in filtered
+    assert "OLLAMA_HOST" not in filtered
+    assert "OLLAMA_API_KEY" in filtered
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_fails_closed_on_unreadable_compose(
+    tmp_path: Path,
+) -> None:
+    """Unreadable compose fails closed: suppress the higher-precedence Ollama base URL key."""
+    missing = tmp_path / "missing.yml"
+    assert not missing.exists()
+
+    names = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST", "OPENAI_API_KEY")
+    filtered = filter_hosted_env_passthrough_names(names, compose_file=missing)
+
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in filtered
+    assert "OLLAMA_HOST" in filtered
+    assert "OPENAI_API_KEY" in filtered
 
 
 @pytest.mark.unit

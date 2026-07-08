@@ -37,7 +37,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
-from awf.profiles.compose import agent_exec_env_passthrough
+from awf.profiles.compose import agent_exec_env_passthrough, filter_hosted_env_passthrough_names
 from awf.runtime.logs import CommandLogSinks, LogStore
 
 _log = get_logger(__name__)
@@ -210,7 +210,11 @@ class AgentAdapter(ABC):
         ``CODEX_API_KEY``) override this so a hosted runtime can resolve and
         inject the credential out-of-band. The compose-derived passthrough
         still applies on the local Compose path; this hook is only consulted
-        on the hosted (non-compose) execution path.
+        on the hosted (non-compose) execution path, where
+        ``filter_hosted_env_passthrough_names`` applies the same
+        compose/profile-owned exclusions as the local ``docker compose exec``
+        path before the request is built, so a profile-owned auth/env slot is
+        not reintroduced by the hosted executor.
         """
         return ()
 
@@ -424,10 +428,12 @@ class AgentAdapter(ABC):
         hosted executor owns its own process cleanup; this path does NOT run
         the compose cleanup helpers.
         """
-        del compose_project, compose_file  # logging/audit only on hosted path
+        del compose_project  # logging/audit only on hosted path
         runtime_executor = self._runtime_executor
         assert runtime_executor is not None  # guarded by run() dispatch
-        env_passthrough_names = self.hosted_env_passthrough_names
+        env_passthrough_names = filter_hosted_env_passthrough_names(
+            self.hosted_env_passthrough_names, compose_file=compose_file
+        )
         request = AgentRuntimeExecRequest(
             workspace_id=workspace_id,
             agent_runtime=self.name,

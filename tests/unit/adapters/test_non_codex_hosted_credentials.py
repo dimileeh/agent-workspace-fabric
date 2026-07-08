@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 import awf.adapters.registry  # noqa: F401 — populate registry
 from awf.adapters.claude_code import ClaudeCodeAdapter
@@ -117,10 +118,14 @@ def _build(adapter_cls: type) -> object:
     return adapter_cls(runner=FakeCommandRunner(), runtime_executor=_RecordingExecutor())
 
 
-async def _run(adapter: object) -> AgentRuntimeExecRequest:
+async def _run(
+    adapter: object,
+    *,
+    compose_file: Path = _COMPOSE_FILE,
+) -> AgentRuntimeExecRequest:
     await adapter.run(
         compose_project=_COMPOSE_PROJECT,
-        compose_file=_COMPOSE_FILE,
+        compose_file=compose_file,
         prompt=_PROMPT,
         workspace_id="ws_non_codex",
     )
@@ -160,9 +165,20 @@ class TestNonCodexHostedCredentials:
         assert "XAI_API_KEY" in request.env_passthrough_names
 
     @pytest.mark.unit
-    async def test_opencode_surfaces_ollama_env_names(self) -> None:
+    async def test_opencode_surfaces_ollama_env_names(self, tmp_path: Path) -> None:
+        # Use a readable compose whose agent service declares no env keys so the
+        # compose/profile-owned exclusions (which the hosted path now applies
+        # via ``filter_hosted_env_passthrough_names``) do not suppress any
+        # names. An unreadable compose fails closed and would drop
+        # ``AWF_OPENCODE_OLLAMA_BASE_URL`` — the same conservatism the local
+        # ``agent_exec_env_passthrough`` applies.
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump({"services": {"agent": {"image": "agent:latest"}}}),
+            encoding="utf-8",
+        )
         adapter = _build(OpenCodeAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert request.agent_runtime is AgentRuntime.opencode
         for name in _OPENCODE_NAMES:
             assert name in request.env_passthrough_names, name
@@ -180,3 +196,72 @@ class TestNonCodexHostedCredentials:
         assert "sk-" not in blob
         # Only the *names* are present, never an assigned value.
         assert not any("=" in name for name in request.env_passthrough_names)
+
+    @pytest.mark.unit
+    async def test_hosted_passthrough_suppresses_profile_owned_auth_slot(
+        self, tmp_path: Path
+    ) -> None:
+        """A profile-owned auth/env slot must not be reintroduced by the hosted path.
+
+        When the compose agent service already declares ``OPENAI_API_KEY`` (a
+        placeholder, a lease-rendered value, or a profile literal), the local
+        ``docker compose exec`` path suppresses it from exec-time ``-e``
+        passthrough. The hosted path must apply the same exclusion or the hosted
+        executor resolves an inherited worker credential the local path and
+        readiness overlay deliberately keep out of the agent environment.
+        """
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump(
+                {
+                    "services": {
+                        "agent": {
+                            "image": "agent:latest",
+                            "environment": {
+                                "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+        assert "OPENAI_API_KEY" not in request.env_passthrough_names
+        # Non-profile-owned provider key names still pass through.
+        assert "ANTHROPIC_API_KEY" in request.env_passthrough_names
+
+    @pytest.mark.unit
+    async def test_hosted_passthrough_suppresses_shadowing_worker_ollama_base_url(
+        self, tmp_path: Path
+    ) -> None:
+        """A higher-precedence worker Ollama base URL key is suppressed when the profile owns the lower one.
+
+        When the profile declares ``OLLAMA_HOST`` and the worker also carries
+        ``AWF_OPENCODE_OLLAMA_BASE_URL`` (higher precedence), the local path
+        suppresses the higher-precedence key so the profile-owned daemon wins.
+        The hosted path must apply the same shadowing exclusion.
+        """
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump(
+                {
+                    "services": {
+                        "agent": {
+                            "image": "agent:latest",
+                            "environment": {
+                                "OLLAMA_HOST": "http://ollama.profile:11434",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+        assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in request.env_passthrough_names
+        # The profile-owned lower-precedence key is itself profile-owned, so it
+        # is excluded too — the hosted executor does not re-resolve it either.
+        assert "OLLAMA_HOST" not in request.env_passthrough_names

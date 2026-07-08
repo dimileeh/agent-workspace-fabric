@@ -476,6 +476,26 @@ def agent_environment_keys_from_compose_file(compose_file: Path) -> frozenset[st
     return _try_agent_environment_keys_from_compose_file(compose_file) or frozenset()
 
 
+def _compose_env_passthrough_exclusions(compose_file: Path) -> frozenset[str]:
+    """Return auth env var names a compose exec/passthrough must not re-inject.
+
+    Shared by the local ``docker compose exec -e`` path and the hosted (non-
+    compose) execution path so both suppress the same profile-owned auth/env
+    slots and the same shadowing worker Ollama base-URL keys. An unreadable
+    compose fails closed the same way ``agent_exec_env_passthrough`` does:
+    assume a profile-owned ``OLLAMA_HOST`` would shadow the worker base URL
+    rather than treat a parse failure as "no profile Ollama keys".
+    """
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        shadowing = _shadowing_worker_ollama_keys({"OLLAMA_HOST"})
+        profile_owned = frozenset[str]()
+    else:
+        shadowing = _shadowing_worker_ollama_keys(set(compose_env))
+        profile_owned = _profile_owned_auth_keys(compose_env)
+    return shadowing | profile_owned
+
+
 def agent_exec_env_passthrough(
     *,
     compose_file: Path,
@@ -497,19 +517,39 @@ def agent_exec_env_passthrough(
     """
 
     source_env = os.environ if host_env is None else host_env
-    compose_env = _try_agent_environment_from_compose_file(compose_file)
-    if compose_env is None:
-        # Unreadable compose: assume profile-owned OLLAMA_HOST would shadow the worker
-        # base URL rather than treat a parse failure as "no profile Ollama keys".
-        shadowing = _shadowing_worker_ollama_keys({"OLLAMA_HOST"})
-        profile_owned = frozenset[str]()
-    else:
-        shadowing = _shadowing_worker_ollama_keys(set(compose_env))
-        profile_owned = _profile_owned_auth_keys(compose_env)
-    excluded = shadowing | profile_owned
+    excluded = _compose_env_passthrough_exclusions(compose_file)
     return tuple(
         name for name in AGENT_AUTH_ENV_VARS if name not in excluded and source_env.get(name)
     )
+
+
+def filter_hosted_env_passthrough_names(
+    names: tuple[str, ...],
+    *,
+    compose_file: Path,
+) -> tuple[str, ...]:
+    """Apply the same compose/profile-owned exclusions to hosted passthrough names.
+
+    The hosted (non-compose) execution path resolves secret values out-of-band
+    from adapter-declared passthrough *names*. Without this filter the hosted
+    request would unconditionally surface every name an adapter declares, even
+    when the workspace's profile already owns that auth/env slot (e.g.
+    ``OPENAI_API_KEY: ""`` placeholder, a required placeholder, or a
+    lease-rendered value) and the local ``docker compose exec`` path deliberately
+    suppresses it. That suppression lives in ``agent_exec_env_passthrough`` /
+    ``_compose_env_passthrough_exclusions``: profile-owned keys already resolved
+    at stack launch, and higher-precedence worker Ollama base-URL keys that would
+    shadow a profile-owned daemon. Reintroducing such a name on the hosted path
+    lets the hosted executor resolve an inherited worker credential/endpoint the
+    local path and readiness overlay keep out of the agent environment.
+
+    Only names in ``AGENT_AUTH_ENV_VARS`` territory can be excluded — adapter
+    backend-credential supplements (e.g. Claude Code ``AWS_*`` / Vertex project /
+    region) are not profile-owned slots, so they always pass through and the
+    hosted executor still resolves only the names whose backing values exist.
+    """
+    excluded = _compose_env_passthrough_exclusions(compose_file)
+    return tuple(name for name in names if name not in excluded)
 
 
 def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
