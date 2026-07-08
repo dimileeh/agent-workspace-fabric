@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlunsplit
+from urllib.parse import quote, urlunsplit
 
 import yaml
 
@@ -1482,7 +1482,13 @@ def literal_profile_env_from_compose(
     so a password expressed via ``${POSTGRES_PASSWORD:-fallback}`` /
     ``${POSTGRES_PASSWORD}`` redacts the same concrete value the local container
     receives at stack launch. Agent env values containing any tracked password
-    are skipped so the credential never reaches the hosted request object. When
+    are skipped so the credential never reaches the hosted request object. A
+    rendered DB URL percent-encodes the userinfo password (per RFC 3986), so a
+    password with URL-reserved characters (e.g. ``p@ss/word``) appears in the
+    URL as its encoded form (``p%40ss%2Fword``); the raw substring test alone
+    would miss it, so each tracked password is also compared against its
+    URL-encoded variant (``quote(..., safe="")``) so an encoded secret-bearing
+    URL is redacted too (PR #751 thread PRRT_kwDOSJAM6s6PZuE5). When
     the compose file is unreadable the result is empty (fail-closed: no values),
     matching ``_compose_env_passthrough_exclusions``.
 
@@ -1542,10 +1548,36 @@ def literal_profile_env_from_compose(
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)
         if resolution is not _ComposeEnvResolution.LITERAL:
             continue
-        if any(password in expanded for password in postgres_passwords if password):
+        if _expanded_value_bears_postgres_password(expanded, postgres_passwords):
             continue
         carried.append((key, expanded))
     return tuple(carried)
+
+
+def _expanded_value_bears_postgres_password(
+    expanded: str,
+    postgres_passwords: frozenset[str],
+) -> bool:
+    """Return whether ``expanded`` embeds any tracked postgres password.
+
+    A rendered agent env DB URL percent-encodes the userinfo password (per
+    RFC 3986), so a password containing URL-reserved characters (e.g.
+    ``p@ss/word``) appears in the URL as its encoded form (``p%40ss%2Fword``).
+    The raw substring test alone misses that form and leaks the
+    secret-bearing URL into ``profile_env``. Each tracked password is also
+    compared against its URL-encoded variant (``quote(..., safe="")``) so an
+    encoded secret-bearing value is redacted too (PR #751 thread
+    PRRT_kwDOSJAM6s6PZuE5).
+    """
+    for password in postgres_passwords:
+        if not password:
+            continue
+        if password in expanded:
+            return True
+        encoded = quote(password, safe="")
+        if encoded != password and encoded in expanded:
+            return True
+    return False
 
 
 def _compose_environment_mapping(environment: object) -> dict[str, str]:

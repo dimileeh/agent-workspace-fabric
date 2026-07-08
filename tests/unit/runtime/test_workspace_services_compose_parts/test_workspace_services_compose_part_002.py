@@ -820,6 +820,79 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_from_service
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_percent_encoded_postgres_password(
+    tmp_path: Path,
+) -> None:
+    """A profile may declare a ``POSTGRES_PASSWORD`` containing URL-reserved
+    characters (e.g. ``p@ss/word``). A valid DB URL must percent-encode the
+    userinfo password (``p%40ss%2Fword``), so the rendered agent env ``DATABASE_URL``
+    carries the *encoded* form, not the raw password. The redaction source
+    previously compared only against the raw password substring, so the
+    encoded URL slipped past redaction and the secret-bearing DB URL leaked
+    into ``AgentRuntimeExecRequest.profile_env`` despite the secret-free
+    contract.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PZuE5: redaction must also
+    compare against the URL-encoded variant of each tracked postgres password
+    (or decode DB URL userinfo) so an encoded secret-bearing URL is redacted.
+    """
+    from urllib.parse import quote
+
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    raw_password = "p@ss/word"
+    encoded_password = quote(raw_password, safe="")
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "postgres": {
+                        "image": "postgres:16-alpine",
+                        "environment": {
+                            "POSTGRES_USER": "awf",
+                            "POSTGRES_PASSWORD": raw_password,
+                            "POSTGRES_DB": "awf",
+                        },
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Non-secret profile literal -> carried (must survive).
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            # A valid DB URL embeds the percent-encoded password
+                            # (the raw ``p@ss/word`` is not a valid URL userinfo
+                            # password without encoding). Must be skipped.
+                            "DATABASE_URL": (
+                                f"postgresql://awf:{encoded_password}@postgres:5432/awf"
+                            ),
+                            "AWF_DATABASE_URL": (
+                                f"postgresql+asyncpg://awf:{encoded_password}@postgres:5432/awf"
+                            ),
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    # Non-secret profile literal is still carried to the hosted executor.
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    # Secret-bearing encoded DB URLs are NOT carried to the hosted executor.
+    carried = dict(profile_env)
+    assert "DATABASE_URL" not in carried
+    assert "AWF_DATABASE_URL" not in carried
+    # Neither the raw nor the encoded form of the password reaches the hosted
+    # request object.
+    assert raw_password not in "".join(v for _k, v in profile_env)
+    assert encoded_password not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_agent_exec_env_passthrough_parses_compose_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
