@@ -19,6 +19,7 @@ from typing import Any
 from awf.adapters.provider_failures import classify_provider_failure
 from awf.adapters.runtime_executor import (
     _HOSTED_TIMEOUT_REASONS,
+    _HOSTED_TIMEOUT_RETURN_CODE,
     AgentRuntimeExecRequest,
     AgentRuntimeExecResult,
     AgentRuntimeExecutor,
@@ -669,7 +670,7 @@ class AgentAdapter(ABC):
         # failure instead of being forced into ``COMMAND_TIMEOUT``.
         timeout_reason = (
             hosted_result.timeout_reason
-            if hosted_result.returncode == 124
+            if hosted_result.returncode == _HOSTED_TIMEOUT_RETURN_CODE
             and hosted_result.timeout_reason in _HOSTED_TIMEOUT_REASONS
             else None
         )
