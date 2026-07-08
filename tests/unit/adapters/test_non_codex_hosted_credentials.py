@@ -280,3 +280,31 @@ class TestNonCodexHostedCredentials:
         # neither Ollama endpoint and OpenCode falls back to the default daemon
         # instead of the profile-owned one.
         assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
+
+    @pytest.mark.unit
+    async def test_hosted_passthrough_keeps_worker_resolved_defaulted_region(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A defaulted region with a worker override stays in hosted passthrough.
+
+        Regression for PR #751 thread PRRT_kwDOSJAM6s6PVH0t: when the profile
+        declares ``AWS_REGION: ${AWS_REGION:-us-west-2}`` and the worker env has
+        ``AWS_REGION`` set, the local Compose container receives the worker
+        value at stack launch. The hosted path resolves ``profile_env`` against
+        the worker env and skips the worker-resolved value (carrying it would
+        embed a secret), so ``AWS_REGION`` must stay in ``env_passthrough_names``
+        for the hosted executor to resolve out-of-band — otherwise the hosted job
+        launches with neither the worker override nor the profile default.
+        """
+        compose_file = _write_compose(
+            tmp_path, environment={"AWS_REGION": "${AWS_REGION:-us-west-2}"}
+        )
+        monkeypatch.setenv("AWS_REGION", "eu-central-1")
+        adapter = _build(ClaudeCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+        # Worker-set defaulted form stays in passthrough for out-of-band resolution.
+        assert "AWS_REGION" in request.env_passthrough_names
+        # The worker value is NOT carried in profile_env (no-secret-values contract).
+        assert "AWS_REGION" not in dict(request.profile_env)
+        # No ${...} placeholder leaks into profile_env.
+        assert not any("${" in value for _key, value in request.profile_env)

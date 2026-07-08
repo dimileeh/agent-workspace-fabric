@@ -799,6 +799,121 @@ def test_filter_hosted_env_passthrough_names_parses_compose_once(
 
 
 @pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_keeps_worker_resolved_defaulted(
+    tmp_path: Path,
+) -> None:
+    """A defaulted form whose variable is worker-set stays in hosted passthrough.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PVH0t: when a profile env value
+    uses a Compose default/override such as ``AWS_REGION: ${AWS_REGION:-us-west-2}``
+    and the worker env has ``AWS_REGION`` set, Docker Compose interpolates the
+    worker value into the local agent container at stack launch. The hosted path
+    must not drop that name entirely: ``literal_profile_env_from_compose`` skips
+    it (worker-resolved; carrying the worker value would embed a secret), so if
+    ``filter_hosted_env_passthrough_names`` also excluded it the hosted job would
+    receive neither the worker override nor the profile default — diverging from
+    the local Compose container. The name must stay in ``env_passthrough_names``
+    so the hosted executor resolves the same worker value out-of-band.
+
+    Pure literals and bare ``${NAME}`` / ``${NAME:?...}`` slots stay excluded
+    (carried via ``profile_env`` or suppressed as profile-owned secret slots).
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # :- with the variable worker-set -> stays in
+                            # passthrough (worker value resolved out-of-band).
+                            "AWS_REGION": "${AWS_REGION:-us-west-2}",
+                            # - with the variable worker-set -> stays in
+                            # passthrough (worker value resolved out-of-band).
+                            "AWS_DEFAULT_REGION": "${AWS_DEFAULT_REGION-us-west-2}",
+                            # Pure literal -> excluded (carried via profile_env).
+                            "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
+                            # Bare ${NAME} -> excluded (profile-owned secret slot).
+                            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                            # :- with the variable unset -> excluded (concrete
+                            # default carried via profile_env).
+                            "UNSET_REGION": "${UNSET_REGION:-us-east-1}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = (
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "OPENAI_API_KEY",
+        "UNSET_REGION",
+        "ANTHROPIC_API_KEY",
+    )
+    worker_env = {"AWS_REGION": "eu-central-1", "AWS_DEFAULT_REGION": "eu-central-1"}
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env=worker_env
+    )
+
+    # Worker-set defaulted forms stay available for hosted out-of-band resolution.
+    assert "AWS_REGION" in filtered
+    assert "AWS_DEFAULT_REGION" in filtered
+    # Pure literal -> excluded (carried via profile_env instead).
+    assert "ANTHROPIC_VERTEX_PROJECT_ID" not in filtered
+    # Bare ${NAME} -> excluded (profile-owned secret slot).
+    assert "OPENAI_API_KEY" not in filtered
+    # :- with variable unset -> excluded (concrete default carried via
+    # profile_env).
+    assert "UNSET_REGION" not in filtered
+    # A name absent from the compose env block still passes through.
+    assert "ANTHROPIC_API_KEY" in filtered
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_defaulted_unset_excluded_by_default_env(
+    tmp_path: Path,
+) -> None:
+    """With the variable unset in the worker env, a defaulted form is excluded.
+
+    Mirrors the unset case from the regression above against the default worker
+    env (``os.environ``): when no worker override is present the concrete default
+    reaches the local container and is carried via ``profile_env``, so the name
+    is excluded from passthrough. Uses an exotic name unlikely to be set in the
+    worker env so the default-env path exercises the unset branch deterministically.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "AWF_TEST_DEFAULTED_REGION_UNSET": (
+                                "${AWF_TEST_DEFAULTED_REGION_UNSET:-us-west-2}"
+                            ),
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = ("AWF_TEST_DEFAULTED_REGION_UNSET",)
+    filtered = filter_hosted_env_passthrough_names(names, compose_file=compose_file)
+
+    # Unset defaulted form -> concrete default carried via profile_env, excluded
+    # from passthrough.
+    assert "AWF_TEST_DEFAULTED_REGION_UNSET" not in filtered
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_placeholders(
     tmp_path: Path,
 ) -> None:
