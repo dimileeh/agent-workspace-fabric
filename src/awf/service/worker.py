@@ -303,6 +303,12 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,
         usage_sampler=usage_collector,
+        # Cloud-neutral hosted execution seam. None in Core: local AWF keeps
+        # the exact tracked docker compose exec path. A hosted AWF Cloud
+        # deployment injects an AgentRuntimeExecutor (e.g. Kubernetes Jobs)
+        # so PR monitor repair is not hard-wired to Docker Compose. The
+        # worker does NOT build a Kubernetes executor here.
+        agent_runtime_executor=None,
     )
     runtime_driver = LocalRuntimeDriver(
         provisioner=provisioner,

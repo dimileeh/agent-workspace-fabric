@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from awf.adapters.provider_failures import classify_provider_failure
+from awf.adapters.runtime_executor import (
+    AgentRuntimeExecRequest,
+    AgentRuntimeExecResult,
+    AgentRuntimeExecutor,
+)
 from awf.adapters.usage import UsageSampleContext, UsageSampler
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
@@ -156,6 +161,7 @@ class AgentAdapter(ABC):
         agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
         agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
         usage_sampler: UsageSampler | None = None,
+        runtime_executor: AgentRuntimeExecutor | None = None,
     ) -> None:
         """Initialize the adapter runtime dependencies and timeout policy."""
         if agent_wall_timeout_seconds <= 0:
@@ -169,6 +175,7 @@ class AgentAdapter(ABC):
         self._agent_wall_timeout_seconds = agent_wall_timeout_seconds
         self._agent_idle_timeout_seconds = agent_idle_timeout_seconds
         self._usage_sampler = usage_sampler
+        self._runtime_executor = runtime_executor
 
     @property
     @abstractmethod
@@ -190,6 +197,19 @@ class AgentAdapter(ABC):
         git ignore view before validation so its cleanliness guard does not
         mistake them for a dirty tree. Defaults to no paths; agents that create
         scratch state override this.
+        """
+        return ()
+
+    @property
+    def hosted_env_passthrough_names(self) -> tuple[str, ...]:
+        """Return env-passthrough *names* a hosted executor should resolve.
+
+        Names only — secret values are NEVER transported. The default is empty;
+        adapters that have a hosted credential contract (e.g. Codex
+        ``CODEX_API_KEY``) override this so a hosted runtime can resolve and
+        inject the credential out-of-band. The compose-derived passthrough
+        still applies on the local Compose path; this hook is only consulted
+        on the hosted (non-compose) execution path.
         """
         return ()
 
@@ -250,6 +270,17 @@ class AgentAdapter(ABC):
         prompt_input = wrapped_prompt.encode("utf-8")
         selected_model = self._selected_model_for_run(model=model)
         cli_args = self._cli_args(model=model)
+        if self._runtime_executor is not None:
+            return await self._run_hosted(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt_input=prompt_input,
+                cli_args=cli_args,
+                selected_model=selected_model,
+                model=model,
+                workspace_id=workspace_id,
+                log_source=log_source,
+            )
         # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
         # synchronously; run it in a worker thread so the blocking I/O never
         # stalls the event loop when concurrent agent runs overlap.
@@ -364,6 +395,184 @@ class AgentAdapter(ABC):
                 phase="finalize",
                 exc_info=True,
             )
+
+    async def _run_hosted(
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        prompt_input: bytes,
+        cli_args: list[str],
+        selected_model: str | None,
+        model: str | None,
+        workspace_id: str | None,
+        log_source: str,
+    ) -> AgentRunResult:
+        """Delegate agent CLI execution to the injected runtime executor.
+
+        The hosted path replaces the tracked ``docker compose exec`` invocation
+        with a cloud-neutral executor call. The same prompt-via-stdin contract,
+        usage sampling, log-store streaming, and provider-failure
+        classification apply so monitor decision semantics are unchanged. The
+        hosted executor owns its own process cleanup; this path does NOT run
+        the compose cleanup helpers.
+        """
+        del compose_project, compose_file  # logging/audit only on hosted path
+        runtime_executor = self._runtime_executor
+        assert runtime_executor is not None  # guarded by run() dispatch
+        env_passthrough_names = self.hosted_env_passthrough_names
+        request = AgentRuntimeExecRequest(
+            workspace_id=workspace_id,
+            agent_runtime=self.name,
+            cli_args=tuple(cli_args),
+            prompt_stdin=prompt_input,
+            log_source=log_source,
+            model=selected_model,
+            effort=self._default_effort,
+            env_passthrough_names=env_passthrough_names,
+            wall_timeout_seconds=self._agent_wall_timeout_seconds,
+            idle_timeout_seconds=self._agent_idle_timeout_seconds,
+        )
+        _log.info(
+            "agent.run.hosted.start",
+            agent=self.name.value,
+            workspace_id=workspace_id,
+            model=selected_model,
+            effort=self._default_effort,
+            wall_timeout_seconds=self._agent_wall_timeout_seconds,
+            idle_timeout_seconds=self._agent_idle_timeout_seconds,
+            source=log_source,
+            prompt_bytes=len(prompt_input),
+            env_passthrough_names=list(env_passthrough_names),
+        )
+        sampler_ctx: UsageSampleContext | None = None
+        final_status = "failed"
+        sinks = None
+        if self._log_store is not None and workspace_id is not None:
+            sinks = await self._log_store.open_command_streams(
+                workspace_id=workspace_id,
+                base_stream_id=log_source,
+                source=log_source,
+                name=f"{log_source.capitalize()} ({self.name.value})"
+                if log_source != "agent"
+                else self.name.value,
+            )
+        try:
+            try:
+                sampler_ctx = await self._start_usage_sampling(
+                    compose_project="",
+                    compose_file=Path(),
+                    workspace_id=workspace_id,
+                )
+                hosted_result = await runtime_executor.execute(request)
+                if sinks is not None:
+                    if hosted_result.stdout:
+                        await sinks.write_stdout(hosted_result.stdout)
+                    if hosted_result.stderr:
+                        await sinks.write_stderr(hosted_result.stderr)
+                result = self._classify_hosted_result(
+                    hosted_result=hosted_result,
+                    model=model,
+                    workspace_id=workspace_id,
+                    log_source=log_source,
+                )
+                final_status = "success"
+                return result
+            except AgentRunError as exc:
+                final_status = (
+                    "timeout"
+                    if exc.reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
+                    else "failed"
+                )
+                raise
+            except asyncio.CancelledError:
+                final_status = "cancelled"
+                raise
+        finally:
+            if sinks is not None:
+                await sinks.close()
+            await self._finalize_usage_sampling(
+                sampler_ctx, status=final_status, workspace_id=workspace_id
+            )
+
+    def _classify_hosted_result(
+        self,
+        *,
+        hosted_result: AgentRuntimeExecResult,
+        model: str | None,
+        workspace_id: str | None,
+        log_source: str,
+    ) -> AgentRunResult:
+        """Map a hosted executor result through the same failure classification.
+
+        Reuses ``_failure_reason_for_output`` so non-zero exits, timeouts, and
+        provider auth failures classify identically to the Compose path —
+        monitor recovery semantics stay unchanged. The hosted executor signals
+        a timeout by returning ``returncode == 124`` (the conventional
+        ``timeout(1)`` exit), mapped to ``AGENT_TIMEOUT``.
+        """
+        del log_source
+        command_result = CommandResult(
+            returncode=hosted_result.returncode,
+            stdout=hosted_result.stdout,
+            stderr=hosted_result.stderr,
+            reason_code=(COMMAND_TIMEOUT_REASON if hosted_result.returncode == 124 else None),
+        )
+        if command_result.ok:
+            _log.info(
+                "agent.run.hosted.ok",
+                agent=self.name.value,
+                workspace_id=workspace_id,
+                stdout_bytes=len(command_result.stdout),
+                stderr_bytes=len(command_result.stderr),
+            )
+            return AgentRunResult(
+                returncode=command_result.returncode,
+                stdout=command_result.stdout,
+                stderr=command_result.stderr,
+            )
+        provider = self.get_provider(model)
+        selected_model = self._selected_model_for_run(model=model)
+        reported_model = selected_model or "unknown"
+        base_reason = _failure_reason_for_result(command_result)
+        provider_failure = classify_provider_failure(
+            reason_code=base_reason,
+            stdout=command_result.stdout,
+            stderr=command_result.stderr,
+            provider=provider,
+            model=selected_model,
+        )
+        reason_code = provider_failure.reason_code if provider_failure is not None else base_reason
+        log_event = (
+            "agent.run.hosted.timeout"
+            if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
+            else "agent.run.hosted.failed"
+        )
+        _log.warning(
+            log_event,
+            agent=self.name.value,
+            workspace_id=workspace_id,
+            returncode=command_result.returncode,
+            reason_code=reason_code,
+            stdout_bytes=len(command_result.stdout),
+            stderr_bytes=len(command_result.stderr),
+        )
+        details: dict[str, str | bool | int | dict[str, object]] | None = None
+        if provider_failure is not None:
+            recovery_metadata = provider_failure.to_metadata()
+            details = {
+                "provider": recovery_metadata.get("provider", provider),
+                "model": recovery_metadata.get("model", reported_model),
+                "retryable": True,
+                "recommended_action": str(recovery_metadata["recommended_action"]),
+                "provider_recovery": recovery_metadata,
+            }
+        raise AgentRunError(
+            agent=self.name,
+            result=command_result,
+            reason_code=reason_code,
+            details=details,
+        )
 
     async def _run_agent_cli(
         self,
@@ -525,6 +734,7 @@ def get_adapter(
     agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
     agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     usage_sampler: UsageSampler | None = None,
+    runtime_executor: AgentRuntimeExecutor | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime.
 
@@ -543,6 +753,7 @@ def get_adapter(
         agent_wall_timeout_seconds=agent_wall_timeout_seconds,
         agent_idle_timeout_seconds=agent_idle_timeout_seconds,
         usage_sampler=usage_sampler,
+        runtime_executor=runtime_executor,
     )
 
 

@@ -244,60 +244,72 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     ):
         return None
 
-    try:
-        _precheck_required_companion_env_secrets_for_resume(
-            companion_specs=companion_specs,
-            environ=os.environ,
-        )
-        _refresh_optional_companion_env_secrets_for_resume(
-            workspace_id=workspace_id,
-            compose_file=Path(compose_file_path),
-            companion_specs=companion_specs,
-            environ=os.environ,
-        )
-        await self._compose.ensure_project_up(
-            project_name=compose_project,
-            compose_file=Path(compose_file_path),
-            workspace_id=workspace_id,
-            wait=True,
-            compose_up_timeout_seconds=compose_up_timeout_seconds,
-            force_recreate=True,
-        )
-    except CompanionEnvSecretPrecheckError as exc:
-        _log.error(
-            "executor.resume_companion_env_secret_precheck_failed",
-            workspace_id=workspace_id,
-            reason_code=exc.reason_code,
-            stderr=exc.stderr[:1000],
-        )
-        await self._record_monitor_runtime_restart_failed(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file_path=compose_file_path,
-            error=exc,
-            event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
-        )
-        return None
-    except ComposeOperationError as exc:
-        _log.error(
-            "executor.resume_compose_up_failed",
-            workspace_id=workspace_id,
-            reason_code=exc.reason_code,
-            stderr=exc.stderr[:1000],
-        )
-        await self._record_monitor_runtime_restart_failed(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file_path=compose_file_path,
-            error=exc,
-        )
-        if not await _compose_runtime_usable_after_restart_failure(compose_project):
+    # In hosted mode (an agent runtime executor is injected) there is no
+    # docker compose project to restart — the hosted runtime owns process
+    # lifecycle. Skip the compose restart + companion env precheck so monitor
+    # repair can advance via the injected executor. Local Core (executor is
+    # None) keeps the exact restart behavior unchanged.
+    if self._agent_runtime_executor is None:
+        try:
+            _precheck_required_companion_env_secrets_for_resume(
+                companion_specs=companion_specs,
+                environ=os.environ,
+            )
+            _refresh_optional_companion_env_secrets_for_resume(
+                workspace_id=workspace_id,
+                compose_file=Path(compose_file_path),
+                companion_specs=companion_specs,
+                environ=os.environ,
+            )
+            await self._compose.ensure_project_up(
+                project_name=compose_project,
+                compose_file=Path(compose_file_path),
+                workspace_id=workspace_id,
+                wait=True,
+                compose_up_timeout_seconds=compose_up_timeout_seconds,
+                force_recreate=True,
+            )
+        except CompanionEnvSecretPrecheckError as exc:
+            _log.error(
+                "executor.resume_companion_env_secret_precheck_failed",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:1000],
+            )
+            await self._record_monitor_runtime_restart_failed(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file_path=compose_file_path,
+                error=exc,
+                event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
+            )
             return None
-        _log.warning(
-            "executor.resume_compose_up_failed_runtime_still_usable",
+        except ComposeOperationError as exc:
+            _log.error(
+                "executor.resume_compose_up_failed",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:1000],
+            )
+            await self._record_monitor_runtime_restart_failed(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file_path=compose_file_path,
+                error=exc,
+            )
+            if not await _compose_runtime_usable_after_restart_failure(compose_project):
+                return None
+            _log.warning(
+                "executor.resume_compose_up_failed_runtime_still_usable",
+                workspace_id=workspace_id,
+                compose_project_name=compose_project,
+                reason_code=exc.reason_code,
+            )
+    else:
+        _log.info(
+            "executor.resume_pr_monitor_hosted_skip_compose_restart",
             workspace_id=workspace_id,
-            compose_project_name=compose_project,
-            reason_code=exc.reason_code,
+            compose_project=compose_project,
         )
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
@@ -314,6 +326,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                runtime_executor=self._agent_runtime_executor,
             )
             if profile is None:
                 profile = _profile_for_workspace(
@@ -1000,6 +1013,7 @@ async def _build_handoff_pr_monitor(
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                runtime_executor=self._agent_runtime_executor,
             )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
