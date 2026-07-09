@@ -519,6 +519,7 @@ class TestNonCodexHostedCredentials:
         real_parse = base_module.try_compose_agent_env_and_postgres_passwords
         real_filter = base_module.filter_hosted_env_passthrough_names
         real_profile_names = base_module.hosted_profile_env_passthrough_names
+        real_aliases = base_module.hosted_profile_env_passthrough_aliases
         real_github_names = base_module.hosted_github_token_passthrough_names
         real_literal = base_module.literal_profile_env_from_compose
 
@@ -535,6 +536,10 @@ class TestNonCodexHostedCredentials:
         def _tracked_profile_names(compose_file, *, compose_env):
             seen_thread_ids["profile_names"] = threading.get_ident()
             return real_profile_names(compose_file, compose_env=compose_env)
+
+        def _tracked_aliases(compose_file, *, compose_env):
+            seen_thread_ids["aliases"] = threading.get_ident()
+            return real_aliases(compose_file, compose_env=compose_env)
 
         def _tracked_github_names(compose_file, *, compose_env):
             seen_thread_ids["github_names"] = threading.get_ident()
@@ -569,6 +574,11 @@ class TestNonCodexHostedCredentials:
         )
         monkeypatch.setattr(
             base_module,
+            "hosted_profile_env_passthrough_aliases",
+            _tracked_aliases,
+        )
+        monkeypatch.setattr(
+            base_module,
             "hosted_github_token_passthrough_names",
             _tracked_github_names,
         )
@@ -588,6 +598,7 @@ class TestNonCodexHostedCredentials:
         assert "profile_names" in seen_thread_ids, (
             "hosted profile parse was not dispatched off-loop"
         )
+        assert "aliases" in seen_thread_ids, "hosted alias parse was not dispatched off-loop"
         assert "github_names" in seen_thread_ids, (
             "hosted GitHub token parse was not dispatched off-loop"
         )
@@ -595,6 +606,7 @@ class TestNonCodexHostedCredentials:
         assert seen_thread_ids["parse"] != loop_thread_id
         assert seen_thread_ids["filter"] != loop_thread_id
         assert seen_thread_ids["profile_names"] != loop_thread_id
+        assert seen_thread_ids["aliases"] != loop_thread_id
         assert seen_thread_ids["github_names"] != loop_thread_id
         assert seen_thread_ids["literal"] != loop_thread_id
         # The offloaded parse result still flows through to the hosted request.

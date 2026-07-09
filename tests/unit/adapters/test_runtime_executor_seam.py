@@ -335,7 +335,7 @@ class TestRuntimeExecutorSeam:
             runner=FakeCommandRunner(),
             default_model="gpt-5",
             runtime_executor=_HungExecutor(),
-            agent_wall_timeout_seconds=0.01,
+            agent_wall_timeout_seconds=0.05,
         )
 
         with pytest.raises(AgentRunError) as exc:
