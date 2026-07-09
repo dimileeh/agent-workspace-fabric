@@ -44,7 +44,7 @@ def test_literal_profile_env_from_compose_skips_mount_backed_bitbucket_askpass(
 
     assert carried.get("APP_BASE_URL") == "http://app:8080"
     assert "GIT_ASKPASS" not in carried
-    assert "GIT_TERMINAL_PROMPT" not in carried
+    assert carried.get("GIT_TERMINAL_PROMPT") == "0"
     assert "GIT_CONFIG_COUNT" not in carried
     assert "GIT_CONFIG_KEY_0" not in carried
     assert "GIT_CONFIG_VALUE_0" not in carried

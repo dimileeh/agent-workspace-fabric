@@ -331,7 +331,6 @@ _GIT_CONFIG_KEY_PREFIX = "GIT_CONFIG_KEY_"
 _GIT_CONFIG_VALUE_PREFIX = "GIT_CONFIG_VALUE_"
 _GIT_ASKPASS_KEY = "GIT_ASKPASS"
 _GIT_TERMINAL_PROMPT_KEY = "GIT_TERMINAL_PROMPT"
-_GIT_TERMINAL_PROMPT_FAIL_FAST = "0"
 _BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
 _BITBUCKET_AGENT_INSTEADOF_KEY = "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
 
@@ -1372,8 +1371,6 @@ def literal_profile_env_from_compose(
             continue
         if mount_backed_bitbucket_askpass:
             if key == _GIT_ASKPASS_KEY and expanded == _BITBUCKET_ASKPASS_TARGET:
-                continue
-            if key == _GIT_TERMINAL_PROMPT_KEY and expanded == _GIT_TERMINAL_PROMPT_FAIL_FAST:
                 continue
             if _is_git_config_protocol_key(key):
                 continue
