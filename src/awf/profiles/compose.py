@@ -66,6 +66,35 @@ AGENT_AUTH_ENV_VARS = (
     "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
 )
 
+# Secret-bearing subset of :data:`AGENT_AUTH_ENV_VARS` — names whose literal
+# value is a credential (API key / token / OAuth token / service-account
+# credentials / access token). A profile-owned literal for one of these keys is
+# a concrete secret and must never be carried in ``profile_env``: the hosted
+# executor resolves it out-of-band (the name is kept out of
+# ``env_passthrough_names`` by ``_profile_owned_auth_keys``), so ``profile_env``
+# must not duplicate it (PR #751 thread PRRT_kwDOSJAM6s6PaYta). Non-secret
+# profile config in :data:`AGENT_AUTH_ENV_VARS` — endpoints (``OLLAMA_HOST`` /
+# ``*_BASE_URL``), org/project/region, model names, backend toggles — stays
+# carried, matching the ``AgentRuntimeExecRequest`` contract.
+_AGENT_AUTH_SECRET_ENV_VARS = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "OPENAI_API_TOKEN",
+        "CODEX_API_KEY",
+        "CODEX_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CURSOR_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_ACCESS_TOKEN",
+        "OLLAMA_API_KEY",
+        "XAI_API_KEY",
+    }
+)
+
 
 # Ollama base-URL env keys in precedence order (highest first) — the OpenCode
 # launcher prelude and the worker-side Ollama preflight both resolve the daemon
@@ -1159,7 +1188,14 @@ def literal_profile_env_from_compose(
     URL as its encoded form (``p%40ss%2Fword``); the raw substring test alone
     would miss it, so each tracked password is also compared against its
     URL-encoded variant (``quote(..., safe="")``) so an encoded secret-bearing
-    URL is redacted too (PR #751 thread PRRT_kwDOSJAM6s6PZuE5). When
+    URL is redacted too (PR #751 thread PRRT_kwDOSJAM6s6PZuE5). Profile-owned
+    auth literals are also skipped: any ``AGENT_AUTH_ENV_VARS`` key declared on
+    the agent service (e.g. ``OPENAI_API_KEY`` / ``CODEX_API_KEY`` set to a
+    concrete key string) is a profile-owned auth slot and its literal value must
+    never reach ``profile_env``. The same keys are kept out of
+    ``env_passthrough_names`` by ``_profile_owned_auth_keys`` so the hosted
+    executor resolves auth out-of-band; ``profile_env`` must not duplicate them
+    as literal secrets (PR #751 thread PRRT_kwDOSJAM6s6PaYta). When
     the compose file is unreadable the result is empty (fail-closed: no values),
     matching ``_compose_env_passthrough_exclusions``.
 
@@ -1193,6 +1229,23 @@ def literal_profile_env_from_compose(
     # ``POSTGRES_PASSWORD``) redacts nothing, preserving carry for profiles
     # without a DB sidecar.
     postgres_passwords = file_postgres_passwords | (postgres_passwords or frozenset())
+    # Profile-owned auth-secret literals are concrete credential strings (e.g.
+    # ``OPENAI_API_KEY: "sk-profile-key"`` / ``CODEX_API_KEY: "sk-codex"``)
+    # that resolve to ``LITERAL`` and do not bear a postgres password, so without
+    # an explicit redaction they would be carried verbatim into
+    # ``AgentRuntimeExecRequest.profile_env``, breaking the documented
+    # secret-free hosted contract (see ``AgentRuntimeExecRequest``). The same
+    # keys are already kept out of ``env_passthrough_names`` by
+    # ``_profile_owned_auth_keys`` (the hosted executor resolves auth
+    # out-of-band), so ``profile_env`` must not duplicate them as literal
+    # secrets. Only the secret-bearing subset of ``AGENT_AUTH_ENV_VARS`` (API
+    # keys / tokens / credentials) is redacted; non-secret profile config in the
+    # same set (e.g. ``OLLAMA_HOST``, ``ANTHROPIC_BASE_URL``, project/region,
+    # backend toggles) is still carried, matching the
+    # ``AgentRuntimeExecRequest`` contract that documents
+    # ``OLLAMA_HOST`` as non-secret profile configuration (PR #751 thread
+    # PRRT_kwDOSJAM6s6PaYta).
+    auth_secret_keys = _AGENT_AUTH_SECRET_ENV_VARS & compose_env.keys()
     carried: list[tuple[str, str]] = []
     for key, raw in compose_env.items():
         # A Compose pass-through slot (``environment: [NAME]``, ``NAME:`` /
@@ -1220,6 +1273,8 @@ def literal_profile_env_from_compose(
         if resolution is not _ComposeEnvResolution.LITERAL:
             continue
         if _expanded_value_bears_postgres_password(expanded, postgres_passwords):
+            continue
+        if key in auth_secret_keys:
             continue
         carried.append((key, expanded))
     return tuple(carried)

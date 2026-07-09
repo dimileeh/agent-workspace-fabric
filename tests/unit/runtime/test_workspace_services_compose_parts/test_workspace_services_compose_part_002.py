@@ -507,6 +507,79 @@ def test_literal_profile_env_from_compose_skips_postgres_password_bearing_values
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_profile_owned_auth_literals(
+    tmp_path: Path,
+) -> None:
+    """A profile-owned auth literal (a concrete API key / token string) is NOT
+    carried to the hosted executor.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PaYta: rendered compose files
+    can hold profile-owned auth literals — for example
+    ``OPENAI_API_KEY: "sk-profile-key"`` or ``CODEX_API_KEY: "sk-codex"``. Those
+    resolve to ``LITERAL`` and do not bear a postgres password, so
+    ``literal_profile_env_from_compose`` carried them verbatim into
+    ``AgentRuntimeExecRequest.profile_env``, breaking the documented
+    secret-free hosted contract even though the same keys are correctly kept
+    out of ``env_passthrough_names`` by ``_profile_owned_auth_keys`` (the hosted
+    executor resolves auth out-of-band). Any ``AGENT_AUTH_ENV_VARS`` key
+    declared on the agent service is a profile-owned auth slot and its literal
+    value must never reach ``profile_env``.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Profile-owned auth-secret literals -> skipped.
+                            "OPENAI_API_KEY": "sk-profile-openai-key",
+                            "CODEX_API_KEY": "sk-profile-codex-key",
+                            "ANTHROPIC_AUTH_TOKEN": "sk-ant-profile-token",
+                            "OLLAMA_API_KEY": "ollama-profile-key",
+                            # Non-secret profile literals (some are in
+                            # AGENT_AUTH_ENV_VARS but not secret-bearing) ->
+                            # still carried.
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            "OPENAI_BASE_URL": "https://profile.proxy/v1",
+                            "ANTHROPIC_BASE_URL": "https://anthropic.profile/v1",
+                            # Non-auth literal that merely looks token-like must
+                            # still be carried (only secret-bearing auth keys
+                            # redact).
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    # Non-secret profile literals are still carried to the hosted executor.
+    assert carried.get("OLLAMA_HOST") == "http://ollama.profile:11434"
+    assert carried.get("OPENAI_BASE_URL") == "https://profile.proxy/v1"
+    assert carried.get("ANTHROPIC_BASE_URL") == "https://anthropic.profile/v1"
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    # Profile-owned auth-secret literals are NOT carried to the hosted executor.
+    assert "OPENAI_API_KEY" not in carried
+    assert "CODEX_API_KEY" not in carried
+    assert "ANTHROPIC_AUTH_TOKEN" not in carried
+    assert "OLLAMA_API_KEY" not in carried
+    # The concrete secret strings never reach the hosted request object.
+    blob = "".join(v for _k, v in profile_env)
+    assert "sk-profile-openai-key" not in blob
+    assert "sk-profile-codex-key" not in blob
+    assert "sk-ant-profile-token" not in blob
+    assert "ollama-profile-key" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_carries_values_without_postgres_service(
     tmp_path: Path,
 ) -> None:
