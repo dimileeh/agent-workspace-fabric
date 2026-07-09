@@ -233,3 +233,48 @@ def test_literal_profile_env_from_compose_skips_url_userinfo_literals(
     assert carried["APP_BASE_URL"] == "http://app:8080"
     blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
     assert "s3cr3t" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_external_postgres_url_userinfo(
+    tmp_path: Path,
+) -> None:
+    """External Postgres DSNs with userinfo are not safe hosted literals."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "postgres": {
+                        "image": "postgres:16-alpine",
+                        "environment": {
+                            "POSTGRES_USER": "awf",
+                            "POSTGRES_PASSWORD": "local-compose-password",
+                            "POSTGRES_DB": "awf",
+                        },
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": ("postgresql://user:external-secret@db.example/app"),
+                            "REPORTING_DATABASE_URL": (
+                                "postgresql+psycopg://report:report-secret@db.example/report"
+                            ),
+                            "APP_BASE_URL": "https://app.example",
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "DATABASE_URL" not in carried
+    assert "REPORTING_DATABASE_URL" not in carried
+    assert carried["APP_BASE_URL"] == "https://app.example"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "external-secret" not in blob
+    assert "report-secret" not in blob

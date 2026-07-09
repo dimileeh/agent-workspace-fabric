@@ -195,14 +195,12 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
 
 
 def _value_has_url_userinfo(value: str) -> bool:
-    """Return whether ``value`` is a non-Postgres URL containing non-empty userinfo."""
+    """Return whether ``value`` is a URL containing non-empty userinfo."""
     try:
         parsed = urlsplit(value)
     except ValueError:
         return False
     if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
-        return False
-    if parsed.scheme.startswith(("postgres", "postgresql")):
         return False
     userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
     return bool(userinfo)
