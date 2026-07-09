@@ -1205,9 +1205,28 @@ def _hosted_git_config_profile_env(
     worker_env: Mapping[str, str],
     skip_bitbucket_agent_rewrites: bool,
 ) -> tuple[tuple[str, str], ...]:
-    entries, _others = _split_git_config_entries(tuple(compose_env.items()))
+    count_raw = compose_env.get(_GIT_CONFIG_COUNT_KEY)
+    if count_raw is None or count_raw == _COMPOSE_PASSTHROUGH:
+        return ()
+    count_value, count_resolution = _compose_resolve_value(count_raw, worker_env=worker_env)
+    if count_resolution is not _ComposeEnvResolution.LITERAL:
+        return ()
+    try:
+        count = int(count_value)
+    except ValueError:
+        return ()
+
     carried_entries: list[tuple[str, str]] = []
-    for config_key_raw, config_value_raw in entries:
+    for index in range(count):
+        config_key_raw = compose_env.get(f"{_GIT_CONFIG_KEY_PREFIX}{index}")
+        config_value_raw = compose_env.get(f"{_GIT_CONFIG_VALUE_PREFIX}{index}")
+        if (
+            config_key_raw is None
+            or config_value_raw is None
+            or config_key_raw == _COMPOSE_PASSTHROUGH
+            or config_value_raw == _COMPOSE_PASSTHROUGH
+        ):
+            continue
         config_key, key_resolution = _compose_resolve_value(
             config_key_raw,
             worker_env=worker_env,
@@ -1441,14 +1460,10 @@ def literal_profile_env_from_compose(
         compose_env,
         worker_env=env,
     )
-    hosted_git_config_profile_env = (
-        _hosted_git_config_profile_env(
-            compose_env,
-            worker_env=env,
-            skip_bitbucket_agent_rewrites=True,
-        )
-        if mount_backed_bitbucket_askpass
-        else ()
+    hosted_git_config_profile_env = _hosted_git_config_profile_env(
+        compose_env,
+        worker_env=env,
+        skip_bitbucket_agent_rewrites=mount_backed_bitbucket_askpass,
     )
     carried: list[tuple[str, str]] = []
     for key, raw in compose_env.items():
@@ -1480,11 +1495,14 @@ def literal_profile_env_from_compose(
             continue
         if _value_has_url_userinfo(expanded):
             continue
-        if mount_backed_bitbucket_askpass:
-            if key == _GIT_ASKPASS_KEY and expanded == _BITBUCKET_ASKPASS_TARGET:
-                continue
-            if _is_git_config_protocol_key(key):
-                continue
+        if (
+            mount_backed_bitbucket_askpass
+            and key == _GIT_ASKPASS_KEY
+            and expanded == _BITBUCKET_ASKPASS_TARGET
+        ):
+            continue
+        if _is_git_config_protocol_key(key):
+            continue
         if key in auth_secret_keys:
             continue
         if key in _HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
