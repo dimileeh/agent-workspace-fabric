@@ -260,6 +260,45 @@ class TestRuntimeExecutorSeam:
         assert exc.value.details.get("retryable") is True
 
     @pytest.mark.unit
+    async def test_hosted_executor_unexpected_exception_becomes_agent_run_error(
+        self,
+    ) -> None:
+        class _FailingExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                raise RuntimeError("k8s api unavailable")
+
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=_FailingExecutor(),
+        )
+        finalize_calls: list[tuple[Any, str, str | None]] = []
+        original_finalize = adapter._finalize_usage_sampling
+
+        async def _recording_finalize(
+            sampler_ctx: Any, *, status: str, workspace_id: str | None
+        ) -> None:
+            finalize_calls.append((sampler_ctx, status, workspace_id))
+            await original_finalize(sampler_ctx, status=status, workspace_id=workspace_id)
+
+        adapter._finalize_usage_sampling = _recording_finalize  # type: ignore[method-assign]
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_hosted_executor_error",
+            )
+
+        assert exc.value.agent is AgentRuntime.codex
+        assert exc.value.reason_code == "AGENT_HOSTED_EXECUTOR_ERROR"
+        assert exc.value.result.returncode == 1
+        assert exc.value.result.stdout == ""
+        assert "k8s api unavailable" in exc.value.result.stderr
+        assert finalize_calls == [(None, "failed", "ws_hosted_executor_error")]
+
+    @pytest.mark.unit
     async def test_hosted_timeout_exit_maps_to_agent_timeout(
         self,
     ) -> None:

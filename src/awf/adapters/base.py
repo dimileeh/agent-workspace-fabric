@@ -600,6 +600,18 @@ class AgentAdapter(ABC):
                     ),
                     timeout_reason=COMMAND_TIMEOUT_REASON,
                 )
+            except AgentRunError:
+                raise
+            except Exception as exc:
+                raise AgentRunError(
+                    agent=self.name,
+                    result=CommandResult(
+                        returncode=1,
+                        stdout="",
+                        stderr=f"{type(exc).__name__}: {exc}",
+                    ),
+                    reason_code="AGENT_HOSTED_EXECUTOR_ERROR",
+                ) from exc
             if sinks is not None:
                 # Buffered fallback: write the hosted executor's buffered
                 # stdout/stderr to the sinks only when that fd was not already
