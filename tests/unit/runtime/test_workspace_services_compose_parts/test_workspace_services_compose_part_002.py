@@ -817,6 +817,52 @@ def test_literal_profile_env_from_compose_skips_profile_owned_github_token_liter
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_jdbc_url_userinfo(
+    tmp_path: Path,
+) -> None:
+    """JDBC-style URL literals with userinfo are NOT carried to hosted profile env.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6PvGqq: ``urlsplit`` treats the
+    outer ``jdbc:`` prefix as the URL scheme and leaves ``netloc`` empty for
+    values like ``jdbc:postgresql://user:secret@db.example/app``. The generic
+    URL-userinfo guard therefore missed embedded credentials when the env name
+    was not itself secret-like, and ``literal_profile_env_from_compose`` carried
+    the raw JDBC URL into ``AgentRuntimeExecRequest.profile_env``.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Non-secret literal still carried.
+                            "APP_BASE_URL": "http://app:8080",
+                            # JDBC URL embeds credentials but the key is not
+                            # secret-like -> must still be skipped.
+                            "JDBC_DATABASE_URL": (
+                                "jdbc:postgresql://app_user:db-secret@db.example/app"
+                            ),
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "JDBC_DATABASE_URL" not in carried
+    assert "db-secret" not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_carries_values_without_postgres_service(
     tmp_path: Path,
 ) -> None:

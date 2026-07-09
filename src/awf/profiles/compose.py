@@ -200,10 +200,16 @@ def _value_has_url_userinfo(value: str) -> bool:
         parsed = urlsplit(value)
     except ValueError:
         return False
-    if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+    if not parsed.scheme:
         return False
-    userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
-    return bool(userinfo)
+    if parsed.netloc:
+        if "@" not in parsed.netloc:
+            return False
+        userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
+        return bool(userinfo)
+    if "://" in parsed.path:
+        return _value_has_url_userinfo(parsed.path)
+    return False
 
 
 _GITHUB_TOKEN_SOURCE_PRECEDENCE = ("AWF_GITHUB_TOKEN", *_GITHUB_TOKEN_ALIAS_PRECEDENCE)
