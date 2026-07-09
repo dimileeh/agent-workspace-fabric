@@ -1103,6 +1103,7 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_refer
                             "ANTHROPIC_API_KEY": "${MY_ANTHROPIC_TOKEN:-}",
                             "AWS_REGION": "${AWS_DEFAULT_REGION:-us-west-2}",
                             "REQUIRED_TARGET": "${REQUIRED_SOURCE?missing}",
+                            "SECRET_DEFAULT": "${X:-${SECRET}}",
                             "SAME_REGION": "${SAME_REGION:-us-east-1}",
                             "SAME_REQUIRED": "${SAME_REQUIRED:?missing}",
                         },
@@ -1117,16 +1118,21 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_refer
         "ANTHROPIC_API_KEY",
         "AWS_REGION",
         "REQUIRED_TARGET",
+        "SECRET_DEFAULT",
         "SAME_REGION",
         "SAME_REQUIRED",
         "MY_ANTHROPIC_TOKEN",
         "AWS_DEFAULT_REGION",
         "REQUIRED_SOURCE",
+        "X",
+        "SECRET",
     )
     worker_env = {
         "MY_ANTHROPIC_TOKEN": "sk-ant-secret",
         "AWS_DEFAULT_REGION": "eu-central-1",
         "REQUIRED_SOURCE": "required-secret",
+        "X": "selected-worker-value",
+        "SECRET": "unused-default-secret",
         "SAME_REGION": "ap-southeast-2",
         "SAME_REQUIRED": "required-value",
     }
@@ -1140,6 +1146,7 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_refer
     assert "ANTHROPIC_API_KEY" not in filtered
     assert "AWS_REGION" not in filtered
     assert "REQUIRED_TARGET" not in filtered
+    assert "SECRET_DEFAULT" not in filtered
     # Same-name worker-resolved defaulted/required references still resolve by
     # the same target name and remain available out-of-band.
     assert "SAME_REGION" in filtered
@@ -1148,6 +1155,8 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_refer
     assert "MY_ANTHROPIC_TOKEN" in filtered
     assert "AWS_DEFAULT_REGION" in filtered
     assert "REQUIRED_SOURCE" in filtered
+    assert "X" in filtered
+    assert "SECRET" in filtered
 
 
 @pytest.mark.unit

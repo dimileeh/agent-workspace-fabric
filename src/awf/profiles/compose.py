@@ -1066,19 +1066,17 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         )
         # Worker-resolved same-name defaulted/required forms resolve to a worker
         # value at stack launch, exactly like pass-through slots. Keep those
-        # target names in hosted passthrough only when the referenced variable
-        # matches the target key; cross-name aliases cannot be reconstructed by
-        # the hosted executor's target-name-only resolution.
+        # target names in hosted passthrough only when the outer selected
+        # variable matches the target key; cross-name aliases and unused nested
+        # default words cannot be reconstructed by the hosted executor's
+        # target-name-only resolution.
         worker_resolved_defaulted = frozenset(
             name
             for name, raw in compose_env.items()
             if raw != _COMPOSE_PASSTHROUGH
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
-            and (
-                _compose_defaulted_reference_name(raw, worker_env=worker_env) == name
-                or _compose_default_word_is_worker_resolved(raw, worker_env=worker_env)
-            )
+            and _compose_defaulted_reference_name(raw, worker_env=worker_env) == name
         )
         # A bare ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose
         # variable IS set in the worker env resolves to the worker value at
