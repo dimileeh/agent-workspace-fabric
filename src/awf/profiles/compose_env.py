@@ -253,6 +253,49 @@ def _compose_bare_reference_name(value: str) -> str | None:
     return None
 
 
+def _compose_defaulted_reference_name(
+    value: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> str | None:
+    """Return the variable name for a single defaulted/required reference.
+
+    Matches exactly ``${NAME:-word}``, ``${NAME-word}``, ``${NAME:?err}``, or
+    ``${NAME?err}``, with no surrounding literal text, and returns ``NAME`` only
+    when that outer expression itself selects the worker value. The hosted
+    passthrough filter uses this to keep only same-name worker-resolved
+    defaulted/required slots; cross-name aliases cannot be reconstructed from a
+    target-name-only passthrough entry.
+    """
+    escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
+    if not escaped.startswith("${"):
+        return None
+    end = _compose_braced_expression_end(escaped, 1)
+    if end is None or end != len(escaped) - 1:
+        return None
+    inner = escaped[2:end]
+    name_match = _COMPOSE_ENV_NAME_PATTERN.match(inner)
+    if name_match is None:
+        return None
+    name = name_match.group(0)
+    remainder = inner[name_match.end() :]
+    for operator in _COMPOSE_BRACED_OPERATORS:
+        if remainder.startswith(operator):
+            worker_value = worker_env.get(name)
+            is_set = name in worker_env
+            is_non_empty = bool(worker_value)
+            if operator == ":-" and is_non_empty:
+                return name
+            if operator == "-" and is_set:
+                return name
+            if operator == ":?" and is_non_empty:
+                return name
+            if operator == "?" and is_set:
+                return name
+            return None
+    return None
+
+
 def _compose_resolve_braced(
     expression: str,
     *,

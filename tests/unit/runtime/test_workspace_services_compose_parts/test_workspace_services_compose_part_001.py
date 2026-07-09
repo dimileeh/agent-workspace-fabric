@@ -1085,6 +1085,68 @@ def test_filter_hosted_env_passthrough_names_keeps_worker_resolved_defaulted(
 
 
 @pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_reference(
+    tmp_path: Path,
+) -> None:
+    """Defaulted/required aliases whose target differs from source stay excluded."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "ANTHROPIC_API_KEY": "${MY_ANTHROPIC_TOKEN:-}",
+                            "AWS_REGION": "${AWS_DEFAULT_REGION:-us-west-2}",
+                            "REQUIRED_TARGET": "${REQUIRED_SOURCE?missing}",
+                            "SAME_REGION": "${SAME_REGION:-us-east-1}",
+                            "SAME_REQUIRED": "${SAME_REQUIRED:?missing}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = (
+        "ANTHROPIC_API_KEY",
+        "AWS_REGION",
+        "REQUIRED_TARGET",
+        "SAME_REGION",
+        "SAME_REQUIRED",
+        "MY_ANTHROPIC_TOKEN",
+        "AWS_DEFAULT_REGION",
+        "REQUIRED_SOURCE",
+    )
+    worker_env = {
+        "MY_ANTHROPIC_TOKEN": "sk-ant-secret",
+        "AWS_DEFAULT_REGION": "eu-central-1",
+        "REQUIRED_SOURCE": "required-secret",
+        "SAME_REGION": "ap-southeast-2",
+        "SAME_REQUIRED": "required-value",
+    }
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env=worker_env
+    )
+
+    # Cross-name defaulted/required references are excluded because hosted
+    # resolves passthrough by target name, not by the compose source variable.
+    assert "ANTHROPIC_API_KEY" not in filtered
+    assert "AWS_REGION" not in filtered
+    assert "REQUIRED_TARGET" not in filtered
+    # Same-name defaulted/required references still mirror local Compose by
+    # resolving the worker value out-of-band.
+    assert "SAME_REGION" in filtered
+    assert "SAME_REQUIRED" in filtered
+    # Source names not declared in compose remain ordinary passthrough names.
+    assert "MY_ANTHROPIC_TOKEN" in filtered
+    assert "AWS_DEFAULT_REGION" in filtered
+    assert "REQUIRED_SOURCE" in filtered
+
+
+@pytest.mark.unit
 def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
     tmp_path: Path,
 ) -> None:

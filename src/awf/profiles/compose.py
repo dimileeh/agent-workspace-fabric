@@ -1140,17 +1140,18 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         passthrough_slots = frozenset(
             name for name, raw in compose_env.items() if raw == _COMPOSE_PASSTHROUGH
         )
-        # Resolve each non-pass-through name's classification once: a worker-
-        # resolved defaulted form (``${NAME:-default}`` / ``${NAME-default}`` /
-        # ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME`` set in the worker env)
-        # resolves to the worker value at stack launch, exactly like a pass-through
-        # slot. ``_compose_env_passthrough_exclusions`` -> ``_profile_owned_auth_keys``
-        # treats any ``AGENT_AUTH_ENV_VARS`` key declared on the agent service as
-        # profile-owned regardless of its value, so a worker-resolved defaulted auth
-        # name sits in the baseline excluded set the same way a pass-through auth
-        # slot does. The worker-resolved-defaulted exception below only prevents
-        # *adding* such a name — it never *removes* a name the first pass already
-        # excluded. ``literal_profile_env_from_compose`` also skips
+        # Resolve each non-pass-through name's classification once: a same-name
+        # worker-resolved defaulted/required form (``${NAME:-default}`` /
+        # ``${NAME-default}`` / ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME``
+        # set in the worker env) resolves to the worker value at stack launch,
+        # exactly like a pass-through slot. ``_compose_env_passthrough_exclusions``
+        # -> ``_profile_owned_auth_keys`` treats any ``AGENT_AUTH_ENV_VARS`` key
+        # declared on the agent service as profile-owned regardless of its value,
+        # so a worker-resolved defaulted auth name sits in the baseline excluded
+        # set the same way a pass-through auth slot does. The
+        # worker-resolved-defaulted exception below only prevents *adding* such a
+        # name — it never *removes* a name the first pass already excluded.
+        # ``literal_profile_env_from_compose`` also skips
         # ``WORKER_RESOLVED_DEFAULTED`` (carrying the worker value would embed a
         # secret), so the hosted monitor launch would drop a credential the local
         # Compose container received at stack launch, leaving the hosted job with
@@ -1158,13 +1159,17 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # from the baseline excluded set first, mirroring the pass-through slot
         # fix (PR #751 thread PRRT_kwDOSJAM6s6PY6Rn) — only non-worker-resolved
         # non-pass-through names stay excluded (PR #751 thread
-        # PRRT_kwDOSJAM6s6PiGHK).
+        # PRRT_kwDOSJAM6s6PiGHK). Cross-name aliases stay excluded because hosted
+        # passthrough resolves by target name, not by the compose source variable.
         worker_resolved_defaulted = frozenset(
             name
             for name, raw in compose_env.items()
             if raw != _COMPOSE_PASSTHROUGH
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
+            and (defaulted_name := _compose_defaulted_reference_name(raw, worker_env=worker_env))
+            is not None
+            and defaulted_name == name
         )
         # A bare ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose
         # variable IS set in the worker env resolves to the worker value at
@@ -1289,6 +1294,7 @@ from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
     _compose_braced_expression_end,
     _compose_concrete_worker_password,
     _compose_concrete_worker_password_braced,
+    _compose_defaulted_reference_name,
     _compose_environment_mapping,
     _compose_resolve_braced,
     _compose_resolve_value,
