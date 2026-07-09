@@ -885,6 +885,42 @@ def hosted_profile_env_passthrough_names(
     )
 
 
+def hosted_profile_env_passthrough_aliases(
+    compose_file: Path,
+    *,
+    compose_env: Mapping[str, str] | None = None,
+    worker_env: Mapping[str, str] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Return cross-name env aliases the hosted executor must resolve by source.
+
+    Profile-declared env secret leases can render Compose env as
+    ``TARGET: ${SOURCE}``. Local Compose substitutes ``SOURCE`` into ``TARGET``
+    at stack launch, but hosted target-name passthrough cannot reconstruct that
+    relationship. Return names only so hosted executors can resolve
+    ``source_name`` out-of-band and inject it as ``target_name`` without
+    transporting the secret value in the request.
+    """
+    if compose_env is None:
+        compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        return ()
+    env = os.environ if worker_env is None else worker_env
+    aliases: list[tuple[str, str]] = []
+    for name, raw in compose_env.items():
+        if raw == _COMPOSE_PASSTHROUGH:
+            continue
+        if (
+            _compose_resolve_value(raw, worker_env=env)[1]
+            is not _ComposeEnvResolution.WORKER_RESOLVED_SLOT
+        ):
+            continue
+        source_name = _compose_bare_reference_name(raw)
+        if source_name is None or source_name == name or not env.get(source_name):
+            continue
+        aliases.append((name, source_name))
+    return tuple(aliases)
+
+
 def _filter_hosted_env_passthrough_names_from_compose_env(
     names: tuple[str, ...],
     compose_env: Mapping[str, str] | None,

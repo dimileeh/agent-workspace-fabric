@@ -11,9 +11,10 @@ launch the same coding CLI against a prepared workspace checkout without
 Docker Compose.
 
 Secret *names* may be passed as env-passthrough intent (e.g.
-``CODEX_API_KEY``); secret *values* are NEVER included — the hosted runtime
-resolves them out-of-band. Implementations MUST stream the prompt via stdin
-(``prompt_stdin``), never argv, and MUST NOT log or persist secret values.
+``CODEX_API_KEY``); cross-name env aliases may be passed as source/target
+names; secret *values* are NEVER included — the hosted runtime resolves them
+out-of-band. Implementations MUST stream the prompt via stdin (``prompt_stdin``),
+never argv, and MUST NOT log or persist secret values.
 """
 
 from __future__ import annotations
@@ -46,7 +47,10 @@ class AgentRuntimeExecRequest:
     against a prepared workspace checkout. Secret *names* may be passed as
     env-passthrough intent (e.g. ``CODEX_API_KEY``); secret *values* are
     NEVER included — the hosted runtime resolves them out-of-band from
-    ``env_passthrough_names``.
+    ``env_passthrough_names``. ``env_passthrough_aliases`` carries
+    ``(target_name, source_name)`` pairs for Compose placeholders such as
+    ``TARGET: ${SOURCE}``; hosted executors resolve ``source_name`` out-of-band
+    and inject it into the job as ``target_name``.
 
     Hosted Codex contract: ``env_passthrough_names`` should include
     ``CODEX_API_KEY`` so a hosted executor can resolve and inject it.
@@ -85,6 +89,7 @@ class AgentRuntimeExecRequest:
     model: str | None
     effort: str | None
     env_passthrough_names: tuple[str, ...] = ()
+    env_passthrough_aliases: tuple[tuple[str, str], ...] = ()
     profile_env: tuple[tuple[str, str], ...] = ()
     wall_timeout_seconds: float | None = None
     idle_timeout_seconds: float | None = None
@@ -120,7 +125,8 @@ class AgentRuntimeExecutor(Protocol):
     A hosted AWF Cloud deployment implements this with Kubernetes Jobs.
     Core ships no Kubernetes implementation. Implementations MUST stream the
     prompt via stdin/context, never argv, and MUST NOT log or persist secret
-    values (resolve them out-of-band from ``env_passthrough_names``).
+    values (resolve them out-of-band from ``env_passthrough_names`` and
+    ``env_passthrough_aliases``).
     ``request.profile_env`` carries literal profile-owned env values the
     executor injects directly (not worker-resolved); those are non-secret
     profile configuration (e.g. ``OLLAMA_HOST``) and may be set on the job env.

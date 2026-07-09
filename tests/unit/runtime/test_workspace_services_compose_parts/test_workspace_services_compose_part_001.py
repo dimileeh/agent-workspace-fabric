@@ -23,6 +23,7 @@ from awf.profiles.compose import (
     agent_environment_with_legacy_host_auth,
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
+    hosted_profile_env_passthrough_aliases,
     hosted_profile_env_passthrough_names,
     profile_agent_environment,
     profile_app_endpoint_environment,
@@ -1323,11 +1324,9 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
     resolved the target by name and found nothing (the worker env has the
     *source* name, not the target). Only a same-name bare slot (the exact form
     Core injects via ``agent_environment_with_legacy_host_auth``) takes the
-    passthrough path; a cross-name bare slot stays excluded so the local
-    container's worker-resolved value is not silently dropped from the hosted
-    surface (the source-to-target aliasing is handled out-of-band by the
-    profile's secret-lease / token-alias machinery, not by bare-name
-    passthrough).
+    passthrough path; a cross-name bare slot stays excluded from target-name
+    passthrough and is carried as explicit source-to-target alias metadata
+    instead.
     """
     from awf.profiles.compose import literal_profile_env_from_compose
 
@@ -1348,6 +1347,11 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
                             # Same-name bare reference (Core-injected form) ->
                             # stays in passthrough (worker value resolves by name).
                             "OLLAMA_HOST": "${OLLAMA_HOST}",
+                            # Non-alias forms must not appear in the alias list.
+                            "UNSET_ALIAS": "${UNSET_SOURCE}",
+                            "MIXED_ALIAS": "prefix-${MY_ANTHROPIC_TOKEN}",
+                            "LITERAL_VALUE": "literal",
+                            "PASSTHROUGH_SLOT": None,
                         },
                     }
                 }
@@ -1362,6 +1366,10 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
         "OLLAMA_HOST",
         "MY_ANTHROPIC_TOKEN",
         "AWS_DEFAULT_REGION",
+        "UNSET_ALIAS",
+        "MIXED_ALIAS",
+        "LITERAL_VALUE",
+        "PASSTHROUGH_SLOT",
     )
     worker_env = {
         "MY_ANTHROPIC_TOKEN": "sk-ant-secret",
@@ -1380,6 +1388,10 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
     # Same-name bare reference stays in passthrough (the Core-injected form;
     # the hosted executor resolves the worker value by name).
     assert "OLLAMA_HOST" in filtered
+    assert "UNSET_ALIAS" not in filtered
+    assert "MIXED_ALIAS" not in filtered
+    assert "LITERAL_VALUE" not in filtered
+    assert "PASSTHROUGH_SLOT" in filtered
 
     # The cross-name bare slots are NOT carried in profile_env (worker-resolved;
     # carrying the worker value would embed a secret), and the same-name slot is
@@ -1389,6 +1401,19 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
     assert "ANTHROPIC_API_KEY" not in carried
     assert "AWS_REGION" not in carried
     assert "OLLAMA_HOST" not in carried
+    assert "UNSET_ALIAS" not in carried
+    assert "MIXED_ALIAS" not in carried
+    assert carried["LITERAL_VALUE"] == "literal"
+    assert "PASSTHROUGH_SLOT" not in carried
+
+    aliases = hosted_profile_env_passthrough_aliases(
+        compose_file,
+        worker_env=worker_env,
+    )
+    assert aliases == (
+        ("ANTHROPIC_API_KEY", "MY_ANTHROPIC_TOKEN"),
+        ("AWS_REGION", "AWS_DEFAULT_REGION"),
+    )
 
 
 @pytest.mark.unit

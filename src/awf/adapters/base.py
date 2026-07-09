@@ -44,6 +44,7 @@ from awf.profiles.compose import (
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
     hosted_github_token_passthrough_names,
+    hosted_profile_env_passthrough_aliases,
     hosted_profile_env_passthrough_names,
     literal_profile_env_from_compose,
 )
@@ -471,6 +472,11 @@ class AgentAdapter(ABC):
             compose_file,
             compose_env=compose_env,
         )
+        env_passthrough_aliases = await asyncio.to_thread(
+            hosted_profile_env_passthrough_aliases,
+            compose_file,
+            compose_env=compose_env,
+        )
         if profile_env_passthrough_names:
             # Include non-adapter profile env secrets that local Compose
             # resolved at stack launch (e.g. ``NPM_TOKEN: ${NPM_TOKEN}``). The
@@ -568,6 +574,7 @@ class AgentAdapter(ABC):
             model=selected_model,
             effort=self._default_effort,
             env_passthrough_names=env_passthrough_names,
+            env_passthrough_aliases=env_passthrough_aliases,
             profile_env=profile_env,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
@@ -585,6 +592,9 @@ class AgentAdapter(ABC):
             source=log_source,
             prompt_bytes=len(prompt_input),
             env_passthrough_names=list(env_passthrough_names),
+            env_passthrough_aliases=[
+                {"target": target, "source": source} for target, source in env_passthrough_aliases
+            ],
             # Log profile_env *keys* only — values are literal profile config
             # (e.g. an Ollama daemon URL) but never secret placeholders; still,
             # a value could be sensitive config, so do not log values.

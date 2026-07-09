@@ -318,6 +318,49 @@ class TestNonCodexHostedCredentials:
         assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
 
     @pytest.mark.unit
+    async def test_hosted_request_carries_cross_name_env_secret_aliases(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cross-name env secret leases keep source-to-target metadata for hosted runs.
+
+        Local Compose resolves ``ANTHROPIC_API_KEY: ${MY_ANTHROPIC_TOKEN}`` at
+        stack launch, so the agent container receives ``ANTHROPIC_API_KEY`` even
+        though the worker secret source is named ``MY_ANTHROPIC_TOKEN``. Hosted
+        execution cannot recover that from target-name passthrough, and
+        ``profile_env`` must not carry the secret value, so the request exposes
+        a names-only alias for the hosted executor to resolve out-of-band.
+        """
+        compose_file = _write_compose(
+            tmp_path,
+            environment={
+                "ANTHROPIC_API_KEY": "${MY_ANTHROPIC_TOKEN}",
+                "NPM_TOKEN": "${NPM_TOKEN}",
+            },
+        )
+        monkeypatch.setenv("MY_ANTHROPIC_TOKEN", _SECRET_VALUE)
+        monkeypatch.setenv("NPM_TOKEN", "npm_worker_secret")
+        adapter = _build(ClaudeCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert "ANTHROPIC_API_KEY" not in request.env_passthrough_names
+        assert "NPM_TOKEN" in request.env_passthrough_names
+        assert request.env_passthrough_aliases == (("ANTHROPIC_API_KEY", "MY_ANTHROPIC_TOKEN"),)
+        assert "ANTHROPIC_API_KEY" not in dict(request.profile_env)
+        blob = (
+            request.prompt_stdin.decode("utf-8", "replace")
+            + "\x00".join(request.cli_args)
+            + "\x00".join(request.env_passthrough_names)
+            + "\x00".join(
+                f"{target}={source}" for target, source in request.env_passthrough_aliases
+            )
+            + "\x00".join(f"{key}={value}" for key, value in request.profile_env)
+        )
+        assert _SECRET_VALUE not in blob
+        assert "npm_worker_secret" not in blob
+        assert "${MY_ANTHROPIC_TOKEN}" not in blob
+        assert not any("=" in name for name in request.env_passthrough_names)
+
+    @pytest.mark.unit
     async def test_hosted_passthrough_suppresses_profile_owned_auth_slot(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
