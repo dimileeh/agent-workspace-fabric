@@ -12,6 +12,7 @@ from urllib.parse import urlunsplit
 import yaml
 
 from awf.node.compose_manager import ComposeService
+from awf.profiles.compose_postgres_env import try_compose_agent_env_and_postgres_passwords
 from awf.profiles.lint import profile_service_volume_lint_errors
 from awf.profiles.models import (
     EndpointVisibility,
@@ -20,7 +21,6 @@ from awf.profiles.models import (
     WorkspaceProfile,
     _normalized_endpoint_env_name,
 )
-from awf.service.environment import compose_env_file_values
 
 AGENT_AUTH_ENV_VARS = (
     # Codex/OpenAI static-token fallback auth. Prefer isolated ~/.codex copies
@@ -329,6 +329,11 @@ def _endpoint_url(endpoint: ProfileAppEndpoint, path: str) -> str:
 _GIT_CONFIG_COUNT_KEY = "GIT_CONFIG_COUNT"
 _GIT_CONFIG_KEY_PREFIX = "GIT_CONFIG_KEY_"
 _GIT_CONFIG_VALUE_PREFIX = "GIT_CONFIG_VALUE_"
+_GIT_ASKPASS_KEY = "GIT_ASKPASS"
+_GIT_TERMINAL_PROMPT_KEY = "GIT_TERMINAL_PROMPT"
+_GIT_TERMINAL_PROMPT_FAIL_FAST = "0"
+_BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
+_BITBUCKET_AGENT_INSTEADOF_KEY = "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
 
 
 def _is_git_config_protocol_key(key: str) -> bool:
@@ -699,236 +704,6 @@ def _try_agent_environment_from_compose_file(
     if not isinstance(agent, Mapping):
         return None
     return _compose_environment_mapping(agent.get("environment"))
-
-
-def _try_compose_agent_env_and_postgres_passwords(
-    compose_file: Path,
-    *,
-    worker_env: Mapping[str, str],
-) -> tuple[dict[str, str] | None, frozenset[str]]:
-    """Parse the compose file once, returning agent env and resolved DB passwords.
-
-    Returns ``(agent_env, postgres_passwords)`` where ``agent_env`` is ``None``
-    when the compose is unreadable or has no agent service (mirrors
-    ``_try_agent_environment_from_compose_file``) and ``postgres_passwords`` is
-    empty when no service declares ``POSTGRES_PASSWORD``). Parsing once avoids
-    a second read/parse of the same file when ``literal_profile_env_from_compose``
-    needs both the agent env and the rendered postgres password for redaction.
-
-    ``POSTGRES_PASSWORD`` is collected from *every* compose service, not only a
-    service literally named ``postgres``, and *all* distinct resolved values are
-    returned (not only the first). A valid custom profile may name its database
-    sidecar ``db`` / ``database`` (or anything else) while still setting
-    ``POSTGRES_PASSWORD`` and expanding that same password into the agent env
-    ``DATABASE_URL`` / ``AWF_DATABASE_URL``. Looking up only
-    ``services["postgres"]`` would leave the password set empty for such a profile
-    and ``literal_profile_env_from_compose`` would carry the rendered DB URL in
-    ``profile_env``, leaking the workspace credential to the hosted executor
-    despite the secret-free contract. Scanning all services tracks the rendered
-    secret source independent of the service name.
-
-    The collector also reads each service's ``env_file`` declarations. ComposeManager
-    renders a profile service's ``env_file`` verbatim into the rendered compose file,
-    and Docker Compose loads that file to populate the service's environment at
-    stack launch — including ``POSTGRES_PASSWORD`` when a profile keeps its DB
-    password in an ``env_file`` instead of the inline ``environment`` map. Inspecting
-    only the inline map would leave ``postgres_passwords`` empty for such a profile,
-    and ``literal_profile_env_from_compose`` would carry the rendered agent env
-    ``DATABASE_URL`` / ``AWF_DATABASE_URL`` (which embed the same password) in
-    ``profile_env``, leaking the workspace credential to a hosted executor despite
-    the secret-free contract (PR #751 thread PRRT_kwDOSJAM6s6PZuE2). The env-file
-    values are parsed with ``compose_env_file_values`` (mirroring Compose's
-    interpolation rules) and ``POSTGRES_PASSWORD`` from each file is added to the
-    redaction set, resolved against ``worker_env`` like an inline value. Relative
-    ``env_file`` paths are resolved against the compose file's parent directory
-    (matching Docker Compose's documented resolution rule) before parsing, so a
-    profile keeping its DB password in a relative ``env_file`` (e.g. ``./db.env``)
-    is found even though ComposeManager writes the rendered compose file under a
-    per-workspace compose directory separate from the worker process cwd (PR #751
-    thread PRRT_kwDOSJAM6s6PaMeK). A missing or unreadable env_file contributes
-    nothing (best-effort: the inline env is the authoritative rendered source, so a
-    missing env_file does not fail closed).
-
-    Keeping only the first declared password (the previous behaviour) is also
-    unsound when a profile runs several DB sidecars with *different* passwords:
-    a rendered agent env value (e.g. a second service's ``WAREHOUSE_URL``) that
-    embeds a later service's password would slip past a redaction that only
-    compares against the first service's password. Collecting every declared
-    value redacts each independently.
-
-    Each declared ``POSTGRES_PASSWORD`` is resolved against ``worker_env`` with
-    ``_compose_resolve_value`` before redaction so a service that expresses its
-    password via Compose interpolation/defaults (e.g.
-    ``${POSTGRES_PASSWORD:-fallback}`` or ``${POSTGRES_PASSWORD}``) redacts the
-    same concrete value Docker Compose injects into the local agent container at
-    stack launch. The raw ``${...}`` placeholder string is also tracked as a
-    redaction target so a rendered agent env value that still carries the
-    unexpanded placeholder (e.g. when ComposeManager did not expand that
-    particular reference) is still redacted. Worker-resolved forms whose concrete
-    value cannot be recovered here (``${NAME}`` with ``NAME`` set, or a defaulted
-    form with ``NAME`` set) contribute only the raw placeholder string: the
-    resolved secret is a worker value that must never be carried in
-    ``profile_env``, and the rendered compose file ComposeManager writes already
-    expands ``${AWF_POSTGRES_PASSWORD}`` into a literal for the common case.
-    """
-    try:
-        payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError, UnicodeDecodeError):
-        return None, frozenset()
-    if not isinstance(payload, Mapping):
-        return None, frozenset()
-    services = payload.get("services")
-    if not isinstance(services, Mapping):
-        return None, frozenset()
-    agent = services.get("agent")
-    agent_env = (
-        _compose_environment_mapping(agent.get("environment"))
-        if isinstance(agent, Mapping)
-        else None
-    )
-    postgres_passwords: set[str] = set()
-    for service in services.values():
-        if not isinstance(service, Mapping):
-            continue
-        service_env = _compose_environment_mapping(service.get("environment"))
-        # Collect ``POSTGRES_PASSWORD`` from the inline ``environment`` map and
-        # from any ``env_file`` the service references. ComposeManager renders a
-        # profile service's ``env_file`` verbatim into the rendered compose file,
-        # and Docker Compose loads it to populate the service env at stack launch —
-        # so an env-file-declared ``POSTGRES_PASSWORD`` is the same rendered secret
-        # source as an inline one. Both are tracked for redaction (PR #751 thread
-        # PRRT_kwDOSJAM6s6PZuE2).
-        _collect_postgres_password(
-            service_env.get("POSTGRES_PASSWORD"),
-            postgres_passwords,
-            worker_env=worker_env,
-        )
-        for env_file_path in _compose_service_env_file_paths(
-            service.get("env_file"), compose_dir=compose_file.parent
-        ):
-            try:
-                env_file_env = compose_env_file_values(env_file_path, environ=worker_env)
-            except (OSError, UnicodeDecodeError):
-                continue
-            _collect_postgres_password(
-                env_file_env.get("POSTGRES_PASSWORD"),
-                postgres_passwords,
-                worker_env=worker_env,
-            )
-    return agent_env, frozenset(postgres_passwords)
-
-
-def _compose_service_env_file_paths(
-    env_file: object, *, compose_dir: Path | None = None
-) -> tuple[Path, ...]:
-    """Return the ``env_file`` paths declared on a compose service.
-
-    Compose accepts ``env_file`` as a single path string or a list of paths
-    (and a mapping form with a ``path`` key). ComposeManager renders a profile
-    service's ``env_file`` as a single-item list of the resolved workspace path
-    (see ``workspace.base.yml.j2``), so both shapes are handled here. A missing
-    or unreadable file is tolerated by the caller.
-
-    Relative paths are resolved against the compose file's parent directory
-    (matching Docker Compose's documented resolution rule) when ``compose_dir``
-    is supplied, so a profile that keeps its DB password in a relative
-    ``env_file`` (e.g. ``./db.env``) is looked up from the compose directory
-    rather than the worker process cwd. Absolute paths are kept verbatim
-    (PR #751 thread PRRT_kwDOSJAM6s6PaMeK).
-    """
-    paths: list[Path] = []
-    raw_paths: list[str] = []
-    if isinstance(env_file, str):
-        raw_paths.append(env_file)
-    elif isinstance(env_file, list):
-        for item in env_file:
-            if isinstance(item, str):
-                raw_paths.append(item)
-            elif isinstance(item, Mapping):
-                raw = item.get("path")
-                if isinstance(raw, str):
-                    raw_paths.append(raw)
-    for raw in raw_paths:
-        path = Path(raw)
-        if not path.is_absolute() and compose_dir is not None:
-            path = compose_dir / path
-        paths.append(path)
-    return tuple(paths)
-
-
-def _collect_postgres_password(
-    raw_password: str | None,
-    postgres_passwords: set[str],
-    *,
-    worker_env: Mapping[str, str],
-) -> None:
-    """Resolve and track one declared ``POSTGRES_PASSWORD`` for redaction.
-
-    Shared by the inline ``environment`` and ``env_file`` collection paths so
-    both apply the same redaction rules: a pass-through slot / explicit empty is
-    skipped, the raw declared value is always a redaction target, and a
-    worker-resolvable form contributes the concrete worker value (when recoverable)
-    so a rendered agent env DB URL embedding the resolved secret is redacted too.
-    """
-    # An explicit empty (``POSTGRES_PASSWORD: ""`` / ``=``) carries no secret and
-    # is skipped (``not raw_password`` covers ``""``).
-    #
-    # A pass-through slot (``POSTGRES_PASSWORD:`` / ``: null`` / list bare name)
-    # is normalized to the :data:`_COMPOSE_PASSTHROUGH` sentinel. Unlike an
-    # explicit empty, Docker Compose resolves a pass-through slot from the
-    # worker shell at stack launch, so the local agent container receives the
-    # concrete worker password — and a rendered agent env DB URL embedding that
-    # resolved value carries the workspace credential. Resolving the slot from
-    # ``worker_env["POSTGRES_PASSWORD"]`` here (the same key Compose resolves the
-    # slot against) redacts the rendered URL the same way the
-    # ``WORKER_RESOLVED_SLOT`` / ``WORKER_RESOLVED_DEFAULTED`` branches do. The
-    # raw placeholder string is the sentinel (never carried in
-    # ``profile_env``), and the redaction set is never carried in
-    # ``profile_env`` — it only marks which agent env values to skip — so
-    # recovering the concrete worker value here only prevents a secret-bearing
-    # URL from reaching the hosted request object (PR #751 thread
-    # PRRT_kwDOSJAM6s6PjBsM).
-    if not raw_password:
-        return
-    if raw_password == _COMPOSE_PASSTHROUGH:
-        resolved = worker_env.get("POSTGRES_PASSWORD")
-        if resolved:
-            postgres_passwords.add(resolved)
-        return
-    # The raw declared value (literal or ``${...}`` placeholder) is always a
-    # redaction target so an agent env value carrying the unexpanded form is
-    # still redacted.
-    postgres_passwords.add(raw_password)
-    resolved, resolution = _compose_resolve_value(raw_password, worker_env=worker_env)
-    if resolution is _ComposeEnvResolution.LITERAL and resolved:
-        postgres_passwords.add(resolved)
-    elif resolution is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED:
-        # A defaulted/required form with the variable *set* in the worker env
-        # resolves to the worker value at stack launch. The redaction set is
-        # only ever used for substring matching to *skip* agent env values —
-        # it is never carried in ``profile_env`` — so it is safe (and
-        # necessary) to include the concrete worker value here. Without it a
-        # rendered DB URL embedding the resolved worker password would slip
-        # past redaction.
-        concrete = _compose_concrete_worker_password(raw_password, worker_env=worker_env)
-        if concrete:
-            postgres_passwords.add(concrete)
-    elif resolution is _ComposeEnvResolution.WORKER_RESOLVED_SLOT:
-        # A bare ``${NAME}`` / ``$NAME`` slot (no default operator) resolves to
-        # the worker value at stack launch too, so a rendered agent env DB URL
-        # embedding the *resolved* worker password carries the workspace
-        # credential. Tracking only the raw ``${...}`` placeholder string (added
-        # above) misses the expanded secret, and the URL slips past substring
-        # redaction into ``profile_env``. Recover the concrete worker value the
-        # same way the defaulted branch does so a bare-slot DB URL is redacted
-        # identically (PR #751 thread PRRT_kwDOSJAM6s6PaFeB). The redaction set is
-        # never carried in ``profile_env`` (worker-resolved values are skipped
-        # from carry), so recovering the worker secret here only marks which
-        # agent env values to skip — it does not violate the no-secret-values
-        # contract.
-        concrete = _compose_concrete_worker_password(raw_password, worker_env=worker_env)
-        if concrete:
-            postgres_passwords.add(concrete)
 
 
 def _try_agent_environment_keys_from_compose_file(
@@ -1313,6 +1088,55 @@ def _hosted_name_only_credential_identifier_keys(
     return frozenset(keys)
 
 
+def _has_mount_backed_bitbucket_askpass(
+    compose_env: Mapping[str, str],
+    *,
+    worker_env: Mapping[str, str],
+) -> bool:
+    raw = compose_env.get(_GIT_ASKPASS_KEY)
+    if raw is None or raw == _COMPOSE_PASSTHROUGH:
+        return False
+    expanded, resolution = _compose_resolve_value(raw, worker_env=worker_env)
+    return resolution is _ComposeEnvResolution.LITERAL and expanded == _BITBUCKET_ASKPASS_TARGET
+
+
+def _hosted_git_config_profile_env(
+    compose_env: Mapping[str, str],
+    *,
+    worker_env: Mapping[str, str],
+    skip_bitbucket_agent_rewrites: bool,
+) -> tuple[tuple[str, str], ...]:
+    entries, _others = _split_git_config_entries(tuple(compose_env.items()))
+    carried_entries: list[tuple[str, str]] = []
+    for config_key_raw, config_value_raw in entries:
+        config_key, key_resolution = _compose_resolve_value(
+            config_key_raw,
+            worker_env=worker_env,
+        )
+        config_value, value_resolution = _compose_resolve_value(
+            config_value_raw,
+            worker_env=worker_env,
+        )
+        if (
+            key_resolution is not _ComposeEnvResolution.LITERAL
+            or value_resolution is not _ComposeEnvResolution.LITERAL
+        ):
+            continue
+        if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
+            continue
+        carried_entries.append((config_key, config_value))
+
+    if not carried_entries:
+        return ()
+
+    pairs: list[tuple[str, str]] = []
+    for index, (config_key, config_value) in enumerate(carried_entries):
+        pairs.append((f"{_GIT_CONFIG_KEY_PREFIX}{index}", config_key))
+        pairs.append((f"{_GIT_CONFIG_VALUE_PREFIX}{index}", config_value))
+    pairs.append((_GIT_CONFIG_COUNT_KEY, str(len(carried_entries))))
+    return tuple(pairs)
+
+
 # Compose env-value interpolation / resolution machinery lives in
 # ``awf.profiles.compose_env`` (extracted to keep this file under the
 # maintainability line limit). The names are re-imported here so every existing
@@ -1461,7 +1285,7 @@ def literal_profile_env_from_compose(
     """
     env = os.environ if worker_env is None else worker_env
     if compose_env is None:
-        compose_env, file_postgres_passwords = _try_compose_agent_env_and_postgres_passwords(
+        compose_env, file_postgres_passwords = try_compose_agent_env_and_postgres_passwords(
             compose_file,
             worker_env=env,
         )
@@ -1505,6 +1329,19 @@ def literal_profile_env_from_compose(
         compose_env,
         worker_env=env,
     )
+    mount_backed_bitbucket_askpass = _has_mount_backed_bitbucket_askpass(
+        compose_env,
+        worker_env=env,
+    )
+    hosted_git_config_profile_env = (
+        _hosted_git_config_profile_env(
+            compose_env,
+            worker_env=env,
+            skip_bitbucket_agent_rewrites=True,
+        )
+        if mount_backed_bitbucket_askpass
+        else ()
+    )
     carried: list[tuple[str, str]] = []
     for key, raw in compose_env.items():
         # A Compose pass-through slot (``environment: [NAME]``, ``NAME:`` /
@@ -1533,9 +1370,17 @@ def literal_profile_env_from_compose(
             continue
         if _expanded_value_bears_postgres_password(expanded, postgres_passwords):
             continue
+        if mount_backed_bitbucket_askpass:
+            if key == _GIT_ASKPASS_KEY and expanded == _BITBUCKET_ASKPASS_TARGET:
+                continue
+            if key == _GIT_TERMINAL_PROMPT_KEY and expanded == _GIT_TERMINAL_PROMPT_FAIL_FAST:
+                continue
+            if _is_git_config_protocol_key(key):
+                continue
         if key in auth_secret_keys:
             continue
         if key in name_only_credential_identifier_keys:
             continue
         carried.append((key, expanded))
+    carried.extend(hosted_git_config_profile_env)
     return tuple(carried)
