@@ -7,9 +7,11 @@ hostifies agent CLI runs (wired through the adapter), it does NOT hostify
 validation. The resumed monitor's ValidationRunner still builds
 ``docker compose exec`` commands for pre-push validation, and companion
 services still run in the compose stack, so the stack must be available even
-on the hosted path. ``monitor.run`` drives the loop via the injected
-executor (wired through ``get_adapter``). Local Core (executor is None) keeps
-the exact compose restart behavior.
+on the hosted path when Compose is available. If Compose cannot be recovered,
+hosted resume still reaches ``monitor.run`` so a no-Compose deployment can use
+its injected runtime backend instead of returning before the hosted adapter is
+constructed. Local Core (executor is None) keeps the exact compose restart
+behavior.
 """
 
 from __future__ import annotations
@@ -31,10 +33,11 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
+from awf.control.executor import monitor_handoff as monitor_handoff_module
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.node.compose_manager import ComposeManager
+from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationRunner
 from tests.postgres import postgres_test_engine
@@ -109,6 +112,38 @@ class _RecordingCompose:
         del project_name, compose_file, wait, compose_up_timeout_seconds
         del force_recreate, services
         self.ensure_project_up_calls.append(workspace_id)
+
+
+class _FailingCompose(_RecordingCompose):
+    """Records ``ensure_project_up`` calls and then fails the restart."""
+
+    async def ensure_project_up(
+        self,
+        *,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        wait: bool = True,
+        compose_up_timeout_seconds: int = 300,
+        force_recreate: bool = False,
+        services: tuple[str, ...] = (),
+    ) -> None:
+        await super().ensure_project_up(
+            project_name=project_name,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            wait=wait,
+            compose_up_timeout_seconds=compose_up_timeout_seconds,
+            force_recreate=force_recreate,
+            services=services,
+        )
+        raise ComposeOperationError(
+            operation="up",
+            returncode=1,
+            stdout="",
+            stderr="compose unavailable",
+            reason_code="COMPOSE_UP_FAILED",
+        )
 
 
 class _RecordingExecutor:
@@ -196,6 +231,44 @@ class TestResumeHandoffHostedSeam:
         # The agent runtime executor only hostifies agent CLI runs; validation
         # still uses docker compose exec, so the compose stack must be brought
         # back up even when an executor is injected.
+        assert compose.ensure_project_up_calls == [ws_id]
+        assert len(monitor.run_calls) == 1
+        assert monitor.run_calls[0]["workspace_id"] == ws_id
+
+    @pytest.mark.unit
+    async def test_injected_executor_continues_when_compose_restart_is_unusable(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        compose = _FailingCompose()
+        executor = _RecordingExecutor()
+        monitor = _RecordingMonitor()
+
+        async def _runtime_unusable(_compose_project: str) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            monitor_handoff_module,
+            "_compose_runtime_usable_after_restart_failure",
+            _runtime_unusable,
+        )
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=lambda *_args, **_kwargs: monitor,
+            agent_runtime_executor=executor,
+        )
+        executor_obj._compose = compose  # type: ignore[method-assign]
+
+        await executor_obj.resume_pr_monitor(ws_id)
+
         assert compose.ensure_project_up_calls == [ws_id]
         assert len(monitor.run_calls) == 1
         assert monitor.run_calls[0]["workspace_id"] == ws_id

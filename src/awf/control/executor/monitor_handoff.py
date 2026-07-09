@@ -302,14 +302,23 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             compose_file_path=compose_file_path,
             error=exc,
         )
-        if not await _compose_runtime_usable_after_restart_failure(compose_project):
-            return None
-        _log.warning(
-            "executor.resume_compose_up_failed_runtime_still_usable",
-            workspace_id=workspace_id,
-            compose_project_name=compose_project,
-            reason_code=exc.reason_code,
-        )
+        runtime_usable = await _compose_runtime_usable_after_restart_failure(compose_project)
+        if not runtime_usable:
+            if self._agent_runtime_executor is None:
+                return None
+            _log.warning(
+                "executor.resume_compose_up_failed_hosted_continue",
+                workspace_id=workspace_id,
+                compose_project_name=compose_project,
+                reason_code=exc.reason_code,
+            )
+        else:
+            _log.warning(
+                "executor.resume_compose_up_failed_runtime_still_usable",
+                workspace_id=workspace_id,
+                compose_project_name=compose_project,
+                reason_code=exc.reason_code,
+            )
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
