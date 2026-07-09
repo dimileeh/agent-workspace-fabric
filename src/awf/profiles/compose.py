@@ -1220,6 +1220,8 @@ def _hosted_git_config_profile_env(
             or value_resolution is not _ComposeEnvResolution.LITERAL
         ):
             continue
+        if _value_has_url_userinfo(config_key) or _value_has_url_userinfo(config_value):
+            continue
         if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
             continue
         carried_entries.append((config_key, config_value))

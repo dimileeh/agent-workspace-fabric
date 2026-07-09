@@ -92,6 +92,47 @@ def test_literal_profile_env_from_compose_reindexes_remaining_git_config(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_carried_git_config_url_userinfo(
+    tmp_path: Path,
+) -> None:
+    """Reindexed profile git config must keep embedded URL credentials out."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GIT_ASKPASS": "/run/awf/secrets/bb-askpass.sh",
+                            "GIT_CONFIG_KEY_0": "user.email",
+                            "GIT_CONFIG_VALUE_0": "agent@example.com",
+                            "GIT_CONFIG_KEY_1": ("url.https://github-token@github.com/.insteadOf"),
+                            "GIT_CONFIG_VALUE_1": "https://github.com/",
+                            "GIT_CONFIG_KEY_2": "url.https://github.com/.insteadOf",
+                            "GIT_CONFIG_VALUE_2": "https://github-token@github.com/",
+                            "GIT_CONFIG_COUNT": "3",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried["GIT_CONFIG_COUNT"] == "1"
+    assert carried["GIT_CONFIG_KEY_0"] == "user.email"
+    assert carried["GIT_CONFIG_VALUE_0"] == "agent@example.com"
+    assert "GIT_CONFIG_KEY_1" not in carried
+    assert "GIT_CONFIG_VALUE_1" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "github-token" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_preserves_profile_git_askpass_literal(
     tmp_path: Path,
 ) -> None:
