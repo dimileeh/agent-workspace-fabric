@@ -300,6 +300,45 @@ def test_literal_profile_env_from_compose_skips_placeholders(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
+    tmp_path: Path,
+) -> None:
+    """Non-auth secret-looking literals never enter hosted profile_env."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "NPM_TOKEN": "npm_profile_token",
+                            "CUSTOM_API_TOKEN": "custom_profile_token",
+                            "PAYMENTS_CLIENT_SECRET": "client_secret",
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            "AWS_REGION": "us-west-2",
+                            "APP_MODE": "ci",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert "NPM_TOKEN" not in carried
+    assert "CUSTOM_API_TOKEN" not in carried
+    assert "PAYMENTS_CLIENT_SECRET" not in carried
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert carried["AWS_REGION"] == "us-west-2"
+    assert carried["APP_MODE"] == "ci"
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_resolves_defaults_and_escapes(
     tmp_path: Path,
 ) -> None:
@@ -328,7 +367,11 @@ def test_literal_profile_env_from_compose_resolves_defaults_and_escapes(
                             "AWS_REGION_UNSET": "${AWS_REGION_UNSET:-us-west-2}",
                             # Mixed literal + unset-var default -> carried expanded.
                             "ENDPOINT": "https://${API_HOST:-api.example.com}/v1",
-                            # Multiple $$ escapes collapse to single $ each.
+                            # Multiple $$ escapes collapse to single $ each
+                            # for non-secret profile config.
+                            "ESCAPED_LITERAL": "pa$$word",
+                            # Secret-looking literals are redacted even when
+                            # they contain Compose escapes.
                             "PASSWORD": "pa$$word",
                             # :- with empty default and unset var -> carried as "".
                             "EMPTY_DEFAULT": "${MISSING:-}",
@@ -352,8 +395,10 @@ def test_literal_profile_env_from_compose_resolves_defaults_and_escapes(
     assert carried.get("AWS_REGION_UNSET") == "us-west-2"
     # Mixed literal + unset default -> expanded form carried.
     assert carried.get("ENDPOINT") == "https://api.example.com/v1"
-    # $$ collapses to a single $.
-    assert carried.get("PASSWORD") == "pa$word"
+    # $$ collapses to a single $ for non-secret config.
+    assert carried.get("ESCAPED_LITERAL") == "pa$word"
+    # Secret-looking literals are still redacted from hosted profile_env.
+    assert "PASSWORD" not in carried
     # Empty default with unset var -> carried as empty string (matches local).
     assert carried.get("EMPTY_DEFAULT") == ""
     # Bare $NAME worker-resolved -> skipped.

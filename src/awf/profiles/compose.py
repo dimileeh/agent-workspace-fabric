@@ -141,6 +141,31 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
 # them from name-only passthrough alongside the corresponding secret material.
 _HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS = frozenset({"AWS_ACCESS_KEY_ID"})
 
+_NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES = frozenset(
+    {
+        "GEMINI_API_KEY_AUTH_MECHANISM",
+    }
+)
+
+_SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
+    {
+        "CREDENTIAL",
+        "CREDENTIALS",
+        "PASSWD",
+        "PASSWORD",
+        "SECRET",
+        "TOKEN",
+    }
+)
+
+_SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS = frozenset(
+    {
+        ("ACCESS", "KEY"),
+        ("API", "KEY"),
+        ("PRIVATE", "KEY"),
+    }
+)
+
 
 # Ollama base-URL env keys in precedence order (highest first) — the OpenCode
 # launcher prelude and the worker-side Ollama preflight both resolve the daemon
@@ -153,6 +178,21 @@ _OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
 # ``GH_TOKEN`` before ``GITHUB_TOKEN`` (https://cli.github.com/manual/gh_help_environment),
 # so injecting a worker token under an earlier alias shadows a profile-owned later one.
 _GITHUB_TOKEN_ALIAS_PRECEDENCE = ("GH_TOKEN", "GITHUB_TOKEN")
+
+
+def _is_secret_like_profile_env_name(name: str) -> bool:
+    normalized = name.upper().replace("-", "_")
+    if normalized in _NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES:
+        return False
+    tokens = tuple(token for token in normalized.split("_") if token)
+    if any(token in _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS for token in tokens):
+        return True
+    return any(
+        (left, right) in _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS
+        for left, right in zip(tokens, tokens[1:], strict=False)
+    )
+
+
 _GITHUB_TOKEN_SOURCE_PRECEDENCE = ("AWF_GITHUB_TOKEN", *_GITHUB_TOKEN_ALIAS_PRECEDENCE)
 
 
@@ -1311,6 +1351,10 @@ def literal_profile_env_from_compose(
     ``env_passthrough_names`` by ``_profile_owned_auth_keys`` so the hosted
     executor resolves auth out-of-band; ``profile_env`` must not duplicate them
     as literal secrets (PR #751 thread PRRT_kwDOSJAM6s6PaYta). When
+    a profile declares an arbitrary non-auth secret-looking literal key (for
+    example ``NPM_TOKEN`` / ``CUSTOM_API_TOKEN``), that literal is skipped too:
+    hosted request transport is secret-free, and only non-secret profile config
+    literals should be copied into ``profile_env``. When
     the compose file is unreadable the result is empty (fail-closed: no values),
     matching ``_compose_env_passthrough_exclusions``.
 
@@ -1366,6 +1410,12 @@ def literal_profile_env_from_compose(
     # be logged/persisted as direct hosted job env. Non-empty literal values for
     # those names are skipped from ``profile_env`` and left in
     # ``env_passthrough_names`` for hosted out-of-band resolution.
+    #
+    # Non-auth profile literals with secret-looking env names are skipped for
+    # the same secret-free hosted request contract. This keeps arbitrary profile
+    # tokens such as ``NPM_TOKEN`` / ``CUSTOM_API_TOKEN`` out of
+    # ``AgentRuntimeExecRequest.profile_env`` without dropping non-secret
+    # profile config like ``OLLAMA_HOST`` / ``AWS_REGION``.
     auth_secret_keys = _AGENT_AUTH_SECRET_ENV_VARS & compose_env.keys()
     name_only_credential_identifier_keys = _hosted_name_only_credential_identifier_keys(
         compose_env,
@@ -1420,6 +1470,8 @@ def literal_profile_env_from_compose(
         if key in auth_secret_keys:
             continue
         if key in name_only_credential_identifier_keys:
+            continue
+        if _is_secret_like_profile_env_name(key):
             continue
         carried.append((key, expanded))
     carried.extend(hosted_git_config_profile_env)
