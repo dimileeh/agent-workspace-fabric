@@ -7,10 +7,9 @@ hostifies agent CLI runs (wired through the adapter), it does NOT hostify
 validation. The resumed monitor's ValidationRunner still builds
 ``docker compose exec`` commands for pre-push validation, and companion
 services still run in the compose stack, so the stack must be available even
-on the hosted path when Compose is available. If Compose cannot be recovered,
-hosted resume still reaches ``monitor.run`` so a no-Compose deployment can use
-its injected runtime backend instead of returning before the hosted adapter is
-constructed. Local Core (executor is None) keeps the exact compose restart
+on the hosted path. If Compose cannot be recovered, hosted resume stops before
+``monitor.run`` because validation and companion services would fail without
+the stack. Local Core (executor is None) keeps the exact compose restart
 behavior.
 """
 
@@ -236,7 +235,7 @@ class TestResumeHandoffHostedSeam:
         assert monitor.run_calls[0]["workspace_id"] == ws_id
 
     @pytest.mark.unit
-    async def test_injected_executor_continues_when_compose_restart_is_unusable(
+    async def test_injected_executor_stops_when_compose_restart_is_unusable(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -270,8 +269,7 @@ class TestResumeHandoffHostedSeam:
         await executor_obj.resume_pr_monitor(ws_id)
 
         assert compose.ensure_project_up_calls == [ws_id]
-        assert len(monitor.run_calls) == 1
-        assert monitor.run_calls[0]["workspace_id"] == ws_id
+        assert monitor.run_calls == []
 
     @pytest.mark.unit
     async def test_local_path_without_executor_still_restarts_compose(
