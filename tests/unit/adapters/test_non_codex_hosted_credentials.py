@@ -598,3 +598,33 @@ class TestNonCodexHostedCredentials:
         )
         assert "ghp_worker_secret" not in blob
         assert "ghp_worker_gh_token_secret" not in blob
+
+    @pytest.mark.unit
+    async def test_hosted_request_skips_worker_github_token_when_profile_owns_awf_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A profile-owned AWF source token is not shadowed on the hosted path."""
+        compose_file = _write_compose(
+            tmp_path,
+            environment={
+                "AWF_GITHUB_TOKEN": "ghp_profile_token_secret",
+                "OLLAMA_HOST": "http://ollama.profile:11434",
+            },
+        )
+        monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_worker_secret")
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert "AWF_GITHUB_TOKEN" not in request.env_passthrough_names
+        assert "AWF_GITHUB_TOKEN" not in dict(request.profile_env)
+        blob = (
+            request.prompt_stdin.decode("utf-8", "replace")
+            + "\x00".join(request.cli_args)
+            + "\x00".join(request.env_passthrough_names)
+            + "\x00".join(f"{k}={v}" for k, v in request.profile_env)
+        )
+        assert "ghp_worker_secret" not in blob
+        assert "ghp_profile_token_secret" not in blob
+        assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env

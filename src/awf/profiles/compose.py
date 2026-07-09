@@ -153,6 +153,7 @@ _OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
 # ``GH_TOKEN`` before ``GITHUB_TOKEN`` (https://cli.github.com/manual/gh_help_environment),
 # so injecting a worker token under an earlier alias shadows a profile-owned later one.
 _GITHUB_TOKEN_ALIAS_PRECEDENCE = ("GH_TOKEN", "GITHUB_TOKEN")
+_GITHUB_TOKEN_SOURCE_PRECEDENCE = ("AWF_GITHUB_TOKEN", *_GITHUB_TOKEN_ALIAS_PRECEDENCE)
 
 
 class ProfileServiceValidationError(ValueError):
@@ -459,7 +460,7 @@ def agent_environment_with_github_token(
 
 
 def _github_token_placeholder(source_env: Mapping[str, str]) -> str | None:
-    for name in ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+    for name in _GITHUB_TOKEN_SOURCE_PRECEDENCE:
         if source_env.get(name):
             return "${" + name + "}"
     return None
@@ -476,7 +477,7 @@ def _github_token_source_name(source_env: Mapping[str, str]) -> str | None:
     source and not the ``gh``-visible aliases (see
     :func:`hosted_github_token_passthrough_names`).
     """
-    for name in ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+    for name in _GITHUB_TOKEN_SOURCE_PRECEDENCE:
         if source_env.get(name):
             return name
     # Unreachable through the production call path: this helper mirrors
@@ -528,21 +529,22 @@ def hosted_github_token_passthrough_names(
     returned names carry no values, so this helper never embeds a worker
     secret (the placeholder string itself is never returned).
 
-    A compose-declared GitHub token alias is surfaced only when its value
-    equals the worker token placeholder (the same AWF source
-    ``agent_environment_with_github_token`` would inject, or a GitHub secret
-    lease that renders to the same source). When a profile owns a GitHub
-    token alias with a *different* token (e.g. a generic ``env`` secret lease
-    rendering ``GITHUB_TOKEN: ${MY_PROFILE_LEASE_TOKEN}``), NO worker alias or
-    source name is surfaced: the local Compose path's group-precedence rule
+    A compose-declared GitHub token source or alias allows worker-token
+    surfacing only when its value equals the worker token placeholder (the same
+    AWF source ``agent_environment_with_github_token`` would inject, or a
+    GitHub secret lease that renders to the same source). When a profile owns a
+    GitHub token source or alias with a *different* token (e.g. a literal
+    ``AWF_GITHUB_TOKEN`` or a generic ``env`` secret lease rendering
+    ``GITHUB_TOKEN: ${MY_PROFILE_LEASE_TOKEN}``), NO worker alias or source name
+    is surfaced: the local Compose path's group-precedence rule
     (``agent_environment_with_github_token``) ensures the profile-owned token
     wins, and surfacing a worker alias/source on the hosted path would let
-    ``gh`` fall back to the worker credential (the profile-owned alias cannot
-    be carried in ``env_passthrough_names`` — it is a worker-resolved secret
-    slot the hosted path resolves via its own adapter contract, not a name
-    the hosted executor re-resolves from the worker). Surfacing nothing
-    preserves the existing no-profile-credential limitation for that edge case
-    without introducing a worker-token shadow.
+    ``gh`` fall back to the worker credential (the profile-owned name cannot be
+    carried in ``env_passthrough_names`` — it is a worker-resolved secret slot
+    the hosted path resolves via its own adapter contract, not a name the hosted
+    executor re-resolves from the worker). Surfacing nothing preserves the
+    existing no-profile-credential limitation for that edge case without
+    introducing a worker-token shadow.
 
     Returns an empty tuple when no worker GitHub token source is present
     (mirroring the local path, which injects nothing) or when the compose
@@ -566,19 +568,19 @@ def hosted_github_token_passthrough_names(
     compose_env = _try_agent_environment_from_compose_file(compose_file)
     if compose_env is None:
         return ()
-    # If any compose-declared GitHub token alias points at a different token
-    # than the worker source, the profile owns a distinct GitHub credential.
-    # Surface nothing so a worker alias cannot shadow it on the hosted path
-    # (the profile-owned alias itself is a worker-resolved secret slot the
-    # hosted path does not re-resolve from the worker env). A pass-through slot
-    # (raw value == :data:`_COMPOSE_PASSTHROUGH`) is worker-resolved, not
-    # profile-owned — the local Compose container received the worker shell
-    # value for that name — so it is NOT a distinct profile-owned token and
-    # does not trigger the group-suppression branch (PR #751 thread
-    # PRRT_kwDOSJAM6s6PZkRH).
-    for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE:
-        raw = compose_env.get(alias)
-        if alias in compose_env and raw != worker_placeholder and raw != _COMPOSE_PASSTHROUGH:
+    # If any compose-declared GitHub token source or alias points at a different
+    # token than the worker source, the profile owns a distinct GitHub
+    # credential. Surface nothing so a worker source/alias cannot shadow it on
+    # the hosted path (the profile-owned name itself is a worker-resolved secret
+    # slot the hosted path does not re-resolve from the worker env). A
+    # pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH`) is
+    # worker-resolved, not profile-owned — the local Compose container received
+    # the worker shell value for that name — so it is NOT a distinct
+    # profile-owned token and does not trigger the group-suppression branch (PR
+    # #751 thread PRRT_kwDOSJAM6s6PZkRH).
+    for token_name in _GITHUB_TOKEN_SOURCE_PRECEDENCE:
+        raw = compose_env.get(token_name)
+        if token_name in compose_env and raw != worker_placeholder and raw != _COMPOSE_PASSTHROUGH:
             return ()
     # Surface every alias whose value matches the worker token placeholder
     # (AWF-injected, or a GitHub lease rendering to the same source), plus

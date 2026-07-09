@@ -254,6 +254,40 @@ def test_hosted_github_token_passthrough_names_surfaces_source_once_when_source_
 
 
 @pytest.mark.unit
+def test_hosted_github_token_passthrough_names_skips_profile_owned_awf_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile-owned AWF source token is not shadowed by the worker source."""
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Profile owns the documented AWF source token.
+                            "AWF_GITHUB_TOKEN": "ghp_profile_token_secret",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_worker_secret")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    names = hosted_github_token_passthrough_names(compose_file)
+
+    assert names == ()
+
+
+@pytest.mark.unit
 def test_hosted_github_token_passthrough_names_skips_profile_owned_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
