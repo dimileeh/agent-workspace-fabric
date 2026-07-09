@@ -837,13 +837,30 @@ def _collect_postgres_password(
     worker-resolvable form contributes the concrete worker value (when recoverable)
     so a rendered agent env DB URL embedding the resolved secret is redacted too.
     """
-    # A pass-through slot (``POSTGRES_PASSWORD:`` / ``: null`` / list bare
-    # name) declares no value — Docker Compose resolves it from the worker
-    # shell — so it has no profile-declared literal/placeholder to redact.
-    # An explicit empty (``POSTGRES_PASSWORD: ""`` / ``=``) likewise carries
-    # no secret. Both are skipped (``not raw_password`` covers the explicit
-    # empty ``""``; the sentinel covers the pass-through slot).
-    if not raw_password or raw_password == _COMPOSE_PASSTHROUGH:
+    # An explicit empty (``POSTGRES_PASSWORD: ""`` / ``=``) carries no secret and
+    # is skipped (``not raw_password`` covers ``""``).
+    #
+    # A pass-through slot (``POSTGRES_PASSWORD:`` / ``: null`` / list bare name)
+    # is normalized to the :data:`_COMPOSE_PASSTHROUGH` sentinel. Unlike an
+    # explicit empty, Docker Compose resolves a pass-through slot from the
+    # worker shell at stack launch, so the local agent container receives the
+    # concrete worker password — and a rendered agent env DB URL embedding that
+    # resolved value carries the workspace credential. Resolving the slot from
+    # ``worker_env["POSTGRES_PASSWORD"]`` here (the same key Compose resolves the
+    # slot against) redacts the rendered URL the same way the
+    # ``WORKER_RESOLVED_SLOT`` / ``WORKER_RESOLVED_DEFAULTED`` branches do. The
+    # raw placeholder string is the sentinel (never carried in
+    # ``profile_env``), and the redaction set is never carried in
+    # ``profile_env`` — it only marks which agent env values to skip — so
+    # recovering the concrete worker value here only prevents a secret-bearing
+    # URL from reaching the hosted request object (PR #751 thread
+    # PRRT_kwDOSJAM6s6PjBsM).
+    if not raw_password:
+        return
+    if raw_password == _COMPOSE_PASSTHROUGH:
+        resolved = worker_env.get("POSTGRES_PASSWORD")
+        if resolved:
+            postgres_passwords.add(resolved)
         return
     # The raw declared value (literal or ``${...}`` placeholder) is always a
     # redaction target so an agent env value carrying the unexpanded form is
