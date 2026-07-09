@@ -606,7 +606,18 @@ def test_profile_base_url_still_allows_worker_ollama_host_exec_passthrough(
 def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_auth_keys(
     tmp_path: Path,
 ) -> None:
-    """Hosted passthrough names are filtered by the same profile-owned exclusions."""
+    """Hosted passthrough names are filtered by the same profile-owned exclusions.
+
+    Profile-owned auth *literals* (``CODEX_API_KEY: sk-profile`` /
+    ``ANTHROPIC_BASE_URL: https://...``) are excluded — their concrete value
+    reaches the hosted job via ``profile_env`` (or, for a secret literal, is
+    redacted and resolved out-of-band by the adapter contract). A bare
+    ``${NAME}`` slot is NOT a profile-owned literal — the worker env owns the
+    value and Docker Compose substitutes it at stack launch — so a bare
+    ``${OPENAI_API_KEY}`` whose variable is worker-set stays in passthrough for
+    hosted out-of-band resolution (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN); a bare
+    slot whose variable is unset stays excluded.
+    """
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         yaml.safe_dump(
@@ -635,13 +646,31 @@ def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_auth_keys(
         # passes through — it is not a profile-owned slot.
         "AWS_REGION",
     )
-    filtered = filter_hosted_env_passthrough_names(names, compose_file=compose_file)
+    # Explicit worker_env so the bare-slot result is deterministic (the ambient
+    # test env may carry OPENAI_API_KEY).
+    worker_env = {"OPENAI_API_KEY": "sk-secret"}
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env=worker_env
+    )
 
-    assert "OPENAI_API_KEY" not in filtered
+    # Bare ${OPENAI_API_KEY} with the variable worker-set -> stays in passthrough
+    # for hosted out-of-band resolution (worker value, not a profile literal).
+    assert "OPENAI_API_KEY" in filtered
+    # Profile-owned literal secret -> excluded (redacted from profile_env;
+    # resolved out-of-band by the adapter contract).
     assert "CODEX_API_KEY" not in filtered
+    # Profile-owned non-secret literal -> excluded (carried via profile_env).
     assert "ANTHROPIC_BASE_URL" not in filtered
+    # A name absent from the compose env block still passes through.
     assert "ANTHROPIC_API_KEY" in filtered
     assert "AWS_REGION" in filtered
+
+    # With the variable UNSET the bare slot stays excluded (out of scope; no
+    # worker value to resolve out-of-band — Compose substitutes "").
+    filtered_unset = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env={}
+    )
+    assert "OPENAI_API_KEY" not in filtered_unset
 
 
 @pytest.mark.unit
@@ -965,10 +994,15 @@ def test_filter_hosted_env_passthrough_names_parses_compose_once(
     monkeypatch.setattr(compose_module, "_try_agent_environment_from_compose_file", _counting_parse)
 
     names = ("OPENAI_API_KEY", "AWS_REGION", "ANTHROPIC_API_KEY")
-    filtered = filter_hosted_env_passthrough_names(names, compose_file=compose_file)
+    # Explicit worker_env so the bare-slot result is deterministic. With the
+    # variable set, the bare ``${OPENAI_API_KEY}`` slot stays in passthrough
+    # (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN); with it unset it is excluded.
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env={"OPENAI_API_KEY": "sk-secret"}
+    )
 
     assert parse_calls == 1
-    assert "OPENAI_API_KEY" not in filtered
+    assert "OPENAI_API_KEY" in filtered
     assert "AWS_REGION" not in filtered
     assert "ANTHROPIC_API_KEY" in filtered
 
@@ -1050,6 +1084,101 @@ def test_filter_hosted_env_passthrough_names_keeps_worker_resolved_defaulted(
 
 
 @pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
+    tmp_path: Path,
+) -> None:
+    """A bare ``${NAME}`` slot whose variable is worker-set stays in hosted passthrough.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6Pi7sN: Core injects bare Compose
+    placeholders for worker-present ``AGENT_AUTH_ENV_VARS`` keys the profile does
+    not already declare (``agent_environment_with_legacy_host_auth`` appends
+    ``NAME: ${NAME}`` when the worker env carries ``NAME``). Docker Compose
+    substitutes the worker value into the local agent container at stack launch.
+    On the hosted path ``literal_profile_env_from_compose`` skips the bare slot
+    (``WORKER_RESOLVED_SLOT`` — carrying the worker value would embed the
+    endpoint/secret in ``profile_env``), and
+    ``_filter_hosted_env_passthrough_names_from_compose_env`` previously excluded
+    the compose-declared name too (only pass-through slots and
+    worker-resolved-defaulted forms were removed from the baseline excluded set),
+    so ``AgentRuntimeExecRequest`` carried neither the value nor the name — even
+    though adapters like OpenCode advertise ``OLLAMA_HOST`` in
+    ``hosted_env_passthrough_names``. A hosted monitor-repair run therefore
+    launched without the daemon endpoint the same workspace had under Compose.
+
+    A bare slot whose variable is worker-set must stay in
+    ``env_passthrough_names`` for hosted out-of-band resolution, mirroring the
+    pass-through-slot (PRRT_kwDOSJAM6s6PY6Rn) and worker-resolved-defaulted
+    (PRRT_kwDOSJAM6s6PiGHK) fixes. A bare slot whose variable is UNSET stays
+    excluded (out of scope; Core only injects the bare form when the worker value
+    is present, and Compose substitutes "" for an unset bare reference).
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Bare ${NAME} with the variable worker-set ->
+                            # stays in passthrough (worker value resolved
+                            # out-of-band), NOT carried in profile_env.
+                            "OLLAMA_HOST": "${OLLAMA_HOST}",
+                            # Bare ${NAME} with the variable worker-set for a
+                            # secret auth key -> stays in passthrough too
+                            # (hosted executor resolves the worker credential
+                            # out-of-band, mirroring the local Compose run).
+                            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                            # Bare ${NAME} with the variable UNSET -> stays
+                            # excluded (out of scope; no divergence).
+                            "UNSET_ENDPOINT": "${UNSET_ENDPOINT}",
+                            # Pure literal -> excluded (carried via profile_env).
+                            "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = (
+        "OLLAMA_HOST",
+        "OPENAI_API_KEY",
+        "UNSET_ENDPOINT",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "ANTHROPIC_API_KEY",
+    )
+    worker_env = {"OLLAMA_HOST": "http://ollama:11434", "OPENAI_API_KEY": "sk-secret"}
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env=worker_env
+    )
+
+    # Bare ${NAME} with the variable worker-set -> stays in passthrough for
+    # hosted out-of-band resolution (Docker Compose injected the worker value at
+    # stack launch).
+    assert "OLLAMA_HOST" in filtered
+    assert "OPENAI_API_KEY" in filtered
+    # Bare ${NAME} with the variable UNSET -> stays excluded (out of scope).
+    assert "UNSET_ENDPOINT" not in filtered
+    # Pure literal -> excluded (carried via profile_env instead).
+    assert "ANTHROPIC_VERTEX_PROJECT_ID" not in filtered
+    # A name absent from the compose env block still passes through.
+    assert "ANTHROPIC_API_KEY" in filtered
+
+    # The bare worker-resolved slots are NOT carried in profile_env (carrying
+    # the worker value would embed the endpoint/secret); only their names are
+    # surfaced for hosted out-of-band resolution. The pure literal IS carried.
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env=worker_env)
+    carried = dict(profile_env)
+    assert "OLLAMA_HOST" not in carried
+    assert "OPENAI_API_KEY" not in carried
+    assert carried.get("ANTHROPIC_VERTEX_PROJECT_ID") == "proj-123"
+
+
+@pytest.mark.unit
 def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
     tmp_path: Path,
 ) -> None:
@@ -1099,7 +1228,10 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
                             "AWS_EMPTY_REGION": "",
                             # Pure literal -> carried via profile_env.
                             "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
-                            # Bare ${NAME} -> profile-owned secret slot, skipped.
+                            # Bare ${NAME} -> worker-resolved slot, skipped
+                            # from profile_env (carrying the worker value would
+                            # embed the secret); the name stays in passthrough
+                            # for hosted out-of-band resolution.
                             "OPENAI_API_KEY": "${OPENAI_API_KEY}",
                             # Empty interpolation default (unset var) -> carried
                             # as a literal empty string (the local container
@@ -1131,13 +1263,18 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
     assert "None" not in carried.values()
     # Pure literal is carried.
     assert carried.get("ANTHROPIC_VERTEX_PROJECT_ID") == "proj-123"
-    # Bare ${NAME} secret slot is skipped.
+    # Bare ${NAME} secret slot is skipped (worker-resolved; carrying the worker
+    # value would embed the secret in profile_env).
     assert "OPENAI_API_KEY" not in carried
     # Empty interpolation default is carried as a literal "".
     assert carried.get("EMPTY_DEFAULT") == ""
 
     # Pass-through slots stay in env_passthrough_names for hosted out-of-band
-    # resolution; literals and bare ${NAME} secret slots are excluded.
+    # resolution; profile-owned literals are excluded. A bare ``${NAME}`` slot
+    # whose variable is worker-set stays in passthrough too (the local container
+    # received the worker value at stack launch; the hosted executor resolves it
+    # out-of-band), mirroring the pass-through slot — PR #751 thread
+    # PRRT_kwDOSJAM6s6Pi7sN.
     names = (
         "AWS_REGION",
         "AWS_NULL_REGION",
@@ -1158,8 +1295,9 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
     assert "AWS_EMPTY_REGION" not in filtered
     # Pure literal -> excluded (carried via profile_env).
     assert "ANTHROPIC_VERTEX_PROJECT_ID" not in filtered
-    # Bare ${NAME} -> excluded (profile-owned secret slot).
-    assert "OPENAI_API_KEY" not in filtered
+    # Bare ${NAME} with the variable worker-set -> stays in passthrough for
+    # hosted out-of-band resolution (worker value, not a profile literal).
+    assert "OPENAI_API_KEY" in filtered
     # Empty interpolation default -> excluded (carried as literal "").
     assert "EMPTY_DEFAULT" not in filtered
     # A name absent from the compose env block still passes through.

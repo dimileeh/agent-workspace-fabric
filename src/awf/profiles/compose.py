@@ -1006,11 +1006,19 @@ def filter_hosted_env_passthrough_names(
     applies to ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME`` set (the local
     container received the worker value). Pure literals, unset defaults, and
     ``${NAME:+alt}`` / ``${NAME+alt}`` alternates stay excluded (their concrete
-    value reaches the hosted job via ``profile_env``), and bare ``${NAME}`` /
-    ``$NAME`` slots stay excluded (profile-owned secret slots resolved via the
-    adapter contract). ``worker_env`` (default ``os.environ``) supplies the worker
-    environment used to classify defaulted / required / alternate forms,
-    mirroring ``literal_profile_env_from_compose``.
+    value reaches the hosted job via ``profile_env``). A bare ``${NAME}`` /
+    ``$NAME`` single reference whose variable is worker-set stays in
+    ``env_passthrough_names`` for hosted out-of-band resolution (the local
+    container received the worker value at stack launch; carrying it would
+    embed the endpoint/secret), mirroring the pass-through slot fix — PR #751
+    thread PRRT_kwDOSJAM6s6Pi7sN. A bare slot whose variable is unset stays
+    excluded (Compose substitutes ``""``; out of scope), as do nested/mixed
+    worker-resolved forms (e.g. ``${X:-${SECRET}}`` / ``prefix-${NAME}``) whose
+    value is a profile-owned literal interpolating a worker value the hosted
+    executor cannot reconstruct from the name alone. ``worker_env`` (default
+    ``os.environ``) supplies the worker environment used to classify defaulted /
+    required / alternate / bare forms, mirroring
+    ``literal_profile_env_from_compose``.
     """
     compose_env = _try_agent_environment_from_compose_file(compose_file)
     env = os.environ if worker_env is None else worker_env
@@ -1042,18 +1050,27 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     worker value out-of-band. A name whose value resolves to ``LITERAL`` (a pure
     literal, an *explicit* empty value ``NAME: ""`` / ``NAME=``, a defaulted form
     with the variable unset, or an ``:+`` / ``+`` alternate form) IS excluded —
-    its concrete value reaches the hosted job via ``profile_env`` instead. See
-    ``filter_hosted_env_passthrough_names`` and PR #751 threads
+    its concrete value reaches the hosted job via ``profile_env`` instead. A
+    bare ``${NAME}`` / ``$NAME`` single reference whose variable is worker-set
+    is NOT excluded either: the local Compose container received the worker
+    value at stack launch, so the hosted executor must resolve it out-of-band
+    rather than drop the name (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN). A bare
+    slot whose variable is unset IS excluded (Compose substitutes ``""``; out
+    of scope), as are nested/mixed worker-resolved forms (e.g.
+    ``${X:-${SECRET}}`` / ``prefix-${NAME}``) — the hosted executor cannot
+    reconstruct a profile-owned literal interpolating a worker value from the
+    name alone. See ``filter_hosted_env_passthrough_names`` and PR #751 threads
     PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm / PRRT_kwDOSJAM6s6PYnJJ /
-    PRRT_kwDOSJAM6s6PY6Rn / PRRT_kwDOSJAM6s6PY8zB. A pass-through slot is removed
-    from the baseline ``_compose_env_passthrough_exclusions`` set even when its
-    name is in ``AGENT_AUTH_ENV_VARS`` (``_profile_owned_auth_keys`` treats any
-    auth key declared on the agent service as profile-owned regardless of
-    value); the local Compose container received the worker shell value, so the
-    hosted executor must resolve it out-of-band (PRRT_kwDOSJAM6s6PY6Rn). An
-    explicit empty value is NOT a pass-through slot (compose-go models it as a
-    non-nil pointer to ``""`` that overrides the worker value), so it stays
-    excluded and its literal ``""`` reaches the hosted job via ``profile_env``
+    PRRT_kwDOSJAM6s6PY6Rn / PRRT_kwDOSJAM6s6PY8zB / PRRT_kwDOSJAM6s6Pi7sN. A
+    pass-through slot is removed from the baseline
+    ``_compose_env_passthrough_exclusions`` set even when its name is in
+    ``AGENT_AUTH_ENV_VARS`` (``_profile_owned_auth_keys`` treats any auth key
+    declared on the agent service as profile-owned regardless of value); the
+    local Compose container received the worker shell value, so the hosted
+    executor must resolve it out-of-band (PRRT_kwDOSJAM6s6PY6Rn). An explicit
+    empty value is NOT a pass-through slot (compose-go models it as a non-nil
+    pointer to ``""`` that overrides the worker value), so it stays excluded
+    and its literal ``""`` reaches the hosted job via ``profile_env``
     (PRRT_kwDOSJAM6s6PY8zB).
     """
     excluded = _compose_env_passthrough_exclusions(compose_env)
@@ -1071,10 +1088,9 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # values (pure literals, an *explicit* empty ``NAME: ""`` / ``NAME=``
         # which Compose sets as a non-nil empty literal overriding the worker
         # value, unset defaults, ``:+`` / ``+`` alternates) are excluded — their
-        # defaults, ``:+`` / ``+`` alternates) are excluded — their concrete value
-        # reaches the hosted job via ``profile_env``. Bare ``${NAME}`` / ``$NAME``
-        # (``WORKER_RESOLVED_SLOT``) stay excluded — profile-owned secret slots
-        # the hosted path resolves via its adapter contract.
+        # concrete value reaches the hosted job via ``profile_env``. A bare
+        # ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose variable
+        # IS set in the worker env stays in passthrough too — see below.
         #
         # A pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH`) is
         # removed from the baseline ``_compose_env_passthrough_exclusions`` set
@@ -1123,12 +1139,59 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
         )
-        excluded = (excluded - passthrough_slots - worker_resolved_defaulted) | frozenset(
+        # A bare ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose
+        # variable IS set in the worker env resolves to the worker value at
+        # stack launch, exactly like a pass-through slot and a worker-resolved
+        # defaulted form. Core injects this exact form via
+        # ``agent_environment_with_legacy_host_auth`` (it appends
+        # ``NAME: ${NAME}`` for worker-present ``AGENT_AUTH_ENV_VARS`` keys the
+        # profile does not already declare), so a profile that owns only the
+        # lower-precedence Ollama key still surfaces a bare ``${OLLAMA_HOST}``
+        # slot the local container received the worker value for.
+        # ``literal_profile_env_from_compose`` skips ``WORKER_RESOLVED_SLOT``
+        # (carrying the worker value would embed the endpoint/secret in
+        # ``profile_env``), and the baseline excluded set treats any
+        # ``AGENT_AUTH_ENV_VARS`` key declared on the agent service as
+        # profile-owned (``_profile_owned_auth_keys``), so — just like the
+        # worker-resolved-defaulted auth case — the name would be excluded and
+        # the hosted executor would carry neither the value nor the name, even
+        # though adapters like OpenCode advertise ``OLLAMA_HOST`` in
+        # ``hosted_env_passthrough_names``. A hosted monitor-repair run would
+        # then launch without the daemon endpoint the same workspace has under
+        # Compose. Remove such names from the baseline excluded set first,
+        # mirroring the pass-through slot (PRRT_kwDOSJAM6s6PY6Rn) and
+        # worker-resolved-defaulted (PRRT_kwDOSJAM6s6PiGHK) fixes.
+        #
+        # Only a *bare single reference* (``${NAME}`` / ``$NAME`` — the exact
+        # form Core injects) qualifies. Nested forms (e.g.
+        # ``${X:-${SECRET}}``) and mixed forms (e.g. ``prefix-${NAME}``) also
+        # classify ``WORKER_RESOLVED_SLOT`` by propagation, but the local
+        # container received a profile-owned literal interpolating a worker
+        # value there, not a pure worker-resolved slot; the hosted executor
+        # cannot reconstruct that mixed value from the name alone, so they stay
+        # excluded (out of scope). A bare slot whose variable is UNSET stays
+        # excluded too: Compose substitutes "" for an unset bare reference,
+        # Core only injects the bare form when the worker value is present
+        # (``source_env.get(name)`` is truthy), and the unset ``${NAME:?err}``
+        # / ``${NAME?err}`` form would fail Compose at stack launch (unreachable
+        # for a running container). ``_compose_bare_reference_name`` returns the
+        # referenced variable only for a single bare reference; the ``in
+        # worker_env`` test gates on the local container actually receiving a
+        # worker value (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN).
+        worker_resolved_slots = frozenset(
             name
             for name, raw in compose_env.items()
             if raw != _COMPOSE_PASSTHROUGH
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
-            is not _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
+            is _ComposeEnvResolution.WORKER_RESOLVED_SLOT
+            and (bare_name := _compose_bare_reference_name(raw)) is not None
+            and bare_name in worker_env
+        )
+        keep = passthrough_slots | worker_resolved_defaulted | worker_resolved_slots
+        excluded = (excluded - keep) | frozenset(
+            name
+            for name, raw in compose_env.items()
+            if name not in keep and raw != _COMPOSE_PASSTHROUGH
         )
     return tuple(name for name in names if name not in excluded)
 
@@ -1152,6 +1215,7 @@ from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
     _COMPOSE_ENV_NAME_PATTERN,
     _COMPOSE_ESCAPED_DOLLAR,
     _COMPOSE_PASSTHROUGH,
+    _compose_bare_reference_name,
     _compose_braced_expression_end,
     _compose_concrete_worker_password,
     _compose_concrete_worker_password_braced,
@@ -1215,9 +1279,17 @@ def literal_profile_env_from_compose(
       which is a secret). The name stays in ``env_passthrough_names`` for hosted
       out-of-band resolution. An unset required form would fail Compose at stack
       launch, so that branch is unreachable for a running container.
-    - Bare ``${NAME}`` / ``$NAME`` forms are skipped (worker-resolved slots the
-      profile owns locally; the hosted path resolves credentials via its own
-      adapter contract, not by re-resolving ``${NAME}`` from the worker).
+    - Bare ``${NAME}`` / ``$NAME`` forms are skipped (worker-resolved slots;
+      the local container received the worker value at stack launch, and
+      carrying it would embed the endpoint/secret in ``profile_env``). A bare
+      single reference whose variable is worker-set stays in
+      ``env_passthrough_names`` for hosted out-of-band resolution, mirroring a
+      pass-through slot (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN); a bare slot whose
+      variable is unset stays excluded (Compose substitutes ``""``; out of
+      scope). Nested/mixed forms (e.g. ``${X:-${SECRET}}`` / ``prefix-${NAME}``)
+      also classify worker-resolved by propagation but stay excluded — the
+      hosted executor cannot reconstruct a profile-owned literal interpolating
+      a worker value from the name alone.
     - A Compose *pass-through* slot (``environment: [NAME]`` with no ``=``,
       ``NAME:`` / ``NAME: null``) is skipped (worker-resolved; Docker Compose
       took the value from the worker shell at stack launch) and the name stays

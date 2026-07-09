@@ -282,23 +282,50 @@ class TestNonCodexHostedCredentials:
 
     @pytest.mark.unit
     async def test_hosted_passthrough_suppresses_profile_owned_auth_slot(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A profile-owned auth/env slot must not be reintroduced by the hosted path.
+        """A bare ``${OPENAI_API_KEY}`` worker-resolved slot stays in hosted passthrough.
 
-        When the compose agent service already declares ``OPENAI_API_KEY`` (a
-        placeholder, a lease-rendered value, or a profile literal), the local
-        ``docker compose exec`` path suppresses it from exec-time ``-e``
-        passthrough. The hosted path must apply the same exclusion or the hosted
-        executor resolves an inherited worker credential the local path and
-        readiness overlay deliberately keep out of the agent environment.
+        The local ``docker compose exec`` path skips compose-declared auth keys
+        from exec-time ``-e`` passthrough because the *running container already
+        has them* — Docker Compose substituted ``${OPENAI_API_KEY}`` from the
+        worker shell at stack launch. The hosted (non-compose) path has no
+        compose env block, so it must surface the same name in
+        ``env_passthrough_names`` for the hosted executor to resolve the worker
+        credential out-of-band, mirroring the local Compose container. A profile-
+        owned auth *literal* (e.g. ``OPENAI_API_KEY: sk-profile``) is a separate
+        case: it is redacted from ``profile_env`` and excluded from passthrough
+        (the hosted executor resolves auth out-of-band via the adapter contract,
+        not by re-resolving a profile-owned secret literal).
+
+        Regression for PR #751 thread PRRT_kwDOSJAM6s6Pi7sN: previously a bare
+        ``${OPENAI_API_KEY}`` slot was excluded from passthrough AND skipped from
+        ``profile_env``, so the hosted job lost the worker credential the local
+        Compose container received at stack launch.
         """
         compose_file = _write_compose(tmp_path, environment={"OPENAI_API_KEY": "${OPENAI_API_KEY}"})
         adapter = _build(OpenCodeAdapter)
+        # Pin the worker env so the bare-slot result is deterministic regardless
+        # of the ambient test/CI environment: with the variable set the bare
+        # slot stays in passthrough; with it unset it is excluded.
+        monkeypatch.setenv("OPENAI_API_KEY", _SECRET_VALUE)
         request = await _run(adapter, compose_file=compose_file)
-        assert "OPENAI_API_KEY" not in request.env_passthrough_names
+        # Bare ${OPENAI_API_KEY} with the variable worker-set -> stays in
+        # passthrough for hosted out-of-band resolution (the local Compose
+        # container received the worker value at stack launch).
+        assert "OPENAI_API_KEY" in request.env_passthrough_names
+        # The worker secret value is never transported (names only).
+        assert _SECRET_VALUE not in "".join(f"{k}={v}" for k, v in request.profile_env)
         # Non-profile-owned provider key names still pass through.
         assert "ANTHROPIC_API_KEY" in request.env_passthrough_names
+
+        # With the variable UNSET the bare slot stays excluded (no worker value
+        # to resolve out-of-band; Compose substitutes "" for an unset bare
+        # reference). A fresh adapter/executor captures the unset call alone.
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        adapter_unset = _build(OpenCodeAdapter)
+        request_unset = await _run(adapter_unset, compose_file=compose_file)
+        assert "OPENAI_API_KEY" not in request_unset.env_passthrough_names
 
     @pytest.mark.unit
     async def test_hosted_passthrough_suppresses_shadowing_worker_ollama_base_url(

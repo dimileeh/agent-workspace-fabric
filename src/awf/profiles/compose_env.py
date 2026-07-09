@@ -214,6 +214,45 @@ def _compose_resolve_value(
     return "".join(expanded).replace(_COMPOSE_ESCAPED_DOLLAR, "$"), _ComposeEnvResolution.LITERAL
 
 
+def _compose_bare_reference_name(value: str) -> str | None:
+    """Return the variable name when ``value`` is exactly a single bare reference.
+
+    A *bare* Compose reference is exactly ``${NAME}`` or ``$NAME`` with no
+    operator and no surrounding literal text — the form Core injects via
+    ``agent_environment_with_legacy_host_auth`` (``NAME: ${NAME}`` for a
+    worker-present ``AGENT_AUTH_ENV_VARS`` key the profile does not declare).
+    Docker Compose substitutes the worker shell value at stack launch, exactly
+    like a pass-through slot. Mixed forms (e.g. ``prefix-${NAME}``) and nested
+    forms (e.g. ``${X:-${SECRET}}``) are NOT bare references: the local container
+    receives a profile-owned literal that interpolates a worker value, and the
+    hosted executor cannot reconstruct that mixed value from the name alone, so
+    they are out of scope for the bare-slot passthrough fix.
+
+    Returns the referenced variable name, or ``None`` when ``value`` is not a
+    single bare reference (a literal, a defaulted/alternate/required form, a
+    mixed value, an escaped ``$$``, or an unparseable expression). Used by
+    ``_filter_hosted_env_passthrough_names_from_compose_env`` to decide whether
+    a ``WORKER_RESOLVED_SLOT`` name stays in ``env_passthrough_names`` for hosted
+    out-of-band resolution (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN).
+    """
+    escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
+    if escaped.startswith("${"):
+        end = _compose_braced_expression_end(escaped, 1)
+        if end is None or end != len(escaped) - 1:
+            return None
+        inner = escaped[2:end]
+        match = _COMPOSE_ENV_NAME_PATTERN.match(inner)
+        if match is None or match.end() != len(inner):
+            return None
+        return match.group(0)
+    if escaped.startswith("$"):
+        match = _COMPOSE_ENV_NAME_PATTERN.match(escaped, 1)
+        if match is None or match.end() != len(escaped):
+            return None
+        return match.group(0)
+    return None
+
+
 def _compose_resolve_braced(
     expression: str,
     *,
