@@ -23,6 +23,19 @@ class CodexAdapter(AgentAdapter):
         del model
         return "openai"
 
+    @property
+    def hosted_env_passthrough_names(self) -> tuple[str, ...]:
+        """Codex hosted credential contract.
+
+        Hosted execution should pass ``CODEX_API_KEY`` to ``codex exec``.
+        ``OPENAI_API_KEY`` may remain a *source* credential in deployment
+        systems, but ``codex exec`` itself must not require a workstation
+        ``~/.codex`` directory in hosted mode. Names only — the hosted
+        executor resolves values out-of-band; secret values are never
+        transported, logged, or persisted by Core.
+        """
+        return ("CODEX_API_KEY",)
+
     def _cli_args(self, *, model: str | None) -> list[str]:
         args = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
         selected_model = model or self._default_model

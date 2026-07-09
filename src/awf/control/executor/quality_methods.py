@@ -983,6 +983,7 @@ async def _run_post_agent_semantic_precommit_repair(
         recovered, repair_result = await _run_agent_callable_with_service_recovery(
             self,
             run_agent=_run_repair_agent,
+            adapter=adapter,
             workspace=ws,
             profile=profile,
             compose_project=compose_project,

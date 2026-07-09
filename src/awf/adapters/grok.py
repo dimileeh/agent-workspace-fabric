@@ -27,6 +27,17 @@ class GrokAdapter(AgentAdapter):
         del model
         return "xai"
 
+    @property
+    def hosted_env_passthrough_names(self) -> tuple[str, ...]:
+        """Grok hosted credential contract.
+
+        Names only — secret values are never transported. Mirrors the
+        ``XAI_API_KEY`` entry in ``AGENT_AUTH_ENV_VARS`` so a hosted executor
+        can resolve and inject the same credential a local Compose run would
+        surface.
+        """
+        return ("XAI_API_KEY",)
+
     def _cli_args(self, *, model: str | None) -> list[str]:
         args = [
             "--always-approve",

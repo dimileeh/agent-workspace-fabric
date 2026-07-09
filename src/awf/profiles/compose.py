@@ -20,6 +20,7 @@ from awf.profiles.models import (
     WorkspaceProfile,
     _normalized_endpoint_env_name,
 )
+from awf.service.environment import compose_env_file_values
 
 AGENT_AUTH_ENV_VARS = (
     # Codex/OpenAI static-token fallback auth. Prefer isolated ~/.codex copies
@@ -63,6 +64,73 @@ AGENT_AUTH_ENV_VARS = (
     # OpenCode shell-tool runtime tuning. This is not auth, but it must follow
     # the same service -> workspace placeholder path to affect agent containers.
     "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
+)
+
+# Secret-bearing subset of :data:`AGENT_AUTH_ENV_VARS` — names whose literal
+# value is a credential (API key / token / OAuth token / service-account
+# credentials / access token). A profile-owned literal for one of these keys is
+# a concrete secret and must never be carried in ``profile_env``: the hosted
+# executor resolves it out-of-band (the name is kept out of
+# ``env_passthrough_names`` by ``_profile_owned_auth_keys``), so ``profile_env``
+# must not duplicate it (PR #751 thread PRRT_kwDOSJAM6s6PaYta). Non-secret
+# profile config in :data:`AGENT_AUTH_ENV_VARS` — endpoints (``OLLAMA_HOST`` /
+# ``*_BASE_URL``), org/project/region, model names, backend toggles — stays
+# carried, matching the ``AgentRuntimeExecRequest`` contract.
+_AGENT_AUTH_SECRET_ENV_VARS = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "OPENAI_API_TOKEN",
+        "CODEX_API_KEY",
+        "CODEX_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CURSOR_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_ACCESS_TOKEN",
+        "OLLAMA_API_KEY",
+        "XAI_API_KEY",
+        # Claude Code Bedrock backend credentials (used when
+        # ``CLAUDE_CODE_USE_BEDROCK=1``). The toggle is in
+        # ``AGENT_AUTH_ENV_VARS`` but the credentials it requires are not; they
+        # are surfaced as a static backend supplement in
+        # ``ClaudeCodeAdapter.hosted_env_passthrough_names``. When a profile
+        # declares one of these as a literal agent env value, the hosted
+        # passthrough filter already treats the compose-declared name as
+        # profile-owned (excluded from ``env_passthrough_names``), so the hosted
+        # executor resolves it out-of-band. ``literal_profile_env_from_compose``
+        # must also redact these from ``profile_env`` or the raw secret literal
+        # would be appended to ``AgentRuntimeExecRequest.profile_env``, violating
+        # the secret-free hosted contract and exposing AWS credentials to the
+        # hosted executor/request object (PR #751 thread PRRT_kwDOSJAM6s6PiiaQ).
+        # Non-secret backend config (``AWS_REGION`` / ``AWS_DEFAULT_REGION`` /
+        # ``AWS_ACCESS_KEY_ID`` / ``AWS_PROFILE`` /
+        # ``ANTHROPIC_VERTEX_PROJECT_ID`` / ``CLOUD_ML_REGION``) is NOT redacted
+        # and stays carried, matching the ``AgentRuntimeExecRequest`` contract.
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        # GitHub CLI token literals. The aliases ``GH_TOKEN`` / ``GITHUB_TOKEN``
+        # and the documented AWF source ``AWF_GITHUB_TOKEN`` are concrete
+        # credentials; a profile-owned literal for any of these is a secret that
+        # must never be carried in ``profile_env``. The hosted executor resolves
+        # GitHub auth out-of-band via ``env_passthrough_names`` (see
+        # ``hosted_github_token_passthrough_names`` / the GitHub token aliases
+        # surfaced by ``agent_environment_with_github_token``), so
+        # ``profile_env`` must not duplicate the raw token literal. Without this
+        # redaction, a profile/compose agent env owning a literal GitHub token
+        # had the raw token appended to ``AgentRuntimeExecRequest.profile_env``,
+        # violating the secret-free hosted contract (PR #751 thread
+        # PRRT_kwDOSJAM6s6PiwKv). The local Compose path keeps the value inside
+        # the already-started container, so redaction only affects the hosted
+        # transport path. Non-secret profile config (e.g. ``OLLAMA_HOST`` /
+        # ``APP_BASE_URL``) is unaffected and still carried.
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "AWF_GITHUB_TOKEN",
+    }
 )
 
 
@@ -389,6 +457,147 @@ def _github_token_placeholder(source_env: Mapping[str, str]) -> str | None:
     return None
 
 
+def _github_token_source_name(source_env: Mapping[str, str]) -> str | None:
+    """Return the env name of the first present GitHub token source.
+
+    Mirrors :func:`_github_token_placeholder`'s scan order
+    (``AWF_GITHUB_TOKEN`` first), but returns the bare *name* (e.g.
+    ``AWF_GITHUB_TOKEN``) rather than the ``${NAME}`` placeholder. Used by the
+    hosted path to surface the chosen source *name* so a hosted executor can
+    resolve the credential out-of-band when the worker only carries the AWF
+    source and not the ``gh``-visible aliases (see
+    :func:`hosted_github_token_passthrough_names`).
+    """
+    for name in ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        if source_env.get(name):
+            return name
+    # Unreachable through the production call path: this helper mirrors
+    # ``_github_token_placeholder``'s scan order, and
+    # ``hosted_github_token_passthrough_names`` returns ``()`` early when the
+    # placeholder is ``None`` (no token source present), so this fallback is
+    # never reached for a running caller. Kept for completeness; excluding it
+    # avoids a hollow test that calls the private helper solely to mark the
+    # line executed.
+    return None  # pragma: no cover
+
+
+def hosted_github_token_passthrough_names(
+    compose_file: Path,
+    *,
+    worker_env: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return GitHub token *names* a hosted executor should resolve.
+
+    Mirrors ``agent_environment_with_github_token``'s alias injection for the
+    local Compose path: when the worker env carries a GitHub token source
+    (``AWF_GITHUB_TOKEN`` / ``GH_TOKEN`` / ``GITHUB_TOKEN``), the local path
+    injects ``GH_TOKEN`` / ``GITHUB_TOKEN`` placeholders into the compose agent
+    env block so the local agent container can run ``gh``. The hosted
+    (non-compose) path has no compose env block substitution, so without these
+    names the hosted executor cannot resolve the credential and the hosted
+    monitor-repair agent loses GitHub CLI access even though the same
+    workspace has it under Compose (PR #751 thread PRRT_kwDOSJAM6s6PXFPz).
+
+    Source-name surfacing (PR #751 thread PRRT_kwDOSJAM6s6PYNGv):
+    ``_github_token_placeholder`` orders ``AWF_GITHUB_TOKEN`` first, so a worker
+    that only has ``AWF_GITHUB_TOKEN`` set (the documented service token) yields
+    the ``${AWF_GITHUB_TOKEN}`` placeholder. Local Compose substitutes that
+    placeholder into the ``GH_TOKEN`` / ``GITHUB_TOKEN`` aliases at stack launch,
+    so the local agent container can run ``gh``; the hosted path has no
+    equivalent substitution — it resolves ``env_passthrough_names`` by name
+    out-of-band, so resolving ``GH_TOKEN`` / ``GITHUB_TOKEN`` finds nothing in
+    that common setup. The helper therefore also surfaces the chosen source
+    *name* so the hosted executor can resolve the credential from the source
+    name and mirror it into the gh-visible aliases (the same
+    ``AWF_GITHUB_TOKEN`` -> ``GH_TOKEN`` / ``GITHUB_TOKEN`` mirroring
+    ``_service_git_environment`` / ``_check_github`` / ``_gh_probe_environ``
+    already apply). The source name is de-duplicated against the surfaced
+    aliases (when the source is itself a gh-visible alias, e.g. ``GH_TOKEN``, it
+    appears once).
+
+    Names only — secret values are NEVER transported; the hosted executor
+    resolves them out-of-band, mirroring ``env_passthrough_names``. The
+    returned names carry no values, so this helper never embeds a worker
+    secret (the placeholder string itself is never returned).
+
+    A compose-declared GitHub token alias is surfaced only when its value
+    equals the worker token placeholder (the same AWF source
+    ``agent_environment_with_github_token`` would inject, or a GitHub secret
+    lease that renders to the same source). When a profile owns a GitHub
+    token alias with a *different* token (e.g. a generic ``env`` secret lease
+    rendering ``GITHUB_TOKEN: ${MY_PROFILE_LEASE_TOKEN}``), NO worker alias or
+    source name is surfaced: the local Compose path's group-precedence rule
+    (``agent_environment_with_github_token``) ensures the profile-owned token
+    wins, and surfacing a worker alias/source on the hosted path would let
+    ``gh`` fall back to the worker credential (the profile-owned alias cannot
+    be carried in ``env_passthrough_names`` — it is a worker-resolved secret
+    slot the hosted path resolves via its own adapter contract, not a name
+    the hosted executor re-resolves from the worker). Surfacing nothing
+    preserves the existing no-profile-credential limitation for that edge case
+    without introducing a worker-token shadow.
+
+    Returns an empty tuple when no worker GitHub token source is present
+    (mirroring the local path, which injects nothing) or when the compose
+    file is unreadable (fail-closed: assume the profile owns a distinct
+    GitHub token rather than surface a worker alias that could shadow a
+    profile-owned token the unreadable parse could not see).
+
+    A compose *pass-through* slot (``environment: [GH_TOKEN]`` with no ``=``,
+    ``GH_TOKEN:`` / ``GH_TOKEN: null``) declares no value — Docker Compose
+    takes it from the worker shell at stack launch — so it is worker-resolved
+    and is treated as matching the corresponding worker source (the local
+    Compose agent received the worker value for that name), NOT as a distinct
+    profile-owned token. The pass-through alias name is surfaced so the hosted
+    executor resolves it out-of-band, mirroring the local container (PR #751
+    thread PRRT_kwDOSJAM6s6PZkRH).
+    """
+    source_env = os.environ if worker_env is None else worker_env
+    worker_placeholder = _github_token_placeholder(source_env)
+    if worker_placeholder is None:
+        return ()
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        return ()
+    # If any compose-declared GitHub token alias points at a different token
+    # than the worker source, the profile owns a distinct GitHub credential.
+    # Surface nothing so a worker alias cannot shadow it on the hosted path
+    # (the profile-owned alias itself is a worker-resolved secret slot the
+    # hosted path does not re-resolve from the worker env). A pass-through slot
+    # (raw value == :data:`_COMPOSE_PASSTHROUGH`) is worker-resolved, not
+    # profile-owned — the local Compose container received the worker shell
+    # value for that name — so it is NOT a distinct profile-owned token and
+    # does not trigger the group-suppression branch (PR #751 thread
+    # PRRT_kwDOSJAM6s6PZkRH).
+    for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE:
+        raw = compose_env.get(alias)
+        if alias in compose_env and raw != worker_placeholder and raw != _COMPOSE_PASSTHROUGH:
+            return ()
+    # Surface every alias whose value matches the worker token placeholder
+    # (AWF-injected, or a GitHub lease rendering to the same source), plus
+    # pass-through slots (worker-resolved — the local Compose container received
+    # the worker shell value for that name, so the hosted executor resolves the
+    # same worker value out-of-band). These are exactly the aliases the local
+    # Compose container receives the worker token in, so the hosted executor
+    # resolving them out-of-band reproduces the same credential.
+    aliases = tuple(
+        alias
+        for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE
+        if compose_env.get(alias) == worker_placeholder
+        or compose_env.get(alias) == _COMPOSE_PASSTHROUGH
+    )
+    # Surface the chosen source name first so a hosted executor can resolve the
+    # credential from the source name when the worker only carries the AWF
+    # source (local Compose substitutes the placeholder into the aliases at
+    # stack launch; the hosted path has no equivalent substitution). De-duplicate
+    # against the surfaced aliases so a source that is itself a gh-visible alias
+    # (e.g. ``GH_TOKEN``) appears exactly once. Source first preserves the scan
+    # order's precedence intent (``AWF_GITHUB_TOKEN`` before the aliases).
+    source_name = _github_token_source_name(source_env)
+    if source_name is not None and source_name not in aliases:
+        return (source_name, *aliases)
+    return aliases
+
+
 def agent_environment_with_host_auth(
     base_environment: tuple[tuple[str, str], ...],
     *,
@@ -459,6 +668,236 @@ def _try_agent_environment_from_compose_file(
     return _compose_environment_mapping(agent.get("environment"))
 
 
+def _try_compose_agent_env_and_postgres_passwords(
+    compose_file: Path,
+    *,
+    worker_env: Mapping[str, str],
+) -> tuple[dict[str, str] | None, frozenset[str]]:
+    """Parse the compose file once, returning agent env and resolved DB passwords.
+
+    Returns ``(agent_env, postgres_passwords)`` where ``agent_env`` is ``None``
+    when the compose is unreadable or has no agent service (mirrors
+    ``_try_agent_environment_from_compose_file``) and ``postgres_passwords`` is
+    empty when no service declares ``POSTGRES_PASSWORD``). Parsing once avoids
+    a second read/parse of the same file when ``literal_profile_env_from_compose``
+    needs both the agent env and the rendered postgres password for redaction.
+
+    ``POSTGRES_PASSWORD`` is collected from *every* compose service, not only a
+    service literally named ``postgres``, and *all* distinct resolved values are
+    returned (not only the first). A valid custom profile may name its database
+    sidecar ``db`` / ``database`` (or anything else) while still setting
+    ``POSTGRES_PASSWORD`` and expanding that same password into the agent env
+    ``DATABASE_URL`` / ``AWF_DATABASE_URL``. Looking up only
+    ``services["postgres"]`` would leave the password set empty for such a profile
+    and ``literal_profile_env_from_compose`` would carry the rendered DB URL in
+    ``profile_env``, leaking the workspace credential to the hosted executor
+    despite the secret-free contract. Scanning all services tracks the rendered
+    secret source independent of the service name.
+
+    The collector also reads each service's ``env_file`` declarations. ComposeManager
+    renders a profile service's ``env_file`` verbatim into the rendered compose file,
+    and Docker Compose loads that file to populate the service's environment at
+    stack launch — including ``POSTGRES_PASSWORD`` when a profile keeps its DB
+    password in an ``env_file`` instead of the inline ``environment`` map. Inspecting
+    only the inline map would leave ``postgres_passwords`` empty for such a profile,
+    and ``literal_profile_env_from_compose`` would carry the rendered agent env
+    ``DATABASE_URL`` / ``AWF_DATABASE_URL`` (which embed the same password) in
+    ``profile_env``, leaking the workspace credential to a hosted executor despite
+    the secret-free contract (PR #751 thread PRRT_kwDOSJAM6s6PZuE2). The env-file
+    values are parsed with ``compose_env_file_values`` (mirroring Compose's
+    interpolation rules) and ``POSTGRES_PASSWORD`` from each file is added to the
+    redaction set, resolved against ``worker_env`` like an inline value. Relative
+    ``env_file`` paths are resolved against the compose file's parent directory
+    (matching Docker Compose's documented resolution rule) before parsing, so a
+    profile keeping its DB password in a relative ``env_file`` (e.g. ``./db.env``)
+    is found even though ComposeManager writes the rendered compose file under a
+    per-workspace compose directory separate from the worker process cwd (PR #751
+    thread PRRT_kwDOSJAM6s6PaMeK). A missing or unreadable env_file contributes
+    nothing (best-effort: the inline env is the authoritative rendered source, so a
+    missing env_file does not fail closed).
+
+    Keeping only the first declared password (the previous behaviour) is also
+    unsound when a profile runs several DB sidecars with *different* passwords:
+    a rendered agent env value (e.g. a second service's ``WAREHOUSE_URL``) that
+    embeds a later service's password would slip past a redaction that only
+    compares against the first service's password. Collecting every declared
+    value redacts each independently.
+
+    Each declared ``POSTGRES_PASSWORD`` is resolved against ``worker_env`` with
+    ``_compose_resolve_value`` before redaction so a service that expresses its
+    password via Compose interpolation/defaults (e.g.
+    ``${POSTGRES_PASSWORD:-fallback}`` or ``${POSTGRES_PASSWORD}``) redacts the
+    same concrete value Docker Compose injects into the local agent container at
+    stack launch. The raw ``${...}`` placeholder string is also tracked as a
+    redaction target so a rendered agent env value that still carries the
+    unexpanded placeholder (e.g. when ComposeManager did not expand that
+    particular reference) is still redacted. Worker-resolved forms whose concrete
+    value cannot be recovered here (``${NAME}`` with ``NAME`` set, or a defaulted
+    form with ``NAME`` set) contribute only the raw placeholder string: the
+    resolved secret is a worker value that must never be carried in
+    ``profile_env``, and the rendered compose file ComposeManager writes already
+    expands ``${AWF_POSTGRES_PASSWORD}`` into a literal for the common case.
+    """
+    try:
+        payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return None, frozenset()
+    if not isinstance(payload, Mapping):
+        return None, frozenset()
+    services = payload.get("services")
+    if not isinstance(services, Mapping):
+        return None, frozenset()
+    agent = services.get("agent")
+    agent_env = (
+        _compose_environment_mapping(agent.get("environment"))
+        if isinstance(agent, Mapping)
+        else None
+    )
+    postgres_passwords: set[str] = set()
+    for service in services.values():
+        if not isinstance(service, Mapping):
+            continue
+        service_env = _compose_environment_mapping(service.get("environment"))
+        # Collect ``POSTGRES_PASSWORD`` from the inline ``environment`` map and
+        # from any ``env_file`` the service references. ComposeManager renders a
+        # profile service's ``env_file`` verbatim into the rendered compose file,
+        # and Docker Compose loads it to populate the service env at stack launch —
+        # so an env-file-declared ``POSTGRES_PASSWORD`` is the same rendered secret
+        # source as an inline one. Both are tracked for redaction (PR #751 thread
+        # PRRT_kwDOSJAM6s6PZuE2).
+        _collect_postgres_password(
+            service_env.get("POSTGRES_PASSWORD"),
+            postgres_passwords,
+            worker_env=worker_env,
+        )
+        for env_file_path in _compose_service_env_file_paths(
+            service.get("env_file"), compose_dir=compose_file.parent
+        ):
+            try:
+                env_file_env = compose_env_file_values(env_file_path, environ=worker_env)
+            except (OSError, UnicodeDecodeError):
+                continue
+            _collect_postgres_password(
+                env_file_env.get("POSTGRES_PASSWORD"),
+                postgres_passwords,
+                worker_env=worker_env,
+            )
+    return agent_env, frozenset(postgres_passwords)
+
+
+def _compose_service_env_file_paths(
+    env_file: object, *, compose_dir: Path | None = None
+) -> tuple[Path, ...]:
+    """Return the ``env_file`` paths declared on a compose service.
+
+    Compose accepts ``env_file`` as a single path string or a list of paths
+    (and a mapping form with a ``path`` key). ComposeManager renders a profile
+    service's ``env_file`` as a single-item list of the resolved workspace path
+    (see ``workspace.base.yml.j2``), so both shapes are handled here. A missing
+    or unreadable file is tolerated by the caller.
+
+    Relative paths are resolved against the compose file's parent directory
+    (matching Docker Compose's documented resolution rule) when ``compose_dir``
+    is supplied, so a profile that keeps its DB password in a relative
+    ``env_file`` (e.g. ``./db.env``) is looked up from the compose directory
+    rather than the worker process cwd. Absolute paths are kept verbatim
+    (PR #751 thread PRRT_kwDOSJAM6s6PaMeK).
+    """
+    paths: list[Path] = []
+    raw_paths: list[str] = []
+    if isinstance(env_file, str):
+        raw_paths.append(env_file)
+    elif isinstance(env_file, list):
+        for item in env_file:
+            if isinstance(item, str):
+                raw_paths.append(item)
+            elif isinstance(item, Mapping):
+                raw = item.get("path")
+                if isinstance(raw, str):
+                    raw_paths.append(raw)
+    for raw in raw_paths:
+        path = Path(raw)
+        if not path.is_absolute() and compose_dir is not None:
+            path = compose_dir / path
+        paths.append(path)
+    return tuple(paths)
+
+
+def _collect_postgres_password(
+    raw_password: str | None,
+    postgres_passwords: set[str],
+    *,
+    worker_env: Mapping[str, str],
+) -> None:
+    """Resolve and track one declared ``POSTGRES_PASSWORD`` for redaction.
+
+    Shared by the inline ``environment`` and ``env_file`` collection paths so
+    both apply the same redaction rules: a pass-through slot / explicit empty is
+    skipped, the raw declared value is always a redaction target, and a
+    worker-resolvable form contributes the concrete worker value (when recoverable)
+    so a rendered agent env DB URL embedding the resolved secret is redacted too.
+    """
+    # An explicit empty (``POSTGRES_PASSWORD: ""`` / ``=``) carries no secret and
+    # is skipped (``not raw_password`` covers ``""``).
+    #
+    # A pass-through slot (``POSTGRES_PASSWORD:`` / ``: null`` / list bare name)
+    # is normalized to the :data:`_COMPOSE_PASSTHROUGH` sentinel. Unlike an
+    # explicit empty, Docker Compose resolves a pass-through slot from the
+    # worker shell at stack launch, so the local agent container receives the
+    # concrete worker password — and a rendered agent env DB URL embedding that
+    # resolved value carries the workspace credential. Resolving the slot from
+    # ``worker_env["POSTGRES_PASSWORD"]`` here (the same key Compose resolves the
+    # slot against) redacts the rendered URL the same way the
+    # ``WORKER_RESOLVED_SLOT`` / ``WORKER_RESOLVED_DEFAULTED`` branches do. The
+    # raw placeholder string is the sentinel (never carried in
+    # ``profile_env``), and the redaction set is never carried in
+    # ``profile_env`` — it only marks which agent env values to skip — so
+    # recovering the concrete worker value here only prevents a secret-bearing
+    # URL from reaching the hosted request object (PR #751 thread
+    # PRRT_kwDOSJAM6s6PjBsM).
+    if not raw_password:
+        return
+    if raw_password == _COMPOSE_PASSTHROUGH:
+        resolved = worker_env.get("POSTGRES_PASSWORD")
+        if resolved:
+            postgres_passwords.add(resolved)
+        return
+    # The raw declared value (literal or ``${...}`` placeholder) is always a
+    # redaction target so an agent env value carrying the unexpanded form is
+    # still redacted.
+    postgres_passwords.add(raw_password)
+    resolved, resolution = _compose_resolve_value(raw_password, worker_env=worker_env)
+    if resolution is _ComposeEnvResolution.LITERAL and resolved:
+        postgres_passwords.add(resolved)
+    elif resolution is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED:
+        # A defaulted/required form with the variable *set* in the worker env
+        # resolves to the worker value at stack launch. The redaction set is
+        # only ever used for substring matching to *skip* agent env values —
+        # it is never carried in ``profile_env`` — so it is safe (and
+        # necessary) to include the concrete worker value here. Without it a
+        # rendered DB URL embedding the resolved worker password would slip
+        # past redaction.
+        concrete = _compose_concrete_worker_password(raw_password, worker_env=worker_env)
+        if concrete:
+            postgres_passwords.add(concrete)
+    elif resolution is _ComposeEnvResolution.WORKER_RESOLVED_SLOT:
+        # A bare ``${NAME}`` / ``$NAME`` slot (no default operator) resolves to
+        # the worker value at stack launch too, so a rendered agent env DB URL
+        # embedding the *resolved* worker password carries the workspace
+        # credential. Tracking only the raw ``${...}`` placeholder string (added
+        # above) misses the expanded secret, and the URL slips past substring
+        # redaction into ``profile_env``. Recover the concrete worker value the
+        # same way the defaulted branch does so a bare-slot DB URL is redacted
+        # identically (PR #751 thread PRRT_kwDOSJAM6s6PaFeB). The redaction set is
+        # never carried in ``profile_env`` (worker-resolved values are skipped
+        # from carry), so recovering the worker secret here only marks which
+        # agent env values to skip — it does not violate the no-secret-values
+        # contract.
+        concrete = _compose_concrete_worker_password(raw_password, worker_env=worker_env)
+        if concrete:
+            postgres_passwords.add(concrete)
+
+
 def _try_agent_environment_keys_from_compose_file(
     compose_file: Path,
 ) -> frozenset[str] | None:
@@ -474,6 +913,32 @@ def agent_environment_keys_from_compose_file(compose_file: Path) -> frozenset[st
     """Return env var names declared on the agent service in a rendered compose file."""
 
     return _try_agent_environment_keys_from_compose_file(compose_file) or frozenset()
+
+
+def _compose_env_passthrough_exclusions(
+    compose_env: Mapping[str, str] | None,
+) -> frozenset[str]:
+    """Return auth env var names a compose exec/passthrough must not re-inject.
+
+    Shared by the local ``docker compose exec -e`` path and the hosted (non-
+    compose) execution path so both suppress the same profile-owned auth/env
+    slots and the same shadowing worker Ollama base-URL keys. An unreadable
+    compose fails closed the same way ``agent_exec_env_passthrough`` does:
+    assume a profile-owned ``OLLAMA_HOST`` would shadow the worker base URL
+    rather than treat a parse failure as "no profile Ollama keys".
+
+    Takes the already-parsed compose agent environment (``None`` when the
+    compose file was unreadable) so callers can read/parse the file once and
+    reuse the result for both this exclusion set and the compose-env union,
+    avoiding a TOCTOU window between two reads of the same file.
+    """
+    if compose_env is None:
+        shadowing = _shadowing_worker_ollama_keys({"OLLAMA_HOST"})
+        profile_owned = frozenset[str]()
+    else:
+        shadowing = _shadowing_worker_ollama_keys(set(compose_env))
+        profile_owned = _profile_owned_auth_keys(compose_env)
+    return shadowing | profile_owned
 
 
 def agent_exec_env_passthrough(
@@ -498,18 +963,270 @@ def agent_exec_env_passthrough(
 
     source_env = os.environ if host_env is None else host_env
     compose_env = _try_agent_environment_from_compose_file(compose_file)
-    if compose_env is None:
-        # Unreadable compose: assume profile-owned OLLAMA_HOST would shadow the worker
-        # base URL rather than treat a parse failure as "no profile Ollama keys".
-        shadowing = _shadowing_worker_ollama_keys({"OLLAMA_HOST"})
-        profile_owned = frozenset[str]()
-    else:
-        shadowing = _shadowing_worker_ollama_keys(set(compose_env))
-        profile_owned = _profile_owned_auth_keys(compose_env)
-    excluded = shadowing | profile_owned
+    excluded = _compose_env_passthrough_exclusions(compose_env)
     return tuple(
         name for name in AGENT_AUTH_ENV_VARS if name not in excluded and source_env.get(name)
     )
+
+
+def filter_hosted_env_passthrough_names(
+    names: tuple[str, ...],
+    *,
+    compose_file: Path,
+    worker_env: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Apply the same compose/profile-owned exclusions to hosted passthrough names.
+
+    The hosted (non-compose) execution path resolves secret values out-of-band
+    from adapter-declared passthrough *names*. Without this filter the hosted
+    request would unconditionally surface every name an adapter declares, even
+    when the workspace's profile already owns that auth/env slot (e.g.
+    ``OPENAI_API_KEY: ""`` placeholder, a required placeholder, or a
+    lease-rendered value) and the local ``docker compose exec`` path deliberately
+    suppresses it. That suppression lives in ``agent_exec_env_passthrough`` /
+    ``_compose_env_passthrough_exclusions``: profile-owned keys already resolved
+    at stack launch, and higher-precedence worker Ollama base-URL keys that would
+    shadow a profile-owned daemon. Reintroducing such a name on the hosted path
+    lets the hosted executor resolve an inherited worker credential/endpoint the
+    local path and readiness overlay keep out of the agent environment.
+
+    The local ``docker compose exec`` path only forwards ``AGENT_AUTH_ENV_VARS``
+    and skips compose-declared ones, so *any* env key declared on the agent
+    service's environment block is profile-owned at stack launch and never
+    re-injected from the worker — including adapter backend-credential
+    supplements (e.g. Claude Code ``AWS_*`` / Vertex project / region) that are
+    not in ``AGENT_AUTH_ENV_VARS``. The hosted path must apply the same
+    broader exclusion or a profile-owned backend credential/endpoint declared in
+    the compose env block would be re-resolved from the worker by the hosted
+    executor, diverging from the local run. When the compose file is unreadable
+    the broader set is unknown, so only the ``AGENT_AUTH_ENV_VARS``-territory /
+    Ollama-shadowing exclusions apply (fail-closed the same way
+    ``_compose_env_passthrough_exclusions`` does).
+
+    The profile-owned *names* stay filtered out of ``env_passthrough_names`` so
+    the hosted executor does not re-resolve them from the worker; their literal
+    *values* reach the hosted job via ``profile_env`` instead (see
+    ``literal_profile_env_from_compose``), mirroring the local container's
+    stack-launch env.
+
+    Worker-resolved defaulted forms (PR #751 thread PRRT_kwDOSJAM6s6PVH0t): a
+    profile env value declared with a Compose default/override such as
+    ``AWS_REGION: ${AWS_REGION:-us-west-2}`` is interpolated by Docker Compose
+    against the *worker* env at stack launch, so the local agent container
+    receives the worker's ``AWS_REGION`` when it is set (not the profile
+    default). Carrying the worker value in ``profile_env`` would embed a secret;
+    excluding the name from passthrough would drop it entirely — so hosted runs
+    received neither, diverging from the local run. Such a name is therefore
+    kept in ``env_passthrough_names`` (classified
+    ``WORKER_RESOLVED_DEFAULTED``) so the hosted executor resolves the same
+    worker value out-of-band, mirroring the local Compose container. The same
+    applies to ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME`` set (the local
+    container received the worker value). Pure literals, unset defaults, and
+    ``${NAME:+alt}`` / ``${NAME+alt}`` alternates stay excluded (their concrete
+    value reaches the hosted job via ``profile_env``). A bare ``${NAME}`` /
+    ``$NAME`` single reference whose variable is worker-set stays in
+    ``env_passthrough_names`` for hosted out-of-band resolution (the local
+    container received the worker value at stack launch; carrying it would
+    embed the endpoint/secret), mirroring the pass-through slot fix — PR #751
+    thread PRRT_kwDOSJAM6s6Pi7sN. A bare slot whose variable is unset stays
+    excluded (Compose substitutes ``""``; out of scope), as do nested/mixed
+    worker-resolved forms (e.g. ``${X:-${SECRET}}`` / ``prefix-${NAME}``) whose
+    value is a profile-owned literal interpolating a worker value the hosted
+    executor cannot reconstruct from the name alone. ``worker_env`` (default
+    ``os.environ``) supplies the worker environment used to classify defaulted /
+    required / alternate / bare forms, mirroring
+    ``literal_profile_env_from_compose``.
+    """
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    env = os.environ if worker_env is None else worker_env
+    return _filter_hosted_env_passthrough_names_from_compose_env(names, compose_env, worker_env=env)
+
+
+def _filter_hosted_env_passthrough_names_from_compose_env(
+    names: tuple[str, ...],
+    compose_env: Mapping[str, str] | None,
+    *,
+    worker_env: Mapping[str, str],
+) -> tuple[str, ...]:
+    """Apply compose/profile-owned exclusions given a pre-parsed compose env.
+
+    Shared shape so a caller that already parsed the compose agent environment
+    (e.g. ``_run_hosted`` computing ``profile_env`` from the same parse) can
+    reuse the result and avoid a second read/parse of the file.
+
+    A compose-declared name whose value resolves to
+    ``WORKER_RESOLVED_DEFAULTED`` (a ``${NAME:-default}`` / ``${NAME-default}``
+    form with ``NAME`` set, or a ``${NAME:?err}`` / ``${NAME?err}`` required form
+    with ``NAME`` set) is NOT excluded: the local Compose container received the
+    worker value at stack launch, so the hosted executor must resolve that value
+    out-of-band rather than drop the name (which would leave the hosted job with
+    neither the worker override nor the profile default). A name whose value is
+    a pass-through slot (``environment: [NAME]`` with no ``=``, ``NAME:`` /
+    ``NAME: null``) is likewise NOT excluded: Docker Compose took its value from
+    the worker shell at stack launch, so the hosted executor must resolve the same
+    worker value out-of-band. A name whose value resolves to ``LITERAL`` (a pure
+    literal, an *explicit* empty value ``NAME: ""`` / ``NAME=``, a defaulted form
+    with the variable unset, or an ``:+`` / ``+`` alternate form) IS excluded —
+    its concrete value reaches the hosted job via ``profile_env`` instead. A
+    bare ``${NAME}`` / ``$NAME`` single reference whose variable is worker-set
+    is NOT excluded either: the local Compose container received the worker
+    value at stack launch, so the hosted executor must resolve it out-of-band
+    rather than drop the name (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN). A bare
+    slot whose variable is unset IS excluded (Compose substitutes ``""``; out
+    of scope), as are nested/mixed worker-resolved forms (e.g.
+    ``${X:-${SECRET}}`` / ``prefix-${NAME}``) — the hosted executor cannot
+    reconstruct a profile-owned literal interpolating a worker value from the
+    name alone. See ``filter_hosted_env_passthrough_names`` and PR #751 threads
+    PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm / PRRT_kwDOSJAM6s6PYnJJ /
+    PRRT_kwDOSJAM6s6PY6Rn / PRRT_kwDOSJAM6s6PY8zB / PRRT_kwDOSJAM6s6Pi7sN. A
+    pass-through slot is removed from the baseline
+    ``_compose_env_passthrough_exclusions`` set even when its name is in
+    ``AGENT_AUTH_ENV_VARS`` (``_profile_owned_auth_keys`` treats any auth key
+    declared on the agent service as profile-owned regardless of value); the
+    local Compose container received the worker shell value, so the hosted
+    executor must resolve it out-of-band (PRRT_kwDOSJAM6s6PY6Rn). An explicit
+    empty value is NOT a pass-through slot (compose-go models it as a non-nil
+    pointer to ``""`` that overrides the worker value), so it stays excluded
+    and its literal ``""`` reaches the hosted job via ``profile_env``
+    (PRRT_kwDOSJAM6s6PY8zB).
+    """
+    excluded = _compose_env_passthrough_exclusions(compose_env)
+    if compose_env is not None:
+        # Exclude compose-declared names UNLESS their value is worker-resolved
+        # and the local container received the worker value at stack launch:
+        # ``WORKER_RESOLVED_DEFAULTED`` (``:-`` / ``-`` / ``:?`` / ``?`` with the
+        # variable set) and a pass-through slot (raw value ==
+        # :data:`_COMPOSE_PASSTHROUGH` — ``environment: [NAME]`` with no ``=``,
+        # ``NAME:`` / ``NAME: null``; Docker Compose took the value from the
+        # worker shell) stay in passthrough for hosted out-of-band resolution.
+        # Carrying the worker value in ``profile_env`` would embed a secret
+        # (defaulted) or override the real worker value with an empty literal
+        # (pass-through), and excluding the name would drop it entirely. Literal
+        # values (pure literals, an *explicit* empty ``NAME: ""`` / ``NAME=``
+        # which Compose sets as a non-nil empty literal overriding the worker
+        # value, unset defaults, ``:+`` / ``+`` alternates) are excluded — their
+        # concrete value reaches the hosted job via ``profile_env``. A bare
+        # ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose variable
+        # IS set in the worker env stays in passthrough too — see below.
+        #
+        # A pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH`) is
+        # removed from the baseline ``_compose_env_passthrough_exclusions`` set
+        # first: that set treats any ``AGENT_AUTH_ENV_VARS`` key declared on the
+        # agent service as profile-owned (``_profile_owned_auth_keys``)
+        # regardless of value, so an auth pass-through slot would be excluded
+        # before the worker-resolved exception below (which only prevents
+        # *adding* a name) could keep it. The local Compose container received
+        # the worker shell value for such a slot, so the hosted executor must
+        # resolve it out-of-band too (PR #751 thread PRRT_kwDOSJAM6s6PY6Rn).
+        #
+        # An *explicit* empty value (``NAME: ""`` / ``NAME=``) is normalized to
+        # the plain string ``""`` (NOT the sentinel): Docker Compose sets a
+        # non-nil empty literal that OVERRIDES the worker shell value, so it is a
+        # profile-owned LITERAL — excluded from passthrough (its concrete ``""``
+        # reaches the hosted job via ``profile_env``), NOT a worker-resolved slot
+        # (PR #751 thread PRRT_kwDOSJAM6s6PY8zB). Only the sentinel marks a true
+        # pass-through slot; ``_compose_resolve_value("")`` -> ``("", LITERAL)``
+        # so an explicit empty is excluded by the LITERAL branch below.
+        passthrough_slots = frozenset(
+            name for name, raw in compose_env.items() if raw == _COMPOSE_PASSTHROUGH
+        )
+        # Resolve each non-pass-through name's classification once: a worker-
+        # resolved defaulted form (``${NAME:-default}`` / ``${NAME-default}`` /
+        # ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME`` set in the worker env)
+        # resolves to the worker value at stack launch, exactly like a pass-through
+        # slot. ``_compose_env_passthrough_exclusions`` -> ``_profile_owned_auth_keys``
+        # treats any ``AGENT_AUTH_ENV_VARS`` key declared on the agent service as
+        # profile-owned regardless of its value, so a worker-resolved defaulted auth
+        # name sits in the baseline excluded set the same way a pass-through auth
+        # slot does. The worker-resolved-defaulted exception below only prevents
+        # *adding* such a name — it never *removes* a name the first pass already
+        # excluded. ``literal_profile_env_from_compose`` also skips
+        # ``WORKER_RESOLVED_DEFAULTED`` (carrying the worker value would embed a
+        # secret), so the hosted monitor launch would drop a credential the local
+        # Compose container received at stack launch, leaving the hosted job with
+        # neither the worker override nor the profile default. Remove these names
+        # from the baseline excluded set first, mirroring the pass-through slot
+        # fix (PR #751 thread PRRT_kwDOSJAM6s6PY6Rn) — only non-worker-resolved
+        # non-pass-through names stay excluded (PR #751 thread
+        # PRRT_kwDOSJAM6s6PiGHK).
+        worker_resolved_defaulted = frozenset(
+            name
+            for name, raw in compose_env.items()
+            if raw != _COMPOSE_PASSTHROUGH
+            and _compose_resolve_value(raw, worker_env=worker_env)[1]
+            is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
+        )
+        # A bare ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose
+        # variable IS set in the worker env resolves to the worker value at
+        # stack launch, exactly like a pass-through slot and a worker-resolved
+        # defaulted form. Core injects this exact form via
+        # ``agent_environment_with_legacy_host_auth`` (it appends
+        # ``NAME: ${NAME}`` for worker-present ``AGENT_AUTH_ENV_VARS`` keys the
+        # profile does not already declare), so a profile that owns only the
+        # lower-precedence Ollama key still surfaces a bare ``${OLLAMA_HOST}``
+        # slot the local container received the worker value for.
+        # ``literal_profile_env_from_compose`` skips ``WORKER_RESOLVED_SLOT``
+        # (carrying the worker value would embed the endpoint/secret in
+        # ``profile_env``), and the baseline excluded set treats any
+        # ``AGENT_AUTH_ENV_VARS`` key declared on the agent service as
+        # profile-owned (``_profile_owned_auth_keys``), so — just like the
+        # worker-resolved-defaulted auth case — the name would be excluded and
+        # the hosted executor would carry neither the value nor the name, even
+        # though adapters like OpenCode advertise ``OLLAMA_HOST`` in
+        # ``hosted_env_passthrough_names``. A hosted monitor-repair run would
+        # then launch without the daemon endpoint the same workspace has under
+        # Compose. Remove such names from the baseline excluded set first,
+        # mirroring the pass-through slot (PRRT_kwDOSJAM6s6PY6Rn) and
+        # worker-resolved-defaulted (PRRT_kwDOSJAM6s6PiGHK) fixes.
+        #
+        # Only a *bare single reference* (``${NAME}`` / ``$NAME`` — the exact
+        # form Core injects) qualifies, AND the referenced variable must match
+        # the target key name. A bare reference to a *different* worker variable
+        # (e.g. a declared env secret lease rendering
+        # ``ANTHROPIC_API_KEY: ${MY_ANTHROPIC_TOKEN}`` or
+        # ``AWS_REGION: ${AWS_DEFAULT_REGION}``) classifies
+        # ``WORKER_RESOLVED_SLOT`` and the source name exists in ``worker_env``,
+        # but the hosted executor resolves by the *target* name (absent from the
+        # worker env), so keeping it in ``env_passthrough_names`` surfaces a
+        # name that resolves to nothing — the hosted request carries neither the
+        # source-to-target mapping nor the resolved value, and the credential is
+        # silently dropped (``literal_profile_env_from_compose`` skips the slot,
+        # so ``profile_env`` has no alias either). The source-to-target aliasing
+        # for such leases is handled by the profile's secret-lease /
+        # token-alias machinery, not by bare-name passthrough, so a cross-name
+        # bare slot stays excluded (PR #751 thread PRRT_kwDOSJAM6s6PjYmf).
+        # Nested forms (e.g. ``${X:-${SECRET}}``) and mixed forms (e.g.
+        # ``prefix-${NAME}``) also classify ``WORKER_RESOLVED_SLOT`` by
+        # propagation, but the local container received a profile-owned literal
+        # interpolating a worker value there, not a pure worker-resolved slot;
+        # the hosted executor cannot reconstruct that mixed value from the name
+        # alone, so they stay excluded (out of scope). A bare slot whose
+        # variable is UNSET stays excluded too: Compose substitutes "" for an
+        # unset bare reference, Core only injects the bare form when the worker
+        # value is present (``source_env.get(name)`` is truthy), and the unset
+        # ``${NAME:?err}`` / ``${NAME?err}`` form would fail Compose at stack
+        # launch (unreachable for a running container).
+        # ``_compose_bare_reference_name`` returns the referenced variable only
+        # for a single bare reference; the ``in worker_env`` test gates on the
+        # local container actually receiving a worker value (PR #751 thread
+        # PRRT_kwDOSJAM6s6Pi7sN).
+        worker_resolved_slots = frozenset(
+            name
+            for name, raw in compose_env.items()
+            if raw != _COMPOSE_PASSTHROUGH
+            and _compose_resolve_value(raw, worker_env=worker_env)[1]
+            is _ComposeEnvResolution.WORKER_RESOLVED_SLOT
+            and (bare_name := _compose_bare_reference_name(raw)) is not None
+            and bare_name == name
+            and bare_name in worker_env
+        )
+        keep = passthrough_slots | worker_resolved_defaulted | worker_resolved_slots
+        excluded = (excluded - keep) | frozenset(
+            name
+            for name, raw in compose_env.items()
+            if name not in keep and raw != _COMPOSE_PASSTHROUGH
+        )
+    return tuple(name for name in names if name not in excluded)
 
 
 def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
@@ -517,18 +1234,216 @@ def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
     return frozenset(name for name in AGENT_AUTH_ENV_VARS if name in compose_env)
 
 
-def _compose_environment_mapping(environment: object) -> dict[str, str]:
-    """Normalize a compose ``environment`` scalar, list, or mapping into a string dict."""
-    if isinstance(environment, Mapping):
-        return {str(key): str(value) for key, value in environment.items()}
-    if isinstance(environment, list):
-        mapping: dict[str, str] = {}
-        for item in environment:
-            if isinstance(item, str):
-                key, sep, value = item.partition("=")
-                if key:
-                    mapping[key] = value if sep else ""
-            elif isinstance(item, Mapping):
-                mapping.update({str(key): str(value) for key, value in item.items()})
-        return mapping
-    return {}
+# Compose env-value interpolation / resolution machinery lives in
+# ``awf.profiles.compose_env`` (extracted to keep this file under the
+# maintainability line limit). The names are re-imported here so every existing
+# caller and test that imports them from ``awf.profiles.compose`` — including
+# module-private names such as ``_COMPOSE_PASSTHROUGH`` and attribute access
+# via ``compose_module.<name>`` — keeps working unchanged. This is a pure
+# relocation; the logic is byte-for-byte identical.
+from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
+    _COMPOSE_ALTERNATE_OPERATORS,
+    _COMPOSE_BRACED_OPERATORS,
+    _COMPOSE_DEFAULT_OPERATORS,
+    _COMPOSE_ENV_NAME_PATTERN,
+    _COMPOSE_ESCAPED_DOLLAR,
+    _COMPOSE_PASSTHROUGH,
+    _compose_bare_reference_name,
+    _compose_braced_expression_end,
+    _compose_concrete_worker_password,
+    _compose_concrete_worker_password_braced,
+    _compose_environment_mapping,
+    _compose_resolve_braced,
+    _compose_resolve_value,
+    _ComposeEnvResolution,
+    _expanded_value_bears_postgres_password,
+)
+
+
+def literal_profile_env_from_compose(
+    compose_file: Path,
+    *,
+    compose_env: Mapping[str, str] | None = None,
+    worker_env: Mapping[str, str] | None = None,
+    postgres_passwords: frozenset[str] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Return profile-owned env values the hosted executor must inject.
+
+    The local ``docker compose exec`` path does not forward profile-owned env
+    because the running agent container already has it (Docker Compose
+    substitutes the compose env block at stack launch). The hosted (non-compose)
+    path has no compose env block, so the hosted executor must inject the same
+    values the local container received or it launches without them (e.g. a
+    profile-owned ``OLLAMA_HOST`` daemon the OpenCode launcher then cannot
+    resolve, falling back to the default daemon).
+
+    Compose interpolation is rendered against ``worker_env`` (default
+    ``os.environ``) so the hosted job receives the concrete value the local
+    container gets at stack launch:
+
+    - Pure literals are carried verbatim.
+    - An escaped ``$$`` collapses to a single literal ``$`` and is carried
+      (Compose models ``$$`` as a literal dollar, not a reference).
+    - ``${NAME:-default}`` / ``${NAME-default}`` with ``NAME`` unset in the
+      worker env resolves to the concrete ``default`` and is carried.
+    - ``${NAME:-default}`` with ``NAME`` present-but-empty in the worker env
+      resolves to the concrete ``default`` and is carried (``:-`` tests
+      non-empty, matching ``awf.service.environment``'s expander so the hosted
+      job receives the default the local container gets).
+    - ``${NAME:-default}`` with ``NAME`` set to a non-empty worker value is
+      skipped (worker-resolved; carrying the worker value would embed a
+      secret in ``profile_env``). The name stays in ``env_passthrough_names``
+      (see ``filter_hosted_env_passthrough_names``) so the hosted executor
+      resolves the same worker value out-of-band — the local Compose container
+      received it at stack launch.
+    - ``${NAME-default}`` with ``NAME`` set in the worker env (even empty) is
+      skipped (``-`` tests set-ness; a present value is worker-resolved). As
+      above, the name stays in ``env_passthrough_names`` for hosted out-of-band
+      resolution.
+    - ``${NAME:+alternate}`` / ``${NAME+alternate}`` with ``NAME`` set (non-empty
+      for ``:+``) resolves to the concrete ``alternate`` and is carried — the
+      local container received the alternate word (profile-owned config), so the
+      hosted job must too. With ``NAME`` unset (or empty for ``:+``) Compose
+      resolves to ``""`` and that empty literal is carried. An alternate word that
+      references a worker secret propagates the worker-resolved classification and
+      is skipped (the secret never reaches ``profile_env``).
+    - ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME`` set (non-empty for ``:?``)
+      is skipped (worker-resolved; the local container received the worker value,
+      which is a secret). The name stays in ``env_passthrough_names`` for hosted
+      out-of-band resolution. An unset required form would fail Compose at stack
+      launch, so that branch is unreachable for a running container.
+    - Bare ``${NAME}`` / ``$NAME`` forms are skipped (worker-resolved slots;
+      the local container received the worker value at stack launch, and
+      carrying it would embed the endpoint/secret in ``profile_env``). A bare
+      single reference whose variable is worker-set stays in
+      ``env_passthrough_names`` for hosted out-of-band resolution, mirroring a
+      pass-through slot (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN); a bare slot whose
+      variable is unset stays excluded (Compose substitutes ``""``; out of
+      scope). Nested/mixed forms (e.g. ``${X:-${SECRET}}`` / ``prefix-${NAME}``)
+      also classify worker-resolved by propagation but stay excluded — the
+      hosted executor cannot reconstruct a profile-owned literal interpolating
+      a worker value from the name alone.
+    - A Compose *pass-through* slot (``environment: [NAME]`` with no ``=``,
+      ``NAME:`` / ``NAME: null``) is skipped (worker-resolved; Docker Compose
+      took the value from the worker shell at stack launch) and the name stays
+      in ``env_passthrough_names`` for hosted out-of-band resolution. An
+      *explicit* empty value (``NAME: ""`` / ``NAME=``) is distinct: Docker
+      Compose sets a non-nil empty literal that OVERRIDES the worker shell
+      value, so it is carried here as a literal ``""`` (the local container
+      received an explicit blank, not the worker value) and the name is excluded
+      from passthrough (profile-owned). See ``_compose_environment_mapping`` /
+      PR #751 thread PRRT_kwDOSJAM6s6PY8zB.
+
+    Skipping worker-resolved values preserves the no-secret-values contract:
+    ``profile_env`` never carries a ``${...}`` placeholder nor a worker secret.
+    ComposeManager also expands ``${AWF_POSTGRES_PASSWORD}`` into profile DB URLs
+    (e.g. ``DATABASE_URL`` / ``AWF_DATABASE_URL``) at render time so the local
+    container can connect; those expanded literals embed the workspace DB
+    password and are NOT carried — the hosted path resolves DB credentials via
+    its own adapter contract, not from ``profile_env``. The rendered service env
+    declaring ``POSTGRES_PASSWORD`` is the authoritative source of that secret;
+    ``POSTGRES_PASSWORD`` is collected from any service (not only one named
+    ``postgres``) so custom profiles that name their DB sidecar ``db`` /
+    ``database`` are redacted too, and *all* distinct declared values are tracked
+    (not only the first) so a profile running several DB sidecars with different
+    passwords redacts each one's rendered DB URL independently. Each declared
+    value is resolved against the worker env (mirroring Compose interpolation)
+    so a password expressed via ``${POSTGRES_PASSWORD:-fallback}`` /
+    ``${POSTGRES_PASSWORD}`` redacts the same concrete value the local container
+    receives at stack launch. Agent env values containing any tracked password
+    are skipped so the credential never reaches the hosted request object. A
+    rendered DB URL percent-encodes the userinfo password (per RFC 3986), so a
+    password with URL-reserved characters (e.g. ``p@ss/word``) appears in the
+    URL as its encoded form (``p%40ss%2Fword``); the raw substring test alone
+    would miss it, so each tracked password is also compared against its
+    URL-encoded variant (``quote(..., safe="")``) so an encoded secret-bearing
+    URL is redacted too (PR #751 thread PRRT_kwDOSJAM6s6PZuE5). Profile-owned
+    auth literals are also skipped: any ``AGENT_AUTH_ENV_VARS`` key declared on
+    the agent service (e.g. ``OPENAI_API_KEY`` / ``CODEX_API_KEY`` set to a
+    concrete key string) is a profile-owned auth slot and its literal value must
+    never reach ``profile_env``. The same keys are kept out of
+    ``env_passthrough_names`` by ``_profile_owned_auth_keys`` so the hosted
+    executor resolves auth out-of-band; ``profile_env`` must not duplicate them
+    as literal secrets (PR #751 thread PRRT_kwDOSJAM6s6PaYta). When
+    the compose file is unreadable the result is empty (fail-closed: no values),
+    matching ``_compose_env_passthrough_exclusions``.
+
+    ``compose_env`` lets a caller that already parsed the compose agent
+    environment (e.g. ``_run_hosted`` computing the passthrough filter from the
+    same parse) reuse the result and avoid a second read/parse of the file. A
+    caller that supplies ``compose_env`` is responsible for the same redaction
+    context (it already has the file open): such a caller must perform its own
+    postgres-password collection and pass the set via ``postgres_passwords``;
+    otherwise no DB-credential redaction is applied for the pre-parsed path.
+    ``worker_env`` lets a caller supply a deterministic worker environment for
+    interpolation (default ``os.environ``); mirroring
+    ``agent_environment_with_*`` helpers.
+    """
+    env = os.environ if worker_env is None else worker_env
+    if compose_env is None:
+        compose_env, file_postgres_passwords = _try_compose_agent_env_and_postgres_passwords(
+            compose_file,
+            worker_env=env,
+        )
+    else:
+        file_postgres_passwords = frozenset()
+    if compose_env is None:
+        return ()
+    # Redact agent env values that embed any rendered postgres password so the
+    # generated workspace DB credential(s) never reach the hosted executor.
+    # ``file_postgres_passwords`` is populated only when this call parsed the
+    # compose file itself; a caller that supplied ``compose_env`` from a prior
+    # parse must pass ``postgres_passwords`` explicitly for the same redaction.
+    # Failing to locate a postgres password (no service declaring
+    # ``POSTGRES_PASSWORD``) redacts nothing, preserving carry for profiles
+    # without a DB sidecar.
+    postgres_passwords = file_postgres_passwords | (postgres_passwords or frozenset())
+    # Profile-owned auth-secret literals are concrete credential strings (e.g.
+    # ``OPENAI_API_KEY: "sk-profile-key"`` / ``CODEX_API_KEY: "sk-codex"``)
+    # that resolve to ``LITERAL`` and do not bear a postgres password, so without
+    # an explicit redaction they would be carried verbatim into
+    # ``AgentRuntimeExecRequest.profile_env``, breaking the documented
+    # secret-free hosted contract (see ``AgentRuntimeExecRequest``). The same
+    # keys are already kept out of ``env_passthrough_names`` by
+    # ``_profile_owned_auth_keys`` (the hosted executor resolves auth
+    # out-of-band), so ``profile_env`` must not duplicate them as literal
+    # secrets. Only the secret-bearing subset of ``AGENT_AUTH_ENV_VARS`` (API
+    # keys / tokens / credentials) is redacted; non-secret profile config in the
+    # same set (e.g. ``OLLAMA_HOST``, ``ANTHROPIC_BASE_URL``, project/region,
+    # backend toggles) is still carried, matching the
+    # ``AgentRuntimeExecRequest`` contract that documents
+    # ``OLLAMA_HOST`` as non-secret profile configuration (PR #751 thread
+    # PRRT_kwDOSJAM6s6PaYta).
+    auth_secret_keys = _AGENT_AUTH_SECRET_ENV_VARS & compose_env.keys()
+    carried: list[tuple[str, str]] = []
+    for key, raw in compose_env.items():
+        # A Compose pass-through slot (``environment: [NAME]``, ``NAME:`` /
+        # ``NAME: null``) is normalized to the :data:`_COMPOSE_PASSTHROUGH`
+        # sentinel; Docker Compose takes its value from the worker shell at
+        # stack launch, exactly like a bare ``${NAME}`` reference. Carrying an
+        # empty literal would override the real worker value in the hosted
+        # request, so the slot is skipped here and kept in
+        # ``env_passthrough_names`` for hosted out-of-band resolution (see
+        # ``filter_hosted_env_passthrough_names``).
+        #
+        # An *explicit* empty value (``NAME: ""`` / ``NAME=``) is normalized to
+        # the plain string ``""`` (NOT the sentinel): Docker Compose sets it as a
+        # non-nil empty literal that OVERRIDES the worker shell value, so the
+        # local container received an explicit blank, not the worker value. It
+        # flows through ``_compose_resolve_value("")`` -> ``("", LITERAL)`` and is
+        # carried as a literal ``""`` so the hosted job mirrors the local
+        # container instead of inheriting a worker value it never had. A literal
+        # empty resolved from an interpolation default (e.g. ``${MISSING:-}`` with
+        # ``MISSING`` unset) has a non-empty raw form and is likewise carried as
+        # ``LITERAL``, matching the local container.
+        if raw == _COMPOSE_PASSTHROUGH:
+            continue
+        expanded, resolution = _compose_resolve_value(raw, worker_env=env)
+        if resolution is not _ComposeEnvResolution.LITERAL:
+            continue
+        if _expanded_value_bears_postgres_password(expanded, postgres_passwords):
+            continue
+        if key in auth_secret_keys:
+            continue
+        carried.append((key, expanded))
+    return tuple(carried)

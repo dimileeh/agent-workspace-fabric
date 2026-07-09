@@ -627,6 +627,35 @@ services:
         assert log_store.sinks.stderr_data == ["legacy stderr"]
         assert log_store.sinks.closed is True
 
+    @pytest.mark.unit
+    async def test_run_only_runner_without_log_store_skips_sink_writes(self) -> None:
+        """A sync-only run with no log store / workspace id must not touch sinks.
+
+        When ``_open_command_streams`` returns ``None`` (no log store, or no
+        workspace id) the non-streaming fallback path must skip the
+        post-run sink write AND skip the finally-block close — the run still
+        succeeds and returns the runner's buffered output. This exercises the
+        ``sinks is None`` branch of ``_run_agent_cli`` distinct from the
+        log-store-backed path.
+        """
+        runner = _RunOnlyRunner()
+        adapter = CodexAdapter(
+            runner=runner,  # type: ignore[arg-type]
+            log_store=None,  # type: ignore[arg-type]
+        )
+
+        result = await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id=None,
+        )
+
+        assert result.stdout == "legacy stdout"
+        assert result.stderr == "legacy stderr"
+        assert runner.calls[0]["input_bytes"] is not None
+        assert _PROMPT.encode() in runner.calls[0]["input_bytes"]  # type: ignore[operator]
+
 
 class TestClaudeCodeAdapter:
     """Claude adapter contract tests."""

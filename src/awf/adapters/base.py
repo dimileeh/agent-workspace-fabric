@@ -17,12 +17,20 @@ from pathlib import Path
 from typing import Any
 
 from awf.adapters.provider_failures import classify_provider_failure
+from awf.adapters.runtime_executor import (
+    _HOSTED_TIMEOUT_REASONS,
+    _HOSTED_TIMEOUT_RETURN_CODE,
+    AgentRuntimeExecRequest,
+    AgentRuntimeExecResult,
+    AgentRuntimeExecutor,
+)
 from awf.adapters.usage import UsageSampleContext, UsageSampler
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
     AsyncCommandRunner,
     CommandResult,
+    StreamCallback,
 )
 from awf.common.compose_exec import (
     build_tracked_compose_exec,
@@ -31,8 +39,13 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
-from awf.profiles.compose import agent_exec_env_passthrough
-from awf.runtime.logs import LogStore
+from awf.profiles.compose import (
+    agent_exec_env_passthrough,
+    filter_hosted_env_passthrough_names,
+    hosted_github_token_passthrough_names,
+    literal_profile_env_from_compose,
+)
+from awf.runtime.logs import CommandLogSinks, LogStore
 
 _log = get_logger(__name__)
 
@@ -156,6 +169,7 @@ class AgentAdapter(ABC):
         agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
         agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
         usage_sampler: UsageSampler | None = None,
+        runtime_executor: AgentRuntimeExecutor | None = None,
     ) -> None:
         """Initialize the adapter runtime dependencies and timeout policy."""
         if agent_wall_timeout_seconds <= 0:
@@ -169,6 +183,7 @@ class AgentAdapter(ABC):
         self._agent_wall_timeout_seconds = agent_wall_timeout_seconds
         self._agent_idle_timeout_seconds = agent_idle_timeout_seconds
         self._usage_sampler = usage_sampler
+        self._runtime_executor = runtime_executor
 
     @property
     @abstractmethod
@@ -194,9 +209,36 @@ class AgentAdapter(ABC):
         return ()
 
     @property
+    def hosted_env_passthrough_names(self) -> tuple[str, ...]:
+        """Return env-passthrough *names* a hosted executor should resolve.
+
+        Names only — secret values are NEVER transported. The default is empty;
+        adapters that have a hosted credential contract (e.g. Codex
+        ``CODEX_API_KEY``) override this so a hosted runtime can resolve and
+        inject the credential out-of-band. The compose-derived passthrough
+        still applies on the local Compose path; this hook is only consulted
+        on the hosted (non-compose) execution path, where
+        ``filter_hosted_env_passthrough_names`` applies the same
+        compose/profile-owned exclusions as the local ``docker compose exec``
+        path before the request is built, so a profile-owned auth/env slot is
+        not reintroduced by the hosted executor.
+        """
+        return ()
+
+    @property
     def provider_recovery_default_model(self) -> str | None:
         """Return the implicit model identity provider recovery should attribute."""
         return self._selected_model_for_run(model=None)
+
+    @property
+    def is_hosted(self) -> bool:
+        """Return whether this adapter delegates to the injected runtime executor.
+
+        When true, agent runs go through the hosted path and there is no
+        Compose agent service to probe or restart — monitor recovery must
+        skip the Compose-service restart branch for timeouts in this mode.
+        """
+        return self._runtime_executor is not None
 
     @abstractmethod
     def get_provider(self, model: str | None) -> str:
@@ -250,6 +292,17 @@ class AgentAdapter(ABC):
         prompt_input = wrapped_prompt.encode("utf-8")
         selected_model = self._selected_model_for_run(model=model)
         cli_args = self._cli_args(model=model)
+        if self._runtime_executor is not None:
+            return await self._run_hosted(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt_input=prompt_input,
+                cli_args=cli_args,
+                selected_model=selected_model,
+                model=model,
+                workspace_id=workspace_id,
+                log_source=log_source,
+            )
         # ``agent_exec_env_passthrough`` reads + YAML-parses the compose file
         # synchronously; run it in a worker thread so the blocking I/O never
         # stalls the event loop when concurrent agent runs overlap.
@@ -305,11 +358,7 @@ class AgentAdapter(ABC):
             final_status = "success"
             return result
         except AgentRunError as exc:
-            final_status = (
-                "timeout"
-                if exc.reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
-                else "failed"
-            )
+            final_status = self._final_status_for_exception(exc)
             raise
         except asyncio.CancelledError:
             final_status = "cancelled"
@@ -365,6 +414,328 @@ class AgentAdapter(ABC):
                 exc_info=True,
             )
 
+    async def _run_hosted(
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        prompt_input: bytes,
+        cli_args: list[str],
+        selected_model: str | None,
+        model: str | None,
+        workspace_id: str | None,
+        log_source: str,
+    ) -> AgentRunResult:
+        """Delegate agent CLI execution to the injected runtime executor.
+
+        The hosted path replaces the tracked ``docker compose exec`` invocation
+        with a cloud-neutral executor call. The same prompt-via-stdin contract,
+        usage sampling, log-store streaming, and provider-failure
+        classification apply so monitor decision semantics are unchanged. The
+        hosted executor owns its own process cleanup; this path does NOT run
+        the compose cleanup helpers.
+
+        Log-store streaming: when sinks are available, ``on_stdout`` /
+        ``on_stderr`` callbacks are passed into the request so a streaming
+        executor writes chunks to the log store *during* execution — mirroring
+        the Compose ``run_streaming`` path — so a long-running hosted run
+        (e.g. a monitor repair that idles until its watchdog fires) no longer
+        leaves the log stream empty until completion. When the executor does
+        not stream, the buffered ``AgentRuntimeExecResult`` stdout/stderr is
+        written to the sinks after ``execute()`` returns, preserving the prior
+        buffered-output contract for non-streaming executors.
+        """
+        del compose_project  # logging/audit only on hosted path
+        runtime_executor = self._runtime_executor
+        assert runtime_executor is not None  # guarded by run() dispatch
+        # ``filter_hosted_env_passthrough_names`` and
+        # ``literal_profile_env_from_compose`` both read + YAML-parse the compose
+        # file synchronously; run them in worker threads so the blocking I/O
+        # never stalls the event loop when concurrent agent runs overlap,
+        # mirroring the ``agent_exec_env_passthrough`` offload on the Compose
+        # path above.
+        env_passthrough_names = await asyncio.to_thread(
+            filter_hosted_env_passthrough_names,
+            self.hosted_env_passthrough_names,
+            compose_file=compose_file,
+        )
+        # Surface GitHub token alias names the local Compose path would inject
+        # into the agent env block (``GH_TOKEN`` / ``GITHUB_TOKEN``) so the
+        # hosted executor can resolve and inject the worker token out-of-band.
+        # Without this the hosted monitor-repair agent loses GitHub CLI
+        # credentials even though the same workspace has them under Compose
+        # (PR #751 thread PRRT_kwDOSJAM6s6PXFPz). The helper applies the same
+        # alias group-precedence rule as ``agent_environment_with_github_token``
+        # so a profile-owned alias (e.g. a secret lease rendering
+        # ``GITHUB_TOKEN``) is not shadowed by a worker alias. Names only —
+        # secret values are never transported; the placeholder string is never
+        # returned. The compose file is immutable after ComposeManager renders
+        # it, so this independent parse is consistent with the filter /
+        # profile_env parses above (no TOCTOU). Offloaded to a worker thread
+        # for the same blocking-I/O reason as the filter / profile_env parses.
+        github_token_names = await asyncio.to_thread(
+            hosted_github_token_passthrough_names, compose_file
+        )
+        if github_token_names:
+            # Union after the filter: the filter excludes compose-declared
+            # profile-owned slots, and the helper already skips profile-owned
+            # aliases, so the union surfaces exactly the names the local
+            # Compose path would inject without reintroducing a profile-owned
+            # slot. De-duplicate preserving filter order.
+            existing_names = set(env_passthrough_names)
+            env_passthrough_names = env_passthrough_names + tuple(
+                name for name in github_token_names if name not in existing_names
+            )
+        # Carry profile-owned env values to the hosted executor. The local
+        # ``docker compose exec`` path does not forward profile-owned env
+        # because the running container already has it (substituted from the
+        # compose env block at stack launch); the hosted path has no compose env
+        # block, so without these values a profile-owned endpoint (e.g.
+        # ``OLLAMA_HOST``) never reaches the hosted job and OpenCode falls back to
+        # the default daemon. Compose interpolation is rendered against the
+        # worker env so the hosted job receives the same concrete value the
+        # local container gets at stack launch: a defaulted
+        # ``${NAME:-default}`` with ``NAME`` unset is carried as the default, an
+        # escaped ``$$`` is carried as a single ``$``, and a pure literal is
+        # carried verbatim. Bare ``${NAME}`` / ``$NAME`` worker-resolved slots are
+        # skipped (the profile owns them locally; the hosted path resolves
+        # credentials via its own adapter contract, not from the worker).
+        profile_env = await asyncio.to_thread(literal_profile_env_from_compose, compose_file)
+        sampler_ctx: UsageSampleContext | None = None
+        final_status = "failed"
+        sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
+        # Streaming callbacks: when sinks are available, forward stdout/stderr
+        # chunks to the log store *during* execution (mirroring the Compose
+        # ``run_streaming`` path) and track whether each fd was streamed. When
+        # the executor does not stream, the buffered ``AgentRuntimeExecResult``
+        # is written to the sinks after ``execute()`` returns instead — see
+        # the post-execute write guard below. Either way the log store ends up
+        # with the run's output; the streaming path additionally fills it
+        # live, so a long-running hosted monitor repair no longer leaves the
+        # log stream empty until completion.
+        streamed_stdout = False
+        streamed_stderr = False
+
+        on_stdout_cb: StreamCallback | None = None
+        on_stderr_cb: StreamCallback | None = None
+        if sinks is not None:
+            stream_sinks = sinks
+
+            async def _on_stdout(data: str) -> None:
+                nonlocal streamed_stdout
+                streamed_stdout = True
+                await stream_sinks.write_stdout(data)
+
+            async def _on_stderr(data: str) -> None:
+                nonlocal streamed_stderr
+                streamed_stderr = True
+                await stream_sinks.write_stderr(data)
+
+            on_stdout_cb = _on_stdout
+            on_stderr_cb = _on_stderr
+
+        request = AgentRuntimeExecRequest(
+            workspace_id=workspace_id,
+            agent_runtime=self.name,
+            cli_args=tuple(cli_args),
+            prompt_stdin=prompt_input,
+            log_source=log_source,
+            model=selected_model,
+            effort=self._default_effort,
+            env_passthrough_names=env_passthrough_names,
+            profile_env=profile_env,
+            wall_timeout_seconds=self._agent_wall_timeout_seconds,
+            idle_timeout_seconds=self._agent_idle_timeout_seconds,
+            on_stdout=on_stdout_cb,
+            on_stderr=on_stderr_cb,
+        )
+        _log.info(
+            "agent.run.hosted.start",
+            agent=self.name.value,
+            workspace_id=workspace_id,
+            model=selected_model,
+            effort=self._default_effort,
+            wall_timeout_seconds=self._agent_wall_timeout_seconds,
+            idle_timeout_seconds=self._agent_idle_timeout_seconds,
+            source=log_source,
+            prompt_bytes=len(prompt_input),
+            env_passthrough_names=list(env_passthrough_names),
+            # Log profile_env *keys* only — values are literal profile config
+            # (e.g. an Ollama daemon URL) but never secret placeholders; still,
+            # a value could be sensitive config, so do not log values.
+            profile_env_keys=[key for key, _ in profile_env],
+        )
+        try:
+            sampler_ctx = None
+            if self._usage_sampler is not None:
+                _log.info(
+                    "agent.run.hosted.usage_sampling_skipped",
+                    agent=self.name.value,
+                    workspace_id=workspace_id,
+                )
+            hosted_result = await runtime_executor.execute(request)
+            if sinks is not None:
+                # Buffered fallback: write the hosted executor's buffered
+                # stdout/stderr to the sinks only when that fd was not already
+                # streamed during execution. This preserves the prior
+                # buffered-output contract for non-streaming executors while
+                # avoiding double-writes (one streamed chunk + one buffered
+                # copy) for executors that stream.
+                if hosted_result.stdout and not streamed_stdout:
+                    await sinks.write_stdout(hosted_result.stdout)
+                if hosted_result.stderr and not streamed_stderr:
+                    await sinks.write_stderr(hosted_result.stderr)
+            result = self._classify_hosted_result(
+                hosted_result=hosted_result,
+                model=model,
+                workspace_id=workspace_id,
+                log_source=log_source,
+            )
+            final_status = "success"
+            return result
+        except AgentRunError as exc:
+            final_status = self._final_status_for_exception(exc)
+            raise
+        except asyncio.CancelledError:
+            final_status = "cancelled"
+            raise
+        finally:
+            if sinks is not None:
+                await sinks.close()
+            await self._finalize_usage_sampling(
+                sampler_ctx, status=final_status, workspace_id=workspace_id
+            )
+
+    async def _open_command_streams(
+        self,
+        *,
+        workspace_id: str | None,
+        log_source: str,
+    ) -> CommandLogSinks | None:
+        """Open log-store command sinks for a run, or ``None`` when unavailable.
+
+        Shared by the Compose and hosted execution paths so both stream to the
+        same log-store sink with identical naming.
+        """
+        if self._log_store is None or workspace_id is None:
+            return None
+        return await self._log_store.open_command_streams(
+            workspace_id=workspace_id,
+            base_stream_id=log_source,
+            source=log_source,
+            name=f"{log_source.capitalize()} ({self.name.value})"
+            if log_source != "agent"
+            else self.name.value,
+        )
+
+    def _final_status_for_exception(self, exc: AgentRunError) -> str:
+        """Map an agent-run exception to a usage-sampling final status.
+
+        Shared by ``run()`` and ``_run_hosted`` so the ``AgentRunError`` →
+        ``final_status`` mapping stays identical across execution paths. The
+        ``asyncio.CancelledError`` case is handled inline by each caller's own
+        ``except asyncio.CancelledError`` handler (``final_status = "cancelled"``),
+        so this helper only ever receives an ``AgentRunError``.
+        """
+        return "timeout" if exc.reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"} else "failed"
+
+    def _classify_hosted_result(
+        self,
+        *,
+        hosted_result: AgentRuntimeExecResult,
+        model: str | None,
+        workspace_id: str | None,
+        log_source: str,
+    ) -> AgentRunResult:
+        """Map a hosted executor result through the same failure classification.
+
+        Reuses ``_failure_reason_for_result`` so non-zero exits, timeouts, and
+        provider auth failures classify identically to the Compose path —
+        monitor recovery semantics stay unchanged. The hosted executor signals
+        a timeout by returning ``returncode == 124`` (the conventional
+        ``timeout(1)`` exit) and carries the wall-vs-idle distinction on
+        ``AgentRuntimeExecResult.timeout_reason``; an idle timeout maps to
+        ``AGENT_IDLE_TIMEOUT`` while a wall-clock timeout maps to
+        ``AGENT_TIMEOUT``. A ``124`` without an explicit, valid
+        ``timeout_reason`` is NOT classified as a timeout — it falls through to
+        ordinary CLI-failure classification, mirroring the Compose path where
+        only a watchdog-set ``reason_code`` yields ``AGENT_TIMEOUT``.
+        """
+        del log_source
+        # Only classify a hosted ``124`` as a timeout when the executor
+        # signals an explicit, valid timeout reason. A ``124`` with an
+        # unset-default (``COMMAND_TIMEOUT_REASON``) still maps to a wall-clock
+        # timeout (backwards-compat for executors that only set ``returncode``),
+        # but a ``124`` carrying any other value is treated as an ordinary CLI
+        # failure instead of being forced into ``COMMAND_TIMEOUT``.
+        timeout_reason = (
+            hosted_result.timeout_reason
+            if hosted_result.returncode == _HOSTED_TIMEOUT_RETURN_CODE
+            and hosted_result.timeout_reason in _HOSTED_TIMEOUT_REASONS
+            else None
+        )
+        command_result = CommandResult(
+            returncode=hosted_result.returncode,
+            stdout=hosted_result.stdout,
+            stderr=hosted_result.stderr,
+            reason_code=timeout_reason,
+        )
+        if command_result.ok:
+            _log.info(
+                "agent.run.hosted.ok",
+                agent=self.name.value,
+                workspace_id=workspace_id,
+                stdout_bytes=len(command_result.stdout),
+                stderr_bytes=len(command_result.stderr),
+            )
+            return AgentRunResult(
+                returncode=command_result.returncode,
+                stdout=command_result.stdout,
+                stderr=command_result.stderr,
+            )
+        provider = self.get_provider(model)
+        selected_model = self._selected_model_for_run(model=model)
+        reported_model = selected_model or "unknown"
+        base_reason = _failure_reason_for_result(command_result)
+        provider_failure = classify_provider_failure(
+            reason_code=base_reason,
+            stdout=command_result.stdout,
+            stderr=command_result.stderr,
+            provider=provider,
+            model=selected_model,
+        )
+        reason_code = provider_failure.reason_code if provider_failure is not None else base_reason
+        log_event = (
+            "agent.run.hosted.timeout"
+            if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
+            else "agent.run.hosted.failed"
+        )
+        _log.warning(
+            log_event,
+            agent=self.name.value,
+            workspace_id=workspace_id,
+            returncode=command_result.returncode,
+            reason_code=reason_code,
+            stdout_bytes=len(command_result.stdout),
+            stderr_bytes=len(command_result.stderr),
+        )
+        details: dict[str, str | bool | int | dict[str, object]] | None = None
+        if provider_failure is not None:
+            recovery_metadata = provider_failure.to_metadata()
+            details = {
+                "provider": recovery_metadata.get("provider", provider),
+                "model": recovery_metadata.get("model", reported_model),
+                "retryable": True,
+                "recommended_action": str(recovery_metadata["recommended_action"]),
+                "provider_recovery": recovery_metadata,
+            }
+        raise AgentRunError(
+            agent=self.name,
+            result=command_result,
+            reason_code=reason_code,
+            details=details,
+        )
+
     async def _run_agent_cli(
         self,
         *,
@@ -379,16 +750,7 @@ class AgentAdapter(ABC):
         # Stream the prompt on stdin and close it explicitly. This avoids OS
         # argv length limits for large review comments while still preventing
         # CLIs from waiting forever for inherited interactive input.
-        sinks = None
-        if self._log_store is not None and workspace_id is not None:
-            sinks = await self._log_store.open_command_streams(
-                workspace_id=workspace_id,
-                base_stream_id=log_source,
-                source=log_source,
-                name=f"{log_source.capitalize()} ({self.name.value})"
-                if log_source != "agent"
-                else self.name.value,
-            )
+        sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
 
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
@@ -525,6 +887,7 @@ def get_adapter(
     agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
     agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     usage_sampler: UsageSampler | None = None,
+    runtime_executor: AgentRuntimeExecutor | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime.
 
@@ -543,6 +906,7 @@ def get_adapter(
         agent_wall_timeout_seconds=agent_wall_timeout_seconds,
         agent_idle_timeout_seconds=agent_idle_timeout_seconds,
         usage_sampler=usage_sampler,
+        runtime_executor=runtime_executor,
     )
 
 

@@ -244,6 +244,17 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     ):
         return None
 
+    # The agent runtime executor seam only hostifies agent CLI runs (wired
+    # through the adapter below); it does NOT hostify validation. The resumed
+    # monitor's ValidationRunner still builds ``docker compose exec`` commands
+    # for pre-push validation, and companion services (e.g. postgres) still run
+    # in the compose stack. So even when an agent runtime executor is injected,
+    # keep the compose stack available for validation — otherwise a worker that
+    # resumes a monitor after the compose project was stopped would see a
+    # hosted agent repair succeed and then validation fail as infrastructure
+    # because the validation/companion stack was never brought back up. A future
+    # hosted validation runner seam would allow skipping this; until then the
+    # restart + companion env precheck runs unconditionally.
     try:
         _precheck_required_companion_env_secrets_for_resume(
             companion_specs=companion_specs,
@@ -291,14 +302,23 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             compose_file_path=compose_file_path,
             error=exc,
         )
-        if not await _compose_runtime_usable_after_restart_failure(compose_project):
-            return None
-        _log.warning(
-            "executor.resume_compose_up_failed_runtime_still_usable",
-            workspace_id=workspace_id,
-            compose_project_name=compose_project,
-            reason_code=exc.reason_code,
-        )
+        runtime_usable = await _compose_runtime_usable_after_restart_failure(compose_project)
+        if not runtime_usable:
+            if self._agent_runtime_executor is None:
+                return None
+            _log.warning(
+                "executor.resume_compose_up_failed_hosted_continue",
+                workspace_id=workspace_id,
+                compose_project_name=compose_project,
+                reason_code=exc.reason_code,
+            )
+        else:
+            _log.warning(
+                "executor.resume_compose_up_failed_runtime_still_usable",
+                workspace_id=workspace_id,
+                compose_project_name=compose_project,
+                reason_code=exc.reason_code,
+            )
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
@@ -314,6 +334,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                runtime_executor=self._agent_runtime_executor,
             )
             if profile is None:
                 profile = _profile_for_workspace(
@@ -1000,6 +1021,7 @@ async def _build_handoff_pr_monitor(
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
+                runtime_executor=self._agent_runtime_executor,
             )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
