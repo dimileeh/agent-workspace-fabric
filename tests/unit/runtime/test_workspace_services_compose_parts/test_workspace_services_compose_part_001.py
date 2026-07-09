@@ -939,18 +939,18 @@ def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_backend_su
         # hosted executor does not re-resolve worker-side values for them.
         "AWS_REGION",
         "ANTHROPIC_VERTEX_PROJECT_ID",
-        # A credential identifier declared as a literal stays name-only
-        # passthrough so it is resolved out-of-band, not carried in profile_env.
+        # A credential identifier declared as a literal without a matching
+        # worker value is profile-owned and should not be re-resolved by name.
         "AWS_ACCESS_KEY_ID",
         # An AGENT_AUTH name absent from compose still passes through.
         "ANTHROPIC_API_KEY",
     )
-    filtered = filter_hosted_env_passthrough_names(names, compose_file=compose_file)
+    filtered = filter_hosted_env_passthrough_names(names, compose_file=compose_file, worker_env={})
 
     assert "CLAUDE_CODE_USE_VERTEX" not in filtered
     assert "AWS_REGION" not in filtered
     assert "ANTHROPIC_VERTEX_PROJECT_ID" not in filtered
-    assert "AWS_ACCESS_KEY_ID" in filtered
+    assert "AWS_ACCESS_KEY_ID" not in filtered
     assert "ANTHROPIC_API_KEY" in filtered
 
 

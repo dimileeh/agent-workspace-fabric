@@ -143,6 +143,7 @@ _HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS = frozenset({"AWS_ACCESS_KEY_ID
 
 _NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES = frozenset(
     {
+        "AWS_ACCESS_KEY_ID",
         "GEMINI_API_KEY_AUTH_MECHANISM",
     }
 )
@@ -1164,7 +1165,11 @@ def _hosted_name_only_credential_identifier_keys(
         if raw == _COMPOSE_PASSTHROUGH:
             continue
         expanded, resolution = _compose_resolve_value(raw, worker_env=worker_env)
-        if resolution is _ComposeEnvResolution.LITERAL and expanded:
+        if (
+            resolution is _ComposeEnvResolution.LITERAL
+            and expanded
+            and worker_env.get(name) == expanded
+        ):
             keys.add(name)
     return frozenset(keys)
 
@@ -1406,10 +1411,9 @@ def literal_profile_env_from_compose(
     # PRRT_kwDOSJAM6s6PaYta).
     #
     # Some credential identifiers (currently ``AWS_ACCESS_KEY_ID``) are not
-    # secrets by themselves but still identify credential material and should not
-    # be logged/persisted as direct hosted job env. Non-empty literal values for
-    # those names are skipped from ``profile_env`` and left in
-    # ``env_passthrough_names`` for hosted out-of-band resolution.
+    # secrets by themselves. They stay as name-only passthrough only when the
+    # worker can resolve the same literal value; otherwise they are carried as
+    # profile-owned config so hosted jobs match local Compose.
     #
     # Non-auth profile literals with secret-looking env names are skipped for
     # the same secret-free hosted request contract. This keeps arbitrary profile
