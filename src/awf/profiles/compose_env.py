@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from enum import StrEnum
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 # Compose variable-interpolation resolver, mirroring the interpolation model in
 # ``awf.service.environment`` (``${VAR}`` / ``${VAR:-...}`` / ``$VAR``). Kept
@@ -105,6 +105,7 @@ _COMPOSE_ESCAPED_DOLLAR = "\0AWF_PROFILE_ESCAPED_DOLLAR\0"
 _COMPOSE_PASSTHROUGH = "\0AWF_PROFILE_COMPOSE_PASSTHROUGH\0"
 
 _COMPOSE_ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_POSTGRES_PASSWORD_SUBSTRING_REDACTION_MIN_LENGTH = 12
 
 
 def _compose_braced_expression_end(value: str, open_brace_index: int) -> int | None:
@@ -542,19 +543,37 @@ def _expanded_value_bears_postgres_password(
     A rendered agent env DB URL percent-encodes the userinfo password (per
     RFC 3986), so a password containing URL-reserved characters (e.g.
     ``p@ss/word``) appears in the URL as its encoded form (``p%40ss%2Fword``).
-    The raw substring test alone misses that form and leaks the
-    secret-bearing URL into ``profile_env``. Each tracked password is also
-    compared against its URL-encoded variant (``quote(..., safe="")``) so an
-    encoded secret-bearing value is redacted too (PR #751 thread
-    PRRT_kwDOSJAM6s6PZuE5).
+    URL userinfo is matched structurally before the fallback substring check so
+    short common local passwords (e.g. ``postgres``) do not redact unrelated
+    literals such as ``POSTGRES_HOST=postgres``.
     """
+    try:
+        url_password = urlsplit(expanded).password
+    except ValueError:
+        url_password = None
+    if url_password:
+        expanded_passwords = frozenset(
+            candidate
+            for password in postgres_passwords
+            for candidate in (password, quote(password, safe=""))
+            if candidate
+        )
+        if url_password in expanded_passwords or unquote(url_password) in expanded_passwords:
+            return True
     for password in postgres_passwords:
         if not password:
             continue
-        if password in expanded:
+        if (
+            len(password) >= _POSTGRES_PASSWORD_SUBSTRING_REDACTION_MIN_LENGTH
+            and password in expanded
+        ):
             return True
         encoded = quote(password, safe="")
-        if encoded != password and encoded in expanded:
+        if (
+            encoded != password
+            and len(encoded) >= _POSTGRES_PASSWORD_SUBSTRING_REDACTION_MIN_LENGTH
+            and encoded in expanded
+        ):
             return True
     return False
 

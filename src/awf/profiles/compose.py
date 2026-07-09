@@ -1253,16 +1253,17 @@ def literal_profile_env_from_compose(
     value is resolved against the worker env (mirroring Compose interpolation)
     so a password expressed via ``${POSTGRES_PASSWORD:-fallback}`` /
     ``${POSTGRES_PASSWORD}`` redacts the same concrete value the local container
-    receives at stack launch. Agent env values containing any tracked password
-    are skipped so the credential never reaches the hosted request object. A
-    rendered DB URL percent-encodes the userinfo password (per RFC 3986), so a
-    password with URL-reserved characters (e.g. ``p@ss/word``) appears in the
-    URL as its encoded form (``p%40ss%2Fword``); the raw substring test alone
-    would miss it, so each tracked password is also compared against its
-    URL-encoded variant (``quote(..., safe="")``) so an encoded secret-bearing
-    URL is redacted too (PR #751 thread PRRT_kwDOSJAM6s6PZuE5). Profile-owned
-    auth literals are also skipped: any ``AGENT_AUTH_ENV_VARS`` key declared on
-    the agent service (e.g. ``OPENAI_API_KEY`` / ``CODEX_API_KEY`` set to a
+    receives at stack launch. Agent env DB URLs whose userinfo password matches
+    any tracked password are skipped so the credential never reaches the hosted
+    request object. A rendered DB URL percent-encodes the userinfo password (per
+    RFC 3986), so a password with URL-reserved characters (e.g. ``p@ss/word``)
+    appears in the URL as its encoded form (``p%40ss%2Fword``); structured
+    userinfo matching checks both raw and encoded forms so an encoded
+    secret-bearing URL is redacted too (PR #751 thread PRRT_kwDOSJAM6s6PZuE5)
+    without dropping unrelated literals that equal a short common password.
+    Profile-owned auth literals are also skipped: any ``AGENT_AUTH_ENV_VARS``
+    key declared on the agent service (e.g. ``OPENAI_API_KEY`` /
+    ``CODEX_API_KEY`` set to a
     concrete key string) is a profile-owned auth slot and its literal value must
     never reach ``profile_env``. The same keys are kept out of
     ``env_passthrough_names`` by ``_profile_owned_auth_keys`` so the hosted

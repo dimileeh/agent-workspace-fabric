@@ -119,3 +119,42 @@ def test_literal_profile_env_from_compose_preserves_profile_git_askpass_literal(
 
     assert carried.get("GIT_ASKPASS") == "/opt/profile/askpass.sh"
     assert carried.get("APP_BASE_URL") == "http://app:8080"
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_keeps_short_password_collision_config(
+    tmp_path: Path,
+) -> None:
+    """A short local DB password must not redact unrelated host literals."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "postgres": {
+                        "image": "postgres:16-alpine",
+                        "environment": {
+                            "POSTGRES_USER": "awf",
+                            "POSTGRES_PASSWORD": "postgres",
+                            "POSTGRES_DB": "awf",
+                        },
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "POSTGRES_HOST": "postgres",
+                            "DATABASE_HOST": "postgres",
+                            "DATABASE_URL": "postgresql://awf:postgres@postgres:5432/awf",
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert carried["POSTGRES_HOST"] == "postgres"
+    assert carried["DATABASE_HOST"] == "postgres"
+    assert "DATABASE_URL" not in carried
