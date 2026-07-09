@@ -404,7 +404,14 @@ def _github_token_source_name(source_env: Mapping[str, str]) -> str | None:
     for name in ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
         if source_env.get(name):
             return name
-    return None
+    # Unreachable through the production call path: this helper mirrors
+    # ``_github_token_placeholder``'s scan order, and
+    # ``hosted_github_token_passthrough_names`` returns ``()`` early when the
+    # placeholder is ``None`` (no token source present), so this fallback is
+    # never reached for a running caller. Kept for completeness; excluding it
+    # avoids a hollow test that calls the private helper solely to mark the
+    # line executed.
+    return None  # pragma: no cover
 
 
 def hosted_github_token_passthrough_names(
