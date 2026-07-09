@@ -892,6 +892,97 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_from_service
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_postgres_password_from_relative_env_file(
+    tmp_path: Path,
+) -> None:
+    """A profile may keep its DB service's ``POSTGRES_PASSWORD`` in an
+    ``env_file`` declared with a *relative* path. Docker Compose resolves
+    relative ``env_file`` paths from the compose file's parent directory (per
+    Docker's documentation), and ComposeManager writes the rendered compose
+    file under a per-workspace compose directory separate from the worker
+    process cwd.
+
+    ``_compose_service_env_file_paths`` previously returned the path verbatim
+    and the caller opened it relative to the worker process cwd, so a valid
+    compose service using ``env_file: [./db.env]`` looked up ``./db.env`` from
+    the worker cwd instead of the compose file's parent. The env file was not
+    found, ``POSTGRES_PASSWORD`` stayed absent from ``postgres_passwords``, and
+    ``literal_profile_env_from_compose`` carried the rendered agent env
+    ``DATABASE_URL`` / ``AWF_DATABASE_URL`` (which embed the same env-file
+    password) in ``AgentRuntimeExecRequest.profile_env``, leaking the workspace
+    credential to a hosted executor despite the secret-free contract.
+
+    Relative ``env_file`` paths must be resolved against the compose file's
+    parent directory before parsing, matching Docker Compose's documented
+    resolution rule (PR #751 thread PRRT_kwDOSJAM6s6PaMeK).
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_dir = tmp_path / "compose.d"
+    compose_dir.mkdir()
+    env_file = compose_dir / "db.env"
+    env_file.write_text("POSTGRES_PASSWORD=relative-env-file-secret\n", encoding="utf-8")
+
+    compose_file = compose_dir / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "postgres": {
+                        "image": "postgres:16-alpine",
+                        # Relative env_file -- Docker resolves it from the
+                        # compose file's parent directory, NOT the worker cwd.
+                        "env_file": ["./db.env"],
+                        "environment": {
+                            "POSTGRES_USER": "awf",
+                            "POSTGRES_DB": "awf",
+                        },
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Non-secret profile literal -> carried (must survive).
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            # AWF-expanded DB URLs embed the env-file password
+                            # -> must be skipped (secret-bearing).
+                            "DATABASE_URL": (
+                                "postgresql://awf:relative-env-file-secret@postgres:5432/awf"
+                            ),
+                            "AWF_DATABASE_URL": (
+                                "postgresql+asyncpg://awf:relative-env-file-secret"
+                                "@postgres:5432/awf"
+                            ),
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Run with cwd pointed at tmp_path (NOT compose_dir) so a naive relative
+    # lookup from the worker cwd would miss ./db.env, exercising the
+    # compose-file-parent resolution the fix adds.
+    import os
+
+    prev_cwd = Path.cwd()
+    os.chdir(tmp_path)
+    try:
+        profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    finally:
+        os.chdir(prev_cwd)
+
+    # Non-secret profile literal is still carried to the hosted executor.
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    # Secret-bearing expanded values are NOT carried to the hosted executor.
+    carried = dict(profile_env)
+    assert "DATABASE_URL" not in carried
+    assert "AWF_DATABASE_URL" not in carried
+    # The relative env-file DB password never reaches the hosted request object.
+    assert "relative-env-file-secret" not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_percent_encoded_postgres_password(
     tmp_path: Path,
 ) -> None:

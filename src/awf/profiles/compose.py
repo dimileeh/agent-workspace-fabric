@@ -634,9 +634,15 @@ def _try_compose_agent_env_and_postgres_passwords(
     the secret-free contract (PR #751 thread PRRT_kwDOSJAM6s6PZuE2). The env-file
     values are parsed with ``compose_env_file_values`` (mirroring Compose's
     interpolation rules) and ``POSTGRES_PASSWORD`` from each file is added to the
-    redaction set, resolved against ``worker_env`` like an inline value. A missing
-    or unreadable env_file contributes nothing (best-effort: the inline env is the
-    authoritative rendered source, so a missing env_file does not fail closed).
+    redaction set, resolved against ``worker_env`` like an inline value. Relative
+    ``env_file`` paths are resolved against the compose file's parent directory
+    (matching Docker Compose's documented resolution rule) before parsing, so a
+    profile keeping its DB password in a relative ``env_file`` (e.g. ``./db.env``)
+    is found even though ComposeManager writes the rendered compose file under a
+    per-workspace compose directory separate from the worker process cwd (PR #751
+    thread PRRT_kwDOSJAM6s6PaMeK). A missing or unreadable env_file contributes
+    nothing (best-effort: the inline env is the authoritative rendered source, so a
+    missing env_file does not fail closed).
 
     Keeping only the first declared password (the previous behaviour) is also
     unsound when a profile runs several DB sidecars with *different* passwords:
@@ -692,7 +698,9 @@ def _try_compose_agent_env_and_postgres_passwords(
             postgres_passwords,
             worker_env=worker_env,
         )
-        for env_file_path in _compose_service_env_file_paths(service.get("env_file")):
+        for env_file_path in _compose_service_env_file_paths(
+            service.get("env_file"), compose_dir=compose_file.parent
+        ):
             try:
                 env_file_env = compose_env_file_values(env_file_path, environ=worker_env)
             except (OSError, UnicodeDecodeError):
@@ -705,27 +713,41 @@ def _try_compose_agent_env_and_postgres_passwords(
     return agent_env, frozenset(postgres_passwords)
 
 
-def _compose_service_env_file_paths(env_file: object) -> tuple[Path, ...]:
+def _compose_service_env_file_paths(
+    env_file: object, *, compose_dir: Path | None = None
+) -> tuple[Path, ...]:
     """Return the ``env_file`` paths declared on a compose service.
 
     Compose accepts ``env_file`` as a single path string or a list of paths
     (and a mapping form with a ``path`` key). ComposeManager renders a profile
     service's ``env_file`` as a single-item list of the resolved workspace path
-    (see ``workspace.base.yml.j2``), so both shapes are handled here. The paths
-    are returned verbatim (already resolved by the renderer); a missing or
-    unreadable file is tolerated by the caller.
+    (see ``workspace.base.yml.j2``), so both shapes are handled here. A missing
+    or unreadable file is tolerated by the caller.
+
+    Relative paths are resolved against the compose file's parent directory
+    (matching Docker Compose's documented resolution rule) when ``compose_dir``
+    is supplied, so a profile that keeps its DB password in a relative
+    ``env_file`` (e.g. ``./db.env``) is looked up from the compose directory
+    rather than the worker process cwd. Absolute paths are kept verbatim
+    (PR #751 thread PRRT_kwDOSJAM6s6PaMeK).
     """
     paths: list[Path] = []
+    raw_paths: list[str] = []
     if isinstance(env_file, str):
-        paths.append(Path(env_file))
+        raw_paths.append(env_file)
     elif isinstance(env_file, list):
         for item in env_file:
             if isinstance(item, str):
-                paths.append(Path(item))
+                raw_paths.append(item)
             elif isinstance(item, Mapping):
                 raw = item.get("path")
                 if isinstance(raw, str):
-                    paths.append(Path(raw))
+                    raw_paths.append(raw)
+    for raw in raw_paths:
+        path = Path(raw)
+        if not path.is_absolute() and compose_dir is not None:
+            path = compose_dir / path
+        paths.append(path)
     return tuple(paths)
 
 
