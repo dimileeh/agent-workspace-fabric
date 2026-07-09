@@ -25,7 +25,7 @@ def _compose_with_agent_env(tmp_path: Path, environment: dict[str, str]) -> Path
 
 
 @pytest.mark.unit
-def test_literal_aws_access_key_id_without_matching_worker_value_is_carried(
+def test_literal_aws_access_key_id_without_matching_worker_value_is_not_carried(
     tmp_path: Path,
 ) -> None:
     compose_file = _compose_with_agent_env(
@@ -44,7 +44,7 @@ def test_literal_aws_access_key_id_without_matching_worker_value_is_carried(
         worker_env=worker_env,
     )
 
-    assert profile_env["AWS_ACCESS_KEY_ID"] == "AKIAIOSFODNN7EXAMPLE"
+    assert "AWS_ACCESS_KEY_ID" not in profile_env
     assert "AWS_SECRET_ACCESS_KEY" not in profile_env
     assert "AWS_ACCESS_KEY_ID" not in filtered
 
@@ -70,3 +70,33 @@ def test_literal_aws_access_key_id_with_same_worker_value_stays_name_only(
 
     assert "AWS_ACCESS_KEY_ID" not in profile_env
     assert "AWS_ACCESS_KEY_ID" in filtered
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_backend_supplement(
+    tmp_path: Path,
+) -> None:
+    compose_file = _compose_with_agent_env(
+        tmp_path,
+        {
+            "AWS_REGION": "us-west-2",
+            "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+            "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
+            "CLAUDE_CODE_USE_VERTEX": "1",
+        },
+    )
+
+    names = (
+        "CLAUDE_CODE_USE_VERTEX",
+        "AWS_REGION",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "AWS_ACCESS_KEY_ID",
+        "ANTHROPIC_API_KEY",
+    )
+    filtered = filter_hosted_env_passthrough_names(names, compose_file=compose_file, worker_env={})
+
+    assert "CLAUDE_CODE_USE_VERTEX" not in filtered
+    assert "AWS_REGION" not in filtered
+    assert "ANTHROPIC_VERTEX_PROJECT_ID" not in filtered
+    assert "AWS_ACCESS_KEY_ID" not in filtered
+    assert "ANTHROPIC_API_KEY" in filtered

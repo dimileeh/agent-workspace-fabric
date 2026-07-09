@@ -195,12 +195,14 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
 
 
 def _value_has_url_userinfo(value: str) -> bool:
-    """Return whether ``value`` is a URL containing non-empty userinfo."""
+    """Return whether ``value`` is a non-Postgres URL containing non-empty userinfo."""
     try:
         parsed = urlsplit(value)
     except ValueError:
         return False
     if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+        return False
+    if parsed.scheme.startswith(("postgres", "postgresql")):
         return False
     userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
     return bool(userinfo)
@@ -1075,7 +1077,10 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             if raw != _COMPOSE_PASSTHROUGH
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
-            and _compose_defaulted_reference_name(raw, worker_env=worker_env) == name
+            and (
+                _compose_defaulted_reference_name(raw, worker_env=worker_env) == name
+                or _compose_default_word_is_worker_resolved(raw, worker_env=worker_env)
+            )
         )
         # A bare ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose
         # variable IS set in the worker env resolves to the worker value at
@@ -1255,6 +1260,7 @@ from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
     _compose_braced_expression_end,
     _compose_concrete_worker_password,
     _compose_concrete_worker_password_braced,
+    _compose_default_word_is_worker_resolved,
     _compose_defaulted_reference_name,
     _compose_environment_mapping,
     _compose_resolve_braced,
@@ -1427,10 +1433,7 @@ def literal_profile_env_from_compose(
     # ``OLLAMA_HOST`` as non-secret profile configuration (PR #751 thread
     # PRRT_kwDOSJAM6s6PaYta).
     #
-    # Some credential identifiers (currently ``AWS_ACCESS_KEY_ID``) are not
-    # secrets by themselves. They stay as name-only passthrough only when the
-    # worker can resolve the same literal value; otherwise they are carried as
-    # profile-owned config so hosted jobs match local Compose.
+    # Hosted jobs resolve credential identifiers by name, not direct literals.
     #
     # Non-auth profile literals with secret-looking env names are skipped for
     # the same secret-free hosted request contract. This keeps arbitrary profile
@@ -1438,10 +1441,6 @@ def literal_profile_env_from_compose(
     # ``AgentRuntimeExecRequest.profile_env`` without dropping non-secret
     # profile config like ``OLLAMA_HOST`` / ``AWS_REGION``.
     auth_secret_keys = _AGENT_AUTH_SECRET_ENV_VARS & compose_env.keys()
-    name_only_credential_identifier_keys = _hosted_name_only_credential_identifier_keys(
-        compose_env,
-        worker_env=env,
-    )
     mount_backed_bitbucket_askpass = _has_mount_backed_bitbucket_askpass(
         compose_env,
         worker_env=env,
@@ -1492,7 +1491,7 @@ def literal_profile_env_from_compose(
                 continue
         if key in auth_secret_keys:
             continue
-        if key in name_only_credential_identifier_keys:
+        if key in _HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
             continue
         if _is_secret_like_profile_env_name(key):
             continue

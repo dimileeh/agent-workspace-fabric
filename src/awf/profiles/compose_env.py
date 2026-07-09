@@ -297,6 +297,33 @@ def _compose_defaulted_reference_name(
     return None
 
 
+def _compose_default_word_is_worker_resolved(
+    value: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> bool:
+    """Return whether a single default expression's default word is worker-resolved."""
+    escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
+    if not escaped.startswith("${"):
+        return False
+    end = _compose_braced_expression_end(escaped, 1)
+    if end is None or end != len(escaped) - 1:
+        return False
+    inner = escaped[2:end]
+    name_match = _COMPOSE_ENV_NAME_PATTERN.match(inner)
+    if name_match is None:
+        return False
+    remainder = inner[name_match.end() :]
+    for operator in _COMPOSE_DEFAULT_OPERATORS:
+        if remainder.startswith(operator):
+            _default, resolution = _compose_resolve_value(
+                remainder[len(operator) :],
+                worker_env=worker_env,
+            )
+            return resolution is not _ComposeEnvResolution.LITERAL
+    return False
+
+
 def _compose_resolve_braced(
     expression: str,
     *,

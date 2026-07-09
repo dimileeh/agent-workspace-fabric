@@ -894,67 +894,6 @@ def test_filter_hosted_env_passthrough_names_fails_closed_on_unreadable_compose(
 
 
 @pytest.mark.unit
-def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_backend_supplement(
-    tmp_path: Path,
-) -> None:
-    """A backend-credential supplement declared in compose is profile-owned on the hosted path too.
-
-    The local ``docker compose exec`` path only forwards ``AGENT_AUTH_ENV_VARS``,
-    so any env key declared on the agent service's environment block — including
-    adapter backend-credential supplements that are NOT in ``AGENT_AUTH_ENV_VARS``
-    (e.g. Claude Code ``AWS_*`` / Vertex project / region) — is profile-owned at
-    stack launch and never re-injected from the worker. The hosted path must
-    apply the same broader exclusion or a profile-owned backend credential/
-    endpoint declared in the compose env block would be re-resolved from the
-    worker by the hosted executor, diverging from the local run.
-    """
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text(
-        yaml.safe_dump(
-            {
-                "services": {
-                    "agent": {
-                        "image": "agent:latest",
-                        "environment": {
-                            # Backend-credential supplements are NOT in
-                            # AGENT_AUTH_ENV_VARS; the toggle is, the credentials
-                            # are not. Declaring them in the compose env block
-                            # makes them profile-owned at stack launch.
-                            "AWS_REGION": "us-west-2",
-                            "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
-                            "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
-                            "CLAUDE_CODE_USE_VERTEX": "1",
-                        },
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    names = (
-        # AGENT_AUTH_ENV_VARS-territory profile-owned: excluded.
-        "CLAUDE_CODE_USE_VERTEX",
-        # Backend supplements declared in compose: must also be excluded so the
-        # hosted executor does not re-resolve worker-side values for them.
-        "AWS_REGION",
-        "ANTHROPIC_VERTEX_PROJECT_ID",
-        # A credential identifier declared as a literal without a matching
-        # worker value is profile-owned and should not be re-resolved by name.
-        "AWS_ACCESS_KEY_ID",
-        # An AGENT_AUTH name absent from compose still passes through.
-        "ANTHROPIC_API_KEY",
-    )
-    filtered = filter_hosted_env_passthrough_names(names, compose_file=compose_file, worker_env={})
-
-    assert "CLAUDE_CODE_USE_VERTEX" not in filtered
-    assert "AWS_REGION" not in filtered
-    assert "ANTHROPIC_VERTEX_PROJECT_ID" not in filtered
-    assert "AWS_ACCESS_KEY_ID" not in filtered
-    assert "ANTHROPIC_API_KEY" in filtered
-
-
-@pytest.mark.unit
 def test_filter_hosted_env_passthrough_names_parses_compose_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
