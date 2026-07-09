@@ -1180,21 +1180,36 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # worker-resolved-defaulted (PRRT_kwDOSJAM6s6PiGHK) fixes.
         #
         # Only a *bare single reference* (``${NAME}`` / ``$NAME`` — the exact
-        # form Core injects) qualifies. Nested forms (e.g.
-        # ``${X:-${SECRET}}``) and mixed forms (e.g. ``prefix-${NAME}``) also
-        # classify ``WORKER_RESOLVED_SLOT`` by propagation, but the local
-        # container received a profile-owned literal interpolating a worker
-        # value there, not a pure worker-resolved slot; the hosted executor
-        # cannot reconstruct that mixed value from the name alone, so they stay
-        # excluded (out of scope). A bare slot whose variable is UNSET stays
-        # excluded too: Compose substitutes "" for an unset bare reference,
-        # Core only injects the bare form when the worker value is present
-        # (``source_env.get(name)`` is truthy), and the unset ``${NAME:?err}``
-        # / ``${NAME?err}`` form would fail Compose at stack launch (unreachable
-        # for a running container). ``_compose_bare_reference_name`` returns the
-        # referenced variable only for a single bare reference; the ``in
-        # worker_env`` test gates on the local container actually receiving a
-        # worker value (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN).
+        # form Core injects) qualifies, AND the referenced variable must match
+        # the target key name. A bare reference to a *different* worker variable
+        # (e.g. a declared env secret lease rendering
+        # ``ANTHROPIC_API_KEY: ${MY_ANTHROPIC_TOKEN}`` or
+        # ``AWS_REGION: ${AWS_DEFAULT_REGION}``) classifies
+        # ``WORKER_RESOLVED_SLOT`` and the source name exists in ``worker_env``,
+        # but the hosted executor resolves by the *target* name (absent from the
+        # worker env), so keeping it in ``env_passthrough_names`` surfaces a
+        # name that resolves to nothing — the hosted request carries neither the
+        # source-to-target mapping nor the resolved value, and the credential is
+        # silently dropped (``literal_profile_env_from_compose`` skips the slot,
+        # so ``profile_env`` has no alias either). The source-to-target aliasing
+        # for such leases is handled by the profile's secret-lease /
+        # token-alias machinery, not by bare-name passthrough, so a cross-name
+        # bare slot stays excluded (PR #751 thread PRRT_kwDOSJAM6s6PjYmf).
+        # Nested forms (e.g. ``${X:-${SECRET}}``) and mixed forms (e.g.
+        # ``prefix-${NAME}``) also classify ``WORKER_RESOLVED_SLOT`` by
+        # propagation, but the local container received a profile-owned literal
+        # interpolating a worker value there, not a pure worker-resolved slot;
+        # the hosted executor cannot reconstruct that mixed value from the name
+        # alone, so they stay excluded (out of scope). A bare slot whose
+        # variable is UNSET stays excluded too: Compose substitutes "" for an
+        # unset bare reference, Core only injects the bare form when the worker
+        # value is present (``source_env.get(name)`` is truthy), and the unset
+        # ``${NAME:?err}`` / ``${NAME?err}`` form would fail Compose at stack
+        # launch (unreachable for a running container).
+        # ``_compose_bare_reference_name`` returns the referenced variable only
+        # for a single bare reference; the ``in worker_env`` test gates on the
+        # local container actually receiving a worker value (PR #751 thread
+        # PRRT_kwDOSJAM6s6Pi7sN).
         worker_resolved_slots = frozenset(
             name
             for name, raw in compose_env.items()
@@ -1202,6 +1217,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is _ComposeEnvResolution.WORKER_RESOLVED_SLOT
             and (bare_name := _compose_bare_reference_name(raw)) is not None
+            and bare_name == name
             and bare_name in worker_env
         )
         keep = passthrough_slots | worker_resolved_defaulted | worker_resolved_slots
