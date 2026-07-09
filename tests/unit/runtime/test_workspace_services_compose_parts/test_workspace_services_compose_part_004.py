@@ -22,12 +22,23 @@ from awf.profiles.compose import (
     hosted_github_token_passthrough_names,
     literal_profile_env_from_compose,
 )
+from awf.profiles.compose_env import _compose_bare_reference_name
 
 
 def _write(tmp_path: Path, payload: object) -> Path:
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(yaml.safe_dump(payload), encoding="utf-8")
     return compose_file
+
+
+@pytest.mark.unit
+def test_compose_bare_reference_name_accepts_only_single_reference() -> None:
+    """Bare reference detection accepts exact slots and rejects mixed values."""
+    assert _compose_bare_reference_name("${OPENAI_API_KEY}") == "OPENAI_API_KEY"
+    assert _compose_bare_reference_name("$OPENAI_API_KEY") == "OPENAI_API_KEY"
+    assert _compose_bare_reference_name("${OPENAI_API_KEY}suffix") is None
+    assert _compose_bare_reference_name("$OPENAI_API_KEY-suffix") is None
+    assert _compose_bare_reference_name("literal") is None
 
 
 @pytest.mark.unit
@@ -571,6 +582,42 @@ def test_literal_profile_env_preparsed_compose_env_skips_file_passwords(
     )
     assert carried.get("OLLAMA_HOST") == "http://ollama.profile:11434"
     assert "DATABASE_URL" not in carried
+
+
+@pytest.mark.unit
+def test_literal_profile_env_keeps_db_url_when_postgres_passthrough_unresolved(
+    tmp_path: Path,
+) -> None:
+    """An unresolved pass-through ``POSTGRES_PASSWORD`` contributes no redaction.
+
+    Docker Compose would resolve ``POSTGRES_PASSWORD: null`` from the worker shell.
+    If the worker has no such value, there is no concrete password for AWF to
+    redact; profile-owned agent literals stay carried.
+    """
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "postgres": {
+                    "image": "postgres:16-alpine",
+                    "environment": {
+                        "POSTGRES_USER": "awf",
+                        "POSTGRES_PASSWORD": None,
+                        "POSTGRES_DB": "awf",
+                    },
+                },
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "DATABASE_URL": "postgresql://awf:profile-pw@postgres:5432/awf"
+                    },
+                },
+            }
+        },
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+    assert carried.get("DATABASE_URL") == "postgresql://awf:profile-pw@postgres:5432/awf"
 
 
 @pytest.mark.unit
