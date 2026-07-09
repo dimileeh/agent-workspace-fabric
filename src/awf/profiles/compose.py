@@ -112,6 +112,24 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
         "AWS_BEARER_TOKEN_BEDROCK",
+        # GitHub CLI token literals. The aliases ``GH_TOKEN`` / ``GITHUB_TOKEN``
+        # and the documented AWF source ``AWF_GITHUB_TOKEN`` are concrete
+        # credentials; a profile-owned literal for any of these is a secret that
+        # must never be carried in ``profile_env``. The hosted executor resolves
+        # GitHub auth out-of-band via ``env_passthrough_names`` (see
+        # ``hosted_github_token_passthrough_names`` / the GitHub token aliases
+        # surfaced by ``agent_environment_with_github_token``), so
+        # ``profile_env`` must not duplicate the raw token literal. Without this
+        # redaction, a profile/compose agent env owning a literal GitHub token
+        # had the raw token appended to ``AgentRuntimeExecRequest.profile_env``,
+        # violating the secret-free hosted contract (PR #751 thread
+        # PRRT_kwDOSJAM6s6PiwKv). The local Compose path keeps the value inside
+        # the already-started container, so redaction only affects the hosted
+        # transport path. Non-secret profile config (e.g. ``OLLAMA_HOST`` /
+        # ``APP_BASE_URL``) is unaffected and still carried.
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "AWF_GITHUB_TOKEN",
     }
 )
 

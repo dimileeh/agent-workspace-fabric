@@ -658,6 +658,64 @@ def test_literal_profile_env_from_compose_skips_profile_owned_claude_backend_sec
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_profile_owned_github_token_literals(
+    tmp_path: Path,
+) -> None:
+    """A profile-owned literal GitHub token is NOT carried to the hosted executor.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PiwKv: in hosted runs where a
+    profile/compose agent env owns a literal GitHub credential such as
+    ``GH_TOKEN`` / ``GITHUB_TOKEN`` / ``AWF_GITHUB_TOKEN``, those names were
+    absent from ``_AGENT_AUTH_SECRET_ENV_VARS``, so
+    ``literal_profile_env_from_compose`` appended the raw token literal to
+    ``AgentRuntimeExecRequest.profile_env``. The local Compose path keeps the
+    value inside the already-started container, but the hosted path transports
+    it in the request object despite the secret-free contract. The GitHub token
+    names must be redacted before carrying profile env values, while non-secret
+    profile config still reaches the hosted executor.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Profile-owned GitHub token literals -> skipped
+                            # (secret-bearing).
+                            "GH_TOKEN": "ghp_profile_github_token_secret",
+                            "GITHUB_TOKEN": "ghp_profile_legacy_token_secret",
+                            "AWF_GITHUB_TOKEN": "ghp_profile_awf_token_secret",
+                            # Non-secret profile literal still carried.
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    # Non-secret profile literal is still carried to the hosted executor.
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    # Profile-owned GitHub token literals are NOT carried to the hosted executor.
+    assert "GH_TOKEN" not in carried
+    assert "GITHUB_TOKEN" not in carried
+    assert "AWF_GITHUB_TOKEN" not in carried
+    # The concrete secret strings never reach the hosted request object.
+    blob = "".join(v for _k, v in profile_env)
+    assert "ghp_profile_github_token_secret" not in blob
+    assert "ghp_profile_legacy_token_secret" not in blob
+    assert "ghp_profile_awf_token_secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_carries_values_without_postgres_service(
     tmp_path: Path,
 ) -> None:
