@@ -67,8 +67,15 @@ _CLAUDE_CODE_BACKEND_AUTH_NAMES = (
     "AWS_BEARER_TOKEN_BEDROCK",
     "ANTHROPIC_VERTEX_PROJECT_ID",
     "CLOUD_ML_REGION",
-    "GOOGLE_APPLICATION_CREDENTIALS",
 )
+# ``GOOGLE_APPLICATION_CREDENTIALS`` is intentionally NOT surfaced here — it is a
+# file-backed credential (its value is a filesystem path), and the hosted
+# request (``AgentRuntimeExecRequest``) carries no file/secret ref or mount. The
+# local Compose path bind-mounts the referenced file via ``_build_host_auth_mounts``
+# so ADC works locally, but env-only passthrough on the hosted path would inject a
+# dangling path and silently break Vertex/ADC auth (PR #751 thread
+# PRRT_kwDOSJAM6s6Pas4k). A future file/secret-ref mechanism on the hosted
+# request is required to support it; until then it is not advertised as env-only.
 _CLAUDE_NAMES = _CLAUDE_CODE_DERIVED_AUTH_NAMES | frozenset(_CLAUDE_CODE_BACKEND_AUTH_NAMES)
 _CURSOR_NAMES = ("CURSOR_API_KEY",)
 _GEMINI_NAMES = (
@@ -79,7 +86,9 @@ _GEMINI_NAMES = (
     "GOOGLE_GENAI_USE_GCA",
     "GOOGLE_CLOUD_PROJECT",
     "GOOGLE_CLOUD_LOCATION",
-    "GOOGLE_APPLICATION_CREDENTIALS",
+    # ``GOOGLE_APPLICATION_CREDENTIALS`` intentionally omitted — see
+    # ``_CLAUDE_CODE_BACKEND_AUTH_NAMES`` note above (file-backed credential;
+    # env-only passthrough injects a dangling path on the hosted path).
     "GOOGLE_CLOUD_ACCESS_TOKEN",
 )
 _GROK_NAMES = ("XAI_API_KEY",)
@@ -164,6 +173,13 @@ class TestNonCodexHostedCredentials:
         assert request.agent_runtime is AgentRuntime.claude_code
         for name in _CLAUDE_NAMES:
             assert name in request.env_passthrough_names, name
+        # ``GOOGLE_APPLICATION_CREDENTIALS`` is file-backed and must NOT be
+        # advertised as env-only passthrough — see
+        # ``test_gemini_does_not_advertise_file_backed_google_application_credentials``
+        # (PR #751 thread PRRT_kwDOSJAM6s6Pas4k). The local Compose path
+        # bind-mounts the file; the hosted request has no file/secret ref, so
+        # surfacing it would inject a dangling path and break Vertex/ADC auth.
+        assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
 
     @pytest.mark.unit
     async def test_cursor_surfaces_cursor_api_key_name(self) -> None:
@@ -177,6 +193,35 @@ class TestNonCodexHostedCredentials:
         adapter = _build(GeminiAdapter)
         request = await _run(adapter)
         assert request.agent_runtime is AgentRuntime.gemini
+        for name in _GEMINI_NAMES:
+            assert name in request.env_passthrough_names, name
+
+    @pytest.mark.unit
+    async def test_gemini_does_not_advertise_file_backed_google_application_credentials(
+        self,
+    ) -> None:
+        """``GOOGLE_APPLICATION_CREDENTIALS`` is file-backed and must not be env-only passthrough.
+
+        Regression for PR #751 thread PRRT_kwDOSJAM6s6Pas4k: the local Compose
+        path bind-mounts the referenced credentials file into the agent
+        container via ``_build_host_auth_mounts`` so the path the env var points
+        at actually exists and ADC/Vertex auth works. The hosted (non-compose)
+        path resolves env-passthrough names to env *values* out-of-band and
+        injects them as env vars, but ``AgentRuntimeExecRequest`` carries no
+        file/secret ref or mount, so the hosted executor has no signal that this
+        name is file-backed and must also mount the file. Surfacing it would
+        inject a dangling ``GOOGLE_APPLICATION_CREDENTIALS=/some/path`` with the
+        file absent, silently breaking ADC/Vertex auth even though the same
+        workspace is ready under Compose. The name must NOT be advertised as
+        env-only passthrough until a file/secret-ref mechanism exists on the
+        hosted request; the value/config names (API keys, Vertex toggles,
+        project/location, access token) are still surfaced because they are not
+        file paths.
+        """
+        adapter = _build(GeminiAdapter)
+        request = await _run(adapter)
+        assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
+        # The value/config names that ARE env-safe remain surfaced.
         for name in _GEMINI_NAMES:
             assert name in request.env_passthrough_names, name
 

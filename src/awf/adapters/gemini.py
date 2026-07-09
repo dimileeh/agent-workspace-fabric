@@ -32,6 +32,18 @@ class GeminiAdapter(AgentAdapter):
         ``AGENT_AUTH_ENV_VARS`` so a hosted executor can resolve and inject the
         same credentials a local Compose run would surface, including the
         Vertex AI / Application Default Credentials backends.
+
+        ``GOOGLE_APPLICATION_CREDENTIALS`` is intentionally NOT surfaced here:
+        it is a *file-backed* credential (its value is a filesystem path), and
+        the hosted request (``AgentRuntimeExecRequest``) carries no file/secret
+        ref or mount. The local Compose path bind-mounts the referenced file via
+        ``_build_host_auth_mounts`` so the path the env var points at exists and
+        ADC/Vertex auth works, but env-only passthrough on the hosted path would
+        inject a dangling ``GOOGLE_APPLICATION_CREDENTIALS=/some/path`` with the
+        file absent, silently breaking ADC/Vertex auth even though the same
+        workspace is ready under Compose. A future file/secret-ref mechanism on
+        the hosted request is required to support it; until then it is not
+        advertised as env-only (PR #751 thread PRRT_kwDOSJAM6s6Pas4k).
         """
         return (
             "GEMINI_API_KEY",
@@ -41,7 +53,6 @@ class GeminiAdapter(AgentAdapter):
             "GOOGLE_GENAI_USE_GCA",
             "GOOGLE_CLOUD_PROJECT",
             "GOOGLE_CLOUD_LOCATION",
-            "GOOGLE_APPLICATION_CREDENTIALS",
             "GOOGLE_CLOUD_ACCESS_TOKEN",
         )
 
