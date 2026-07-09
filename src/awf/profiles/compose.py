@@ -106,9 +106,12 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
         # the secret-free hosted contract and exposing AWS credentials to the
         # hosted executor/request object (PR #751 thread PRRT_kwDOSJAM6s6PiiaQ).
         # Non-secret backend config (``AWS_REGION`` / ``AWS_DEFAULT_REGION`` /
-        # ``AWS_ACCESS_KEY_ID`` / ``AWS_PROFILE`` /
-        # ``ANTHROPIC_VERTEX_PROJECT_ID`` / ``CLOUD_ML_REGION``) is NOT redacted
-        # and stays carried, matching the ``AgentRuntimeExecRequest`` contract.
+        # ``AWS_PROFILE`` / ``ANTHROPIC_VERTEX_PROJECT_ID`` /
+        # ``CLOUD_ML_REGION``) is NOT redacted and stays carried, matching the
+        # ``AgentRuntimeExecRequest`` contract. ``AWS_ACCESS_KEY_ID`` is handled
+        # separately as a name-only credential identifier: it is not secret
+        # material by itself, but hosted jobs still must not receive it through
+        # direct ``profile_env`` values.
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
         "AWS_BEARER_TOKEN_BEDROCK",
@@ -132,6 +135,11 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
         "AWF_GITHUB_TOKEN",
     }
 )
+
+# Credential identifiers that are not secrets by themselves but still must not
+# be transported as direct hosted job env values. Hosted executors should resolve
+# them from name-only passthrough alongside the corresponding secret material.
+_HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS = frozenset({"AWS_ACCESS_KEY_ID"})
 
 
 # Ollama base-URL env keys in precedence order (highest first) — the OpenCode
@@ -1220,7 +1228,16 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             and bare_name == name
             and bare_name in worker_env
         )
-        keep = passthrough_slots | worker_resolved_defaulted | worker_resolved_slots
+        name_only_credential_identifiers = _hosted_name_only_credential_identifier_keys(
+            compose_env,
+            worker_env=worker_env,
+        )
+        keep = (
+            passthrough_slots
+            | worker_resolved_defaulted
+            | worker_resolved_slots
+            | name_only_credential_identifiers
+        )
         excluded = (excluded - keep) | frozenset(
             name
             for name, raw in compose_env.items()
@@ -1232,6 +1249,24 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
 def _profile_owned_auth_keys(compose_env: Mapping[str, str]) -> frozenset[str]:
     """Return agent auth env keys already declared in the compose environment block."""
     return frozenset(name for name in AGENT_AUTH_ENV_VARS if name in compose_env)
+
+
+def _hosted_name_only_credential_identifier_keys(
+    compose_env: Mapping[str, str],
+    *,
+    worker_env: Mapping[str, str],
+) -> frozenset[str]:
+    """Return literal credential identifiers that hosted should resolve by name."""
+    keys: set[str] = set()
+    for name, raw in compose_env.items():
+        if name not in _HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
+            continue
+        if raw == _COMPOSE_PASSTHROUGH:
+            continue
+        expanded, resolution = _compose_resolve_value(raw, worker_env=worker_env)
+        if resolution is _ComposeEnvResolution.LITERAL and expanded:
+            keys.add(name)
+    return frozenset(keys)
 
 
 # Compose env-value interpolation / resolution machinery lives in
@@ -1414,7 +1449,17 @@ def literal_profile_env_from_compose(
     # ``AgentRuntimeExecRequest`` contract that documents
     # ``OLLAMA_HOST`` as non-secret profile configuration (PR #751 thread
     # PRRT_kwDOSJAM6s6PaYta).
+    #
+    # Some credential identifiers (currently ``AWS_ACCESS_KEY_ID``) are not
+    # secrets by themselves but still identify credential material and should not
+    # be logged/persisted as direct hosted job env. Non-empty literal values for
+    # those names are skipped from ``profile_env`` and left in
+    # ``env_passthrough_names`` for hosted out-of-band resolution.
     auth_secret_keys = _AGENT_AUTH_SECRET_ENV_VARS & compose_env.keys()
+    name_only_credential_identifier_keys = _hosted_name_only_credential_identifier_keys(
+        compose_env,
+        worker_env=env,
+    )
     carried: list[tuple[str, str]] = []
     for key, raw in compose_env.items():
         # A Compose pass-through slot (``environment: [NAME]``, ``NAME:`` /
@@ -1444,6 +1489,8 @@ def literal_profile_env_from_compose(
         if _expanded_value_bears_postgres_password(expanded, postgres_passwords):
             continue
         if key in auth_secret_keys:
+            continue
+        if key in name_only_credential_identifier_keys:
             continue
         carried.append((key, expanded))
     return tuple(carried)

@@ -919,6 +919,7 @@ def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_backend_su
                             # are not. Declaring them in the compose env block
                             # makes them profile-owned at stack launch.
                             "AWS_REGION": "us-west-2",
+                            "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
                             "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
                             "CLAUDE_CODE_USE_VERTEX": "1",
                         },
@@ -936,8 +937,8 @@ def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_backend_su
         # hosted executor does not re-resolve worker-side values for them.
         "AWS_REGION",
         "ANTHROPIC_VERTEX_PROJECT_ID",
-        # A backend supplement absent from the compose env block still passes
-        # through — the hosted executor resolves only names with backing values.
+        # A credential identifier declared as a literal stays name-only
+        # passthrough so it is resolved out-of-band, not carried in profile_env.
         "AWS_ACCESS_KEY_ID",
         # An AGENT_AUTH name absent from compose still passes through.
         "ANTHROPIC_API_KEY",
