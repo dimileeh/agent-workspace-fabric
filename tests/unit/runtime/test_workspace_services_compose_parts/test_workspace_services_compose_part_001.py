@@ -712,6 +712,71 @@ def test_filter_hosted_env_passthrough_names_keeps_auth_pass_through_slot(
 
 
 @pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_keeps_auth_worker_resolved_defaulted(
+    tmp_path: Path,
+) -> None:
+    """A worker-resolved defaulted auth key stays in hosted passthrough.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PiGHK: a Compose agent env key in
+    ``AGENT_AUTH_ENV_VARS`` whose value is a defaulted form with the variable
+    worker-set (e.g. ``OPENAI_API_KEY: ${OPENAI_API_KEY:-sk-default}`` with
+    ``OPENAI_API_KEY`` set in the worker env) classifies as
+    ``WORKER_RESOLVED_DEFAULTED``. ``_compose_env_passthrough_exclusions`` ->
+    ``_profile_owned_auth_keys`` treats any ``AGENT_AUTH_ENV_VARS`` key declared
+    on the agent service as profile-owned regardless of its value, so the name
+    sits in the baseline excluded set. Pass-through auth slots are removed from
+    that set (PRRT_kwDOSJAM6s6PY6Rn), but worker-resolved defaulted auth names
+    were not, so the worker-resolved-defaulted exception below only prevented
+    *adding* a name — it never removed a name the first pass had already
+    excluded. ``literal_profile_env_from_compose`` also skips
+    ``WORKER_RESOLVED_DEFAULTED`` (carrying the worker value would embed a
+    secret), so the hosted monitor launch dropped the credential the local
+    Compose container received at stack launch, leaving the hosted job with
+    neither the worker override nor the profile default. Such a name must stay
+    in ``env_passthrough_names`` for hosted out-of-band resolution, mirroring the
+    pass-through slot fix. (An explicit empty auth value ``OPENAI_API_KEY: ""``
+    stays excluded — Compose sets a non-nil empty literal that overrides the
+    worker value, carried via ``profile_env``.)
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # :- with the variable worker-set -> stays in
+                            # passthrough (worker value resolved out-of-band).
+                            "OPENAI_API_KEY": "${OPENAI_API_KEY:-sk-default}",
+                            # Explicit empty -> EXCLUDED (carried literal "" via
+                            # profile_env; overrides the worker value).
+                            "ANTHROPIC_API_KEY": "",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
+    worker_env = {"OPENAI_API_KEY": "sk-secret", "ANTHROPIC_API_KEY": "sk-ant"}
+    filtered = filter_hosted_env_passthrough_names(
+        names, compose_file=compose_file, worker_env=worker_env
+    )
+
+    # Worker-set defaulted auth key stays in passthrough for hosted out-of-band
+    # resolution (Docker Compose injected the worker value at stack launch).
+    assert "OPENAI_API_KEY" in filtered
+    # Explicit-empty auth value is EXCLUDED — profile-owned literal carried via
+    # profile_env, NOT a worker-resolved slot.
+    assert "ANTHROPIC_API_KEY" not in filtered
+    # An auth name absent from the compose env block still passes through.
+    assert "ANTHROPIC_BASE_URL" in filtered
+
+
+@pytest.mark.unit
 def test_filter_hosted_env_passthrough_names_keeps_auth_pass_through_slot_list_form(
     tmp_path: Path,
 ) -> None:
