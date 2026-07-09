@@ -158,3 +158,37 @@ def test_literal_profile_env_from_compose_keeps_short_password_collision_config(
     assert carried["POSTGRES_HOST"] == "postgres"
     assert carried["DATABASE_HOST"] == "postgres"
     assert "DATABASE_URL" not in carried
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_url_userinfo_literals(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile env must not carry credentials embedded in URL userinfo."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "REDIS_URL": "redis://:s3cr3t@redis:6379/0",
+                            "CACHE_URL": "redis://redis:6379/0",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "REDIS_URL" not in carried
+    assert carried["CACHE_URL"] == "redis://redis:6379/0"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "s3cr3t" not in blob

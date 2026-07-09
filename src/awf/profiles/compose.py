@@ -7,7 +7,7 @@ import os
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
@@ -192,6 +192,18 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
         (left, right) in _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS
         for left, right in zip(tokens, tokens[1:], strict=False)
     )
+
+
+def _value_has_url_userinfo(value: str) -> bool:
+    """Return whether ``value`` is a URL containing non-empty userinfo."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+        return False
+    userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
+    return bool(userinfo)
 
 
 _GITHUB_TOKEN_SOURCE_PRECEDENCE = ("AWF_GITHUB_TOKEN", *_GITHUB_TOKEN_ALIAS_PRECEDENCE)
@@ -1348,6 +1360,9 @@ def literal_profile_env_from_compose(
     userinfo matching checks both raw and encoded forms so an encoded
     secret-bearing URL is redacted too (PR #751 thread PRRT_kwDOSJAM6s6PZuE5)
     without dropping unrelated literals that equal a short common password.
+    Literal URLs with userinfo are also skipped even when the env name is not
+    secret-like, because hosted request transport must not carry embedded URL
+    credentials such as ``redis://:password@redis:6379/0``.
     Profile-owned auth literals are also skipped: any ``AGENT_AUTH_ENV_VARS``
     key declared on the agent service (e.g. ``OPENAI_API_KEY`` /
     ``CODEX_API_KEY`` set to a
@@ -1465,6 +1480,8 @@ def literal_profile_env_from_compose(
         if resolution is not _ComposeEnvResolution.LITERAL:
             continue
         if _expanded_value_bears_postgres_password(expanded, postgres_passwords):
+            continue
+        if _value_has_url_userinfo(expanded):
             continue
         if mount_backed_bitbucket_askpass:
             if key == _GIT_ASKPASS_KEY and expanded == _BITBUCKET_ASKPASS_TARGET:
