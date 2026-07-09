@@ -1085,10 +1085,10 @@ def test_filter_hosted_env_passthrough_names_keeps_worker_resolved_defaulted(
 
 
 @pytest.mark.unit
-def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_reference(
+def test_filter_hosted_env_passthrough_names_keeps_cross_name_defaulted_reference(
     tmp_path: Path,
 ) -> None:
-    """Defaulted/required aliases whose target differs from source stay excluded."""
+    """Defaulted/required aliases stay in passthrough when the source is set."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         yaml.safe_dump(
@@ -1131,13 +1131,11 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_refer
         names, compose_file=compose_file, worker_env=worker_env
     )
 
-    # Cross-name defaulted/required references are excluded because hosted
-    # resolves passthrough by target name, not by the compose source variable.
-    assert "ANTHROPIC_API_KEY" not in filtered
-    assert "AWS_REGION" not in filtered
-    assert "REQUIRED_TARGET" not in filtered
-    # Same-name defaulted/required references still mirror local Compose by
-    # resolving the worker value out-of-band.
+    # Worker-resolved defaulted/required references mirror local Compose by
+    # resolving the worker-selected value out-of-band.
+    assert "ANTHROPIC_API_KEY" in filtered
+    assert "AWS_REGION" in filtered
+    assert "REQUIRED_TARGET" in filtered
     assert "SAME_REGION" in filtered
     assert "SAME_REQUIRED" in filtered
     # Source names not declared in compose remain ordinary passthrough names.
