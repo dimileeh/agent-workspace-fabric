@@ -43,6 +43,7 @@ from awf.profiles.compose import (
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
     hosted_github_token_passthrough_names,
+    hosted_profile_env_passthrough_names,
     literal_profile_env_from_compose,
 )
 from awf.runtime.logs import CommandLogSinks, LogStore
@@ -448,17 +449,28 @@ class AgentAdapter(ABC):
         del compose_project  # logging/audit only on hosted path
         runtime_executor = self._runtime_executor
         assert runtime_executor is not None  # guarded by run() dispatch
-        # ``filter_hosted_env_passthrough_names`` and
-        # ``literal_profile_env_from_compose`` both read + YAML-parse the compose
-        # file synchronously; run them in worker threads so the blocking I/O
-        # never stalls the event loop when concurrent agent runs overlap,
-        # mirroring the ``agent_exec_env_passthrough`` offload on the Compose
-        # path above.
+        # The compose-env helpers below read + YAML-parse the compose file
+        # synchronously; run them in worker threads so blocking I/O never stalls
+        # the event loop when concurrent agent runs overlap, mirroring the
+        # ``agent_exec_env_passthrough`` offload on the Compose path above.
         env_passthrough_names = await asyncio.to_thread(
             filter_hosted_env_passthrough_names,
             self.hosted_env_passthrough_names,
             compose_file=compose_file,
         )
+        profile_env_passthrough_names = await asyncio.to_thread(
+            hosted_profile_env_passthrough_names,
+            compose_file,
+        )
+        if profile_env_passthrough_names:
+            # Include non-adapter profile env secrets that local Compose
+            # resolved at stack launch (e.g. ``NPM_TOKEN: ${NPM_TOKEN}``). The
+            # helper returns names only; worker-resolved values still stay out
+            # of ``profile_env`` and the request payload.
+            existing_names = set(env_passthrough_names)
+            env_passthrough_names = env_passthrough_names + tuple(
+                name for name in profile_env_passthrough_names if name not in existing_names
+            )
         # Surface GitHub token alias names the local Compose path would inject
         # into the agent env block (``GH_TOKEN`` / ``GITHUB_TOKEN``) so the
         # hosted executor can resolve and inject the worker token out-of-band.

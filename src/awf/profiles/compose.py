@@ -1080,6 +1080,31 @@ def filter_hosted_env_passthrough_names(
     return _filter_hosted_env_passthrough_names_from_compose_env(names, compose_env, worker_env=env)
 
 
+def hosted_profile_env_passthrough_names(
+    compose_file: Path,
+    *,
+    worker_env: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return compose-declared env names the hosted executor must resolve by name.
+
+    Adapter-declared passthrough names cover runtime auth contracts, but a
+    profile can also declare arbitrary same-name worker-resolved env secrets
+    such as ``NPM_TOKEN: ${NPM_TOKEN}``. The local Compose container receives
+    those values at stack launch. Hosted runs skip the worker-resolved values
+    from ``profile_env`` for secret safety, so they must carry the resolvable
+    names out-of-band even when no adapter advertises them.
+    """
+    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        return ()
+    env = os.environ if worker_env is None else worker_env
+    return _filter_hosted_env_passthrough_names_from_compose_env(
+        tuple(compose_env),
+        compose_env,
+        worker_env=env,
+    )
+
+
 def _filter_hosted_env_passthrough_names_from_compose_env(
     names: tuple[str, ...],
     compose_env: Mapping[str, str] | None,

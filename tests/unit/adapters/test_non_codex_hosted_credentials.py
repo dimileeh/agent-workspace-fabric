@@ -281,6 +281,43 @@ class TestNonCodexHostedCredentials:
         assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
 
     @pytest.mark.unit
+    async def test_hosted_request_surfaces_profile_env_secret_names(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same-name profile env secrets stay resolvable on the hosted path.
+
+        Regression for PR #754 thread PRRT_kwDOSJAM6s6PswPc: when a profile
+        declares an arbitrary project secret such as ``NPM_TOKEN: ${NPM_TOKEN}``,
+        local Compose substitutes the worker value into the agent container at
+        stack launch. The hosted path skips that worker-resolved value from
+        ``profile_env`` for secret safety, so it must still include the name in
+        ``env_passthrough_names`` even though no adapter advertises ``NPM_TOKEN``.
+        """
+        compose_file = _write_compose(
+            tmp_path,
+            environment={
+                "NPM_TOKEN": "${NPM_TOKEN}",
+                "OLLAMA_HOST": "http://ollama.profile:11434",
+            },
+        )
+        monkeypatch.setenv("NPM_TOKEN", "npm_worker_secret")
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert "NPM_TOKEN" in request.env_passthrough_names
+        assert "NPM_TOKEN" not in dict(request.profile_env)
+        blob = (
+            request.prompt_stdin.decode("utf-8", "replace")
+            + "\x00".join(request.cli_args)
+            + "\x00".join(request.env_passthrough_names)
+            + "\x00".join(f"{k}={v}" for k, v in request.profile_env)
+        )
+        assert "npm_worker_secret" not in blob
+        assert "${NPM_TOKEN}" not in blob
+        assert not any("=" in name for name in request.env_passthrough_names)
+        assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
+
+    @pytest.mark.unit
     async def test_hosted_passthrough_suppresses_profile_owned_auth_slot(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -391,11 +428,10 @@ class TestNonCodexHostedCredentials:
         Regression for PR #751 thread PRRT_kwDOSJAM6s6PWZD1: the Compose path
         wraps ``agent_exec_env_passthrough`` (synchronous compose read/parse)
         in ``asyncio.to_thread`` so concurrent agent runs do not stall the event
-        loop. The hosted path's ``filter_hosted_env_passthrough_names`` and
-        ``literal_profile_env_from_compose`` perform the same synchronous
-        read/YAML-parse and must be offloaded the same way, or concurrent
-        hosted runs serialize on blocking I/O. This test asserts both calls run
-        off the event loop thread.
+        loop. The hosted path's compose-env helpers perform the same
+        synchronous read/YAML-parse and must be offloaded the same way, or
+        concurrent hosted runs serialize on blocking I/O. This test asserts
+        those calls run off the event loop thread.
         """
         import awf.adapters.base as base_module
 
@@ -404,17 +440,27 @@ class TestNonCodexHostedCredentials:
         seen_thread_ids: dict[str, int] = {}
 
         real_filter = base_module.filter_hosted_env_passthrough_names
+        real_profile_names = base_module.hosted_profile_env_passthrough_names
         real_literal = base_module.literal_profile_env_from_compose
 
         def _tracked_filter(names, *, compose_file):
             seen_thread_ids["filter"] = threading.get_ident()
             return real_filter(names, compose_file=compose_file)
 
+        def _tracked_profile_names(compose_file):
+            seen_thread_ids["profile_names"] = threading.get_ident()
+            return real_profile_names(compose_file)
+
         def _tracked_literal(compose_file):
             seen_thread_ids["literal"] = threading.get_ident()
             return real_literal(compose_file)
 
         monkeypatch.setattr(base_module, "filter_hosted_env_passthrough_names", _tracked_filter)
+        monkeypatch.setattr(
+            base_module,
+            "hosted_profile_env_passthrough_names",
+            _tracked_profile_names,
+        )
         monkeypatch.setattr(base_module, "literal_profile_env_from_compose", _tracked_literal)
 
         compose_file = _write_compose(
@@ -426,8 +472,12 @@ class TestNonCodexHostedCredentials:
         # Both blocking compose-file parses ran, and neither ran on the event
         # loop's thread (asyncio.to_thread dispatches to a worker thread).
         assert "filter" in seen_thread_ids, "hosted filter parse was not dispatched off-loop"
+        assert "profile_names" in seen_thread_ids, (
+            "hosted profile parse was not dispatched off-loop"
+        )
         assert "literal" in seen_thread_ids, "hosted literal parse was not dispatched off-loop"
         assert seen_thread_ids["filter"] != loop_thread_id
+        assert seen_thread_ids["profile_names"] != loop_thread_id
         assert seen_thread_ids["literal"] != loop_thread_id
         # The offloaded parse result still flows through to the hosted request.
         assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
