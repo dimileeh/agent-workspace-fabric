@@ -194,6 +194,12 @@ async def _recover_monitor_agent_service_after_error(
     # timeout as AGENT_SERVICE_UNHEALTHY and can fail/terminate monitor
     # recovery on GKE. Local Core (executor is None) keeps the restart path.
     if self._deps.adapter.is_hosted:
+        _log.warning(
+            "monitor.agent_service_recovery_skipped_hosted",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+            hosted=True,
+        )
         return None
     if not compose_file.is_file():
         return None
@@ -244,6 +250,12 @@ async def _recover_monitor_agent_service_after_cleanup_error(
     # recovery path. Mirrors the hosted guard in
     # _recover_monitor_agent_service_after_error.
     if self._deps.adapter.is_hosted:
+        _log.warning(
+            "monitor.agent_service_recovery_skipped_hosted",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+            hosted=True,
+        )
         return None
     service_healthy = await probe_agent_service_health(RuntimeInspector(), compose_project)
     if service_healthy is not False or not _cleanup_failure_indicates_agent_service_down(exc):

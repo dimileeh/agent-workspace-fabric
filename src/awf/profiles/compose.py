@@ -497,6 +497,7 @@ def _github_token_source_name(source_env: Mapping[str, str]) -> str | None:
 def hosted_github_token_passthrough_names(
     compose_file: Path,
     *,
+    compose_env: Mapping[str, str] | None = None,
     worker_env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Return GitHub token *names* a hosted executor should resolve.
@@ -569,7 +570,8 @@ def hosted_github_token_passthrough_names(
     worker_placeholder = _github_token_placeholder(source_env)
     if worker_placeholder is None:
         return ()
-    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        compose_env = _try_agent_environment_from_compose_file(compose_file)
     if compose_env is None:
         return ()
     # If any compose-declared GitHub token source or alias points at a different
@@ -780,6 +782,7 @@ def filter_hosted_env_passthrough_names(
     names: tuple[str, ...],
     *,
     compose_file: Path,
+    compose_env: Mapping[str, str] | None = None,
     worker_env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Apply the same compose/profile-owned exclusions to hosted passthrough names.
@@ -849,7 +852,8 @@ def filter_hosted_env_passthrough_names(
     to classify defaulted / required / alternate / bare forms, mirroring
     ``literal_profile_env_from_compose``.
     """
-    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        compose_env = _try_agent_environment_from_compose_file(compose_file)
     env = os.environ if worker_env is None else worker_env
     return _filter_hosted_env_passthrough_names_from_compose_env(names, compose_env, worker_env=env)
 
@@ -857,6 +861,7 @@ def filter_hosted_env_passthrough_names(
 def hosted_profile_env_passthrough_names(
     compose_file: Path,
     *,
+    compose_env: Mapping[str, str] | None = None,
     worker_env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Return compose-declared env names the hosted executor must resolve by name.
@@ -868,7 +873,8 @@ def hosted_profile_env_passthrough_names(
     from ``profile_env`` for secret safety, so they must carry the resolvable
     names out-of-band even when no adapter advertises them.
     """
-    compose_env = _try_agent_environment_from_compose_file(compose_file)
+    if compose_env is None:
+        compose_env = _try_agent_environment_from_compose_file(compose_file)
     if compose_env is None:
         return ()
     env = os.environ if worker_env is None else worker_env

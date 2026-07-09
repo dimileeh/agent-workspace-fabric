@@ -11,6 +11,7 @@ It just runs the CLI, captures stdout/stderr, and returns a structured result.
 from __future__ import annotations
 
 import asyncio
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,7 @@ from awf.profiles.compose import (
     hosted_profile_env_passthrough_names,
     literal_profile_env_from_compose,
 )
+from awf.profiles.compose_postgres_env import try_compose_agent_env_and_postgres_passwords
 from awf.runtime.logs import CommandLogSinks, LogStore
 
 _log = get_logger(__name__)
@@ -449,18 +451,25 @@ class AgentAdapter(ABC):
         del compose_project  # logging/audit only on hosted path
         runtime_executor = self._runtime_executor
         assert runtime_executor is not None  # guarded by run() dispatch
-        # The compose-env helpers below read + YAML-parse the compose file
-        # synchronously; run them in worker threads so blocking I/O never stalls
-        # the event loop when concurrent agent runs overlap, mirroring the
-        # ``agent_exec_env_passthrough`` offload on the Compose path above.
+        # Parse the rendered compose file once in a worker thread. The helpers
+        # below can then reuse the immutable agent env map, avoiding duplicate
+        # synchronous YAML reads while preserving the postgres-password
+        # redaction context needed by ``literal_profile_env_from_compose``.
+        compose_env, postgres_passwords = await asyncio.to_thread(
+            try_compose_agent_env_and_postgres_passwords,
+            compose_file,
+            worker_env=os.environ,
+        )
         env_passthrough_names = await asyncio.to_thread(
             filter_hosted_env_passthrough_names,
             self.hosted_env_passthrough_names,
             compose_file=compose_file,
+            compose_env=compose_env,
         )
         profile_env_passthrough_names = await asyncio.to_thread(
             hosted_profile_env_passthrough_names,
             compose_file,
+            compose_env=compose_env,
         )
         if profile_env_passthrough_names:
             # Include non-adapter profile env secrets that local Compose
@@ -481,12 +490,11 @@ class AgentAdapter(ABC):
         # so a profile-owned alias (e.g. a secret lease rendering
         # ``GITHUB_TOKEN``) is not shadowed by a worker alias. Names only —
         # secret values are never transported; the placeholder string is never
-        # returned. The compose file is immutable after ComposeManager renders
-        # it, so this independent parse is consistent with the filter /
-        # profile_env parses above (no TOCTOU). Offloaded to a worker thread
-        # for the same blocking-I/O reason as the filter / profile_env parses.
+        # returned.
         github_token_names = await asyncio.to_thread(
-            hosted_github_token_passthrough_names, compose_file
+            hosted_github_token_passthrough_names,
+            compose_file,
+            compose_env=compose_env,
         )
         if github_token_names:
             # Union after the filter: the filter excludes compose-declared
@@ -512,7 +520,12 @@ class AgentAdapter(ABC):
         # carried verbatim. Bare ``${NAME}`` / ``$NAME`` worker-resolved slots are
         # skipped (the profile owns them locally; the hosted path resolves
         # credentials via its own adapter contract, not from the worker).
-        profile_env = await asyncio.to_thread(literal_profile_env_from_compose, compose_file)
+        profile_env = await asyncio.to_thread(
+            literal_profile_env_from_compose,
+            compose_file,
+            compose_env=compose_env,
+            postgres_passwords=postgres_passwords,
+        )
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
@@ -578,7 +591,6 @@ class AgentAdapter(ABC):
             profile_env_keys=[key for key, _ in profile_env],
         )
         try:
-            sampler_ctx = None
             if self._usage_sampler is not None:
                 _log.info(
                     "agent.run.hosted.usage_sampling_skipped",
@@ -627,7 +639,6 @@ class AgentAdapter(ABC):
                 hosted_result=hosted_result,
                 model=model,
                 workspace_id=workspace_id,
-                log_source=log_source,
             )
             final_status = "success"
             return result
@@ -683,7 +694,6 @@ class AgentAdapter(ABC):
         hosted_result: AgentRuntimeExecResult,
         model: str | None,
         workspace_id: str | None,
-        log_source: str,
     ) -> AgentRunResult:
         """Map a hosted executor result through the same failure classification.
 
@@ -699,7 +709,6 @@ class AgentAdapter(ABC):
         ordinary CLI-failure classification, mirroring the Compose path where
         only a watchdog-set ``reason_code`` yields ``AGENT_TIMEOUT``.
         """
-        del log_source
         # Only classify a hosted ``124`` as a timeout when the executor
         # signals an explicit, valid timeout reason. A ``124`` with an
         # unset-default (``COMMAND_TIMEOUT_REASON``) still maps to a wall-clock

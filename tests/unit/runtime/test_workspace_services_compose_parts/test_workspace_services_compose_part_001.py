@@ -23,6 +23,7 @@ from awf.profiles.compose import (
     agent_environment_with_legacy_host_auth,
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
+    hosted_profile_env_passthrough_names,
     profile_agent_environment,
     profile_app_endpoint_environment,
     profile_services,
@@ -1006,6 +1007,68 @@ def test_filter_hosted_env_passthrough_names_parses_compose_once(
     assert "OPENAI_API_KEY" in filtered
     assert "AWS_REGION" not in filtered
     assert "ANTHROPIC_API_KEY" in filtered
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_accepts_preparsed_compose_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that already parsed compose env can avoid a second file parse."""
+    compose_file = tmp_path / "missing-compose.yml"
+    parse_calls = 0
+
+    def _unexpected_parse(path: Path) -> dict[str, str] | None:
+        nonlocal parse_calls
+        parse_calls += 1
+        return None
+
+    import awf.profiles.compose as compose_module
+
+    monkeypatch.setattr(
+        compose_module, "_try_agent_environment_from_compose_file", _unexpected_parse
+    )
+
+    filtered = filter_hosted_env_passthrough_names(
+        ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
+        compose_file=compose_file,
+        compose_env={"OPENAI_API_KEY": "${OPENAI_API_KEY}"},
+        worker_env={"OPENAI_API_KEY": "sk-worker"},
+    )
+
+    assert parse_calls == 0
+    assert "OPENAI_API_KEY" in filtered
+    assert "ANTHROPIC_API_KEY" in filtered
+
+
+@pytest.mark.unit
+def test_hosted_profile_env_passthrough_names_accepts_preparsed_compose_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted profile passthrough names reuse the caller's compose parse."""
+    compose_file = tmp_path / "missing-compose.yml"
+    parse_calls = 0
+
+    def _unexpected_parse(path: Path) -> dict[str, str] | None:
+        nonlocal parse_calls
+        parse_calls += 1
+        return None
+
+    import awf.profiles.compose as compose_module
+
+    monkeypatch.setattr(
+        compose_module, "_try_agent_environment_from_compose_file", _unexpected_parse
+    )
+
+    names = hosted_profile_env_passthrough_names(
+        compose_file,
+        compose_env={"NPM_TOKEN": "${NPM_TOKEN}", "OLLAMA_HOST": "http://ollama:11434"},
+        worker_env={"NPM_TOKEN": "npm-worker-token"},
+    )
+
+    assert parse_calls == 0
+    assert names == ("NPM_TOKEN",)
 
 
 @pytest.mark.unit

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import pytest_mock
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
@@ -290,7 +291,10 @@ async def test_monitor_agent_hosted_timeout_skips_compose_recovery(
     )
     command_evidence: list[str] = []
 
-    with pytest.raises(AgentRunError) as raised:
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentRunError) as raised,
+    ):
         await runner._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project="proj",
@@ -304,6 +308,13 @@ async def test_monitor_agent_hosted_timeout_skips_compose_recovery(
     assert command_evidence == []
     probe.assert_not_awaited()
     ensure_project_up.assert_not_awaited()
+    assert {
+        "event": "monitor.agent_service_recovery_skipped_hosted",
+        "workspace_id": workspace_id,
+        "reason_code": AGENT_IDLE_TIMEOUT,
+        "hosted": True,
+        "log_level": "warning",
+    } in captured
 
 
 @pytest.mark.unit
@@ -353,7 +364,10 @@ async def test_monitor_agent_hosted_cleanup_failure_skips_compose_recovery(
     )
     command_evidence: list[str] = []
 
-    with pytest.raises(ComposeExecCleanupError) as raised:
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(ComposeExecCleanupError) as raised,
+    ):
         await runner._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
             compose_project="proj",
@@ -367,6 +381,13 @@ async def test_monitor_agent_hosted_cleanup_failure_skips_compose_recovery(
     assert command_evidence == []
     probe.assert_not_awaited()
     ensure_project_up.assert_not_awaited()
+    assert {
+        "event": "monitor.agent_service_recovery_skipped_hosted",
+        "workspace_id": workspace_id,
+        "reason_code": cleanup_error.reason_code,
+        "hosted": True,
+        "log_level": "warning",
+    } in captured
 
 
 @pytest.mark.unit

@@ -434,32 +434,68 @@ class TestNonCodexHostedCredentials:
         those calls run off the event loop thread.
         """
         import awf.adapters.base as base_module
+        import awf.profiles.compose as compose_module
 
         loop_thread_id = threading.get_ident()
 
         seen_thread_ids: dict[str, int] = {}
+        parse_calls = 0
 
+        real_parse = base_module.try_compose_agent_env_and_postgres_passwords
         real_filter = base_module.filter_hosted_env_passthrough_names
         real_profile_names = base_module.hosted_profile_env_passthrough_names
+        real_github_names = base_module.hosted_github_token_passthrough_names
         real_literal = base_module.literal_profile_env_from_compose
 
-        def _tracked_filter(names, *, compose_file):
+        def _tracked_parse(compose_file, *, worker_env):
+            nonlocal parse_calls
+            seen_thread_ids["parse"] = threading.get_ident()
+            parse_calls += 1
+            return real_parse(compose_file, worker_env=worker_env)
+
+        def _tracked_filter(names, *, compose_file, compose_env):
             seen_thread_ids["filter"] = threading.get_ident()
-            return real_filter(names, compose_file=compose_file)
+            return real_filter(names, compose_file=compose_file, compose_env=compose_env)
 
-        def _tracked_profile_names(compose_file):
+        def _tracked_profile_names(compose_file, *, compose_env):
             seen_thread_ids["profile_names"] = threading.get_ident()
-            return real_profile_names(compose_file)
+            return real_profile_names(compose_file, compose_env=compose_env)
 
-        def _tracked_literal(compose_file):
+        def _tracked_github_names(compose_file, *, compose_env):
+            seen_thread_ids["github_names"] = threading.get_ident()
+            return real_github_names(compose_file, compose_env=compose_env)
+
+        def _tracked_literal(compose_file, *, compose_env, postgres_passwords):
             seen_thread_ids["literal"] = threading.get_ident()
-            return real_literal(compose_file)
+            return real_literal(
+                compose_file,
+                compose_env=compose_env,
+                postgres_passwords=postgres_passwords,
+            )
 
+        def _unexpected_helper_parse(compose_file):
+            raise AssertionError(f"helper re-parsed compose file: {compose_file}")
+
+        monkeypatch.setattr(
+            base_module,
+            "try_compose_agent_env_and_postgres_passwords",
+            _tracked_parse,
+        )
+        monkeypatch.setattr(
+            compose_module,
+            "_try_agent_environment_from_compose_file",
+            _unexpected_helper_parse,
+        )
         monkeypatch.setattr(base_module, "filter_hosted_env_passthrough_names", _tracked_filter)
         monkeypatch.setattr(
             base_module,
             "hosted_profile_env_passthrough_names",
             _tracked_profile_names,
+        )
+        monkeypatch.setattr(
+            base_module,
+            "hosted_github_token_passthrough_names",
+            _tracked_github_names,
         )
         monkeypatch.setattr(base_module, "literal_profile_env_from_compose", _tracked_literal)
 
@@ -469,15 +505,22 @@ class TestNonCodexHostedCredentials:
         adapter = _build(ClaudeCodeAdapter)
         request = await _run(adapter, compose_file=compose_file)
 
-        # Both blocking compose-file parses ran, and neither ran on the event
-        # loop's thread (asyncio.to_thread dispatches to a worker thread).
+        # The single blocking compose-file parse ran off the event loop, and
+        # the helper calls reused that parse instead of re-reading the file.
+        assert parse_calls == 1
+        assert "parse" in seen_thread_ids, "hosted compose parse was not dispatched off-loop"
         assert "filter" in seen_thread_ids, "hosted filter parse was not dispatched off-loop"
         assert "profile_names" in seen_thread_ids, (
             "hosted profile parse was not dispatched off-loop"
         )
+        assert "github_names" in seen_thread_ids, (
+            "hosted GitHub token parse was not dispatched off-loop"
+        )
         assert "literal" in seen_thread_ids, "hosted literal parse was not dispatched off-loop"
+        assert seen_thread_ids["parse"] != loop_thread_id
         assert seen_thread_ids["filter"] != loop_thread_id
         assert seen_thread_ids["profile_names"] != loop_thread_id
+        assert seen_thread_ids["github_names"] != loop_thread_id
         assert seen_thread_ids["literal"] != loop_thread_id
         # The offloaded parse result still flows through to the hosted request.
         assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
