@@ -254,6 +254,75 @@ def test_hosted_github_token_passthrough_names_surfaces_source_once_when_source_
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("worker_env", "compose_environment", "expected_names", "unexpected_values"),
+    [
+        (
+            {
+                "GH_TOKEN": "ghp_worker_secret",
+                "GITHUB_TOKEN": "ghp_worker_fallback_secret",
+            },
+            {
+                "GH_TOKEN": "${GH_TOKEN:-}",
+                "GITHUB_TOKEN": "${GITHUB_TOKEN:-}",
+            },
+            ("GH_TOKEN", "GITHUB_TOKEN"),
+            ("ghp_worker_secret", "ghp_worker_fallback_secret", "${GH_TOKEN:-}"),
+        ),
+        (
+            {"AWF_GITHUB_TOKEN": "ghp_awf_worker_secret"},
+            {
+                "AWF_GITHUB_TOKEN": "${AWF_GITHUB_TOKEN:-}",
+                "GH_TOKEN": "${AWF_GITHUB_TOKEN}",
+            },
+            ("AWF_GITHUB_TOKEN", "GH_TOKEN"),
+            ("ghp_awf_worker_secret", "${AWF_GITHUB_TOKEN:-}"),
+        ),
+    ],
+)
+def test_hosted_github_token_passthrough_names_accepts_same_name_defaulted_worker_tokens(
+    tmp_path: Path,
+    worker_env: dict[str, str],
+    compose_environment: dict[str, str],
+    expected_names: tuple[str, ...],
+    unexpected_values: tuple[str, ...],
+) -> None:
+    """Defaulted same-name GitHub token slots are worker-resolved, not profile-owned.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6Pse2h: when a profile declares
+    a GitHub token source/alias as a defaulted same-name expression such as
+    ``GH_TOKEN: ${GH_TOKEN:-}`` or
+    ``AWF_GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-}``, Docker Compose gives the local
+    agent the worker token at stack launch when that worker token is set. The
+    hosted path must surface the matching names for out-of-band resolution
+    instead of suppressing the whole GitHub token group as profile-owned.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": compose_environment,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = hosted_github_token_passthrough_names(compose_file, worker_env=worker_env)
+
+    for expected_name in expected_names:
+        assert expected_name in names
+    for unexpected_value in unexpected_values:
+        assert unexpected_value not in names
+
+
+@pytest.mark.unit
 def test_hosted_github_token_passthrough_names_skips_profile_owned_awf_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

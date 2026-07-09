@@ -580,7 +580,12 @@ def hosted_github_token_passthrough_names(
     # #751 thread PRRT_kwDOSJAM6s6PZkRH).
     for token_name in _GITHUB_TOKEN_SOURCE_PRECEDENCE:
         raw = compose_env.get(token_name)
-        if token_name in compose_env and raw != worker_placeholder and raw != _COMPOSE_PASSTHROUGH:
+        if token_name in compose_env and not _github_token_slot_matches_worker(
+            token_name,
+            raw,
+            worker_placeholder=worker_placeholder,
+            worker_env=source_env,
+        ):
             return ()
     # Surface every alias whose value matches the worker token placeholder
     # (AWF-injected, or a GitHub lease rendering to the same source), plus
@@ -592,8 +597,12 @@ def hosted_github_token_passthrough_names(
     aliases = tuple(
         alias
         for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE
-        if compose_env.get(alias) == worker_placeholder
-        or compose_env.get(alias) == _COMPOSE_PASSTHROUGH
+        if _github_token_slot_matches_worker(
+            alias,
+            compose_env.get(alias),
+            worker_placeholder=worker_placeholder,
+            worker_env=source_env,
+        )
     )
     # Surface the chosen source name first so a hosted executor can resolve the
     # credential from the source name when the worker only carries the AWF
@@ -606,6 +615,20 @@ def hosted_github_token_passthrough_names(
     if source_name is not None and source_name not in aliases:
         return (source_name, *aliases)
     return aliases
+
+
+def _github_token_slot_matches_worker(
+    token_name: str,
+    raw: str | None,
+    *,
+    worker_placeholder: str,
+    worker_env: Mapping[str, str],
+) -> bool:
+    """Return whether a compose GitHub token slot resolves to the worker token."""
+    return raw in (worker_placeholder, _COMPOSE_PASSTHROUGH) or (
+        raw is not None
+        and _compose_defaulted_reference_name(raw, worker_env=worker_env) == token_name
+    )
 
 
 def agent_environment_with_host_auth(
