@@ -120,9 +120,9 @@ def test_literal_profile_env_skips_default_word_referencing_worker_secret(
       from passthrough (a profile-owned secret slot the hosted path resolves via
       its adapter contract, mirroring a bare ``${SECRET}``).
     - With ``X`` set (non-empty) the outer ``:-`` resolves to the worker value of
-      ``X``, so the value is classified ``WORKER_RESOLVED_DEFAULTED`` and kept in
-      passthrough for hosted out-of-band resolution (the local container received
-      the worker value of ``X``, not the secret-bearing default).
+      ``X``, so the value is classified ``WORKER_RESOLVED_DEFAULTED``. The
+      target name still stays excluded because hosted passthrough resolves by
+      target key and cannot recover the cross-name source value.
     """
     compose_file = _write(
         tmp_path,
@@ -150,14 +150,15 @@ def test_literal_profile_env_skips_default_word_referencing_worker_secret(
     assert "SECRET_DEFAULT" not in filtered
 
     # X set -> outer defaulted resolves to the worker value of X -> skipped from
-    # carry (worker secret), kept in passthrough (worker-resolved-defaulted).
+    # carry (worker secret), excluded from passthrough because the source name
+    # differs from the target name.
     worker_env_set = {**worker_env, "X": "x-is-set"}
     carried = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env_set))
     assert "SECRET_DEFAULT" not in carried
     filtered = filter_hosted_env_passthrough_names(
         ("SECRET_DEFAULT",), compose_file=compose_file, worker_env=worker_env_set
     )
-    assert "SECRET_DEFAULT" in filtered
+    assert "SECRET_DEFAULT" not in filtered
 
 
 @pytest.mark.unit
