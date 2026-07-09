@@ -1,10 +1,10 @@
 """Codex hosted credential contract tests.
 
-Hosted execution should pass ``CODEX_API_KEY`` to ``codex exec`` (env
-passthrough name). ``OPENAI_API_KEY`` may remain a *source* credential in
-deployment systems, but ``codex exec`` itself must not require a workstation
-``~/.codex`` directory in hosted mode. No secret values are ever transported
-in the request, argv, stdin, or logs.
+Hosted execution should pass Codex/OpenAI auth and config env names to
+``codex exec``. ``OPENAI_API_KEY`` may remain a *source* credential in
+deployment systems, and org/project/base-url config must match the local
+Compose path. No secret values are ever transported in the request, argv,
+stdin, or logs.
 """
 
 from __future__ import annotations
@@ -26,6 +26,17 @@ _PROMPT = "Fix the typo in README."
 _COMPOSE_PROJECT = "awf_ws_xyz"
 _COMPOSE_FILE = Path("/fake/path/compose.yml")
 _SECRET_VALUE = "sk-codex-secret-do-not-leak"
+_CODEX_OPENAI_ENV_NAMES = (
+    "OPENAI_API_KEY",
+    "OPENAI_API_TOKEN",
+    "CODEX_API_KEY",
+    "CODEX_AUTH_TOKEN",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "OPENAI_ORGANIZATION",
+    "OPENAI_PROJECT",
+    "OPENAI_PROJECT_ID",
+)
 
 
 class _RecordingExecutor:
@@ -39,7 +50,7 @@ class _RecordingExecutor:
 
 class TestCodexHostedCredentials:
     @pytest.mark.unit
-    async def test_hosted_path_surfaces_codex_api_key_name(self) -> None:
+    async def test_hosted_path_surfaces_codex_openai_env_names(self) -> None:
         executor = _RecordingExecutor()
         adapter = CodexAdapter(
             runner=FakeCommandRunner(),
@@ -55,7 +66,7 @@ class TestCodexHostedCredentials:
         )
 
         request = executor.calls[0]
-        assert "CODEX_API_KEY" in request.env_passthrough_names
+        assert request.env_passthrough_names == _CODEX_OPENAI_ENV_NAMES
 
     @pytest.mark.unit
     async def test_codex_cli_argv_does_not_require_codex_dir(self) -> None:

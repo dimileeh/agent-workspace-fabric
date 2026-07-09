@@ -9,6 +9,27 @@ from __future__ import annotations
 
 from awf.adapters.base import AgentAdapter, register_adapter
 from awf.db.enums import AgentRuntime
+from awf.profiles.compose import AGENT_AUTH_ENV_VARS
+
+# Codex/OpenAI auth and config entries that ``AGENT_AUTH_ENV_VARS`` owns. The
+# hosted passthrough derives these from the shared source of truth so hosted
+# Codex can resolve the same credential/config names the local Compose path
+# surfaces.
+_CODEX_OPENAI_ENV_NAMES = frozenset(
+    name
+    for name in (
+        "OPENAI_API_KEY",
+        "OPENAI_API_TOKEN",
+        "CODEX_API_KEY",
+        "CODEX_AUTH_TOKEN",
+        "OPENAI_BASE_URL",
+        "OPENAI_ORG_ID",
+        "OPENAI_ORGANIZATION",
+        "OPENAI_PROJECT",
+        "OPENAI_PROJECT_ID",
+    )
+    if name in AGENT_AUTH_ENV_VARS
+)
 
 
 @register_adapter
@@ -27,14 +48,14 @@ class CodexAdapter(AgentAdapter):
     def hosted_env_passthrough_names(self) -> tuple[str, ...]:
         """Codex hosted credential contract.
 
-        Hosted execution should pass ``CODEX_API_KEY`` to ``codex exec``.
-        ``OPENAI_API_KEY`` may remain a *source* credential in deployment
-        systems, but ``codex exec`` itself must not require a workstation
-        ``~/.codex`` directory in hosted mode. Names only — the hosted
-        executor resolves values out-of-band; secret values are never
-        transported, logged, or persisted by Core.
+        Names only — the hosted executor resolves values out-of-band; secret
+        values are never transported, logged, or persisted by Core. The
+        Codex/OpenAI auth and config entries are derived from
+        ``AGENT_AUTH_ENV_VARS`` (the shared source of truth) so hosted Codex
+        can resolve the same credential, base URL, organization, and project
+        settings that a local Compose run would surface.
         """
-        return ("CODEX_API_KEY",)
+        return tuple(name for name in AGENT_AUTH_ENV_VARS if name in _CODEX_OPENAI_ENV_NAMES)
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         args = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
