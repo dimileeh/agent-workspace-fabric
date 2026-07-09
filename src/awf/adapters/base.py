@@ -60,6 +60,15 @@ DEFAULT_AGENT_WALL_TIMEOUT_SECONDS = 7200.0
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 3600.0
 """Default maximum stdout/stderr silence for a single agent CLI run."""
 
+_HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES = frozenset(
+    {
+        # ADC is a filesystem path whose local Compose contract includes an auth
+        # bind mount. Hosted requests currently carry env values only, so profile
+        # passthrough must not re-add the name after adapters omit it.
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    }
+)
+
 
 # Prepended to every agent prompt. Encodes contract invariants the
 # agent must honour inside an AWF workspace.
@@ -484,7 +493,10 @@ class AgentAdapter(ABC):
             # of ``profile_env`` and the request payload.
             existing_names = set(env_passthrough_names)
             env_passthrough_names = env_passthrough_names + tuple(
-                name for name in profile_env_passthrough_names if name not in existing_names
+                name
+                for name in profile_env_passthrough_names
+                if name not in existing_names
+                and name not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
             )
         # Surface GitHub token alias names the local Compose path would inject
         # into the agent env block (``GH_TOKEN`` / ``GITHUB_TOKEN``) so the

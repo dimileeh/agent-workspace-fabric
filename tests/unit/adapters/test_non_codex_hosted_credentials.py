@@ -318,6 +318,38 @@ class TestNonCodexHostedCredentials:
         assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
 
     @pytest.mark.unit
+    async def test_hosted_profile_passthrough_does_not_reintroduce_file_backed_adc(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Profile passthrough must not bypass adapter ADC file-backed exclusions.
+
+        Regression for PR #754 thread PRRT_kwDOSJAM6s6PuWqQ: Compose generation
+        can add ``GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS}``
+        from ``AGENT_AUTH_ENV_VARS`` when the worker has file-backed ADC. The
+        Gemini and Claude adapters intentionally omit that name from hosted
+        env-only passthrough because the hosted request carries no file/mount
+        contract. The generic profile passthrough union must not add it back.
+        """
+        compose_file = _write_compose(
+            tmp_path,
+            environment={
+                "GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS}",
+                "NPM_TOKEN": "${NPM_TOKEN}",
+            },
+        )
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/host/adc.json")
+        monkeypatch.setenv("NPM_TOKEN", "npm_worker_secret")
+
+        for adapter_cls in (ClaudeCodeAdapter, GeminiAdapter):
+            adapter = _build(adapter_cls)
+            request = await _run(adapter, compose_file=compose_file)
+
+            assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
+            assert "GOOGLE_APPLICATION_CREDENTIALS" not in dict(request.profile_env)
+            assert "NPM_TOKEN" in request.env_passthrough_names
+            assert "NPM_TOKEN" not in dict(request.profile_env)
+
+    @pytest.mark.unit
     async def test_hosted_request_carries_cross_name_env_secret_aliases(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
