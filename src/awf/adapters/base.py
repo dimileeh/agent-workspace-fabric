@@ -585,7 +585,21 @@ class AgentAdapter(ABC):
                     agent=self.name.value,
                     workspace_id=workspace_id,
                 )
-            hosted_result = await runtime_executor.execute(request)
+            try:
+                hosted_result = await asyncio.wait_for(
+                    runtime_executor.execute(request),
+                    timeout=request.wall_timeout_seconds,
+                )
+            except TimeoutError:
+                hosted_result = AgentRuntimeExecResult(
+                    returncode=_HOSTED_TIMEOUT_RETURN_CODE,
+                    stdout="",
+                    stderr=(
+                        "hosted runtime executor timed out after "
+                        f"{self._agent_wall_timeout_seconds:g}s\n"
+                    ),
+                    timeout_reason=COMMAND_TIMEOUT_REASON,
+                )
             if sinks is not None:
                 # Buffered fallback: write the hosted executor's buffered
                 # stdout/stderr to the sinks only when that fd was not already

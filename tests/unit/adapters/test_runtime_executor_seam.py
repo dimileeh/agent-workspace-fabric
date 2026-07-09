@@ -284,6 +284,35 @@ class TestRuntimeExecutorSeam:
         assert exc.value.result.returncode == 124
 
     @pytest.mark.unit
+    async def test_hosted_executor_hang_is_bounded_by_local_wall_timeout(self) -> None:
+        """A hung hosted backend is mapped through the normal timeout path."""
+
+        class _HungExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                await asyncio.sleep(60)
+                raise AssertionError("execute should be preempted by adapter watchdog")
+
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=_HungExecutor(),
+            agent_wall_timeout_seconds=0.01,
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_hosted_hang",
+            )
+
+        assert exc.value.reason_code == "AGENT_TIMEOUT"
+        assert exc.value.result.returncode == 124
+        assert exc.value.result.reason_code == "COMMAND_TIMEOUT"
+        assert "hosted runtime executor timed out" in exc.value.result.stderr
+
+    @pytest.mark.unit
     async def test_hosted_idle_timeout_signal_maps_to_agent_idle_timeout(
         self,
     ) -> None:
