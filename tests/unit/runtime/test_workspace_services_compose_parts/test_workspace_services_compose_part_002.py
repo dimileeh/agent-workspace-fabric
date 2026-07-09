@@ -580,6 +580,84 @@ def test_literal_profile_env_from_compose_skips_profile_owned_auth_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_profile_owned_claude_backend_secrets(
+    tmp_path: Path,
+) -> None:
+    """Profile-owned Claude Bedrock backend credential literals are NOT carried.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PiiaQ: when a Claude Code
+    Bedrock profile declares backend credentials such as
+    ``AWS_SECRET_ACCESS_KEY`` / ``AWS_SESSION_TOKEN`` /
+    ``AWS_BEARER_TOKEN_BEDROCK`` as literal agent env values, the hosted
+    passthrough filter already treats those compose-declared names as
+    profile-owned (``_filter_hosted_env_passthrough_names_from_compose_env``
+    excludes any compose-declared non-pass-through, non-worker-resolved-
+    defaulted name), so the hosted executor resolves them out-of-band. But
+    ``literal_profile_env_from_compose`` only redacted keys in
+    ``_AGENT_AUTH_SECRET_ENV_VARS``, and those Claude backend credential names
+    were absent from the set, so their raw secret literals were appended to
+    ``AgentRuntimeExecRequest.profile_env``, violating the secret-free hosted
+    contract and exposing AWS credentials to the hosted executor/request
+    object. The backend credential secrets must be added to the redaction set
+    while still carrying non-secret backend config (regions, profile names,
+    project ids, endpoint regions).
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Profile-owned Claude Bedrock backend credential
+                            # literals -> skipped (secret-bearing).
+                            "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                            "AWS_SESSION_TOKEN": "IQoJb3JpZ2luX2VjEGgaCXVzLWVhc3QtMSJIMEY",
+                            "AWS_BEARER_TOKEN_BEDROCK": "BEDROCK-BEARER-TOKEN-SECRET",
+                            # Non-secret backend config (region / profile /
+                            # project / endpoint region) -> still carried.
+                            "AWS_REGION": "us-west-2",
+                            "AWS_DEFAULT_REGION": "us-west-2",
+                            "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+                            "AWS_PROFILE": "bedrock-profile",
+                            "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
+                            "CLOUD_ML_REGION": "us-east5",
+                            # Non-auth literal still carried.
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    # Non-secret backend config is still carried to the hosted executor.
+    assert carried.get("AWS_REGION") == "us-west-2"
+    assert carried.get("AWS_DEFAULT_REGION") == "us-west-2"
+    assert carried.get("AWS_ACCESS_KEY_ID") == "AKIAIOSFODNN7EXAMPLE"
+    assert carried.get("AWS_PROFILE") == "bedrock-profile"
+    assert carried.get("ANTHROPIC_VERTEX_PROJECT_ID") == "proj-123"
+    assert carried.get("CLOUD_ML_REGION") == "us-east5"
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    # Profile-owned backend credential secret literals are NOT carried.
+    assert "AWS_SECRET_ACCESS_KEY" not in carried
+    assert "AWS_SESSION_TOKEN" not in carried
+    assert "AWS_BEARER_TOKEN_BEDROCK" not in carried
+    # The concrete secret strings never reach the hosted request object.
+    blob = "".join(v for _k, v in profile_env)
+    assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in blob
+    assert "IQoJb3JpZ2luX2VjEGgaCXVzLWVhc3QtMSJIMEY" not in blob
+    assert "BEDROCK-BEARER-TOKEN-SECRET" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_carries_values_without_postgres_service(
     tmp_path: Path,
 ) -> None:

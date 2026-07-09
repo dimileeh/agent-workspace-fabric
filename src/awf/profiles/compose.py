@@ -92,6 +92,26 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
         "GOOGLE_CLOUD_ACCESS_TOKEN",
         "OLLAMA_API_KEY",
         "XAI_API_KEY",
+        # Claude Code Bedrock backend credentials (used when
+        # ``CLAUDE_CODE_USE_BEDROCK=1``). The toggle is in
+        # ``AGENT_AUTH_ENV_VARS`` but the credentials it requires are not; they
+        # are surfaced as a static backend supplement in
+        # ``ClaudeCodeAdapter.hosted_env_passthrough_names``. When a profile
+        # declares one of these as a literal agent env value, the hosted
+        # passthrough filter already treats the compose-declared name as
+        # profile-owned (excluded from ``env_passthrough_names``), so the hosted
+        # executor resolves it out-of-band. ``literal_profile_env_from_compose``
+        # must also redact these from ``profile_env`` or the raw secret literal
+        # would be appended to ``AgentRuntimeExecRequest.profile_env``, violating
+        # the secret-free hosted contract and exposing AWS credentials to the
+        # hosted executor/request object (PR #751 thread PRRT_kwDOSJAM6s6PiiaQ).
+        # Non-secret backend config (``AWS_REGION`` / ``AWS_DEFAULT_REGION`` /
+        # ``AWS_ACCESS_KEY_ID`` / ``AWS_PROFILE`` /
+        # ``ANTHROPIC_VERTEX_PROJECT_ID`` / ``CLOUD_ML_REGION``) is NOT redacted
+        # and stays carried, matching the ``AgentRuntimeExecRequest`` contract.
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
     }
 )
 
