@@ -144,8 +144,8 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
                             "UNSET_ALIAS": "${UNSET_SOURCE}",
                             "MIXED_ALIAS": "prefix-${MY_ANTHROPIC_TOKEN}",
                             "LITERAL_VALUE": "literal",
-                            # Pass-through slot with no worker value: keep the
-                            # hosted passthrough intent, but do not carry a value.
+                            # Pass-through slot with no worker value: exclude it
+                            # from hosted passthrough and do not carry a value.
                             "PASSTHROUGH_SLOT": None,
                         },
                     }
@@ -186,18 +186,19 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
     assert "UNSET_ALIAS" not in filtered
     assert "MIXED_ALIAS" not in filtered
     assert "LITERAL_VALUE" not in filtered
-    assert "PASSTHROUGH_SLOT" in filtered
+    assert "PASSTHROUGH_SLOT" not in filtered
 
     # The cross-name bare slots are NOT carried in profile_env (worker-resolved;
     # carrying the worker value would embed a secret), and the same-name slot is
-    # skipped too. The unset pass-through slot is not carried either. None of
+    # skipped too. The unset cross-name bare reference resolves to Compose's
+    # empty literal, while the unset pass-through slot is not carried. None of
     # the alias values reach profile_env.
     profile_env = literal_profile_env_from_compose(compose_file, worker_env=worker_env)
     carried = dict(profile_env)
     assert "ANTHROPIC_API_KEY" not in carried
     assert "AWS_REGION" not in carried
     assert "OLLAMA_HOST" not in carried
-    assert "UNSET_ALIAS" not in carried
+    assert carried["UNSET_ALIAS"] == ""
     assert "MIXED_ALIAS" not in carried
     assert carried["LITERAL_VALUE"] == "literal"
     assert "PASSTHROUGH_SLOT" not in carried
