@@ -803,14 +803,15 @@ def test_literal_profile_env_preparsed_compose_env_skips_file_passwords(
 
 
 @pytest.mark.unit
-def test_literal_profile_env_keeps_db_url_when_postgres_passthrough_unresolved(
+def test_literal_profile_env_redacts_db_url_password_when_postgres_passthrough_unresolved(
     tmp_path: Path,
 ) -> None:
-    """An unresolved pass-through ``POSTGRES_PASSWORD`` contributes no redaction.
+    """URL userinfo still redacts DB passwords without tracked Postgres context.
 
     Docker Compose would resolve ``POSTGRES_PASSWORD: null`` from the worker shell.
-    If the worker has no such value, there is no concrete password for AWF to
-    redact; profile-owned agent literals stay carried.
+    If the worker has no such value, there is no concrete service password for
+    AWF to match, but hosted ``profile_env`` must still not carry a literal DB
+    URL with an embedded password.
     """
     compose_file = _write(
         tmp_path,
@@ -835,7 +836,7 @@ def test_literal_profile_env_keeps_db_url_when_postgres_passthrough_unresolved(
     )
 
     carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
-    assert carried.get("DATABASE_URL") == "postgresql://awf:profile-pw@postgres:5432/awf"
+    assert "DATABASE_URL" not in carried
 
 
 @pytest.mark.unit
