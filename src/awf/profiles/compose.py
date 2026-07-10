@@ -183,7 +183,10 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS = frozenset(
 
 _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS = frozenset({"PUBLIC", "PUBLISHABLE", "SITE"})
 
-_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(r"^\s*(?:basic|bearer)\s+\S+", re.IGNORECASE)
+_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?:^\s*|\bauthorization\s*:\s*)(?:basic|bearer)\s+\S+",
+    re.IGNORECASE,
+)
 _URL_SECRET_CREDENTIAL_FIELD_NAMES = frozenset({"PASSWORD", "PASSWD", "SECRET", "TOKEN"})
 _URL_SECRET_CREDENTIAL_FIELD_EXACT_NAMES = frozenset({"APIKEY", "CLIENTSECRET"})
 _URL_SECRET_CREDENTIAL_FIELD_NAME_TOKEN_PAIRS = frozenset(
@@ -233,7 +236,7 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
 
 
 def _is_auth_credential_like_profile_env_value(value: str) -> bool:
-    return bool(_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.match(value))
+    return bool(_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value))
 
 
 def _url_field_name_has_secret_credential(name: str) -> bool:

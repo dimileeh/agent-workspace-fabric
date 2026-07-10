@@ -817,6 +817,54 @@ def test_literal_profile_env_from_compose_skips_profile_owned_github_token_liter
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_embedded_auth_header_literals(
+    tmp_path: Path,
+) -> None:
+    """Embedded auth header credentials are NOT carried to hosted profile env.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6PwWHe: non-secret-looking
+    profile env names such as ``HTTP_HEADERS`` / ``CURL_ARGS`` can still carry
+    literal ``Authorization: Bearer ...`` or ``Authorization: Basic ...``
+    credentials. Those values must be skipped before building the hosted
+    ``profile_env`` request payload.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "HTTP_HEADERS": (
+                                "Accept: application/json\n"
+                                "Authorization: Bearer embedded-bearer-secret"
+                            ),
+                            "CURL_ARGS": ("-fsS -H 'Authorization: Basic embedded-basic-secret'"),
+                            # Non-secret profile literal still carried.
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "HTTP_HEADERS" not in carried
+    assert "CURL_ARGS" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "embedded-bearer-secret" not in blob
+    assert "embedded-basic-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_preserves_public_key_literals(
     tmp_path: Path,
 ) -> None:
