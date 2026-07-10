@@ -1171,6 +1171,42 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_refer
 
 
 @pytest.mark.unit
+def test_hosted_profile_env_passthrough_aliases_preserves_empty_worker_source(
+    tmp_path: Path,
+) -> None:
+    """Cross-name aliases preserve explicitly empty worker source values."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "EMPTY_BARE_TARGET": "${EMPTY_SOURCE}",
+                            "EMPTY_DEFAULT_TARGET": "${EMPTY_SOURCE-default}",
+                            "MISSING_BARE_TARGET": "${MISSING_SOURCE}",
+                            "MISSING_DEFAULT_TARGET": "${MISSING_SOURCE-default}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    aliases = hosted_profile_env_passthrough_aliases(
+        compose_file,
+        worker_env={"EMPTY_SOURCE": ""},
+    )
+
+    assert aliases == (
+        ("EMPTY_BARE_TARGET", "EMPTY_SOURCE"),
+        ("EMPTY_DEFAULT_TARGET", "EMPTY_SOURCE"),
+    )
+
+
+@pytest.mark.unit
 def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
     tmp_path: Path,
 ) -> None:

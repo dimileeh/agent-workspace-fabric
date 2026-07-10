@@ -688,6 +688,38 @@ def test_hosted_git_config_preserves_worker_resolved_value_block(
 
 
 @pytest.mark.unit
+def test_hosted_git_config_preserves_empty_worker_resolved_value_alias(
+    tmp_path: Path,
+) -> None:
+    """A worker-resolved empty git-config value keeps its alias."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "credential.helper",
+                        "GIT_CONFIG_VALUE_0": "${EMPTY_GIT_HELPER-default}",
+                    },
+                }
+            }
+        },
+    )
+    worker_env = {"EMPTY_GIT_HELPER": ""}
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    aliases = hosted_profile_env_passthrough_aliases(compose_file, worker_env=worker_env)
+
+    assert profile_env == {
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_COUNT": "1",
+    }
+    assert aliases == (("GIT_CONFIG_VALUE_0", "EMPTY_GIT_HELPER"),)
+
+
+@pytest.mark.unit
 def test_hosted_git_config_reindexes_worker_resolved_value_aliases(
     tmp_path: Path,
 ) -> None:

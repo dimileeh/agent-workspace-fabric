@@ -1086,7 +1086,7 @@ def hosted_profile_env_passthrough_aliases(
             source_name = _compose_defaulted_reference_name(raw, worker_env=env)
         else:
             continue
-        if source_name is None or source_name == name or not env.get(source_name):
+        if source_name is None or source_name == name or source_name not in env:
             continue
         aliases.append((name, source_name))
     aliases.extend(
@@ -1442,7 +1442,7 @@ def _hosted_git_config_value_alias_source(
         source_name = _compose_defaulted_reference_name(raw, worker_env=worker_env)
     else:
         return None
-    if source_name is None or not worker_env.get(source_name):
+    if source_name is None or source_name not in worker_env:
         return None
     return source_name
 
