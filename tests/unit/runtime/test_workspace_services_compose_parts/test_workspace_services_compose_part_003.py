@@ -326,6 +326,7 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                             "POSTGRES_PWD": "postgres_profile_pwd",
                             "PGPASSWORD": "postgres_profile_password",
                             "MYSQL_PWD": "mysql_profile_password",
+                            "NPM_CONFIG__AUTH": "npm_profile_auth",
                             "PWD": "/workspace",
                             "AUTHORIZATION": "Bearer profile-token",
                             "HTTP_AUTHORIZATION": "Basic profile-token",
@@ -360,6 +361,7 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert "POSTGRES_PWD" not in carried
     assert "PGPASSWORD" not in carried
     assert "MYSQL_PWD" not in carried
+    assert "NPM_CONFIG__AUTH" not in carried
     assert carried["PWD"] == "/workspace"
     assert "AUTHORIZATION" not in carried
     assert "HTTP_AUTHORIZATION" not in carried

@@ -158,6 +158,7 @@ _SECRET_LIKE_PROFILE_ENV_EXACT_NAMES = frozenset(
         # redactions instead of making ``AUTH`` a generic secret token.
         "DOCKER_AUTH_CONFIG",
         "MYSQL_PWD",
+        "NPM_CONFIG__AUTH",
         "PGPASSWORD",
         "REDISCLI_AUTH",
     }
