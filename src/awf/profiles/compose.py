@@ -1102,11 +1102,10 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     neither the worker override nor the profile default). A name whose value is
     a pass-through slot (``environment: [NAME]`` with no ``=``, ``NAME:`` /
     ``NAME: null``) whose name exists in the worker environment is likewise NOT
-    excluded: the local Compose container received that worker value at stack
-    launch, so the hosted executor must keep the name available for out-of-band
+    excluded: the hosted executor must keep the name available for out-of-band
     resolution instead of replacing it with an empty literal. An unset
-    pass-through slot stays excluded because the local Compose container had no
-    worker value to mirror. A name whose value resolves to ``LITERAL`` (a pure
+    pass-through slot is also kept as passthrough intent; hosted resolution may
+    still omit it if no worker value is available. A name whose value resolves to ``LITERAL`` (a pure
     literal, an *explicit* empty value ``NAME: ""`` / ``NAME=``, a defaulted form
     with the variable unset, or an ``:+`` / ``+`` alternate form) IS excluded —
     its concrete value reaches the hosted job via ``profile_env`` instead. A
@@ -1173,9 +1172,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # pass-through slot; ``_compose_resolve_value("")`` -> ``("", LITERAL)``
         # so an explicit empty is excluded by the LITERAL branch below.
         passthrough_slots = frozenset(
-            name
-            for name, raw in compose_env.items()
-            if raw == _COMPOSE_PASSTHROUGH and name in worker_env
+            name for name, raw in compose_env.items() if raw == _COMPOSE_PASSTHROUGH
         )
         # Worker-resolved same-name defaulted/required forms resolve to a worker
         # value at stack launch, exactly like pass-through slots. Keep those
