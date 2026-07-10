@@ -8,7 +8,7 @@ import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import yaml
 
@@ -170,6 +170,7 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS = frozenset(
 )
 
 _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(r"^\s*(?:basic|bearer)\s+\S+", re.IGNORECASE)
+_URL_SECRET_CREDENTIAL_FIELD_NAMES = frozenset({"PASSWORD", "PASSWD", "TOKEN"})
 
 
 # Ollama base-URL env keys in precedence order (highest first) — the OpenCode
@@ -206,8 +207,30 @@ def _is_auth_credential_like_profile_env_value(value: str) -> bool:
     return bool(_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.match(value))
 
 
+def _url_field_name_has_secret_credential(name: str) -> bool:
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", name).upper()
+    tokens = tuple(token for token in normalized.split("_") if token)
+    return any(token in _URL_SECRET_CREDENTIAL_FIELD_NAMES for token in tokens)
+
+
+def _url_component_has_secret_credential_field(component: str) -> bool:
+    if not component:
+        return False
+    try:
+        query_pairs = parse_qsl(component, keep_blank_values=False)
+    except ValueError:
+        query_pairs = []
+    if any(_url_field_name_has_secret_credential(key) for key, _value in query_pairs):
+        return True
+    for raw_part in re.split(r"[&;]", component):
+        key, separator, value = raw_part.partition("=")
+        if separator and value and _url_field_name_has_secret_credential(key):
+            return True
+    return False
+
+
 def _value_has_url_userinfo(value: str) -> bool:
-    """Return whether ``value`` is a URL containing non-empty userinfo."""
+    """Return whether ``value`` is a URL containing credential material."""
     try:
         parsed = urlsplit(value)
     except ValueError:
@@ -222,11 +245,20 @@ def _value_has_url_userinfo(value: str) -> bool:
             userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
             if userinfo:
                 return True
+        if _url_component_has_secret_credential_field(
+            parsed.netloc
+        ) or _url_component_has_secret_credential_field(parsed.query):
+            return True
         return any(
             _value_has_url_userinfo(match.group(0))
             for component in (parsed.path, parsed.query, parsed.fragment)
             for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(component)
         )
+    if any(
+        _url_component_has_secret_credential_field(component)
+        for component in (parsed.path, parsed.query, parsed.fragment)
+    ):
+        return True
     if "://" in parsed.path or "://" in parsed.query or "://" in parsed.fragment:
         return any(
             _value_has_url_userinfo(match.group(0))

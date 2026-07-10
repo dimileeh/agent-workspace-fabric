@@ -318,6 +318,79 @@ def test_literal_profile_env_from_compose_skips_url_userinfo_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_url_query_password_literals(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile env must not carry credentials embedded in URL queries."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": "postgresql://db/app?password=s3cr3t",
+                            "JDBC_DATABASE_URL": (
+                                "jdbc:mysql://db/app?user=app&password=jdbc-secret"
+                            ),
+                            "CACHE_URL": "redis://redis:6379/0",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "DATABASE_URL" not in carried
+    assert "JDBC_DATABASE_URL" not in carried
+    assert carried["CACHE_URL"] == "redis://redis:6379/0"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "s3cr3t" not in blob
+    assert "jdbc-secret" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_url_query_token_literals(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile env must not carry token-bearing URL query parameters."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "CALLBACK_URL": "https://proxy.local/cb?token=query-token",
+                            "SAFE_CALLBACK_URL": "https://proxy.local/cb?next=/ready",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "CALLBACK_URL" not in carried
+    assert carried["SAFE_CALLBACK_URL"] == "https://proxy.local/cb?next=/ready"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "query-token" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_embedded_url_userinfo_literals(
     tmp_path: Path,
 ) -> None:
