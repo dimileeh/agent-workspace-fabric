@@ -371,6 +371,43 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_public_frontend_api_keys(
+    tmp_path: Path,
+) -> None:
+    """Public frontend API-key literals are build config, not hosted secrets."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "NEXT_PUBLIC_FIREBASE_API_KEY": "public-next-firebase-key",
+                            "VITE_FIREBASE_API_KEY": "public-vite-firebase-key",
+                            "STRIPE_PUBLISHABLE_KEY": "pk_test_public",
+                            "CUSTOM_API_KEY": "secret-custom-api-key",
+                            "PRIVATE_KEY": "secret-private-key",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert carried["NEXT_PUBLIC_FIREBASE_API_KEY"] == "public-next-firebase-key"
+    assert carried["VITE_FIREBASE_API_KEY"] == "public-vite-firebase-key"
+    assert carried["STRIPE_PUBLISHABLE_KEY"] == "pk_test_public"
+    assert "CUSTOM_API_KEY" not in carried
+    assert "PRIVATE_KEY" not in carried
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_resolves_defaults_and_escapes(
     tmp_path: Path,
 ) -> None:

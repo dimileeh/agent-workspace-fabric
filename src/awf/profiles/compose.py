@@ -187,6 +187,7 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS = frozenset(
 )
 
 _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS = frozenset({"PUBLIC", "PUBLISHABLE", "SITE"})
+_PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKENS = frozenset({"VITE"})
 
 _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?:^\s*|\bauthorization\s*:\s*)(?:basic|bearer)\s+\S+",
@@ -226,6 +227,18 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
     if normalized in _SECRET_LIKE_PROFILE_ENV_EXACT_NAMES:
         return True
     tokens = tuple(token for token in normalized.split("_") if token)
+    if tokens and tokens[-1] == "KEY":
+        if len(tokens) >= 2 and tokens[-2] in _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS:
+            return False
+        if (
+            len(tokens) >= 3
+            and tokens[-2] == "API"
+            and (
+                any(token in _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS for token in tokens[:-2])
+                or tokens[0] in _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKENS
+            )
+        ):
+            return False
     if any(token in _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS for token in tokens):
         return True
     if len(tokens) >= 2 and tokens[-1] in _SECRET_LIKE_PROFILE_ENV_NAME_ABBREVIATION_TOKENS:
@@ -235,9 +248,7 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
         for left, right in zip(tokens, tokens[1:], strict=False)
     ):
         return True
-    if tokens and tokens[-1] == "KEY":
-        return not (len(tokens) >= 2 and tokens[-2] in _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS)
-    return False
+    return bool(tokens and tokens[-1] == "KEY")
 
 
 def _is_auth_credential_like_profile_env_value(value: str) -> bool:
