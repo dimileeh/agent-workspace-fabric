@@ -13,7 +13,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from awf.profiles.compose import filter_hosted_env_passthrough_names
+from awf.profiles.compose import (
+    filter_hosted_env_passthrough_names,
+    hosted_profile_env_passthrough_aliases,
+)
 
 FILTER = filter_hosted_env_passthrough_names
 
@@ -620,3 +623,256 @@ def test_literal_profile_env_from_compose_alternate_carries_word_when_set(
     assert carried.get("ENDPOINT_PLUS_UNSET") == ""
     # :+ whose word references a worker secret -> not carried (worker-resolved).
     assert "SECRET_BEARING" not in carried
+
+
+@pytest.mark.unit
+def test_hosted_profile_env_passthrough_aliases_preserves_conditional_alias(
+    tmp_path: Path,
+) -> None:
+    """A selected alternate word that is a source reference stays an alias."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "ANTHROPIC_API_KEY": "${USE_PROFILE:+${MY_ANTHROPIC_TOKEN}}",
+                            "OLLAMA_HOST": "${USE_PROFILE:+${OLLAMA_HOST}}",
+                            "UNSELECTED_KEY": "${USE_OTHER:+${MY_ANTHROPIC_TOKEN}}",
+                            "LITERAL_ALT": "${USE_PROFILE:+profile-owned}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_env = {
+        "USE_PROFILE": "1",
+        "MY_ANTHROPIC_TOKEN": "sk-ant-secret",
+        "OLLAMA_HOST": "http://ollama:11434",
+    }
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    filtered = filter_hosted_env_passthrough_names(
+        ("ANTHROPIC_API_KEY", "OLLAMA_HOST", "MY_ANTHROPIC_TOKEN"),
+        compose_file=compose_file,
+        worker_env=worker_env,
+    )
+    aliases = hosted_profile_env_passthrough_aliases(compose_file, worker_env=worker_env)
+
+    assert "ANTHROPIC_API_KEY" not in profile_env
+    assert "OLLAMA_HOST" not in profile_env
+    assert "UNSELECTED_KEY" not in profile_env
+    assert profile_env["LITERAL_ALT"] == "profile-owned"
+    assert "ANTHROPIC_API_KEY" not in filtered
+    assert "OLLAMA_HOST" in filtered
+    assert aliases == (("ANTHROPIC_API_KEY", "MY_ANTHROPIC_TOKEN"),)
+    assert "sk-ant-secret" not in "\x00".join(profile_env.values())
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_postgres_password_bare_slot(
+    tmp_path: Path,
+) -> None:
+    """A service may declare ``POSTGRES_PASSWORD`` as a bare Compose
+    interpolation slot (e.g. ``POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}``), which
+    ``_compose_resolve_value`` classifies as ``WORKER_RESOLVED_SLOT`` (the bare
+    ``${NAME}`` form has no default operator). Docker Compose resolves it against
+    the worker env at stack launch, so the local agent container receives the
+    concrete worker password — and a rendered agent env DB URL embedding that
+    resolved value carries the workspace credential.
+
+    ``_collect_postgres_password`` previously only recovered the concrete worker
+    value for the ``WORKER_RESOLVED_DEFAULTED`` branch (``:-`` / ``-`` / ``:?`` /
+    ``?`` with the variable set), leaving the bare ``${NAME}`` slot tracked only
+    by its raw placeholder string. A rendered DB URL embedding the *resolved*
+    worker password (not the unexpanded ``${POSTGRES_PASSWORD}`` placeholder)
+    then slipped past substring redaction and ``literal_profile_env_from_compose``
+    forwarded the secret-bearing URL in ``profile_env`` despite the secret-free
+    contract. The redaction source must also recover the concrete worker value
+    for ``WORKER_RESOLVED_SLOT`` so a bare-slot DB URL is redacted the same way a
+    defaulted one is.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PaFeB.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "postgres": {
+                        "image": "postgres:16-alpine",
+                        "environment": {
+                            "POSTGRES_USER": "awf",
+                            # Bare interpolation slot (no default): Compose
+                            # resolves it against the worker env at stack launch.
+                            "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD}",
+                            "POSTGRES_DB": "awf",
+                        },
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Non-secret profile literal -> carried (must survive).
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            # A rendered DB URL embedding the *resolved* worker
+                            # value -> must be skipped (secret-bearing).
+                            "DATABASE_URL": ("postgresql://awf:resolved-pw@postgres:5432/awf"),
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Worker env supplies the resolved password that Compose would inject.
+    profile_env = literal_profile_env_from_compose(
+        compose_file, worker_env={"POSTGRES_PASSWORD": "resolved-pw"}
+    )
+
+    # Non-secret profile literal is still carried to the hosted executor.
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    # The resolved-password-bearing DB URL is NOT carried.
+    carried = dict(profile_env)
+    assert "DATABASE_URL" not in carried
+    # The resolved worker password never reaches the hosted request object.
+    assert "resolved-pw" not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_postgres_password_passthrough_slot(
+    tmp_path: Path,
+) -> None:
+    """A service may declare ``POSTGRES_PASSWORD`` as a Compose *pass-through*
+    slot (``POSTGRES_PASSWORD:`` / ``POSTGRES_PASSWORD: null`` /
+    ``environment: [POSTGRES_PASSWORD]``), which ``_compose_environment_mapping``
+    normalizes to the :data:`_COMPOSE_PASSTHROUGH` sentinel. Docker Compose
+    resolves a pass-through slot from the worker shell at stack launch, so the
+    local agent container receives the concrete worker password — and a rendered
+    agent env DB URL embedding that resolved value carries the workspace
+    credential.
+
+    ``_collect_postgres_password`` previously early-returned on the
+    ``_COMPOSE_PASSTHROUGH`` sentinel before recovering the concrete worker
+    value, so a rendered ``DATABASE_URL`` / ``AWF_DATABASE_URL`` embedding the
+    resolved worker password slipped past substring redaction and
+    ``literal_profile_env_from_compose`` forwarded the secret-bearing URL in
+    ``profile_env`` despite the secret-free contract. A pass-through slot must
+    resolve ``POSTGRES_PASSWORD`` from ``worker_env`` for redaction the same way
+    the ``WORKER_RESOLVED_SLOT`` / ``WORKER_RESOLVED_DEFAULTED`` branches do.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PjBsM.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "postgres": {
+                        "image": "postgres:16-alpine",
+                        "environment": {
+                            "POSTGRES_USER": "awf",
+                            # Pass-through slot (mapping null form): Compose
+                            # resolves it against the worker env at stack launch.
+                            "POSTGRES_PASSWORD": None,
+                            "POSTGRES_DB": "awf",
+                        },
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Non-secret profile literal -> carried (must survive).
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                            # A rendered DB URL embedding the *resolved* worker
+                            # value -> must be skipped (secret-bearing).
+                            "DATABASE_URL": ("postgresql://awf:resolved-pw@postgres:5432/awf"),
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Worker env supplies the resolved password that Compose would inject.
+    profile_env = literal_profile_env_from_compose(
+        compose_file, worker_env={"POSTGRES_PASSWORD": "resolved-pw"}
+    )
+
+    # Non-secret profile literal is still carried to the hosted executor.
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    # The resolved-password-bearing DB URL is NOT carried.
+    carried = dict(profile_env)
+    assert "DATABASE_URL" not in carried
+    # The resolved worker password never reaches the hosted request object.
+    assert "resolved-pw" not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_postgres_password_passthrough_slot_list_form(
+    tmp_path: Path,
+) -> None:
+    """The list bare-name pass-through form
+    (``environment: [POSTGRES_PASSWORD]`` with no ``=``) must redact the
+    resolved worker password too, mirroring the mapping null-form slot (see
+    ``test_literal_profile_env_from_compose_redacts_postgres_password_passthrough_slot``).
+    Both normalize to the :data:`_COMPOSE_PASSTHROUGH` sentinel and resolve from
+    the worker shell at stack launch.
+
+    Regression for PR #751 thread PRRT_kwDOSJAM6s6PjBsM.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "postgres": {
+                        "image": "postgres:16-alpine",
+                        "environment": [
+                            "POSTGRES_USER=awf",
+                            # List bare-name pass-through slot (no ``=``):
+                            # Compose resolves it against the worker env at
+                            # stack launch.
+                            "POSTGRES_PASSWORD",
+                            "POSTGRES_DB=awf",
+                        ],
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": [
+                            "OLLAMA_HOST=http://ollama.profile:11434",
+                            # A rendered DB URL embedding the *resolved* worker
+                            # value -> must be skipped (secret-bearing).
+                            "DATABASE_URL=postgresql://awf:resolved-pw@postgres:5432/awf",
+                        ],
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Worker env supplies the resolved password that Compose would inject.
+    profile_env = literal_profile_env_from_compose(
+        compose_file, worker_env={"POSTGRES_PASSWORD": "resolved-pw"}
+    )
+
+    # Non-secret profile literal is still carried to the hosted executor.
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    # The resolved-password-bearing DB URL is NOT carried.
+    carried = dict(profile_env)
+    assert "DATABASE_URL" not in carried
+    # The resolved worker password never reaches the hosted request object.
+    assert "resolved-pw" not in "".join(v for _k, v in profile_env)
