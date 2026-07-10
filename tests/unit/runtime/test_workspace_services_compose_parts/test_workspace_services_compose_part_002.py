@@ -818,11 +818,12 @@ def test_literal_profile_env_from_compose_skips_embedded_auth_header_literals(
 ) -> None:
     """Embedded auth header credentials are NOT carried to hosted profile env.
 
-    Regression for PR #754 thread PRRT_kwDOSJAM6s6PwWHe: non-secret-looking
-    profile env names such as ``HTTP_HEADERS`` / ``CURL_ARGS`` can still carry
-    literal ``Authorization: Bearer ...`` or ``Authorization: Basic ...``
-    credentials. Those values must be skipped before building the hosted
-    ``profile_env`` request payload.
+    Regression for PR #754 threads PRRT_kwDOSJAM6s6PwWHe and
+    PRRT_kwDOSJAM6s6PypKt: non-secret-looking profile env names such as
+    ``HTTP_HEADERS`` / ``CURL_ARGS`` can still carry literal
+    ``Authorization: Bearer ...``, ``Authorization: Basic ...``, or token-style
+    ``Authorization: token ...`` credentials. Those values must be skipped
+    before building the hosted ``profile_env`` request payload.
     """
 
     compose_file = tmp_path / "compose.yml"
@@ -838,6 +839,12 @@ def test_literal_profile_env_from_compose_skips_embedded_auth_header_literals(
                                 "Authorization: Bearer embedded-bearer-secret"
                             ),
                             "CURL_ARGS": ("-fsS -H 'Authorization: Basic embedded-basic-secret'"),
+                            "GH_CURL_ARGS": (
+                                "-fsS -H 'Authorization: token embedded-token-secret'"
+                            ),
+                            "ALT_CURL_ARGS": (
+                                '-fsS -H "Authorization: Token embedded-alt-token-secret"'
+                            ),
                             # Non-secret profile literal still carried.
                             "APP_BASE_URL": "http://app:8080",
                         },
@@ -854,9 +861,13 @@ def test_literal_profile_env_from_compose_skips_embedded_auth_header_literals(
     assert carried.get("APP_BASE_URL") == "http://app:8080"
     assert "HTTP_HEADERS" not in carried
     assert "CURL_ARGS" not in carried
+    assert "GH_CURL_ARGS" not in carried
+    assert "ALT_CURL_ARGS" not in carried
     blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
     assert "embedded-bearer-secret" not in blob
     assert "embedded-basic-secret" not in blob
+    assert "embedded-token-secret" not in blob
+    assert "embedded-alt-token-secret" not in blob
 
 
 @pytest.mark.unit
