@@ -12,6 +12,49 @@ from awf.profiles.compose import literal_profile_env_from_compose
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_local_postgres_url_userinfo_passwords(
+    tmp_path: Path,
+) -> None:
+    """Local Postgres URL bypass must not carry untracked embedded passwords."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": ("postgresql://awf:literal-secret@postgres:5432/awf"),
+                            "AWF_DATABASE_URL": (
+                                "postgresql+asyncpg://awf:awf-secret@postgres:5432/awf"
+                            ),
+                            "AWF_TEST_DATABASE_URL": (
+                                "postgresql+asyncpg://awf:test-secret@postgres:5432/awf"
+                            ),
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    carried = dict(profile_env)
+    assert "DATABASE_URL" not in carried
+    assert "AWF_DATABASE_URL" not in carried
+    assert "AWF_TEST_DATABASE_URL" not in carried
+    blob = "\x00".join(v for _k, v in profile_env)
+    assert "literal-secret" not in blob
+    assert "awf-secret" not in blob
+    assert "test-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_postgres_password_from_service_env_file(
     tmp_path: Path,
 ) -> None:

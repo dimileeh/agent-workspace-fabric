@@ -110,11 +110,15 @@ def _local_postgres_database_url_without_tracked_password(
         return False
     try:
         parsed = urlsplit(value)
+        hostname = parsed.hostname
+        password = parsed.password
     except ValueError:
         return False
     return (
-        parsed.scheme == "postgresql" or parsed.scheme.startswith("postgresql+")
-    ) and parsed.hostname == "postgres"
+        (parsed.scheme == "postgresql" or parsed.scheme.startswith("postgresql+"))
+        and hostname == "postgres"
+        and password is None
+    )
 
 
 def _has_concrete_postgres_password(postgres_passwords: frozenset[str]) -> bool:
