@@ -13,13 +13,17 @@ from awf.db.enums import AgentRuntime
 
 @register_adapter
 class GeminiAdapter(AgentAdapter):
+    """Adapter that runs Google Gemini CLI in AWF workspaces."""
+
     runtime = AgentRuntime.gemini
 
     @property
     def name(self) -> AgentRuntime:
+        """Return the Gemini runtime identity."""
         return AgentRuntime.gemini
 
     def get_provider(self, model: str | None) -> str:
+        """Return the provider family used for Gemini runs."""
         del model
         return "google"
 

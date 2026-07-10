@@ -34,13 +34,17 @@ _CODEX_OPENAI_ENV_NAMES = frozenset(
 
 @register_adapter
 class CodexAdapter(AgentAdapter):
+    """Adapter that runs OpenAI Codex CLI in AWF workspaces."""
+
     runtime = AgentRuntime.codex
 
     @property
     def name(self) -> AgentRuntime:
+        """Return the Codex runtime identity."""
         return AgentRuntime.codex
 
     def get_provider(self, model: str | None) -> str:
+        """Return the provider family used for Codex runs."""
         del model
         return "openai"
 

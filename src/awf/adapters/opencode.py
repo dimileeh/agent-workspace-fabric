@@ -50,13 +50,17 @@ OPENCODE_PROVIDER_API_KEY_NAMES = (
 
 @register_adapter
 class OpenCodeAdapter(AgentAdapter):
+    """Adapter that runs OpenCode CLI in AWF workspaces."""
+
     runtime = AgentRuntime.opencode
 
     @property
     def name(self) -> AgentRuntime:
+        """Return the OpenCode runtime identity."""
         return AgentRuntime.opencode
 
     def get_provider(self, model: str | None) -> str:
+        """Return the provider family for the selected OpenCode model."""
         active_model = model or self._default_model or OPENCODE_OLLAMA_CLOUD_MODELS[0]
         if "/" in active_model:
             return active_model.split("/", 1)[0]

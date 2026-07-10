@@ -103,6 +103,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         execution_owner_id: str | None = None,
         execution_lease_expires_at: datetime | None = None,
     ) -> None:
+        """Run the workspace execution flow for a claimed workspace."""
         return await _execution_flow.execute(
             self,
             workspace_id=workspace_id,

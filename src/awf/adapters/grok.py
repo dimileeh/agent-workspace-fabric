@@ -17,13 +17,17 @@ from awf.db.enums import AgentRuntime
 
 @register_adapter
 class GrokAdapter(AgentAdapter):
+    """Adapter that runs xAI Grok Build CLI in AWF workspaces."""
+
     runtime = AgentRuntime.grok
 
     @property
     def name(self) -> AgentRuntime:
+        """Return the Grok runtime identity."""
         return AgentRuntime.grok
 
     def get_provider(self, model: str | None) -> str:
+        """Return the provider family used for Grok runs."""
         del model
         return "xai"
 

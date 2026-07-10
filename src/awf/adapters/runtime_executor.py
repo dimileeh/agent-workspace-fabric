@@ -142,6 +142,6 @@ class AgentRuntimeExecutor(Protocol):
     during execution, which loses live output for long monitor repairs.
     """
 
-    async def execute(
-        self, request: AgentRuntimeExecRequest
-    ) -> AgentRuntimeExecResult: ...  # pragma: no cover
+    async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+        """Run one hosted agent CLI request and return its captured result."""
+        ...  # pragma: no cover

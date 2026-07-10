@@ -73,14 +73,18 @@ _CLAUDE_CODE_BACKEND_AUTH_ENV_NAMES = (
 
 @register_adapter
 class ClaudeCodeAdapter(AgentAdapter):
+    """Adapter that runs Anthropic Claude Code in AWF workspaces."""
+
     runtime = AgentRuntime.claude_code
 
     @property
     def name(self) -> AgentRuntime:
+        """Return the Claude Code runtime identity."""
         return AgentRuntime.claude_code
 
     @property
     def runtime_scratch_paths(self) -> tuple[str, ...]:
+        """Return Claude Code checkout-local scratch paths AWF should ignore."""
         # ``claude`` creates nested git worktrees for its isolated subagents
         # under ``.claude/worktrees/`` inside the checkout. Exclude that
         # agent-runtime state from AWF's validation-cleanliness guard.
@@ -111,6 +115,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         )
 
     def get_provider(self, model: str | None) -> str:
+        """Return the provider family used for Claude Code runs."""
         del model
         return "anthropic"
 

@@ -226,6 +226,7 @@ def profile_services(
     *,
     base_path: Path | None = None,
 ) -> tuple[ComposeService, ...]:
+    """Resolve profile service declarations into Compose service records."""
     lint_errors = profile_service_volume_lint_errors(profile)
     if lint_errors:
         raise ProfileServiceValidationError(lint_errors)
@@ -283,6 +284,7 @@ def _resolve_workspace_path(value: str, *, base_path: Path | None) -> str:
 
 
 def profile_agent_environment(profile: WorkspaceProfile) -> tuple[tuple[str, str], ...]:
+    """Return runtime and endpoint environment entries for the agent service."""
     return (
         *profile.runtime.environment.items(),
         *profile_app_endpoint_environment(profile),
@@ -322,6 +324,7 @@ def profile_app_endpoint_environment(
     *,
     resolved_endpoints: Iterable[dict[str, Any]] | None = None,
 ) -> tuple[tuple[str, str], ...]:
+    """Render profile app endpoints into agent-visible environment entries."""
     if resolved_endpoints is None:
         resolved_endpoints = resolve_app_endpoints(profile)
 
@@ -741,6 +744,7 @@ def agent_environment_with_host_auth(
     *,
     host_env: Mapping[str, str] | None = None,
 ) -> tuple[tuple[str, str], ...]:
+    """Expose legacy host auth placeholders for the agent environment."""
     return agent_environment_with_legacy_host_auth(base_environment, host_env=host_env)
 
 
