@@ -413,6 +413,30 @@ def test_hosted_git_config_filters_unsafe_entries_and_reindexes_safe_ones() -> N
 
 
 @pytest.mark.unit
+def test_hosted_git_config_preserves_safe_git_ssh_rewrite_key() -> None:
+    """Hosted git config keeps passwordless git+ssh rewrite keys."""
+
+    profile_env, aliases = compose_module._hosted_git_config_env(
+        {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "url.git+ssh://git@github.com/.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://github.com/",
+            "GIT_CONFIG_KEY_1": "url.git+ssh://token@github.com/.insteadOf",
+            "GIT_CONFIG_VALUE_1": "https://github.com/",
+        },
+        worker_env={},
+        skip_bitbucket_agent_rewrites=False,
+    )
+
+    assert profile_env == (
+        ("GIT_CONFIG_KEY_0", "url.git+ssh://git@github.com/.insteadOf"),
+        ("GIT_CONFIG_VALUE_0", "https://github.com/"),
+        ("GIT_CONFIG_COUNT", "1"),
+    )
+    assert aliases == ()
+
+
+@pytest.mark.unit
 def test_hosted_git_config_ignores_unusable_count_values() -> None:
     """Nonliteral and noninteger git-config counts produce no hosted block."""
 

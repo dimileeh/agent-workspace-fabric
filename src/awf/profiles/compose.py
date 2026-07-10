@@ -469,7 +469,7 @@ def _is_safe_ssh_git_config_insteadof_key(config_key: str) -> bool:
     except ValueError:
         return False
     if (
-        parsed.scheme != "ssh"
+        parsed.scheme.lower() not in {"ssh", "git+ssh"}
         or parsed.username != "git"
         or parsed.password is not None
         or not parsed.hostname
