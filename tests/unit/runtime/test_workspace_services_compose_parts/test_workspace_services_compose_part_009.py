@@ -110,6 +110,37 @@ def test_literal_profile_env_from_compose_preserves_authorization_endpoints(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "headers",
+    [
+        '{"Authorization":"Bearer quoted-bearer-token"}',
+        "{'Authorization':'Basic quoted-basic-token'}",
+    ],
+)
+def test_literal_profile_env_from_compose_redacts_quoted_authorization_header_values(
+    tmp_path: Path,
+    headers: str,
+) -> None:
+    """Hosted profile_env does not carry auth headers hidden in JSON-like values."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "REQUEST_HEADERS": headers,
+                "OLLAMA_HOST": "http://ollama.profile:11434",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "REQUEST_HEADERS" not in profile_env
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+
+
+@pytest.mark.unit
 def test_hosted_git_config_filters_unsafe_entries_and_reindexes_safe_ones() -> None:
     """Hosted git config keeps only safe literal and worker-resolved entries."""
 
