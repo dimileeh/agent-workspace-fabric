@@ -24,6 +24,10 @@ def test_url_and_secret_like_profile_env_detection_covers_query_credentials() ->
     assert compose_module._is_secret_like_profile_env_name("AUTHORIZATION_URL") is False
     assert compose_module._is_secret_like_profile_env_name("OIDC_AUTHORIZATION_ENDPOINT") is False
     assert compose_module._is_secret_like_profile_env_name("PUBLIC_API_URL") is False
+    assert compose_module._is_secret_like_profile_env_name("SLACK_WEBHOOK_SECRET_URL") is True
+    assert compose_module._is_secret_like_profile_env_name("PASSWORD_ENDPOINT") is True
+    assert compose_module._is_secret_like_profile_env_name("PAYMENTS_CLIENT_SECRET_URI") is True
+    assert compose_module._is_secret_like_profile_env_name("SERVICE_ACCESS_KEY_URL") is True
 
     assert compose_module._value_has_url_userinfo("https://user:pass@example.test/repo") is True
     assert (
@@ -82,6 +86,42 @@ def test_literal_profile_env_from_compose_redacts_camelcase_url_token_fields(
     assert "REFRESH_CALLBACK_URL" not in profile_env
     assert "AUTH_CALLBACK_URL" not in profile_env
     assert profile_env["PUBLIC_CALLBACK_URL"] == "https://app.example/cb?state=public"
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_secret_named_url_literals(
+    tmp_path: Path,
+) -> None:
+    """Endpoint suffixes do not override explicit secret-name tokens."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "SLACK_WEBHOOK_SECRET_URL": "https://hooks.slack.com/services/raw-path-secret",
+                "PASSWORD_ENDPOINT": "https://vault.example/passwords/raw-password-path",
+                "PAYMENTS_CLIENT_SECRET_URI": "https://pay.example/setup/client-secret",
+                "SERVICE_ACCESS_KEY_URL": "https://keys.example/service/raw-key",
+                "AUTHORIZATION_URL": "https://issuer.example/oauth/authorize",
+                "OIDC_TOKEN_URL": "https://issuer.example/oauth/token",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "SLACK_WEBHOOK_SECRET_URL" not in profile_env
+    assert "PASSWORD_ENDPOINT" not in profile_env
+    assert "PAYMENTS_CLIENT_SECRET_URI" not in profile_env
+    assert "SERVICE_ACCESS_KEY_URL" not in profile_env
+    assert profile_env["AUTHORIZATION_URL"] == "https://issuer.example/oauth/authorize"
+    assert profile_env["OIDC_TOKEN_URL"] == "https://issuer.example/oauth/token"
+    blob = "\x00".join(profile_env.values())
+    assert "raw-path-secret" not in blob
+    assert "raw-password-path" not in blob
+    assert "client-secret" not in blob
+    assert "raw-key" not in blob
 
 
 @pytest.mark.unit
