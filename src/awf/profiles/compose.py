@@ -1081,10 +1081,11 @@ def hosted_profile_env_passthrough_aliases(
         if raw == _COMPOSE_PASSTHROUGH:
             continue
         resolution = _compose_resolve_value(raw, worker_env=env)[1]
-        if resolution is _ComposeEnvResolution.WORKER_RESOLVED_SLOT:
-            source_name = _compose_bare_reference_name(raw)
-        elif resolution is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED:
-            source_name = _compose_defaulted_reference_name(raw, worker_env=env)
+        if resolution in (
+            _ComposeEnvResolution.WORKER_RESOLVED_SLOT,
+            _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED,
+        ):
+            source_name = _compose_selected_worker_reference_name(raw, worker_env=env)
         else:
             continue
         if source_name is None or source_name == name or source_name not in env:
@@ -1243,33 +1244,30 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # source-to-target mapping nor the resolved value, and the credential is
         # silently dropped (``literal_profile_env_from_compose`` skips the slot,
         # so ``profile_env`` has no alias either). The source-to-target aliasing
-        # for such leases is handled by the profile's secret-lease /
-        # token-alias machinery, not by bare-name passthrough, so a cross-name
-        # bare slot stays excluded (PR #751 thread PRRT_kwDOSJAM6s6PjYmf).
-        # Nested forms (e.g. ``${X:-${SECRET}}``) and mixed forms (e.g.
-        # ``prefix-${NAME}``) also classify ``WORKER_RESOLVED_SLOT`` by
-        # propagation, but the local container received a profile-owned literal
-        # interpolating a worker value there, not a pure worker-resolved slot;
-        # the hosted executor cannot reconstruct that mixed value from the name
-        # alone, so they stay excluded (out of scope). A bare slot whose
+        # for such leases is handled by ``env_passthrough_aliases``, not by
+        # target-name passthrough, so a cross-name slot stays excluded (PR #751
+        # thread PRRT_kwDOSJAM6s6PjYmf). A selected default/alternate word that
+        # is exactly a same-name worker reference (e.g. ``${FLAG:+${NAME}}``)
+        # is safe to keep because the hosted executor resolves the same target
+        # name local Compose selected. Mixed forms (e.g. ``prefix-${NAME}``)
+        # still cannot be reconstructed from the name alone. A bare slot whose
         # variable is UNSET stays excluded too: Compose substitutes "" for an
         # unset bare reference, Core only injects the bare form when the worker
         # value is present (``source_env.get(name)`` is truthy), and the unset
         # ``${NAME:?err}`` / ``${NAME?err}`` form would fail Compose at stack
-        # launch (unreachable for a running container).
-        # ``_compose_bare_reference_name`` returns the referenced variable only
-        # for a single bare reference; the ``in worker_env`` test gates on the
-        # local container actually receiving a worker value (PR #751 thread
-        # PRRT_kwDOSJAM6s6Pi7sN).
+        # launch (unreachable for a running container). The ``in worker_env``
+        # test gates on the local container actually receiving a worker value
+        # (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN).
         worker_resolved_slots = frozenset(
             name
             for name, raw in compose_env.items()
             if raw != _COMPOSE_PASSTHROUGH
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is _ComposeEnvResolution.WORKER_RESOLVED_SLOT
-            and (bare_name := _compose_bare_reference_name(raw)) is not None
-            and bare_name == name
-            and bare_name in worker_env
+            and (source_name := _compose_selected_worker_reference_name(raw, worker_env=worker_env))
+            is not None
+            and source_name == name
+            and source_name in worker_env
         )
         name_only_credential_identifiers = _hosted_name_only_credential_identifier_keys(
             compose_env,
@@ -1437,10 +1435,11 @@ def _hosted_git_config_value_alias_source(
     value_resolution: _ComposeEnvResolution,
     worker_env: Mapping[str, str],
 ) -> str | None:
-    if value_resolution is _ComposeEnvResolution.WORKER_RESOLVED_SLOT:
-        source_name = _compose_bare_reference_name(raw)
-    elif value_resolution is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED:
-        source_name = _compose_defaulted_reference_name(raw, worker_env=worker_env)
+    if value_resolution in (
+        _ComposeEnvResolution.WORKER_RESOLVED_SLOT,
+        _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED,
+    ):
+        source_name = _compose_selected_worker_reference_name(raw, worker_env=worker_env)
     else:
         return None
     if source_name is None or source_name not in worker_env:
@@ -1471,6 +1470,7 @@ from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
     _compose_environment_mapping,
     _compose_resolve_braced,
     _compose_resolve_value,
+    _compose_selected_worker_reference_name,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
 )

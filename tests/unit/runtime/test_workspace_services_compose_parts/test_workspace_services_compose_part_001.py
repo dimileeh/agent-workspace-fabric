@@ -1412,6 +1412,56 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
 
 
 @pytest.mark.unit
+def test_hosted_profile_env_passthrough_aliases_preserves_conditional_alias(
+    tmp_path: Path,
+) -> None:
+    """A selected alternate word that is a source reference stays an alias."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "ANTHROPIC_API_KEY": "${USE_PROFILE:+${MY_ANTHROPIC_TOKEN}}",
+                            "OLLAMA_HOST": "${USE_PROFILE:+${OLLAMA_HOST}}",
+                            "UNSELECTED_KEY": "${USE_OTHER:+${MY_ANTHROPIC_TOKEN}}",
+                            "LITERAL_ALT": "${USE_PROFILE:+profile-owned}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_env = {
+        "USE_PROFILE": "1",
+        "MY_ANTHROPIC_TOKEN": "sk-ant-secret",
+        "OLLAMA_HOST": "http://ollama:11434",
+    }
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    filtered = filter_hosted_env_passthrough_names(
+        ("ANTHROPIC_API_KEY", "OLLAMA_HOST", "MY_ANTHROPIC_TOKEN"),
+        compose_file=compose_file,
+        worker_env=worker_env,
+    )
+    aliases = hosted_profile_env_passthrough_aliases(compose_file, worker_env=worker_env)
+
+    assert "ANTHROPIC_API_KEY" not in profile_env
+    assert "OLLAMA_HOST" not in profile_env
+    assert "UNSELECTED_KEY" not in profile_env
+    assert profile_env["LITERAL_ALT"] == "profile-owned"
+    assert "ANTHROPIC_API_KEY" not in filtered
+    assert "OLLAMA_HOST" in filtered
+    assert aliases == (("ANTHROPIC_API_KEY", "MY_ANTHROPIC_TOKEN"),)
+    assert "sk-ant-secret" not in "\x00".join(profile_env.values())
+
+
+@pytest.mark.unit
 def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
     tmp_path: Path,
 ) -> None:
