@@ -792,6 +792,45 @@ class TestRuntimeExecutorSeam:
         assert log_store.sinks.closed is True
 
     @pytest.mark.unit
+    async def test_hosted_streaming_executor_appends_buffered_tail_to_log_store(self) -> None:
+        class _StreamingTailExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                if request.on_stdout is not None:
+                    maybe = request.on_stdout("progress\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                if request.on_stderr is not None:
+                    maybe = request.on_stderr("warn\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                return AgentRuntimeExecResult(
+                    returncode=0,
+                    stdout="progress\nfinal\n",
+                    stderr="warn\nfinal warning\n",
+                )
+
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            runtime_executor=_StreamingTailExecutor(),
+        )
+
+        result = await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_streamed_buffered_tail",
+        )
+
+        assert result.ok
+        assert result.stdout == "progress\nfinal\n"
+        assert result.stderr == "warn\nfinal warning\n"
+        assert log_store.sinks.stdout_data == ["progress\n", "final\n"]
+        assert log_store.sinks.stderr_data == ["warn\n", "final warning\n"]
+        assert log_store.sinks.closed is True
+
+    @pytest.mark.unit
     async def test_hosted_streamed_failure_result_preserves_streamed_output(self) -> None:
         class _StreamingFailureExecutor:
             async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
@@ -829,7 +868,10 @@ class TestRuntimeExecutorSeam:
         assert exc.value.result.stdout == "actionable stdout\n"
         assert exc.value.result.stderr == "actionable stderr\nhosted diagnostic stderr\n"
         assert log_store.sinks.stdout_data == ["actionable stdout\n"]
-        assert log_store.sinks.stderr_data == ["actionable stderr\n"]
+        assert log_store.sinks.stderr_data == [
+            "actionable stderr\n",
+            "hosted diagnostic stderr\n",
+        ]
         assert log_store.sinks.closed is True
 
     @pytest.mark.unit
@@ -873,8 +915,14 @@ class TestRuntimeExecutorSeam:
         assert exc.value.result.stderr == (
             "actionable stderr\ndiagnostic stderr later quotes actionable stderr\n"
         )
-        assert log_store.sinks.stdout_data == ["actionable stdout\n"]
-        assert log_store.sinks.stderr_data == ["actionable stderr\n"]
+        assert log_store.sinks.stdout_data == [
+            "actionable stdout\n",
+            "diagnostic stdout later quotes actionable stdout\n",
+        ]
+        assert log_store.sinks.stderr_data == [
+            "actionable stderr\n",
+            "diagnostic stderr later quotes actionable stderr\n",
+        ]
         assert log_store.sinks.closed is True
 
     @pytest.mark.unit

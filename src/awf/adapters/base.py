@@ -142,6 +142,17 @@ def _prepend_missing_streamed_output(*, chunks: list[str], buffered: str) -> str
     return streamed + buffered
 
 
+def _buffered_output_not_streamed(*, chunks: list[str], buffered: str) -> str:
+    if not buffered:
+        return ""
+    streamed = "".join(chunks)
+    if not streamed:
+        return buffered
+    if buffered.startswith(streamed):
+        return buffered[len(streamed) :]
+    return buffered
+
+
 @dataclass(frozen=True)
 class AgentRunResult:
     """Structured result of one coding-CLI run."""
@@ -575,21 +586,15 @@ class AgentAdapter(ABC):
         # below. Either way the log store ends up with the run's output; the
         # streaming path additionally fills it live, so a long-running hosted
         # monitor repair no longer leaves the log stream empty until completion.
-        streamed_stdout = False
-        streamed_stderr = False
         streamed_stdout_chunks: list[str] = []
         streamed_stderr_chunks: list[str] = []
 
         async def _on_stdout(data: str) -> None:
-            nonlocal streamed_stdout
-            streamed_stdout = True
             streamed_stdout_chunks.append(data)
             if sinks is not None:
                 await sinks.write_stdout(data)
 
         async def _on_stderr(data: str) -> None:
-            nonlocal streamed_stderr
-            streamed_stderr = True
             streamed_stderr_chunks.append(data)
             if sinks is not None:
                 await sinks.write_stderr(data)
@@ -639,8 +644,6 @@ class AgentAdapter(ABC):
                     agent=self.name.value,
                     workspace_id=workspace_id,
                 )
-            hosted_watchdog_timed_out = False
-            hosted_watchdog_timeout_stderr = ""
             try:
                 execute_task = asyncio.create_task(runtime_executor.execute(request))
                 try:
@@ -671,7 +674,6 @@ class AgentAdapter(ABC):
                         _discard_hosted_execute_task_result(execute_task)
                     else:
                         execute_task.add_done_callback(_discard_hosted_execute_task_result)
-                    hosted_watchdog_timed_out = True
                     hosted_watchdog_timeout_stderr = (
                         "hosted runtime executor timed out after "
                         f"{self._agent_wall_timeout_seconds:g}s\n"
@@ -705,17 +707,20 @@ class AgentAdapter(ABC):
                     reason_code="AGENT_HOSTED_EXECUTOR_ERROR",
                 ) from exc
             if sinks is not None:
-                # Buffered fallback: write the hosted executor's buffered
-                # stdout/stderr to the sinks only when that fd was not already
-                # streamed during execution. If the adapter watchdog synthesized
-                # the result, only the timeout diagnostic is new sink output and
-                # must be appended after any earlier streamed stderr.
-                if hosted_result.stdout and not streamed_stdout:
-                    await sinks.write_stdout(hosted_result.stdout)
-                if hosted_result.stderr and not streamed_stderr:
-                    await sinks.write_stderr(hosted_result.stderr)
-                elif hosted_watchdog_timed_out and hosted_watchdog_timeout_stderr:
-                    await sinks.write_stderr(hosted_watchdog_timeout_stderr)
+                # Buffered fallback: write only the hosted executor output not
+                # already streamed during execution.
+                stdout_not_streamed = _buffered_output_not_streamed(
+                    chunks=streamed_stdout_chunks,
+                    buffered=hosted_result.stdout,
+                )
+                stderr_not_streamed = _buffered_output_not_streamed(
+                    chunks=streamed_stderr_chunks,
+                    buffered=hosted_result.stderr,
+                )
+                if stdout_not_streamed:
+                    await sinks.write_stdout(stdout_not_streamed)
+                if stderr_not_streamed:
+                    await sinks.write_stderr(stderr_not_streamed)
             hosted_result = AgentRuntimeExecResult(
                 returncode=hosted_result.returncode,
                 stdout=_prepend_missing_streamed_output(
