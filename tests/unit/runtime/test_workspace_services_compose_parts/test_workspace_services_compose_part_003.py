@@ -320,6 +320,9 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                             "AUTHORIZATION": "Bearer profile-token",
                             "HTTP_AUTHORIZATION": "Basic profile-token",
                             "UPSTREAM_AUTH": "Bearer upstream-token",
+                            "AUTH_MODE": "disabled",
+                            "AUTH_PROVIDER": "local",
+                            "POSTGRES_HOST_AUTH_METHOD": "trust",
                             "GEMINI_API_KEY_AUTH_MECHANISM": "api-key",
                             "OLLAMA_HOST": "http://ollama.profile:11434",
                             "AWS_REGION": "us-west-2",
@@ -340,6 +343,9 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert "AUTHORIZATION" not in carried
     assert "HTTP_AUTHORIZATION" not in carried
     assert "UPSTREAM_AUTH" not in carried
+    assert carried["AUTH_MODE"] == "disabled"
+    assert carried["AUTH_PROVIDER"] == "local"
+    assert carried["POSTGRES_HOST_AUTH_METHOD"] == "trust"
     assert carried["GEMINI_API_KEY_AUTH_MECHANISM"] == "api-key"
     assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
     assert carried["AWS_REGION"] == "us-west-2"

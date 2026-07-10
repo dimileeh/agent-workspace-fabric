@@ -151,7 +151,6 @@ _NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES = frozenset(
 
 _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
     {
-        "AUTH",
         "AUTHORIZATION",
         "CREDENTIAL",
         "CREDENTIALS",
@@ -169,6 +168,8 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS = frozenset(
         ("PRIVATE", "KEY"),
     }
 )
+
+_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(r"^\s*(?:basic|bearer)\s+\S+", re.IGNORECASE)
 
 
 # Ollama base-URL env keys in precedence order (highest first) — the OpenCode
@@ -197,6 +198,10 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
         (left, right) in _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS
         for left, right in zip(tokens, tokens[1:], strict=False)
     )
+
+
+def _is_auth_credential_like_profile_env_value(value: str) -> bool:
+    return bool(_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.match(value))
 
 
 def _value_has_url_userinfo(value: str) -> bool:
@@ -1469,7 +1474,7 @@ def literal_profile_env_from_compose(
     # the same secret-free hosted request contract. This keeps arbitrary profile
     # tokens such as ``NPM_TOKEN`` / ``CUSTOM_API_TOKEN`` out of
     # ``AgentRuntimeExecRequest.profile_env`` without dropping non-secret
-    # profile config like ``OLLAMA_HOST`` / ``AWS_REGION``.
+    # profile config like ``AUTH_MODE`` / ``OLLAMA_HOST`` / ``AWS_REGION``.
     auth_secret_keys = _AGENT_AUTH_SECRET_ENV_VARS & compose_env.keys()
     mount_backed_bitbucket_askpass = _has_mount_backed_bitbucket_askpass(
         compose_env,
@@ -1522,7 +1527,9 @@ def literal_profile_env_from_compose(
             continue
         if key in _HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
             continue
-        if _is_secret_like_profile_env_name(key):
+        if _is_secret_like_profile_env_name(key) or _is_auth_credential_like_profile_env_value(
+            expanded
+        ):
             continue
         carried.append((key, expanded))
     carried.extend(hosted_git_config_profile_env)
