@@ -1045,6 +1045,50 @@ def test_literal_profile_env_from_compose_skips_standard_auth_credential_literal
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_neutral_npmrc_auth_literals(
+    tmp_path: Path,
+) -> None:
+    """Neutral env values carrying npmrc auth assignments are NOT carried.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6P77x4: a neutral env name such
+    as ``NPMRC`` can carry legacy npmrc ``_auth`` / ``auth`` fields without
+    matching secret-name redaction, URL userinfo redaction, or libpq redaction.
+    """
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "NPMRC": "//registry.npmjs.org/:_auth=base64-registry-secret",
+                            "LEGACY_NPMRC": "registry=https://registry.example\n_auth=legacy-secret",
+                            "COMPAT_NPMRC": "//registry.example/:auth=compat-secret",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "NPMRC" not in carried
+    assert "LEGACY_NPMRC" not in carried
+    assert "COMPAT_NPMRC" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "base64-registry-secret" not in blob
+    assert "legacy-secret" not in blob
+    assert "compat-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_concatenated_password_token_literals(
     tmp_path: Path,
 ) -> None:

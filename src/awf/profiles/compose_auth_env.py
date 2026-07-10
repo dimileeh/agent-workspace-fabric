@@ -208,6 +208,10 @@ _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?:^\s*(?:basic|bearer)\s+\S+|(?<![A-Za-z0-9_-])[\"']?_?(?:(?:proxy[-_]?)?authorization|cookie|(?:(?:x[-_]?)|(?:[A-Za-z0-9]+[-_])+)?api[-_]?key|(?:access|private)[-_]?key|secret[-_]?access[-_]?key|client[-_]?secret|password|passwd|pwd|secret|(?:x[-_]?)?(?:(?:access|auth|csrf|id|job|private|refresh|session)[-_]?)?token|(?:x[-_]?)?(?:amz[-_]?)?security[-_]?token)[\"']?\s*[:=]\s*[\"']?\S+|[\"']private[_-]key[\"']\s*:\s*[\"'][^\"']+|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)",
     re.IGNORECASE,
 )
+_NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?:^|[\r\n])\s*(?://[^\s=]+:\s*)?_?auth\s*=\s*\S+",
+    re.IGNORECASE,
+)
 _URL_SECRET_CREDENTIAL_FIELD_NAMES = frozenset(
     {"JWT", "PASSWORD", "PASSWD", "SECRET", "SIGNATURE", "TOKEN"}
 )

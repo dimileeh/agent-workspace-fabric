@@ -22,6 +22,7 @@ from awf.profiles.compose_auth_env import (
     _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES,
     _NON_SECRET_PROFILE_ENV_NAME_ENDPOINT_SUFFIX_TOKENS,
     _NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES,
+    _NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN,
     _OLLAMA_BASE_URL_ENV_KEYS,
     _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS,
     _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKEN_SEQUENCES,
@@ -109,7 +110,10 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
 
 
 def _is_auth_credential_like_profile_env_value(value: str) -> bool:
-    return bool(_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value))
+    return bool(
+        _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+    )
 
 
 def _url_field_name_tokens(name: str) -> tuple[str, ...]:
