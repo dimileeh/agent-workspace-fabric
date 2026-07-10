@@ -247,7 +247,7 @@ class TestResumeHandoffHostedSeam:
         executor = _RecordingExecutor()
         monitor = _RecordingMonitor()
 
-        async def _runtime_unusable(_compose_project: str) -> bool:
+        async def _runtime_unusable(_compose_project: str, _compose_file: Path) -> bool:
             return False
 
         monkeypatch.setattr(

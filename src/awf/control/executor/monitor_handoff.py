@@ -63,7 +63,7 @@ from awf.node.companion_services import (
 )
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
-from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
+from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
 
 _add_executor_pr_audit_event = _monitor_handoff_audit._add_executor_pr_audit_event
 _record_executor_pr_audit_event = _monitor_handoff_audit._record_executor_pr_audit_event
@@ -302,7 +302,10 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             compose_file_path=compose_file_path,
             error=exc,
         )
-        runtime_usable = await _compose_runtime_usable_after_restart_failure(compose_project)
+        runtime_usable = await _compose_runtime_usable_after_restart_failure(
+            compose_project,
+            Path(compose_file_path),
+        )
         if not runtime_usable:
             _log.warning(
                 "executor.resume_compose_up_failed_runtime_unusable",
@@ -503,7 +506,10 @@ async def _inspect_compose_runtime(compose_project: str) -> RuntimeSnapshot:
     return await RuntimeInspector().inspect(compose_project)
 
 
-async def _compose_runtime_usable_after_restart_failure(compose_project: str) -> bool:
+async def _compose_runtime_usable_after_restart_failure(
+    compose_project: str,
+    compose_file: Path,
+) -> bool:
     """Return whether monitor resume can proceed after a compose restart failure."""
     try:
         snapshot = await _inspect_compose_runtime(compose_project)
@@ -513,7 +519,53 @@ async def _compose_runtime_usable_after_restart_failure(compose_project: str) ->
             compose_project_name=compose_project,
         )
         return False
-    return snapshot.stack_state == "running"
+    if snapshot.stack_state != "running":
+        return False
+    expected_services = _compose_service_names_from_file(compose_file)
+    if not expected_services:
+        _log.warning(
+            "executor.resume_compose_runtime_missing_expected_services",
+            compose_project_name=compose_project,
+            compose_file=str(compose_file),
+        )
+        return False
+    ready_services = {
+        service.name for service in snapshot.services if _compose_runtime_service_ready(service)
+    }
+    missing_services = expected_services - ready_services
+    if missing_services:
+        _log.warning(
+            "executor.resume_compose_runtime_partial_stack",
+            compose_project_name=compose_project,
+            compose_file=str(compose_file),
+            missing_services=sorted(missing_services),
+        )
+        return False
+    return True
+
+
+def _compose_service_names_from_file(compose_file: Path) -> set[str]:
+    try:
+        payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
+    except Exception:
+        _log.exception(
+            "executor.resume_compose_runtime_service_parse_failed",
+            compose_file=str(compose_file),
+        )
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    services = payload.get("services")
+    if not isinstance(services, dict):
+        return set()
+    return {name for name in services if isinstance(name, str) and name}
+
+
+def _compose_runtime_service_ready(service: RuntimeService) -> bool:
+    if service.state.strip().lower() != "running":
+        return False
+    health = (service.health or "").strip().lower()
+    return health not in {"starting", "unhealthy"}
 
 
 def _precheck_required_companion_env_secrets_for_resume(
