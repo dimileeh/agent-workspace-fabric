@@ -11,12 +11,19 @@ from awf.adapters.base import AgentAdapter, register_adapter
 from awf.db.enums import AgentRuntime
 from awf.profiles.compose import AGENT_AUTH_ENV_VARS
 
-# Anthropic / Claude Code auth and backend-toggle entries that ``AGENT_AUTH_ENV_VARS``
-# owns. The hosted passthrough derives these from the shared source of truth so the
-# hosted contract cannot drift when ``AGENT_AUTH_ENV_VARS`` is extended for this
-# adapter. Bedrock / Vertex *backend* credentials (``AWS_*``, Vertex project / region
-# / ADC) are NOT in ``AGENT_AUTH_ENV_VARS`` — the toggle is, the credentials it
-# requires are not — so they stay a static supplement below.
+# Anthropic / Claude Code auth and backend-toggle entries that
+# ``AGENT_AUTH_ENV_VARS`` owns. The hosted passthrough derives these from the
+# shared source of truth so the hosted contract cannot drift when
+# ``AGENT_AUTH_ENV_VARS`` is extended for this adapter.
+#
+# Bedrock / Vertex backend credentials/config (``AWS_*``,
+# ``ANTHROPIC_VERTEX_PROJECT_ID``, ``CLOUD_ML_REGION``, and ADC) are NOT in
+# ``AGENT_AUTH_ENV_VARS``. Do not advertise them as ambient hosted passthrough:
+# the local Compose exec path would not pass those names into the same
+# workspace. Profiles that explicitly declare same-name backend env slots are
+# preserved by the generic hosted profile passthrough helpers, which mirrors the
+# values the local Compose container received at stack launch without exposing
+# secret values in the request payload.
 _CLAUDE_CODE_AUTH_ENV_NAMES = frozenset(
     name
     for name in (
@@ -29,45 +36,6 @@ _CLAUDE_CODE_AUTH_ENV_NAMES = frozenset(
         "CLAUDE_CODE_USE_VERTEX",
     )
     if name in AGENT_AUTH_ENV_VARS
-)
-
-# Bedrock / Vertex backend credentials that ``AGENT_AUTH_ENV_VARS`` does not surface.
-# The hosted executor only resolves names whose backing values exist, so the union is
-# safe regardless of which backend is active.
-#
-# ``GOOGLE_APPLICATION_CREDENTIALS`` is intentionally NOT surfaced here — it is a
-# *file-backed* credential (its value is a filesystem path), and the hosted
-# request (``AgentRuntimeExecRequest``) carries no file/secret ref or mount. The
-# local Compose path bind-mounts the referenced file via ``_build_host_auth_mounts``
-# so the path the env var points at exists and Vertex/ADC auth works, but env-only
-# passthrough on the hosted path would inject a dangling
-# ``GOOGLE_APPLICATION_CREDENTIALS=/some/path`` with the file absent, silently
-# breaking Vertex/ADC auth even though the same workspace is ready under Compose.
-# A future file/secret-ref mechanism on the hosted request is required to support
-# it; until then it is not advertised as env-only (PR #751 thread
-# PRRT_kwDOSJAM6s6Pas4k).
-_CLAUDE_CODE_BACKEND_AUTH_ENV_NAMES = (
-    # Amazon Bedrock backend auth (used when CLAUDE_CODE_USE_BEDROCK=1). The AWS SDK
-    # credential chain resolves region via AWS_REGION then AWS_DEFAULT_REGION then
-    # the active profile; AWS_PROFILE selects a shared-credentials profile.
-    # AWS_BEARER_TOKEN_BEDROCK is the Bedrock API-key auth path that needs no IAM
-    # credentials.
-    "AWS_REGION",
-    "AWS_DEFAULT_REGION",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_PROFILE",
-    "AWS_BEARER_TOKEN_BEDROCK",
-    # Google Vertex AI / Agent Platform backend auth (used when
-    # CLAUDE_CODE_USE_VERTEX=1). ANTHROPIC_VERTEX_PROJECT_ID selects the GCP project
-    # and CLOUD_ML_REGION selects the endpoint region. ADC for the GCP SDK chain is
-    # supplied by GOOGLE_APPLICATION_CREDENTIALS, but that is a file-backed
-    # credential excluded from the env-only hosted contract above; the hosted
-    # Vertex path requires a file/secret-ref mechanism to support ADC (tracked
-    # separately).
-    "ANTHROPIC_VERTEX_PROJECT_ID",
-    "CLOUD_ML_REGION",
 )
 
 
@@ -103,16 +71,14 @@ class ClaudeCodeAdapter(AgentAdapter):
 
         ``AGENT_AUTH_ENV_VARS`` exposes the ``CLAUDE_CODE_USE_BEDROCK`` /
         ``CLAUDE_CODE_USE_VERTEX`` backend toggles but not the AWS / Vertex
-        credentials those modes require to actually authenticate. Surface the
-        backend-specific auth env vars here too — without them a hosted run can
-        flip the toggle and still fail to authenticate against Bedrock or
-        Vertex. The hosted executor only resolves names whose backing values
-        exist, so the union is safe regardless of which backend is active.
+        credentials those modes require to actually authenticate. Those backend
+        names are intentionally not included as ambient hosted passthrough
+        because the local Compose path does not pass them either. When a profile
+        explicitly declares same-name backend env slots, the hosted profile
+        passthrough helpers add those names separately, preserving local
+        Compose parity without resolving unrelated ambient credentials.
         """
-        return (
-            *(name for name in AGENT_AUTH_ENV_VARS if name in _CLAUDE_CODE_AUTH_ENV_NAMES),
-            *_CLAUDE_CODE_BACKEND_AUTH_ENV_NAMES,
-        )
+        return tuple(name for name in AGENT_AUTH_ENV_VARS if name in _CLAUDE_CODE_AUTH_ENV_NAMES)
 
     def get_provider(self, model: str | None) -> str:
         """Return the provider family used for Claude Code runs."""

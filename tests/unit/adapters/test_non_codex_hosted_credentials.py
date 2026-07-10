@@ -38,11 +38,11 @@ _COMPOSE_FILE = Path("/fake/path/compose.yml")
 _SECRET_VALUE = "sk-non-codex-secret-do-not-leak"
 
 # Claude Code auth / backend-toggle names are derived from AGENT_AUTH_ENV_VARS so
-# the hosted contract cannot drift from the shared source of truth. The Bedrock /
-# Vertex *backend* credentials (AWS_*, ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION,
-# GOOGLE_APPLICATION_CREDENTIALS) are NOT in AGENT_AUTH_ENV_VARS — the toggle is,
-# the credentials it requires are not — so they stay a static supplement asserted
-# alongside the derived set.
+# the hosted contract cannot drift from the shared source of truth. Backend
+# credentials/config (AWS_*, ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION,
+# GOOGLE_APPLICATION_CREDENTIALS) are NOT in AGENT_AUTH_ENV_VARS, so they must
+# not be advertised as ambient hosted passthrough by default. Profile-declared
+# same-name slots are covered separately below.
 _CLAUDE_CODE_DERIVED_AUTH_NAMES = frozenset(
     name
     for name in AGENT_AUTH_ENV_VARS
@@ -76,7 +76,7 @@ _CLAUDE_CODE_BACKEND_AUTH_NAMES = (
 # dangling path and silently break Vertex/ADC auth (PR #751 thread
 # PRRT_kwDOSJAM6s6Pas4k). A future file/secret-ref mechanism on the hosted
 # request is required to support it; until then it is not advertised as env-only.
-_CLAUDE_NAMES = _CLAUDE_CODE_DERIVED_AUTH_NAMES | frozenset(_CLAUDE_CODE_BACKEND_AUTH_NAMES)
+_CLAUDE_NAMES = _CLAUDE_CODE_DERIVED_AUTH_NAMES
 _CURSOR_NAMES = ("CURSOR_API_KEY",)
 _GEMINI_NAMES = (
     "GEMINI_API_KEY",
@@ -173,6 +173,8 @@ class TestNonCodexHostedCredentials:
         assert request.agent_runtime is AgentRuntime.claude_code
         for name in _CLAUDE_NAMES:
             assert name in request.env_passthrough_names, name
+        for name in _CLAUDE_CODE_BACKEND_AUTH_NAMES:
+            assert name not in request.env_passthrough_names, name
         # ``GOOGLE_APPLICATION_CREDENTIALS`` is file-backed and must NOT be
         # advertised as env-only passthrough — see
         # ``test_gemini_does_not_advertise_file_backed_google_application_credentials``
@@ -493,6 +495,60 @@ class TestNonCodexHostedCredentials:
         assert "AWS_REGION" not in dict(request.profile_env)
         # No ${...} placeholder leaks into profile_env.
         assert not any("${" in value for _key, value in request.profile_env)
+
+    @pytest.mark.unit
+    async def test_claude_code_profile_declared_bedrock_slots_are_resolvable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Profile-declared Bedrock slots preserve local Compose parity.
+
+        Regression for PR #754 thread PRRT_kwDOSJAM6s6P8RKB: Claude backend
+        credentials must not be surfaced from ambient hosted-worker env by
+        default, but a profile that explicitly declares same-name Bedrock slots
+        still makes the local Compose container receive those values at stack
+        launch. Hosted runs must carry the names for out-of-band resolution
+        without transporting the secret values in the request payload.
+        """
+        compose_file = _write_compose(
+            tmp_path,
+            environment={
+                "CLAUDE_CODE_USE_BEDROCK": "${CLAUDE_CODE_USE_BEDROCK}",
+                "AWS_REGION": "${AWS_REGION}",
+                "AWS_ACCESS_KEY_ID": "${AWS_ACCESS_KEY_ID}",
+                "AWS_SECRET_ACCESS_KEY": "${AWS_SECRET_ACCESS_KEY}",
+                "AWS_SESSION_TOKEN": "${AWS_SESSION_TOKEN}",
+                "AWS_BEARER_TOKEN_BEDROCK": "${AWS_BEARER_TOKEN_BEDROCK}",
+            },
+        )
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        monkeypatch.setenv("AWS_REGION", "us-west-2")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA_TEST_IDENTIFIER")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws_secret_do_not_leak")
+        monkeypatch.setenv("AWS_SESSION_TOKEN", "aws_session_do_not_leak")
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock_bearer_do_not_leak")
+
+        adapter = _build(ClaudeCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        for name in (
+            "CLAUDE_CODE_USE_BEDROCK",
+            "AWS_REGION",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_BEARER_TOKEN_BEDROCK",
+        ):
+            assert name in request.env_passthrough_names, name
+            assert name not in dict(request.profile_env)
+        blob = (
+            request.prompt_stdin.decode("utf-8", "replace")
+            + "\x00".join(request.cli_args)
+            + "\x00".join(request.env_passthrough_names)
+            + "\x00".join(f"{key}={value}" for key, value in request.profile_env)
+        )
+        assert "aws_secret_do_not_leak" not in blob
+        assert "aws_session_do_not_leak" not in blob
+        assert "bedrock_bearer_do_not_leak" not in blob
 
     @pytest.mark.unit
     async def test_hosted_offloads_blocking_compose_parse_to_worker_thread(
