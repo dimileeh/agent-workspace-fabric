@@ -28,6 +28,7 @@ from typing import Any
 import pytest
 import structlog
 
+import awf.adapters.base as base_module
 import awf.adapters.registry  # noqa: F401 — populate registry
 from awf.adapters.base import AgentRunError
 from awf.adapters.codex import CodexAdapter
@@ -354,6 +355,47 @@ class TestRuntimeExecutorSeam:
 
         assert exc.value.reason_code == "AGENT_TIMEOUT"
         assert exc.value.result.returncode == 124
+
+    @pytest.mark.unit
+    async def test_hosted_watchdog_uses_late_completed_executor_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A result completed just after watchdog timeout must not be discarded."""
+
+        async def _stale_wait(
+            tasks: set[asyncio.Task[AgentRuntimeExecResult]], timeout: float | None = None
+        ) -> tuple[
+            set[asyncio.Task[AgentRuntimeExecResult]], set[asyncio.Task[AgentRuntimeExecResult]]
+        ]:
+            del timeout
+            await asyncio.sleep(0)
+            assert all(task.done() for task in tasks)
+            return set(), set(tasks)
+
+        monkeypatch.setattr(base_module.asyncio, "wait", _stale_wait)
+        executor = _RecordingExecutor(
+            result=AgentRuntimeExecResult(
+                returncode=0,
+                stdout="late hosted stdout",
+                stderr="",
+            )
+        )
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+            agent_wall_timeout_seconds=0.01,
+        )
+
+        result = await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_hosted_late_success",
+        )
+
+        assert result.ok
+        assert result.stdout == "late hosted stdout"
 
     @pytest.mark.unit
     async def test_hosted_executor_hang_is_bounded_by_local_wall_timeout(self) -> None:
