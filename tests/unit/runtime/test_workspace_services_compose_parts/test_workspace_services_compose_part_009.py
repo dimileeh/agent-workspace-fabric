@@ -85,6 +85,37 @@ def test_literal_profile_env_from_compose_redacts_camelcase_url_token_fields(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_local_postgres_dsn_aliases(
+    tmp_path: Path,
+) -> None:
+    """Passwordless local Postgres DSN aliases are app config, not hosted secrets."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "SQLALCHEMY_DATABASE_URI": "postgresql://awf@postgres:5432/app",
+                "POSTGRES_URL": "postgres://postgres@postgres/app",
+                "APP_DATABASE_URL": "postgresql+asyncpg://awf@postgres:5432/app",
+                "EXTERNAL_POSTGRES_URL": "postgres://awf@db.example.test/app",
+                "APP_POSTGRES_URL": "postgres://awf@postgres/app?access_token=raw-token",
+                "POSTGRES_URL_WITH_PASSWORD": "postgres://awf:raw-password@postgres/app",
+            },
+            worker_env={},
+        )
+    )
+
+    assert profile_env["SQLALCHEMY_DATABASE_URI"] == "postgresql://awf@postgres:5432/app"
+    assert profile_env["POSTGRES_URL"] == "postgres://postgres@postgres/app"
+    assert profile_env["APP_DATABASE_URL"] == "postgresql+asyncpg://awf@postgres:5432/app"
+    assert "EXTERNAL_POSTGRES_URL" not in profile_env
+    assert "APP_POSTGRES_URL" not in profile_env
+    assert "POSTGRES_URL_WITH_PASSWORD" not in profile_env
+
+
+@pytest.mark.unit
 def test_name_only_credential_identifier_uses_passthrough_not_profile_env(
     tmp_path: Path,
 ) -> None:

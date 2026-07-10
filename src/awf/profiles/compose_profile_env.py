@@ -19,7 +19,21 @@ from awf.profiles.compose_postgres_env import (
 )
 
 _LOCAL_POSTGRES_DATABASE_URL_ENV_NAMES = frozenset(
-    {"DATABASE_URL", "AWF_DATABASE_URL", "AWF_TEST_DATABASE_URL"}
+    {
+        "DATABASE_URI",
+        "DATABASE_URL",
+        "POSTGRES_URI",
+        "POSTGRES_URL",
+        "SQLALCHEMY_DATABASE_URI",
+        "AWF_DATABASE_URL",
+        "AWF_TEST_DATABASE_URL",
+    }
+)
+_LOCAL_POSTGRES_DATABASE_URL_ENV_NAME_SUFFIXES = (
+    "_DATABASE_URI",
+    "_DATABASE_URL",
+    "_POSTGRES_URI",
+    "_POSTGRES_URL",
 )
 
 
@@ -114,10 +128,9 @@ def _local_postgres_database_url_without_tracked_password(
     postgres_passwords: frozenset[str],
 ) -> bool:
     """Return whether a local Postgres URL should survive generic userinfo redaction."""
-    if (
-        _has_concrete_postgres_password(postgres_passwords)
-        or key.upper() not in _LOCAL_POSTGRES_DATABASE_URL_ENV_NAMES
-    ):
+    if _has_concrete_postgres_password(
+        postgres_passwords
+    ) or not _is_local_postgres_database_url_env_name(key):
         return False
     try:
         parsed = urlsplit(value)
@@ -135,6 +148,13 @@ def _local_postgres_database_url_without_tracked_password(
             compose_module._url_component_has_secret_credential_field(component)
             for component in (parsed.path, parsed.query, parsed.fragment)
         )
+    )
+
+
+def _is_local_postgres_database_url_env_name(key: str) -> bool:
+    normalized = key.upper().replace("-", "_")
+    return normalized in _LOCAL_POSTGRES_DATABASE_URL_ENV_NAMES or normalized.endswith(
+        _LOCAL_POSTGRES_DATABASE_URL_ENV_NAME_SUFFIXES
     )
 
 
