@@ -317,7 +317,7 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                     "agent": {
                         "image": "agent:latest",
                         "environment": {
-                            "NPM_TOKEN": "npm_profile_token",
+                            "NPM_TOKEN": "",
                             "CUSTOM_API_TOKEN": "custom_profile_token",
                             "SENDGRID_APIKEY": "sendgrid_profile_apikey",
                             "NPM_CONFIG_REGISTRY_AUTHTOKEN": "npm_profile_authtoken",
@@ -328,8 +328,11 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                             "REDIS_PASS": "redis_profile_password",
                             "POSTGRES_PWD": "postgres_profile_pwd",
                             "PGPASSWORD": "postgres_profile_password",
+                            "EMPTY_PGPASSWORD": "",
+                            "DB_PASSWORD": "",
                             "MYSQL_PWD": "mysql_profile_password",
                             "NPM_CONFIG__AUTH": "npm_profile_auth",
+                            "EMPTY_NPM_CONFIG__AUTH": "",
                             "PWD": "/workspace",
                             "AUTHORIZATION": "Bearer profile-token",
                             "HTTP_AUTHORIZATION": "Basic profile-token",
@@ -339,6 +342,7 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                             "PASS_THROUGH_MODE": "enabled",
                             "POSTGRES_HOST_AUTH_METHOD": "trust",
                             "GEMINI_API_KEY_AUTH_MECHANISM": "api-key",
+                            "AWS_ACCESS_KEY_ID": "",
                             "OLLAMA_HOST": "http://ollama.profile:11434",
                             "AWS_REGION": "us-west-2",
                             "APP_MODE": "ci",
@@ -352,7 +356,7 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
 
     carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
 
-    assert "NPM_TOKEN" not in carried
+    assert carried["NPM_TOKEN"] == ""
     assert "CUSTOM_API_TOKEN" not in carried
     assert "SENDGRID_APIKEY" not in carried
     assert "NPM_CONFIG_REGISTRY_AUTHTOKEN" not in carried
@@ -363,8 +367,11 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert "REDIS_PASS" not in carried
     assert "POSTGRES_PWD" not in carried
     assert "PGPASSWORD" not in carried
+    assert carried["EMPTY_PGPASSWORD"] == ""
+    assert carried["DB_PASSWORD"] == ""
     assert "MYSQL_PWD" not in carried
     assert "NPM_CONFIG__AUTH" not in carried
+    assert carried["EMPTY_NPM_CONFIG__AUTH"] == ""
     assert carried["PWD"] == "/workspace"
     assert "AUTHORIZATION" not in carried
     assert "HTTP_AUTHORIZATION" not in carried
@@ -374,6 +381,7 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert carried["PASS_THROUGH_MODE"] == "enabled"
     assert carried["POSTGRES_HOST_AUTH_METHOD"] == "trust"
     assert carried["GEMINI_API_KEY_AUTH_MECHANISM"] == "api-key"
+    assert carried["AWS_ACCESS_KEY_ID"] == ""
     assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
     assert carried["AWS_REGION"] == "us-west-2"
     assert carried["APP_MODE"] == "ci"
