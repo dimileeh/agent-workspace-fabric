@@ -8,7 +8,7 @@ import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 import yaml
 
@@ -148,6 +148,15 @@ def _url_component_has_secret_credential_field(component: str) -> bool:
     return False
 
 
+def _url_component_variants(component: str) -> tuple[str, ...]:
+    if not component:
+        return ()
+    decoded = unquote(component)
+    if decoded == component:
+        return (component,)
+    return (component, decoded)
+
+
 def _is_passwordless_git_ssh_url_userinfo(value: str, scheme: str) -> bool:
     return scheme.lower() in {"ssh", "git+ssh"} and value == "git"
 
@@ -173,23 +182,27 @@ def _value_has_url_userinfo(value: str) -> bool:
                 return True
         if any(
             _url_component_has_secret_credential_field(component)
-            for component in (parsed.netloc, parsed.path, parsed.query, parsed.fragment)
+            for raw_component in (parsed.netloc, parsed.path, parsed.query, parsed.fragment)
+            for component in _url_component_variants(raw_component)
         ):
             return True
         return any(
             _value_has_url_userinfo(match.group(0))
-            for component in (parsed.path, parsed.query, parsed.fragment)
+            for raw_component in (parsed.path, parsed.query, parsed.fragment)
+            for component in _url_component_variants(raw_component)
             for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(component)
         )
     if any(
         _url_component_has_secret_credential_field(component)
-        for component in (parsed.path, parsed.query, parsed.fragment)
+        for raw_component in (parsed.path, parsed.query, parsed.fragment)
+        for component in _url_component_variants(raw_component)
     ):
         return True
     if "://" in parsed.path or "://" in parsed.query or "://" in parsed.fragment:
         return any(
             _value_has_url_userinfo(match.group(0))
-            for component in (parsed.path, parsed.query, parsed.fragment)
+            for raw_component in (parsed.path, parsed.query, parsed.fragment)
+            for component in _url_component_variants(raw_component)
             for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(component)
         )
     return False

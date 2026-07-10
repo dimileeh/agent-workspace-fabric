@@ -405,6 +405,41 @@ def test_literal_profile_env_from_compose_redacts_encoded_nested_url_query_crede
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_encoded_nested_url_path_credentials(
+    tmp_path: Path,
+) -> None:
+    """Decoded nested URL path values must not carry bearer material."""
+
+    nested_secret = "bearer-secret"
+    nested_url = f"https://app.internal/cb?access_token={nested_secret}"
+    callback_url = f"https://proxy.internal/{quote(nested_url, safe='')}"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "CALLBACK_URL": callback_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "CALLBACK_URL" not in carried
+    assert nested_secret not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_postgres_password_from_service_env_file(
     tmp_path: Path,
 ) -> None:
