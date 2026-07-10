@@ -177,9 +177,11 @@ _SECRET_LIKE_PROFILE_ENV_NAME_CONCATENATED_TOKENS = frozenset(
         "AUTHTOKEN",
         "CLIENTSECRET",
         "DBPASSWORD",
+        "JWTSECRET",
         "PRIVATEKEY",
         "POSTGRESPASSWORD",
         "REFRESHTOKEN",
+        "SECRETKEY",
         "SESSIONTOKEN",
     }
 )

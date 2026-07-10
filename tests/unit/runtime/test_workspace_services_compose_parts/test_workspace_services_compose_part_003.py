@@ -324,6 +324,8 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                             "STRIPE_KEY": "sk_live_profile",
                             "SENDGRID_KEY": "sendgrid_profile_key",
                             "PAYMENTS_CLIENT_SECRET": "client_secret",
+                            "SECRETKEY": "secret_key_value",
+                            "JWTSECRET": "jwt_secret_value",
                             "DB_PASS": "database_profile_password",
                             "REDIS_PASS": "redis_profile_password",
                             "POSTGRES_PWD": "postgres_profile_pwd",
@@ -363,6 +365,8 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert "STRIPE_KEY" not in carried
     assert "SENDGRID_KEY" not in carried
     assert "PAYMENTS_CLIENT_SECRET" not in carried
+    assert "SECRETKEY" not in carried
+    assert "JWTSECRET" not in carried
     assert "DB_PASS" not in carried
     assert "REDIS_PASS" not in carried
     assert "POSTGRES_PWD" not in carried
