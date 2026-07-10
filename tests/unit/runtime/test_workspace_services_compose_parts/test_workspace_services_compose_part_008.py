@@ -10,6 +10,7 @@ import yaml
 
 from awf.profiles.compose import literal_profile_env_from_compose
 from awf.profiles.compose_postgres_env import compose_postgres_service_hostnames
+from awf.profiles.compose_profile_env import _local_postgres_database_url_without_tracked_password
 
 
 @pytest.mark.unit
@@ -493,6 +494,21 @@ def test_literal_profile_env_from_compose_redacts_malformed_url_with_postgres_pa
     assert carried.get("OLLAMA_HOST") == "http://ollama.profile:11434"
     assert "AWF_DATABASE_URL" not in carried
     assert password not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_local_postgres_database_url_without_tracked_password_rejects_malformed_url() -> None:
+    """Malformed local Postgres DSNs are not safe hosted profile config."""
+
+    assert (
+        _local_postgres_database_url_without_tracked_password(
+            "DATABASE_URL",
+            "postgresql://awf@[::1",
+            local_postgres_hostnames=frozenset({"postgres"}),
+            postgres_passwords=frozenset(),
+        )
+        is False
+    )
 
 
 @pytest.mark.unit
