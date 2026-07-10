@@ -82,7 +82,7 @@ def literal_profile_env_from_compose(
         return ()
 
     local_postgres_hostnames = frozenset({"postgres"}) | compose_postgres_service_hostnames(
-        compose_file
+        compose_file, worker_env=env
     )
     postgres_passwords = file_postgres_passwords | (postgres_passwords or frozenset())
     auth_secret_keys = compose_module._AGENT_AUTH_SECRET_ENV_VARS & compose_env.keys()

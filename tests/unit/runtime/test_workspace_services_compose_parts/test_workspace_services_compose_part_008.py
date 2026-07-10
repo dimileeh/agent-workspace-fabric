@@ -155,6 +155,43 @@ def test_literal_profile_env_from_compose_preserves_custom_postgres_service_host
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_detects_custom_postgres_env_file_with_worker_env(
+    tmp_path: Path,
+) -> None:
+    """Required env-file interpolation should not hide local Postgres services."""
+
+    compose_file = tmp_path / "compose.yml"
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text("POSTGRES_PASSWORD=${PGPW:?required}\n", encoding="utf-8")
+    database_url = "postgresql://awf@db:5432/app"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "db": {"image": "example/database-wrapper:latest", "env_file": "postgres.env"},
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": database_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = dict(
+        literal_profile_env_from_compose(compose_file, worker_env={"PGPW": "tracked-secret"})
+    )
+
+    assert profile_env["DATABASE_URL"] == database_url
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "tracked-secret" not in "\x00".join(profile_env.values())
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_local_postgres_url_userinfo_passwords(
     tmp_path: Path,
 ) -> None:
