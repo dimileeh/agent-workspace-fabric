@@ -366,6 +366,35 @@ def test_literal_profile_env_from_compose_keeps_short_password_collision_config(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_safe_ssh_repository_url_literal(
+    tmp_path: Path,
+) -> None:
+    """A passwordless ``ssh://git@...`` repository URL does not carry a secret."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "REPOSITORY_URL": "ssh://git@github.com/org/repo.git",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert carried["REPOSITORY_URL"] == "ssh://git@github.com/org/repo.git"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_url_userinfo_literals(
     tmp_path: Path,
 ) -> None:

@@ -312,6 +312,10 @@ def _url_component_has_secret_credential_field(component: str) -> bool:
     return False
 
 
+def _is_passwordless_git_ssh_url_userinfo(value: str, scheme: str) -> bool:
+    return scheme.lower() == "ssh" and value == "git"
+
+
 def _value_has_url_userinfo(value: str) -> bool:
     """Return whether ``value`` is a URL containing credential material."""
     try:
@@ -326,7 +330,10 @@ def _value_has_url_userinfo(value: str) -> bool:
     if parsed.netloc:
         if "@" in parsed.netloc:
             userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
-            if userinfo:
+            if userinfo and not _is_passwordless_git_ssh_url_userinfo(
+                userinfo,
+                parsed.scheme,
+            ):
                 return True
         if any(
             _url_component_has_secret_credential_field(component)
