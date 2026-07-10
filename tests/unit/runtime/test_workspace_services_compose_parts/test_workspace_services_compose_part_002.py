@@ -970,6 +970,53 @@ def test_literal_profile_env_from_compose_skips_standard_auth_credential_literal
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_concatenated_password_token_literals(
+    tmp_path: Path,
+) -> None:
+    """No-underscore password/token env literals are NOT carried.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6P0bNG: names such as
+    ``DBPASSWORD`` and ``SESSIONTOKEN`` become a single tokenizer token, so they
+    must be covered by the concatenated-token redaction list.
+    """
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DBPASSWORD": "db-profile-password",
+                            "POSTGRESPASSWORD": "postgres-profile-password",
+                            "REFRESHTOKEN": "refresh-profile-token",
+                            "SESSIONTOKEN": "session-profile-token",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "DBPASSWORD" not in carried
+    assert "POSTGRESPASSWORD" not in carried
+    assert "REFRESHTOKEN" not in carried
+    assert "SESSIONTOKEN" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "db-profile-password" not in blob
+    assert "postgres-profile-password" not in blob
+    assert "refresh-profile-token" not in blob
+    assert "session-profile-token" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_preserves_public_key_literals(
     tmp_path: Path,
 ) -> None:
