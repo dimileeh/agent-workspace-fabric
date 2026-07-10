@@ -174,6 +174,16 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
         "TOKEN",
     }
 )
+_SECRET_LIKE_PROFILE_ENV_NAME_CONCATENATED_TOKENS = frozenset(
+    {
+        "ACCESSKEY",
+        "ACCESSTOKEN",
+        "APIKEY",
+        "AUTHTOKEN",
+        "CLIENTSECRET",
+        "PRIVATEKEY",
+    }
+)
 
 _SECRET_LIKE_PROFILE_ENV_NAME_ABBREVIATION_TOKENS = frozenset({"PASS", "PWD"})
 
@@ -227,23 +237,21 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
     if normalized in _SECRET_LIKE_PROFILE_ENV_EXACT_NAMES:
         return True
     tokens = tuple(token for token in normalized.split("_") if token)
-    if tokens and tokens[-1] == "KEY":
+    if tokens and tokens[-1] in {"KEY", "APIKEY"}:
         if len(tokens) >= 2 and tokens[-2] in _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS:
             return False
-        if (
-            len(tokens) >= 3
-            and tokens[-2] == "API"
-            and (
-                any(token in _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS for token in tokens[:-2])
-                or tokens[0] in _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKENS
-                or any(
-                    tokens[: len(prefix)] == prefix
-                    for prefix in _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKEN_SEQUENCES
-                )
+        if (tokens[-1] == "APIKEY" or (len(tokens) >= 3 and tokens[-2] == "API")) and (
+            any(token in _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS for token in tokens[:-1])
+            or tokens[0] in _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKENS
+            or any(
+                tokens[: len(prefix)] == prefix
+                for prefix in _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKEN_SEQUENCES
             )
         ):
             return False
     if any(token in _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS for token in tokens):
+        return True
+    if any(token in _SECRET_LIKE_PROFILE_ENV_NAME_CONCATENATED_TOKENS for token in tokens):
         return True
     if len(tokens) >= 2 and tokens[-1] in _SECRET_LIKE_PROFILE_ENV_NAME_ABBREVIATION_TOKENS:
         return True

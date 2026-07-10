@@ -316,6 +316,8 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                         "environment": {
                             "NPM_TOKEN": "npm_profile_token",
                             "CUSTOM_API_TOKEN": "custom_profile_token",
+                            "SENDGRID_APIKEY": "sendgrid_profile_apikey",
+                            "NPM_CONFIG_REGISTRY_AUTHTOKEN": "npm_profile_authtoken",
                             "STRIPE_KEY": "sk_live_profile",
                             "SENDGRID_KEY": "sendgrid_profile_key",
                             "PAYMENTS_CLIENT_SECRET": "client_secret",
@@ -348,6 +350,8 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
 
     assert "NPM_TOKEN" not in carried
     assert "CUSTOM_API_TOKEN" not in carried
+    assert "SENDGRID_APIKEY" not in carried
+    assert "NPM_CONFIG_REGISTRY_AUTHTOKEN" not in carried
     assert "STRIPE_KEY" not in carried
     assert "SENDGRID_KEY" not in carried
     assert "PAYMENTS_CLIENT_SECRET" not in carried
@@ -387,8 +391,10 @@ def test_literal_profile_env_from_compose_preserves_public_frontend_api_keys(
                         "environment": {
                             "NEXT_PUBLIC_FIREBASE_API_KEY": "public-next-firebase-key",
                             "VITE_FIREBASE_API_KEY": "public-vite-firebase-key",
+                            "VITE_FIREBASE_APIKEY": "public-vite-firebase-apikey",
                             "REACT_APP_FIREBASE_API_KEY": "public-react-firebase-key",
                             "GATSBY_FIREBASE_API_KEY": "public-gatsby-firebase-key",
+                            "RECAPTCHA_SITE_APIKEY": "public-recaptcha-site-apikey",
                             "STRIPE_PUBLISHABLE_KEY": "pk_test_public",
                             "CUSTOM_API_KEY": "secret-custom-api-key",
                             "PRIVATE_KEY": "secret-private-key",
@@ -404,8 +410,10 @@ def test_literal_profile_env_from_compose_preserves_public_frontend_api_keys(
 
     assert carried["NEXT_PUBLIC_FIREBASE_API_KEY"] == "public-next-firebase-key"
     assert carried["VITE_FIREBASE_API_KEY"] == "public-vite-firebase-key"
+    assert carried["VITE_FIREBASE_APIKEY"] == "public-vite-firebase-apikey"
     assert carried["REACT_APP_FIREBASE_API_KEY"] == "public-react-firebase-key"
     assert carried["GATSBY_FIREBASE_API_KEY"] == "public-gatsby-firebase-key"
+    assert carried["RECAPTCHA_SITE_APIKEY"] == "public-recaptcha-site-apikey"
     assert carried["STRIPE_PUBLISHABLE_KEY"] == "pk_test_public"
     assert "CUSTOM_API_KEY" not in carried
     assert "PRIVATE_KEY" not in carried
