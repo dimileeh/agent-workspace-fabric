@@ -216,12 +216,21 @@ def _value_has_url_userinfo(value: str) -> bool:
             for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(value)
         )
     if parsed.netloc:
-        if "@" not in parsed.netloc:
-            return False
-        userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
-        return bool(userinfo)
-    if "://" in parsed.path:
-        return _value_has_url_userinfo(parsed.path)
+        if "@" in parsed.netloc:
+            userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
+            if userinfo:
+                return True
+        return any(
+            _value_has_url_userinfo(match.group(0))
+            for component in (parsed.path, parsed.query, parsed.fragment)
+            for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(component)
+        )
+    if "://" in parsed.path or "://" in parsed.query or "://" in parsed.fragment:
+        return any(
+            _value_has_url_userinfo(match.group(0))
+            for component in (parsed.path, parsed.query, parsed.fragment)
+            for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(component)
+        )
     return False
 
 

@@ -314,6 +314,44 @@ def test_literal_profile_env_from_compose_skips_embedded_url_userinfo_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_nested_url_userinfo_literals(
+    tmp_path: Path,
+) -> None:
+    """Safe-looking outer URLs must not carry credentialed nested URLs."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "CALLBACK_URL": (
+                                "https://proxy.local/cb?target=redis://:s3cr3t@redis:6379/0"
+                            ),
+                            "SAFE_CALLBACK_URL": (
+                                "https://proxy.local/cb?target=redis://redis:6379/0"
+                            ),
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "CALLBACK_URL" not in carried
+    assert carried["SAFE_CALLBACK_URL"] == "https://proxy.local/cb?target=redis://redis:6379/0"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "s3cr3t" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_external_postgres_url_userinfo(
     tmp_path: Path,
 ) -> None:
