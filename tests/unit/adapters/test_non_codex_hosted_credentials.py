@@ -613,23 +613,23 @@ class TestNonCodexHostedCredentials:
         assert ("OLLAMA_HOST", "http://ollama.profile:11434") in request.profile_env
 
     @pytest.mark.unit
-    async def test_hosted_request_surfaces_github_token_aliases(
+    async def test_hosted_request_maps_github_token_aliases_from_awf_source(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The hosted request carries GitHub token alias names so hosted ``gh`` works.
+        """The hosted request maps GitHub token aliases so hosted ``gh`` works.
 
         Regression for PR #751 thread PRRT_kwDOSJAM6s6PXFPz: when a workspace is
         launched with ``AWF_GITHUB_TOKEN`` in the worker env, the local Compose
         path injects ``GH_TOKEN: ${AWF_GITHUB_TOKEN}`` and
         ``GITHUB_TOKEN: ${AWF_GITHUB_TOKEN}`` into the agent env block so the
         local agent container can run ``gh``. The hosted (non-compose) path has
-        no compose env block substitution, so without surfacing these alias
-        names the hosted executor cannot resolve the credential and the hosted
-        monitor-repair agent loses GitHub CLI access even though the same
-        workspace has it under Compose.
+        no compose env block substitution, so the hosted request must carry
+        explicit alias mappings from the worker-visible source to the gh-visible
+        targets.
 
-        The hosted request's ``env_passthrough_names`` must include both
-        aliases so the hosted executor can resolve them out-of-band. Names
+        The hosted request's ``env_passthrough_aliases`` must include both
+        aliases so the hosted executor resolves ``AWF_GITHUB_TOKEN`` out-of-band
+        and injects it as ``GH_TOKEN`` / ``GITHUB_TOKEN``. Names and aliases
         only — secret values are never transported, and the placeholder value
         never appears in the request. ``profile_env`` must NOT carry the
         worker-resolved slot (no-secret-values contract unchanged).
@@ -650,16 +650,23 @@ class TestNonCodexHostedCredentials:
         adapter = _build(OpenCodeAdapter)
         request = await _run(adapter, compose_file=compose_file)
 
-        # Both GitHub token aliases are surfaced for hosted out-of-band
-        # resolution so the hosted executor can inject the worker token.
-        assert "GH_TOKEN" in request.env_passthrough_names
-        assert "GITHUB_TOKEN" in request.env_passthrough_names
+        # The documented worker source is available, and both gh-visible names
+        # are mapped from it instead of being emitted as plain passthrough names
+        # that would resolve by their own absent worker-env name.
+        assert "AWF_GITHUB_TOKEN" in request.env_passthrough_names
+        assert "GH_TOKEN" not in request.env_passthrough_names
+        assert "GITHUB_TOKEN" not in request.env_passthrough_names
+        assert ("GH_TOKEN", "AWF_GITHUB_TOKEN") in request.env_passthrough_aliases
+        assert ("GITHUB_TOKEN", "AWF_GITHUB_TOKEN") in request.env_passthrough_aliases
         # No secret value reaches the request: names only carry no value, and
         # profile_env never carries the worker-resolved slot.
         blob = (
             request.prompt_stdin.decode("utf-8", "replace")
             + "\x00".join(request.cli_args)
             + "\x00".join(request.env_passthrough_names)
+            + "\x00".join(
+                f"{target}={source}" for target, source in request.env_passthrough_aliases
+            )
             + "\x00".join(f"{k}={v}" for k, v in request.profile_env)
         )
         assert "ghp_worker_secret" not in blob
@@ -685,14 +692,11 @@ class TestNonCodexHostedCredentials:
         out-of-band, so resolving ``GH_TOKEN`` / ``GITHUB_TOKEN`` finds nothing in
         that setup and the hosted monitor-repair agent loses GitHub CLI access.
 
-        The hosted request's ``env_passthrough_names`` must therefore include
-        the chosen source name (``AWF_GITHUB_TOKEN``) so the hosted executor can
-        resolve the credential from the source name and mirror it into the
-        gh-visible aliases (the same ``AWF_GITHUB_TOKEN`` -> ``GH_TOKEN`` /
-        ``GITHUB_TOKEN`` mirroring ``_service_git_environment`` /
-        ``_check_github`` / ``_gh_probe_environ`` already apply). Names only —
-        secret values are never transported, and the placeholder value never
-        appears in the request.
+        The hosted request's ``env_passthrough_aliases`` must therefore map
+        ``GH_TOKEN`` / ``GITHUB_TOKEN`` from ``AWF_GITHUB_TOKEN`` so the hosted
+        executor can resolve the credential from the source name and inject the
+        gh-visible aliases. Names and aliases only — secret values are never
+        transported, and the placeholder value never appears in the request.
         """
         compose_file = _write_compose(
             tmp_path,
@@ -711,18 +715,23 @@ class TestNonCodexHostedCredentials:
         request = await _run(adapter, compose_file=compose_file)
 
         # The chosen source name is surfaced so the hosted executor can resolve
-        # the credential from it (the aliases alone would resolve to nothing in
-        # this setup). The aliases are still surfaced for hosted executors that
-        # resolve them directly when present.
+        # the credential from it, and the gh-visible aliases are preserved as
+        # source mappings instead of plain names that would resolve to nothing
+        # in this setup.
         assert "AWF_GITHUB_TOKEN" in request.env_passthrough_names
-        assert "GH_TOKEN" in request.env_passthrough_names
-        assert "GITHUB_TOKEN" in request.env_passthrough_names
+        assert "GH_TOKEN" not in request.env_passthrough_names
+        assert "GITHUB_TOKEN" not in request.env_passthrough_names
+        assert ("GH_TOKEN", "AWF_GITHUB_TOKEN") in request.env_passthrough_aliases
+        assert ("GITHUB_TOKEN", "AWF_GITHUB_TOKEN") in request.env_passthrough_aliases
         # No secret value reaches the request: names only carry no value, and
         # profile_env never carries the worker-resolved slot.
         blob = (
             request.prompt_stdin.decode("utf-8", "replace")
             + "\x00".join(request.cli_args)
             + "\x00".join(request.env_passthrough_names)
+            + "\x00".join(
+                f"{target}={source}" for target, source in request.env_passthrough_aliases
+            )
             + "\x00".join(f"{k}={v}" for k, v in request.profile_env)
         )
         assert "ghp_worker_secret" not in blob

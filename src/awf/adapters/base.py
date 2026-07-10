@@ -510,17 +510,12 @@ class AgentAdapter(ABC):
                 if name not in existing_names
                 and name not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
             )
-        # Surface GitHub token alias names the local Compose path would inject
-        # into the agent env block (``GH_TOKEN`` / ``GITHUB_TOKEN``) so the
-        # hosted executor can resolve and inject the worker token out-of-band.
-        # Without this the hosted monitor-repair agent loses GitHub CLI
-        # credentials even though the same workspace has them under Compose
-        # (PR #751 thread PRRT_kwDOSJAM6s6PXFPz). The helper applies the same
-        # alias group-precedence rule as ``agent_environment_with_github_token``
-        # so a profile-owned alias (e.g. a secret lease rendering
-        # ``GITHUB_TOKEN``) is not shadowed by a worker alias. Names only —
-        # secret values are never transported; the placeholder string is never
-        # returned.
+        # Surface the GitHub token source name when the local Compose path would
+        # inject gh-visible aliases (``GH_TOKEN`` / ``GITHUB_TOKEN``) from that
+        # source. Alias targets already carried in ``env_passthrough_aliases``
+        # must NOT also be plain names: hosted executors resolve plain names by
+        # their own name, while aliases preserve the source->target mapping
+        # needed when the worker only has ``AWF_GITHUB_TOKEN``.
         github_token_names = await asyncio.to_thread(
             hosted_github_token_passthrough_names,
             compose_file,
@@ -529,12 +524,14 @@ class AgentAdapter(ABC):
         if github_token_names:
             # Union after the filter: the filter excludes compose-declared
             # profile-owned slots, and the helper already skips profile-owned
-            # aliases, so the union surfaces exactly the names the local
-            # Compose path would inject without reintroducing a profile-owned
-            # slot. De-duplicate preserving filter order.
+            # aliases. De-duplicate preserving filter order while keeping alias
+            # targets out of plain passthrough names.
             existing_names = set(env_passthrough_names)
+            alias_targets = {target for target, _source in env_passthrough_aliases}
             env_passthrough_names = env_passthrough_names + tuple(
-                name for name in github_token_names if name not in existing_names
+                name
+                for name in github_token_names
+                if name not in existing_names and name not in alias_targets
             )
         # Carry profile-owned env values to the hosted executor. The local
         # ``docker compose exec`` path does not forward profile-owned env
