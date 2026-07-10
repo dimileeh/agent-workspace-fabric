@@ -159,7 +159,7 @@ async def test_compose_runtime_usable_after_restart_failure_rejects_inspection_e
         "services: [\n",
     ],
 )
-async def test_compose_runtime_usable_after_restart_failure_rejects_unreadable_services(
+async def test_compose_runtime_usable_after_restart_failure_allows_unreadable_services(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     compose_text: str | None,
@@ -183,7 +183,7 @@ async def test_compose_runtime_usable_after_restart_failure_rejects_unreadable_s
 
     monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
 
-    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+    assert await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
         "awf_x",
         compose_file,
     )
