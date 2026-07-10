@@ -369,6 +369,10 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                             "JWTSECRET": "jwt_secret_value",
                             "DB_PASS": "database_profile_password",
                             "REDIS_PASS": "redis_profile_password",
+                            "SSH_PASSPHRASE": "ssh_profile_passphrase",
+                            "GPG_PASSPHRASE": "gpg_profile_passphrase",
+                            "KEY_PASSPHRASE": "key_profile_passphrase",
+                            "EMPTY_SSH_PASSPHRASE": "",
                             "POSTGRES_PWD": "postgres_profile_pwd",
                             "PGPASSWORD": "postgres_profile_password",
                             "EMPTY_PGPASSWORD": "",
@@ -411,6 +415,10 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert "JWTSECRET" not in carried
     assert "DB_PASS" not in carried
     assert "REDIS_PASS" not in carried
+    assert "SSH_PASSPHRASE" not in carried
+    assert "GPG_PASSPHRASE" not in carried
+    assert "KEY_PASSPHRASE" not in carried
+    assert carried["EMPTY_SSH_PASSPHRASE"] == ""
     assert "POSTGRES_PWD" not in carried
     assert "PGPASSWORD" not in carried
     assert carried["EMPTY_PGPASSWORD"] == ""
