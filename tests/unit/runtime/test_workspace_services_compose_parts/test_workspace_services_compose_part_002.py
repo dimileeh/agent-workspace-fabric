@@ -675,6 +675,59 @@ def test_literal_profile_env_from_compose_skips_profile_owned_auth_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_carries_empty_auth_literals(
+    tmp_path: Path,
+) -> None:
+    """Explicit empty auth literals are carried to blank hosted credentials.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6P0GRE: local Compose treats
+    ``ANTHROPIC_API_KEY: ""`` as a concrete empty value that overrides any
+    worker credential at stack launch. The hosted path also excludes that
+    compose-declared name from passthrough, so ``literal_profile_env_from_compose``
+    must carry the empty literal in ``profile_env``. Concrete secret-bearing
+    literals remain redacted.
+    """
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "OPENAI_API_KEY": "",
+                            "ANTHROPIC_API_KEY": "",
+                            "CODEX_API_KEY": "sk-profile-codex-key",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(
+        compose_file,
+        worker_env={
+            "OPENAI_API_KEY": "sk-worker-openai",
+            "ANTHROPIC_API_KEY": "sk-worker-anthropic",
+        },
+    )
+    carried = dict(profile_env)
+
+    assert carried["OPENAI_API_KEY"] == ""
+    assert carried["ANTHROPIC_API_KEY"] == ""
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    assert "CODEX_API_KEY" not in carried
+    blob = "\x00".join(v for _k, v in profile_env)
+    assert "sk-worker-openai" not in blob
+    assert "sk-worker-anthropic" not in blob
+    assert "sk-profile-codex-key" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_profile_owned_claude_backend_secrets(
     tmp_path: Path,
 ) -> None:

@@ -71,6 +71,9 @@ def literal_profile_env_from_compose(
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)
         if resolution is not _ComposeEnvResolution.LITERAL:
             continue
+        if key in auth_secret_keys and expanded == "":
+            carried.append((key, expanded))
+            continue
         if _expanded_value_bears_postgres_password(expanded, postgres_passwords):
             continue
         if compose_module._value_has_url_userinfo(
