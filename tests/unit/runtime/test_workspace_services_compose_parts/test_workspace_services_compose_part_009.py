@@ -134,6 +134,32 @@ def test_literal_profile_env_from_compose_redacts_url_auth_token_fields(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_neutral_docker_auth_blob(
+    tmp_path: Path,
+) -> None:
+    """Neutral env names carrying Docker JSON auth fields are skipped."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "APP_BASE_URL": "http://app:8080",
+                "REGISTRY_CONFIG": (
+                    '{"auths":{"registry.example":{"auth":"registry-profile-secret"}}}'
+                ),
+            },
+            worker_env={},
+        )
+    )
+
+    assert profile_env["APP_BASE_URL"] == "http://app:8080"
+    assert "REGISTRY_CONFIG" not in profile_env
+    assert "registry-profile-secret" not in "".join(profile_env.values())
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_bare_jwt_url_fields(
     tmp_path: Path,
 ) -> None:
