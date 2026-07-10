@@ -481,6 +481,35 @@ def test_literal_profile_env_from_compose_redacts_prefixed_token_secret_config_f
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_prefixed_password_config_fields(
+    tmp_path: Path,
+) -> None:
+    """Neutral config env values can still embed prefixed password fields."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump({"services": {"agent": {"image": "agent:latest"}}}),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(
+        compose_file,
+        compose_env={
+            "APP_CONFIG": '{"db_password":"db-secret"}',
+            "CAMEL_CONFIG": '{"databasePassword":"camel-secret"}',
+            "SAFE_CONFIG": "feature=enabled",
+        },
+        worker_env={},
+    )
+
+    carried = dict(profile_env)
+    assert carried == {"SAFE_CONFIG": "feature=enabled"}
+    blob = "\x00".join(v for _k, v in profile_env)
+    assert "db-secret" not in blob
+    assert "camel-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_encoded_nested_url_query_credentials(
     tmp_path: Path,
 ) -> None:
