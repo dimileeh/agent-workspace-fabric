@@ -556,35 +556,36 @@ class AgentAdapter(ABC):
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
-        # Streaming callbacks: when sinks are available, forward stdout/stderr
-        # chunks to the log store *during* execution (mirroring the Compose
-        # ``run_streaming`` path) and track whether each fd was streamed. When
-        # the executor does not stream, the buffered ``AgentRuntimeExecResult``
-        # is written to the sinks after ``execute()`` returns instead — see
-        # the post-execute write guard below. Either way the log store ends up
-        # with the run's output; the streaming path additionally fills it
-        # live, so a long-running hosted monitor repair no longer leaves the
-        # log stream empty until completion.
+        # Streaming callbacks: buffer stdout/stderr chunks so adapter watchdog
+        # timeouts can still report partial output, and when sinks are available
+        # forward chunks to the log store *during* execution (mirroring the
+        # Compose ``run_streaming`` path). When the executor does not stream,
+        # the buffered ``AgentRuntimeExecResult`` is written to the sinks after
+        # ``execute()`` returns instead — see the post-execute write guard
+        # below. Either way the log store ends up with the run's output; the
+        # streaming path additionally fills it live, so a long-running hosted
+        # monitor repair no longer leaves the log stream empty until completion.
         streamed_stdout = False
         streamed_stderr = False
+        streamed_stdout_chunks: list[str] = []
+        streamed_stderr_chunks: list[str] = []
 
-        on_stdout_cb: StreamCallback | None = None
-        on_stderr_cb: StreamCallback | None = None
-        if sinks is not None:
-            stream_sinks = sinks
+        async def _on_stdout(data: str) -> None:
+            nonlocal streamed_stdout
+            streamed_stdout = True
+            streamed_stdout_chunks.append(data)
+            if sinks is not None:
+                await sinks.write_stdout(data)
 
-            async def _on_stdout(data: str) -> None:
-                nonlocal streamed_stdout
-                streamed_stdout = True
-                await stream_sinks.write_stdout(data)
+        async def _on_stderr(data: str) -> None:
+            nonlocal streamed_stderr
+            streamed_stderr = True
+            streamed_stderr_chunks.append(data)
+            if sinks is not None:
+                await sinks.write_stderr(data)
 
-            async def _on_stderr(data: str) -> None:
-                nonlocal streamed_stderr
-                streamed_stderr = True
-                await stream_sinks.write_stderr(data)
-
-            on_stdout_cb = _on_stdout
-            on_stderr_cb = _on_stderr
+        on_stdout_cb: StreamCallback | None = _on_stdout
+        on_stderr_cb: StreamCallback | None = _on_stderr
 
         request = AgentRuntimeExecRequest(
             workspace_id=workspace_id,
@@ -629,6 +630,7 @@ class AgentAdapter(ABC):
                     workspace_id=workspace_id,
                 )
             hosted_watchdog_timed_out = False
+            hosted_watchdog_timeout_stderr = ""
             try:
                 execute_task = asyncio.create_task(runtime_executor.execute(request))
                 try:
@@ -660,13 +662,17 @@ class AgentAdapter(ABC):
                     else:
                         execute_task.add_done_callback(_discard_hosted_execute_task_result)
                     hosted_watchdog_timed_out = True
+                    hosted_watchdog_timeout_stderr = (
+                        "hosted runtime executor timed out after "
+                        f"{self._agent_wall_timeout_seconds:g}s\n"
+                    )
+                    timeout_stderr = (
+                        "".join(streamed_stderr_chunks) + hosted_watchdog_timeout_stderr
+                    )
                     hosted_result = AgentRuntimeExecResult(
                         returncode=_HOSTED_TIMEOUT_RETURN_CODE,
-                        stdout="",
-                        stderr=(
-                            "hosted runtime executor timed out after "
-                            f"{self._agent_wall_timeout_seconds:g}s\n"
-                        ),
+                        stdout="".join(streamed_stdout_chunks),
+                        stderr=timeout_stderr,
                         timeout_reason=COMMAND_TIMEOUT_REASON,
                     )
             except AgentRunError:
@@ -685,12 +691,14 @@ class AgentAdapter(ABC):
                 # Buffered fallback: write the hosted executor's buffered
                 # stdout/stderr to the sinks only when that fd was not already
                 # streamed during execution. If the adapter watchdog synthesized
-                # the result, stderr is new diagnostic output and must be
-                # appended after any earlier streamed stderr.
+                # the result, only the timeout diagnostic is new sink output and
+                # must be appended after any earlier streamed stderr.
                 if hosted_result.stdout and not streamed_stdout:
                     await sinks.write_stdout(hosted_result.stdout)
-                if hosted_result.stderr and (not streamed_stderr or hosted_watchdog_timed_out):
+                if hosted_result.stderr and not streamed_stderr:
                     await sinks.write_stderr(hosted_result.stderr)
+                elif hosted_watchdog_timed_out and hosted_watchdog_timeout_stderr:
+                    await sinks.write_stderr(hosted_watchdog_timeout_stderr)
             result = self._classify_hosted_result(
                 hosted_result=hosted_result,
                 model=model,
