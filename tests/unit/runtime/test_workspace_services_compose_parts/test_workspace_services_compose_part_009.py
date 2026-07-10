@@ -91,6 +91,29 @@ def test_literal_profile_env_from_compose_redacts_camelcase_url_token_fields(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_bare_jwt_url_fields(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile_env skips URLs with bare JWT query parameters."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "CALLBACK_URL": "https://app.example/cb?jwt=raw-jwt-token",
+                "PUBLIC_CALLBACK_URL": "https://app.example/cb?state=public",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "CALLBACK_URL" not in profile_env
+    assert profile_env["PUBLIC_CALLBACK_URL"] == "https://app.example/cb?state=public"
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_secret_named_url_literals(
     tmp_path: Path,
 ) -> None:
