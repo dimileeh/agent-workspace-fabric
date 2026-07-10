@@ -215,7 +215,19 @@ _URL_SECRET_CREDENTIAL_FIELD_NAMES = frozenset(
     {"JWT", "PASSWORD", "PASSWD", "SECRET", "SIGNATURE", "TOKEN"}
 )
 _URL_SECRET_CREDENTIAL_FIELD_EXACT_NAMES = frozenset(
-    {"APIKEY", "AUTH", "CLIENTSECRET", "KEY", "SESSION", "SESSIONID", "SIG", "SSLPASSWORD"}
+    {
+        "ACCESSKEY",
+        "APIKEY",
+        "AUTH",
+        "CLIENTSECRET",
+        "KEY",
+        "PRIVATEKEY",
+        "SECRETKEY",
+        "SESSION",
+        "SESSIONID",
+        "SIG",
+        "SSLPASSWORD",
+    }
 )
 _URL_SECRET_CREDENTIAL_FIELD_NAME_TOKEN_PAIRS = frozenset(
     {
