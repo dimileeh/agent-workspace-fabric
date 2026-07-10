@@ -817,6 +817,49 @@ def test_literal_profile_env_from_compose_skips_profile_owned_github_token_liter
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_public_key_literals(
+    tmp_path: Path,
+) -> None:
+    """Public frontend key literals are profile config, not hosted secrets."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "VAPID_PUBLIC_KEY": "vapid-public-key",
+                            "RECAPTCHA_SITE_KEY": "recaptcha-site-key",
+                            "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY": "pk_test_publishable",
+                            "PRIVATE_KEY": "private-key-secret",
+                            "CUSTOM_API_KEY": "custom-api-secret",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried["VAPID_PUBLIC_KEY"] == "vapid-public-key"
+    assert carried["RECAPTCHA_SITE_KEY"] == "recaptcha-site-key"
+    assert carried["NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY"] == "pk_test_publishable"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    assert "PRIVATE_KEY" not in carried
+    assert "CUSTOM_API_KEY" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "private-key-secret" not in blob
+    assert "custom-api-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_jdbc_url_userinfo(
     tmp_path: Path,
 ) -> None:

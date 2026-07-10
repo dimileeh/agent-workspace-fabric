@@ -169,6 +169,8 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS = frozenset(
     }
 )
 
+_PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS = frozenset({"PUBLIC", "PUBLISHABLE", "SITE"})
+
 _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(r"^\s*(?:basic|bearer)\s+\S+", re.IGNORECASE)
 _URL_SECRET_CREDENTIAL_FIELD_NAMES = frozenset({"PASSWORD", "PASSWD", "TOKEN"})
 
@@ -195,12 +197,14 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
     tokens = tuple(token for token in normalized.split("_") if token)
     if any(token in _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS for token in tokens):
         return True
-    if tokens and tokens[-1] == "KEY":
-        return True
-    return any(
+    if any(
         (left, right) in _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS
         for left, right in zip(tokens, tokens[1:], strict=False)
-    )
+    ):
+        return True
+    if tokens and tokens[-1] == "KEY":
+        return not (len(tokens) >= 2 and tokens[-2] in _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS)
+    return False
 
 
 def _is_auth_credential_like_profile_env_value(value: str) -> bool:
