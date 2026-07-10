@@ -9,6 +9,38 @@ import pytest
 import yaml
 
 from awf.profiles.compose import literal_profile_env_from_compose
+from awf.profiles.compose_postgres_env import compose_postgres_service_hostnames
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("payload", "expected_hostnames"),
+    [
+        ([], frozenset()),
+        ({"services": []}, frozenset()),
+        (
+            {
+                "services": {
+                    123: {"image": "postgres:16-alpine"},
+                    "not-a-service": [],
+                    "db": {"image": "postgres:16-alpine"},
+                }
+            },
+            frozenset({"db"}),
+        ),
+    ],
+)
+def test_compose_postgres_service_hostnames_tolerates_malformed_compose_shapes(
+    tmp_path: Path,
+    payload: object,
+    expected_hostnames: frozenset[str],
+) -> None:
+    """Malformed Compose fragments do not create false local DB hostnames."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    assert compose_postgres_service_hostnames(compose_file) == expected_hostnames
 
 
 @pytest.mark.unit
@@ -201,6 +233,70 @@ def test_literal_profile_env_from_compose_redacts_libpq_keyword_password(
     assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
     assert "DATABASE_URL" not in carried
     assert "s3cr3t" not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_libpq_keyword_dsn_without_secret_fields(
+    tmp_path: Path,
+) -> None:
+    """Keyword DSN values remain profile config when no secret field is present."""
+
+    compose_file = tmp_path / "compose.yml"
+    keyword_dsn = "host=postgres user=app dbname=app sslmode=require"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": keyword_dsn,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert profile_env["DATABASE_URL"] == keyword_dsn
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_generic_url_userinfo(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile env never carries arbitrary URL userinfo credentials."""
+
+    compose_file = tmp_path / "compose.yml"
+    secret_url = "https://user:opaque@example.com/api"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "SERVICE_URL": secret_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "SERVICE_URL" not in carried
+    assert "opaque" not in "\x00".join(v for _k, v in profile_env)
 
 
 @pytest.mark.unit

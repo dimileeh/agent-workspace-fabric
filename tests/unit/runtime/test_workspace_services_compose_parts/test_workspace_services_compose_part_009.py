@@ -148,6 +148,37 @@ def test_name_only_credential_identifier_uses_passthrough_not_profile_env(
 
 
 @pytest.mark.unit
+def test_name_only_credential_identifier_passthrough_slot_stays_passthrough(
+    tmp_path: Path,
+) -> None:
+    """Compose pass-through credential names are not converted to profile env."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+    compose_env = {
+        "AWS_ACCESS_KEY_ID": compose_module._COMPOSE_PASSTHROUGH,  # noqa: SLF001
+        "OLLAMA_HOST": "http://ollama.profile:11434",
+    }
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env=compose_env,
+            worker_env={"AWS_ACCESS_KEY_ID": "AKIA_WORKER_IDENTIFIER"},
+        )
+    )
+    names = filter_hosted_env_passthrough_names(
+        ("AWS_ACCESS_KEY_ID", "OLLAMA_HOST"),
+        compose_file=compose_file,
+        compose_env=compose_env,
+        worker_env={"AWS_ACCESS_KEY_ID": "AKIA_WORKER_IDENTIFIER"},
+    )
+
+    assert "AWS_ACCESS_KEY_ID" not in profile_env
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert names == ("AWS_ACCESS_KEY_ID",)
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_preserves_authorization_endpoints(
     tmp_path: Path,
 ) -> None:
