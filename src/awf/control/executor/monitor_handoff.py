@@ -522,6 +522,13 @@ async def _compose_runtime_usable_after_restart_failure(
     if snapshot.stack_state != "running":
         return False
     expected_services = _compose_service_names_from_file(compose_file)
+    if expected_services is None:
+        _log.warning(
+            "executor.resume_compose_runtime_expected_services_unavailable",
+            compose_project_name=compose_project,
+            compose_file=str(compose_file),
+        )
+        return True
     if not expected_services:
         _log.warning(
             "executor.resume_compose_runtime_missing_expected_services",
@@ -544,7 +551,7 @@ async def _compose_runtime_usable_after_restart_failure(
     return True
 
 
-def _compose_service_names_from_file(compose_file: Path) -> set[str]:
+def _compose_service_names_from_file(compose_file: Path) -> set[str] | None:
     try:
         payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
     except Exception:
@@ -552,7 +559,7 @@ def _compose_service_names_from_file(compose_file: Path) -> set[str]:
             "executor.resume_compose_runtime_service_parse_failed",
             compose_file=str(compose_file),
         )
-        return set()
+        return None
     if not isinstance(payload, dict):
         return set()
     services = payload.get("services")
