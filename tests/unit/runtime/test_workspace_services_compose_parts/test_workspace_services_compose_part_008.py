@@ -240,6 +240,47 @@ def test_literal_profile_env_from_compose_redacts_local_postgres_url_query_crede
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://awf@postgres:5432/app/"
+        + quote("https://callback.example/cb?access_token=nested-secret", safe=""),
+        "postgresql://awf@postgres:5432/app#"
+        + quote("https://callback.example/cb?access_token=nested-secret", safe=""),
+    ],
+)
+def test_literal_profile_env_from_compose_redacts_encoded_nested_url_credentials(
+    tmp_path: Path,
+    database_url: str,
+) -> None:
+    """Local Postgres URL bypass must inspect decoded nested URL credentials."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": database_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    assert "DATABASE_URL" not in dict(profile_env)
+    assert "nested-secret" not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_libpq_keyword_password(
     tmp_path: Path,
 ) -> None:

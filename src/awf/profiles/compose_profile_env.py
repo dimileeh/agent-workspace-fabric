@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from awf.profiles.compose_env import (
     _COMPOSE_PASSTHROUGH,
@@ -169,9 +169,20 @@ def _local_postgres_database_url_without_tracked_password(
         and password is None
         and not any(
             compose_module._url_component_has_secret_credential_field(component)
-            for component in (parsed.path, parsed.query, parsed.fragment)
+            or compose_module._value_has_url_userinfo(component)
+            for raw_component in (parsed.path, parsed.query, parsed.fragment)
+            for component in _url_component_variants(raw_component)
         )
     )
+
+
+def _url_component_variants(component: str) -> tuple[str, ...]:
+    if not component:
+        return ()
+    decoded = unquote(component)
+    if decoded == component:
+        return (component,)
+    return (component, decoded)
 
 
 def _is_local_postgres_database_url_env_name(key: str) -> bool:
