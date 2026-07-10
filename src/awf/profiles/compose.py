@@ -1263,7 +1263,7 @@ def _hosted_name_only_credential_identifier_keys(
     *,
     worker_env: Mapping[str, str],
 ) -> frozenset[str]:
-    """Return literal credential identifiers that hosted should resolve by name."""
+    """Return credential identifiers that hosted should resolve by name."""
     keys: set[str] = set()
     for name, raw in compose_env.items():
         if name not in _HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
@@ -1273,8 +1273,14 @@ def _hosted_name_only_credential_identifier_keys(
         expanded, resolution = _compose_resolve_value(raw, worker_env=worker_env)
         if (
             resolution is _ComposeEnvResolution.LITERAL
-            and expanded
-            and worker_env.get(name) == expanded
+            and (expanded == "" or worker_env.get(name) == expanded)
+        ) or (
+            resolution
+            in (
+                _ComposeEnvResolution.WORKER_RESOLVED_SLOT,
+                _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED,
+            )
+            and _compose_selected_worker_reference_name(raw, worker_env=worker_env) == name
         ):
             keys.add(name)
     return frozenset(keys)

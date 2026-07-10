@@ -435,7 +435,7 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert carried["PASS_THROUGH_MODE"] == "enabled"
     assert carried["POSTGRES_HOST_AUTH_METHOD"] == "trust"
     assert carried["GEMINI_API_KEY_AUTH_MECHANISM"] == "api-key"
-    assert carried["AWS_ACCESS_KEY_ID"] == ""
+    assert "AWS_ACCESS_KEY_ID" not in carried
     assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
     assert carried["AWS_REGION"] == "us-west-2"
     assert carried["APP_MODE"] == "ci"

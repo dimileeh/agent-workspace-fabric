@@ -73,6 +73,44 @@ def test_literal_aws_access_key_id_with_same_worker_value_stays_name_only(
 
 
 @pytest.mark.unit
+def test_empty_aws_access_key_id_does_not_override_name_only_passthrough(
+    tmp_path: Path,
+) -> None:
+    compose_file = _compose_with_agent_env(tmp_path, {"AWS_ACCESS_KEY_ID": ""})
+    worker_env = {"AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE"}
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    filtered = filter_hosted_env_passthrough_names(
+        ("AWS_ACCESS_KEY_ID",),
+        compose_file=compose_file,
+        worker_env=worker_env,
+    )
+
+    assert "AWS_ACCESS_KEY_ID" not in profile_env
+    assert "AWS_ACCESS_KEY_ID" in filtered
+
+
+@pytest.mark.unit
+def test_unset_aws_access_key_id_slot_stays_name_only_not_profile_env(
+    tmp_path: Path,
+) -> None:
+    compose_file = _compose_with_agent_env(
+        tmp_path,
+        {"AWS_ACCESS_KEY_ID": "${AWS_ACCESS_KEY_ID}"},
+    )
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+    filtered = filter_hosted_env_passthrough_names(
+        ("AWS_ACCESS_KEY_ID",),
+        compose_file=compose_file,
+        worker_env={},
+    )
+
+    assert "AWS_ACCESS_KEY_ID" not in profile_env
+    assert "AWS_ACCESS_KEY_ID" in filtered
+
+
+@pytest.mark.unit
 def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_backend_supplement(
     tmp_path: Path,
 ) -> None:

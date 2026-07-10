@@ -102,10 +102,10 @@ def literal_profile_env_from_compose(
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)
         if resolution is not _ComposeEnvResolution.LITERAL:
             continue
+        if key in compose_module._HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
+            continue
         if expanded == "" and (
-            key in auth_secret_keys
-            or key in compose_module._HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS
-            or compose_module._is_secret_like_profile_env_name(key)
+            key in auth_secret_keys or compose_module._is_secret_like_profile_env_name(key)
         ):
             carried.append((key, expanded))
             continue
@@ -131,8 +131,6 @@ def literal_profile_env_from_compose(
         if compose_module._is_git_config_protocol_key(key):
             continue
         if key in auth_secret_keys:
-            continue
-        if key in compose_module._HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
             continue
         if compose_module._is_secret_like_profile_env_name(
             key
