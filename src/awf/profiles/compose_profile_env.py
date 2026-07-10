@@ -147,9 +147,9 @@ def _local_postgres_database_url_without_tracked_password(
     postgres_passwords: frozenset[str],
 ) -> bool:
     """Return whether a local Postgres URL should survive generic userinfo redaction."""
-    if _has_concrete_postgres_password(
-        postgres_passwords
-    ) or not _is_local_postgres_database_url_env_name(key):
+    if not _is_local_postgres_database_url_env_name(key):
+        return False
+    if _expanded_value_bears_postgres_password(value, postgres_passwords):
         return False
     try:
         parsed = urlsplit(value)
@@ -192,8 +192,3 @@ def _expanded_value_has_libpq_keyword_dsn_secret_field(key: str, value: str) -> 
     return _is_local_postgres_database_url_env_name(key) or bool(
         normalized_fields & _LIBPQ_KEYWORD_DSN_CONTEXT_FIELD_NAMES
     )
-
-
-def _has_concrete_postgres_password(postgres_passwords: frozenset[str]) -> bool:
-    """Return whether the redaction set contains a concrete password value."""
-    return any(password and "$" not in password for password in postgres_passwords)

@@ -76,6 +76,42 @@ def test_literal_profile_env_from_compose_preserves_passwordless_local_postgres_
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_passwordless_local_postgres_url_with_tracked_password(
+    tmp_path: Path,
+) -> None:
+    """A separate tracked Postgres password does not make a passwordless URL secret."""
+
+    compose_file = tmp_path / "compose.yml"
+    database_url = "postgresql://awf@postgres:5432/app"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "postgres": {
+                        "image": "postgres:16-alpine",
+                        "environment": {"POSTGRES_PASSWORD": "tracked-secret"},
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": database_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert profile_env["DATABASE_URL"] == database_url
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "tracked-secret" not in "\x00".join(profile_env.values())
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_preserves_custom_postgres_service_hostnames(
     tmp_path: Path,
 ) -> None:
