@@ -285,11 +285,18 @@ def _is_auth_credential_like_profile_env_value(value: str) -> bool:
     return bool(_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value))
 
 
+def _url_field_name_tokens(name: str) -> tuple[str, ...]:
+    camel_split = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", name)
+    camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", camel_split)
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", camel_split).upper()
+    return tuple(token for token in normalized.split("_") if token)
+
+
 def _url_field_name_has_secret_credential(name: str) -> bool:
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", name).upper()
+    tokens = _url_field_name_tokens(name)
+    normalized = "".join(tokens)
     if normalized in _URL_SECRET_CREDENTIAL_FIELD_EXACT_NAMES:
         return True
-    tokens = tuple(token for token in normalized.split("_") if token)
     return any(token in _URL_SECRET_CREDENTIAL_FIELD_NAMES for token in tokens) or any(
         (left, right) in _URL_SECRET_CREDENTIAL_FIELD_NAME_TOKEN_PAIRS
         for left, right in zip(tokens, tokens[1:], strict=False)
