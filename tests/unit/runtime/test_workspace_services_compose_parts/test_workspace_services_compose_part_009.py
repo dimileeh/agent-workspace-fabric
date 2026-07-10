@@ -369,6 +369,34 @@ def test_literal_profile_env_from_compose_redacts_auth_token_header_values(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_gitlab_token_header_values(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile_env does not carry GitLab token headers hidden in generic values."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "REQUEST_HEADERS": '{"PRIVATE-TOKEN":"glpat_profile_header_secret"}',
+                "CURL_ARGS": "-fsS -H 'JOB-TOKEN: profile-curl-job-secret'",
+                "OLLAMA_HOST": "http://ollama.profile:11434",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "REQUEST_HEADERS" not in profile_env
+    assert "CURL_ARGS" not in profile_env
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    blob = "\x00".join(profile_env.values())
+    assert "glpat_profile_header_secret" not in blob
+    assert "profile-curl-job-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_cookie_header_values(
     tmp_path: Path,
 ) -> None:
