@@ -417,6 +417,8 @@ def test_literal_profile_env_from_compose_redacts_api_key_header_values(
             compose_env={
                 "REQUEST_HEADERS": '{"X-Api-Key":"sk_profile_header_secret"}',
                 "CURL_ARGS": '-fsS -H "x-api-key: sk_profile_curl_secret"',
+                "VENDOR_REQUEST_HEADERS": ('{"x-goog-api-key":"sk_profile_vendor_header_secret"}'),
+                "VENDOR_CURL_ARGS": ("-fsS -H 'x-goog-api-key: sk_profile_vendor_curl_secret'"),
                 "OLLAMA_HOST": "http://ollama.profile:11434",
             },
             worker_env={},
@@ -425,10 +427,14 @@ def test_literal_profile_env_from_compose_redacts_api_key_header_values(
 
     assert "REQUEST_HEADERS" not in profile_env
     assert "CURL_ARGS" not in profile_env
+    assert "VENDOR_REQUEST_HEADERS" not in profile_env
+    assert "VENDOR_CURL_ARGS" not in profile_env
     assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
     blob = "\x00".join(profile_env.values())
     assert "sk_profile_header_secret" not in blob
     assert "sk_profile_curl_secret" not in blob
+    assert "sk_profile_vendor_header_secret" not in blob
+    assert "sk_profile_vendor_curl_secret" not in blob
 
 
 @pytest.mark.unit
