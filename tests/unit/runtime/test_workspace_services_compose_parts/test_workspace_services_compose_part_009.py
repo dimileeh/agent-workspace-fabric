@@ -683,6 +683,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
             compose_env={
                 "OAUTH_CONFIG": '{"client_secret":"profile-oauth-client-secret"}',
                 "APP_CONFIG": "{'password':'profile-app-password'}",
+                "CLI_CONFIG": "oauth_token=profile-oauth-token-secret",
+                "BLOB_CONFIG": '{"oauth_token":"profile-json-oauth-token-secret"}',
                 "SDK_CONFIG": '{"apiKey":"profile-sdk-api-key"}',
                 "KUBECONFIG_CONTENT": "apiVersion: v1\nclient-key-data: profile-kube-key-data",
                 "APP_KEY_CONFIG": '{"privateKeyData":"profile-private-key-data"}',
@@ -695,6 +697,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
 
     assert "OAUTH_CONFIG" not in profile_env
     assert "APP_CONFIG" not in profile_env
+    assert "CLI_CONFIG" not in profile_env
+    assert "BLOB_CONFIG" not in profile_env
     assert "SDK_CONFIG" not in profile_env
     assert "KUBECONFIG_CONTENT" not in profile_env
     assert "APP_KEY_CONFIG" not in profile_env
@@ -703,6 +707,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
     blob = "\x00".join(profile_env.values())
     assert "profile-oauth-client-secret" not in blob
     assert "profile-app-password" not in blob
+    assert "profile-oauth-token-secret" not in blob
+    assert "profile-json-oauth-token-secret" not in blob
     assert "profile-sdk-api-key" not in blob
     assert "profile-kube-key-data" not in blob
     assert "profile-private-key-data" not in blob
