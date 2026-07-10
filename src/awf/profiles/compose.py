@@ -1279,7 +1279,8 @@ def _hosted_name_only_credential_identifier_keys(
         expanded, resolution = _compose_resolve_value(raw, worker_env=worker_env)
         if (
             resolution is _ComposeEnvResolution.LITERAL
-            and (expanded == "" or worker_env.get(name) == expanded)
+            and expanded != ""
+            and worker_env.get(name) == expanded
         ) or (
             resolution
             in (
