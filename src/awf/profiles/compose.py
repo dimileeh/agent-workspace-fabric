@@ -313,7 +313,7 @@ def _url_component_has_secret_credential_field(component: str) -> bool:
 
 
 def _is_passwordless_git_ssh_url_userinfo(value: str, scheme: str) -> bool:
-    return scheme.lower() == "ssh" and value == "git"
+    return scheme.lower() in {"ssh", "git+ssh"} and value == "git"
 
 
 def _value_has_url_userinfo(value: str) -> bool:

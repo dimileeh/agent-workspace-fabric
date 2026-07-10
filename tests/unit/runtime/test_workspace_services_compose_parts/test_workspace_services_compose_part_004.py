@@ -840,6 +840,32 @@ def test_literal_profile_env_redacts_db_url_password_when_postgres_passthrough_u
 
 
 @pytest.mark.unit
+def test_literal_profile_env_preserves_passwordless_git_plus_ssh_url(
+    tmp_path: Path,
+) -> None:
+    """Passwordless ``git+ssh://git@...`` URLs are profile config, not secrets."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "PRIVATE_PACKAGE_URL": "git+ssh://git@github.com/org/pkg.git",
+                        "TOKENIZED_PACKAGE_URL": ("git+ssh://token@github.com/org/private.git"),
+                    },
+                },
+            }
+        },
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert carried.get("PRIVATE_PACKAGE_URL") == "git+ssh://git@github.com/org/pkg.git"
+    assert "TOKENIZED_PACKAGE_URL" not in carried
+
+
+@pytest.mark.unit
 def test_hosted_github_token_passthrough_names_empty_without_worker_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
