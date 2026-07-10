@@ -1139,7 +1139,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # Exclude compose-declared names UNLESS their value is worker-resolved
         # and the local container received the worker value at stack launch:
         # ``WORKER_RESOLVED_DEFAULTED`` (``:-`` / ``-`` / ``:?`` / ``?`` with the
-        # variable set) and a pass-through slot (raw value ==
+        # variable set) and a worker-present pass-through slot (raw value ==
         # :data:`_COMPOSE_PASSTHROUGH` — ``environment: [NAME]`` with no ``=``,
         # ``NAME:`` / ``NAME: null``) stay in passthrough for hosted out-of-band
         # resolution.
@@ -1153,8 +1153,8 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose variable
         # IS set in the worker env stays in passthrough too — see below.
         #
-        # A pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH`) is
-        # removed from the baseline
+        # A worker-present pass-through slot (raw value ==
+        # :data:`_COMPOSE_PASSTHROUGH`) is removed from the baseline
         # ``_compose_env_passthrough_exclusions`` set first: that set treats any
         # ``AGENT_AUTH_ENV_VARS`` key declared on the agent service as
         # profile-owned (``_profile_owned_auth_keys``) regardless of value, so
@@ -1173,7 +1173,9 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # pass-through slot; ``_compose_resolve_value("")`` -> ``("", LITERAL)``
         # so an explicit empty is excluded by the LITERAL branch below.
         passthrough_slots = frozenset(
-            name for name, raw in compose_env.items() if raw == _COMPOSE_PASSTHROUGH
+            name
+            for name, raw in compose_env.items()
+            if raw == _COMPOSE_PASSTHROUGH and name in worker_env
         )
         # Worker-resolved same-name defaulted/required forms resolve to a worker
         # value at stack launch, exactly like pass-through slots. Keep those
