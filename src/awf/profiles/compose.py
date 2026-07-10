@@ -154,8 +154,13 @@ _SECRET_LIKE_PROFILE_ENV_EXACT_NAMES = frozenset(
         # Standard database client password env aliases do not split into the
         # generic PASSWORD/PASSWD tokens below (`PGPASSWORD` is one token and
         # `MYSQL_PWD` uses `PWD`), but their literal values are credentials.
+        # Standard auth-bearing client/env aliases likewise use ``AUTH`` as an
+        # auth-mode noun in some non-secret config, so keep them exact-name
+        # redactions instead of making ``AUTH`` a generic secret token.
+        "DOCKER_AUTH_CONFIG",
         "MYSQL_PWD",
         "PGPASSWORD",
+        "REDISCLI_AUTH",
     }
 )
 

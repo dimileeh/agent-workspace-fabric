@@ -865,6 +865,53 @@ def test_literal_profile_env_from_compose_skips_embedded_auth_header_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_standard_auth_credential_literals(
+    tmp_path: Path,
+) -> None:
+    """Standard AUTH-bearing credential env literals are NOT carried.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6PweEC: names such as
+    ``REDISCLI_AUTH`` and ``DOCKER_AUTH_CONFIG`` carry concrete credentials but
+    do not match the generic secret-name tokens because ``AUTH`` itself is not a
+    redaction token.
+    """
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "REDISCLI_AUTH": "redis-profile-password",
+                            "DOCKER_AUTH_CONFIG": (
+                                '{"auths":{"registry.example":{"auth":"registry-profile-secret"}}}'
+                            ),
+                            "AUTH_MODE": "basic",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert carried.get("AUTH_MODE") == "basic"
+    assert "REDISCLI_AUTH" not in carried
+    assert "DOCKER_AUTH_CONFIG" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "redis-profile-password" not in blob
+    assert "registry-profile-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_preserves_public_key_literals(
     tmp_path: Path,
 ) -> None:
