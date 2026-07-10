@@ -544,3 +544,42 @@ def test_literal_profile_env_from_compose_skips_external_postgres_url_userinfo(
     blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
     assert "external-secret" not in blob
     assert "report-secret" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_git_config_auth_header_value(
+    tmp_path: Path,
+) -> None:
+    """Git env-protocol auth headers must not be carried as hosted literals."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GIT_CONFIG_COUNT": "2",
+                            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
+                            "GIT_CONFIG_VALUE_0": "Authorization: Bearer test-token",
+                            "GIT_CONFIG_KEY_1": "user.email",
+                            "GIT_CONFIG_VALUE_1": "agent@example.com",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried["GIT_CONFIG_COUNT"] == "1"
+    assert carried["GIT_CONFIG_KEY_0"] == "user.email"
+    assert carried["GIT_CONFIG_VALUE_0"] == "agent@example.com"
+    assert "GIT_CONFIG_KEY_1" not in carried
+    assert "GIT_CONFIG_VALUE_1" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "Authorization" not in blob
+    assert "test-token" not in blob

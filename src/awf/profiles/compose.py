@@ -1382,7 +1382,9 @@ def _hosted_git_config_env(
         if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
             continue
         if value_resolution is _ComposeEnvResolution.LITERAL:
-            if _value_has_url_userinfo(config_value):
+            if _value_has_url_userinfo(config_value) or _is_auth_credential_like_profile_env_value(
+                config_value
+            ):
                 continue
             carried_entries.append((config_key, config_value, None))
             continue
