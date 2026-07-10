@@ -380,6 +380,43 @@ class TestRuntimeExecutorSeam:
         assert "hosted runtime executor timed out" in exc.value.result.stderr
 
     @pytest.mark.unit
+    async def test_hosted_watchdog_logs_timeout_after_streamed_stderr(self) -> None:
+        """The synthesized timeout line is appended after live stderr chunks."""
+
+        class _StreamingHungExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                if request.on_stderr is not None:
+                    maybe = request.on_stderr("partial stderr\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                await asyncio.sleep(60)
+                raise AssertionError("execute should be preempted by adapter watchdog")
+
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            default_model="gpt-5",
+            runtime_executor=_StreamingHungExecutor(),
+            agent_wall_timeout_seconds=0.05,
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_streamed_stderr_timeout",
+            )
+
+        assert exc.value.reason_code == "AGENT_TIMEOUT"
+        assert log_store.sinks.stderr_data == [
+            "partial stderr\n",
+            "hosted runtime executor timed out after 0.05s\n",
+        ]
+        assert log_store.sinks.closed is True
+
+    @pytest.mark.unit
     async def test_hosted_idle_timeout_signal_maps_to_agent_idle_timeout(
         self,
     ) -> None:

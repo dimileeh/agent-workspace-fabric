@@ -619,6 +619,7 @@ class AgentAdapter(ABC):
                     agent=self.name.value,
                     workspace_id=workspace_id,
                 )
+            hosted_watchdog_timed_out = False
             try:
                 execute_task = asyncio.create_task(runtime_executor.execute(request))
                 try:
@@ -639,6 +640,7 @@ class AgentAdapter(ABC):
                         pass
                     except Exception:
                         pass
+                    hosted_watchdog_timed_out = True
                     hosted_result = AgentRuntimeExecResult(
                         returncode=_HOSTED_TIMEOUT_RETURN_CODE,
                         stdout="",
@@ -663,13 +665,12 @@ class AgentAdapter(ABC):
             if sinks is not None:
                 # Buffered fallback: write the hosted executor's buffered
                 # stdout/stderr to the sinks only when that fd was not already
-                # streamed during execution. This preserves the prior
-                # buffered-output contract for non-streaming executors while
-                # avoiding double-writes (one streamed chunk + one buffered
-                # copy) for executors that stream.
+                # streamed during execution. If the adapter watchdog synthesized
+                # the result, stderr is new diagnostic output and must be
+                # appended after any earlier streamed stderr.
                 if hosted_result.stdout and not streamed_stdout:
                     await sinks.write_stdout(hosted_result.stdout)
-                if hosted_result.stderr and not streamed_stderr:
+                if hosted_result.stderr and (not streamed_stderr or hosted_watchdog_timed_out):
                     await sinks.write_stderr(hosted_result.stderr)
             result = self._classify_hosted_result(
                 hosted_result=hosted_result,
