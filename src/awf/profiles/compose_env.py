@@ -452,7 +452,14 @@ def _compose_resolve_braced(
             if alternate_resolution is not _ComposeEnvResolution.LITERAL:
                 return "", alternate_resolution
             return alternate, _ComposeEnvResolution.LITERAL
-        # Variable unset (or empty for :+) -> Compose resolves to "", carried.
+        # Variable unset (or empty for :+) -> Compose resolves to "". When the
+        # unselected alternate word would have resolved from the worker, keep
+        # the worker-resolved classification so the hosted profile env does not
+        # carry an empty alias for a secret-bearing slot.
+        _alternate, alternate_resolution = _compose_resolve_value(word, worker_env=worker_env)
+        if alternate_resolution is not _ComposeEnvResolution.LITERAL:
+            return "", alternate_resolution
+        # Literal alternate words are safe to mirror as Compose's empty result.
         return "", _ComposeEnvResolution.LITERAL
     # ``:?`` / ``?`` (required): a set variable resolves to the worker value
     # (a secret), so the slot is worker-resolved-defaulted — kept in passthrough
