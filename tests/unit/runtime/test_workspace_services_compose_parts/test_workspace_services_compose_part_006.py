@@ -430,6 +430,74 @@ def test_literal_profile_env_from_compose_skips_url_query_api_key_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_url_fragment_credential_literals(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile env must not carry credentials embedded in URL fragments."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "CALLBACK_URL": ("https://app.example/cb#access_token=fragment-token"),
+                            "SAFE_CALLBACK_URL": "https://app.example/cb#section=ready",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "CALLBACK_URL" not in carried
+    assert carried["SAFE_CALLBACK_URL"] == "https://app.example/cb#section=ready"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "fragment-token" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_url_path_credential_literals(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile env must not carry credentials embedded in URL path params."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "CALLBACK_URL": "https://app.example/cb;password=path-secret",
+                            "SAFE_CALLBACK_URL": "https://app.example/cb;mode=ready",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "CALLBACK_URL" not in carried
+    assert carried["SAFE_CALLBACK_URL"] == "https://app.example/cb;mode=ready"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "path-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_embedded_url_userinfo_literals(
     tmp_path: Path,
 ) -> None:

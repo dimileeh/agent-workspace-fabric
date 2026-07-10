@@ -298,9 +298,10 @@ def _value_has_url_userinfo(value: str) -> bool:
             userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
             if userinfo:
                 return True
-        if _url_component_has_secret_credential_field(
-            parsed.netloc
-        ) or _url_component_has_secret_credential_field(parsed.query):
+        if any(
+            _url_component_has_secret_credential_field(component)
+            for component in (parsed.netloc, parsed.path, parsed.query, parsed.fragment)
+        ):
             return True
         return any(
             _value_has_url_userinfo(match.group(0))
