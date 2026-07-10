@@ -620,20 +620,34 @@ class AgentAdapter(ABC):
                     workspace_id=workspace_id,
                 )
             try:
-                hosted_result = await asyncio.wait_for(
-                    runtime_executor.execute(request),
-                    timeout=request.wall_timeout_seconds,
-                )
-            except TimeoutError:
-                hosted_result = AgentRuntimeExecResult(
-                    returncode=_HOSTED_TIMEOUT_RETURN_CODE,
-                    stdout="",
-                    stderr=(
-                        "hosted runtime executor timed out after "
-                        f"{self._agent_wall_timeout_seconds:g}s\n"
-                    ),
-                    timeout_reason=COMMAND_TIMEOUT_REASON,
-                )
+                execute_task = asyncio.create_task(runtime_executor.execute(request))
+                try:
+                    done, _pending = await asyncio.wait(
+                        {execute_task},
+                        timeout=request.wall_timeout_seconds,
+                    )
+                except asyncio.CancelledError:
+                    execute_task.cancel()
+                    raise
+                if execute_task in done:
+                    hosted_result = execute_task.result()
+                else:
+                    execute_task.cancel()
+                    try:
+                        await execute_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
+                    hosted_result = AgentRuntimeExecResult(
+                        returncode=_HOSTED_TIMEOUT_RETURN_CODE,
+                        stdout="",
+                        stderr=(
+                            "hosted runtime executor timed out after "
+                            f"{self._agent_wall_timeout_seconds:g}s\n"
+                        ),
+                        timeout_reason=COMMAND_TIMEOUT_REASON,
+                    )
             except AgentRunError:
                 raise
             except Exception as exc:

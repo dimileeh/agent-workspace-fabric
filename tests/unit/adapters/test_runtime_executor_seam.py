@@ -299,6 +299,34 @@ class TestRuntimeExecutorSeam:
         assert finalize_calls == [(None, "failed", "ws_hosted_executor_error")]
 
     @pytest.mark.unit
+    async def test_hosted_executor_timeout_error_becomes_executor_error(
+        self,
+    ) -> None:
+        class _TimeoutExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                raise TimeoutError("k8s api client timed out")
+
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=_TimeoutExecutor(),
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_hosted_executor_timeout_error",
+            )
+
+        assert exc.value.agent is AgentRuntime.codex
+        assert exc.value.reason_code == "AGENT_HOSTED_EXECUTOR_ERROR"
+        assert exc.value.result.returncode == 1
+        assert exc.value.result.stdout == ""
+        assert "TimeoutError: k8s api client timed out" in exc.value.result.stderr
+
+    @pytest.mark.unit
     async def test_hosted_timeout_exit_maps_to_agent_timeout(
         self,
     ) -> None:
