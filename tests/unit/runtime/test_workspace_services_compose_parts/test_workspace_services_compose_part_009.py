@@ -631,6 +631,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
                 "OAUTH_CONFIG": '{"client_secret":"profile-oauth-client-secret"}',
                 "APP_CONFIG": "{'password':'profile-app-password'}",
                 "SDK_CONFIG": '{"apiKey":"profile-sdk-api-key"}',
+                "KUBECONFIG_CONTENT": "apiVersion: v1\nclient-key-data: profile-kube-key-data",
+                "APP_KEY_CONFIG": '{"privateKeyData":"profile-private-key-data"}',
                 "SAFE_CONFIG": '{"issuer":"https://issuer.example","timeout":30}',
                 "OLLAMA_HOST": "http://ollama.profile:11434",
             },
@@ -641,12 +643,16 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
     assert "OAUTH_CONFIG" not in profile_env
     assert "APP_CONFIG" not in profile_env
     assert "SDK_CONFIG" not in profile_env
+    assert "KUBECONFIG_CONTENT" not in profile_env
+    assert "APP_KEY_CONFIG" not in profile_env
     assert profile_env["SAFE_CONFIG"] == '{"issuer":"https://issuer.example","timeout":30}'
     assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
     blob = "\x00".join(profile_env.values())
     assert "profile-oauth-client-secret" not in blob
     assert "profile-app-password" not in blob
     assert "profile-sdk-api-key" not in blob
+    assert "profile-kube-key-data" not in blob
+    assert "profile-private-key-data" not in blob
 
 
 @pytest.mark.unit
