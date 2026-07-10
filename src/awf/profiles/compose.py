@@ -988,6 +988,8 @@ def hosted_profile_env_passthrough_aliases(
     env = os.environ if worker_env is None else worker_env
     aliases: list[tuple[str, str]] = []
     for name, raw in compose_env.items():
+        if _is_git_config_protocol_key(name):
+            continue
         if raw == _COMPOSE_PASSTHROUGH:
             continue
         resolution = _compose_resolve_value(raw, worker_env=env)[1]
@@ -1000,6 +1002,16 @@ def hosted_profile_env_passthrough_aliases(
         if source_name is None or source_name == name or not env.get(source_name):
             continue
         aliases.append((name, source_name))
+    aliases.extend(
+        _hosted_git_config_passthrough_aliases(
+            compose_env,
+            worker_env=env,
+            skip_bitbucket_agent_rewrites=_has_mount_backed_bitbucket_askpass(
+                compose_env,
+                worker_env=env,
+            ),
+        )
+    )
     return tuple(aliases)
 
 
@@ -1234,18 +1246,46 @@ def _hosted_git_config_profile_env(
     worker_env: Mapping[str, str],
     skip_bitbucket_agent_rewrites: bool,
 ) -> tuple[tuple[str, str], ...]:
+    profile_env, _aliases = _hosted_git_config_env(
+        compose_env,
+        worker_env=worker_env,
+        skip_bitbucket_agent_rewrites=skip_bitbucket_agent_rewrites,
+    )
+    return profile_env
+
+
+def _hosted_git_config_passthrough_aliases(
+    compose_env: Mapping[str, str],
+    *,
+    worker_env: Mapping[str, str],
+    skip_bitbucket_agent_rewrites: bool,
+) -> tuple[tuple[str, str], ...]:
+    _profile_env, aliases = _hosted_git_config_env(
+        compose_env,
+        worker_env=worker_env,
+        skip_bitbucket_agent_rewrites=skip_bitbucket_agent_rewrites,
+    )
+    return aliases
+
+
+def _hosted_git_config_env(
+    compose_env: Mapping[str, str],
+    *,
+    worker_env: Mapping[str, str],
+    skip_bitbucket_agent_rewrites: bool,
+) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
     count_raw = compose_env.get(_GIT_CONFIG_COUNT_KEY)
     if count_raw is None or count_raw == _COMPOSE_PASSTHROUGH:
-        return ()
+        return (), ()
     count_value, count_resolution = _compose_resolve_value(count_raw, worker_env=worker_env)
     if count_resolution is not _ComposeEnvResolution.LITERAL:
-        return ()
+        return (), ()
     try:
         count = int(count_value)
     except ValueError:
-        return ()
+        return (), ()
 
-    carried_entries: list[tuple[str, str]] = []
+    carried_entries: list[tuple[str, str | None, str | None]] = []
     for index in range(count):
         config_key_raw = compose_env.get(f"{_GIT_CONFIG_KEY_PREFIX}{index}")
         config_value_raw = compose_env.get(f"{_GIT_CONFIG_VALUE_PREFIX}{index}")
@@ -1264,26 +1304,58 @@ def _hosted_git_config_profile_env(
             config_value_raw,
             worker_env=worker_env,
         )
-        if (
-            key_resolution is not _ComposeEnvResolution.LITERAL
-            or value_resolution is not _ComposeEnvResolution.LITERAL
-        ):
+        if key_resolution is not _ComposeEnvResolution.LITERAL:
             continue
-        if _value_has_url_userinfo(config_key) or _value_has_url_userinfo(config_value):
+        if _value_has_url_userinfo(config_key):
             continue
         if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
             continue
-        carried_entries.append((config_key, config_value))
+        if value_resolution is _ComposeEnvResolution.LITERAL:
+            if _value_has_url_userinfo(config_value):
+                continue
+            carried_entries.append((config_key, config_value, None))
+            continue
+        value_source = _hosted_git_config_value_alias_source(
+            config_value_raw,
+            value_resolution=value_resolution,
+            worker_env=worker_env,
+        )
+        if value_source is None:
+            continue
+        carried_entries.append((config_key, None, value_source))
 
     if not carried_entries:
-        return ()
+        return (), ()
 
     pairs: list[tuple[str, str]] = []
-    for index, (config_key, config_value) in enumerate(carried_entries):
+    aliases: list[tuple[str, str]] = []
+    for index, (config_key, entry_config_value, entry_value_source) in enumerate(carried_entries):
         pairs.append((f"{_GIT_CONFIG_KEY_PREFIX}{index}", config_key))
-        pairs.append((f"{_GIT_CONFIG_VALUE_PREFIX}{index}", config_value))
+        value_key = f"{_GIT_CONFIG_VALUE_PREFIX}{index}"
+        if entry_value_source is None:
+            assert entry_config_value is not None
+            pairs.append((value_key, entry_config_value))
+        else:
+            aliases.append((value_key, entry_value_source))
     pairs.append((_GIT_CONFIG_COUNT_KEY, str(len(carried_entries))))
-    return tuple(pairs)
+    return tuple(pairs), tuple(aliases)
+
+
+def _hosted_git_config_value_alias_source(
+    raw: str,
+    *,
+    value_resolution: _ComposeEnvResolution,
+    worker_env: Mapping[str, str],
+) -> str | None:
+    if value_resolution is _ComposeEnvResolution.WORKER_RESOLVED_SLOT:
+        source_name = _compose_bare_reference_name(raw)
+    elif value_resolution is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED:
+        source_name = _compose_defaulted_reference_name(raw, worker_env=worker_env)
+    else:
+        return None
+    if source_name is None or not worker_env.get(source_name):
+        return None
+    return source_name
 
 
 # Compose env-value interpolation / resolution machinery lives in

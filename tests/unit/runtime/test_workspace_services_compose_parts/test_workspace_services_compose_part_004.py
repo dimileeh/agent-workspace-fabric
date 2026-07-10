@@ -20,6 +20,7 @@ import yaml
 from awf.profiles.compose import (
     filter_hosted_env_passthrough_names,
     hosted_github_token_passthrough_names,
+    hosted_profile_env_passthrough_aliases,
     literal_profile_env_from_compose,
 )
 from awf.profiles.compose_env import _compose_bare_reference_name
@@ -651,3 +652,71 @@ def test_hosted_github_token_passthrough_names_empty_without_worker_token(
         },
     )
     assert hosted_github_token_passthrough_names(compose_file, worker_env={}) == ()
+
+
+@pytest.mark.unit
+def test_hosted_git_config_preserves_worker_resolved_value_block(
+    tmp_path: Path,
+) -> None:
+    """A worker-resolved git-config value keeps its count/key block."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "credential.helper",
+                        "GIT_CONFIG_VALUE_0": "${GIT_HELPER}",
+                    },
+                }
+            }
+        },
+    )
+    worker_env = {"GIT_HELPER": "!/workspace/bin/git-helper"}
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    aliases = hosted_profile_env_passthrough_aliases(compose_file, worker_env=worker_env)
+
+    assert profile_env == {
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_COUNT": "1",
+    }
+    assert aliases == (("GIT_CONFIG_VALUE_0", "GIT_HELPER"),)
+    assert "!/workspace/bin/git-helper" not in "".join(profile_env.values())
+
+
+@pytest.mark.unit
+def test_hosted_git_config_reindexes_worker_resolved_value_aliases(
+    tmp_path: Path,
+) -> None:
+    """Skipped git-config entries do not leave original-index aliases behind."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "GIT_CONFIG_COUNT": "2",
+                        "GIT_CONFIG_KEY_0": "credential.helper",
+                        "GIT_CONFIG_VALUE_0": "${MISSING_HELPER}",
+                        "GIT_CONFIG_KEY_1": "user.name",
+                        "GIT_CONFIG_VALUE_1": "${GIT_AUTHOR_NAME}",
+                    },
+                }
+            }
+        },
+    )
+    worker_env = {"GIT_AUTHOR_NAME": "Profile Bot"}
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    aliases = hosted_profile_env_passthrough_aliases(compose_file, worker_env=worker_env)
+
+    assert profile_env == {
+        "GIT_CONFIG_KEY_0": "user.name",
+        "GIT_CONFIG_COUNT": "1",
+    }
+    assert aliases == (("GIT_CONFIG_VALUE_0", "GIT_AUTHOR_NAME"),)
+    assert "GIT_CONFIG_KEY_1" not in profile_env
