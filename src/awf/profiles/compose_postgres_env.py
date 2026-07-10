@@ -42,7 +42,24 @@ def compose_postgres_service_hostnames(
             continue
         if _compose_service_is_postgres(service, compose_dir=compose_file.parent, worker_env=env):
             hostnames.add(service_name.lower())
+            hostnames.update(_compose_service_network_aliases(service))
     return frozenset(hostnames)
+
+
+def _compose_service_network_aliases(service: Mapping[object, object]) -> frozenset[str]:
+    """Return string network aliases declared on a Compose service."""
+    networks = service.get("networks")
+    if not isinstance(networks, Mapping):
+        return frozenset()
+    aliases: set[str] = set()
+    for network_config in networks.values():
+        if not isinstance(network_config, Mapping):
+            continue
+        raw_aliases = network_config.get("aliases")
+        if not isinstance(raw_aliases, list):
+            continue
+        aliases.update(alias.lower() for alias in raw_aliases if isinstance(alias, str))
+    return frozenset(aliases)
 
 
 def try_compose_agent_env_and_postgres_passwords(

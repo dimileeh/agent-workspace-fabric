@@ -49,6 +49,50 @@ def test_literal_profile_env_from_compose_carries_values_without_postgres_servic
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_allows_passwordless_postgres_network_alias(
+    tmp_path: Path,
+) -> None:
+    """Passwordless local Postgres DSNs may target Compose network aliases."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "db": {
+                        "image": "postgres:16-alpine",
+                        "environment": {
+                            "POSTGRES_USER": "awf",
+                            "POSTGRES_HOST_AUTH_METHOD": "trust",
+                            "POSTGRES_DB": "awf",
+                        },
+                        "networks": {
+                            "app_net": {
+                                "aliases": ["pg-primary"],
+                            }
+                        },
+                    },
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": "postgresql://awf@pg-primary:5432/awf",
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    },
+                },
+                "networks": {"app_net": {}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    assert ("DATABASE_URL", "postgresql://awf@pg-primary:5432/awf") in profile_env
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_postgres_password_under_nonstandard_service_name(
     tmp_path: Path,
 ) -> None:
