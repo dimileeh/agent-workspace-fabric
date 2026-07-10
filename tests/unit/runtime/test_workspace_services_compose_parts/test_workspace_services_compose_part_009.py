@@ -242,6 +242,34 @@ def test_literal_profile_env_from_compose_redacts_quoted_authorization_header_va
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_api_key_header_values(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile_env does not carry API-key headers hidden in generic values."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "REQUEST_HEADERS": '{"X-Api-Key":"sk_profile_header_secret"}',
+                "CURL_ARGS": '-fsS -H "x-api-key: sk_profile_curl_secret"',
+                "OLLAMA_HOST": "http://ollama.profile:11434",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "REQUEST_HEADERS" not in profile_env
+    assert "CURL_ARGS" not in profile_env
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    blob = "\x00".join(profile_env.values())
+    assert "sk_profile_header_secret" not in blob
+    assert "sk_profile_curl_secret" not in blob
+
+
+@pytest.mark.unit
 def test_hosted_git_config_filters_unsafe_entries_and_reindexes_safe_ones() -> None:
     """Hosted git config keeps only safe literal and worker-resolved entries."""
 
