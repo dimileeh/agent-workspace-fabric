@@ -774,3 +774,36 @@ def test_literal_profile_env_from_compose_skips_git_config_auth_header_value(
     blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
     assert "Authorization" not in blob
     assert "test-token" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_proxy_auth_header_value(
+    tmp_path: Path,
+) -> None:
+    """Neutral env names must not carry proxy authorization header literals."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "CURL_ARGS": "-H 'Proxy-Authorization: Basic test-proxy-token'",
+                            "APP_BASE_URL": "https://app.example",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried["APP_BASE_URL"] == "https://app.example"
+    assert "CURL_ARGS" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "Proxy-Authorization" not in blob
+    assert "test-proxy-token" not in blob
