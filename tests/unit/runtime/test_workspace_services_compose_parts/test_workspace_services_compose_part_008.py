@@ -12,6 +12,37 @@ from awf.profiles.compose import literal_profile_env_from_compose
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_passwordless_local_postgres_scheme(
+    tmp_path: Path,
+) -> None:
+    """The common local ``postgres://user@postgres`` DSN is safe to replay."""
+
+    compose_file = tmp_path / "compose.yml"
+    database_url = "postgres://postgres@postgres:5432/app"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": database_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert profile_env["DATABASE_URL"] == database_url
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_local_postgres_url_userinfo_passwords(
     tmp_path: Path,
 ) -> None:
@@ -58,6 +89,8 @@ def test_literal_profile_env_from_compose_redacts_local_postgres_url_userinfo_pa
 @pytest.mark.parametrize(
     "database_url,secret",
     [
+        ("postgres://postgres@postgres:5432/app?password=s3cr3t", "s3cr3t"),
+        ("postgres://postgres@postgres:5432/app#token=s3cr3t", "s3cr3t"),
         ("postgresql://postgres@postgres:5432/app?password=s3cr3t", "s3cr3t"),
         ("postgresql+asyncpg://postgres@postgres:5432/app#token=s3cr3t", "s3cr3t"),
     ],

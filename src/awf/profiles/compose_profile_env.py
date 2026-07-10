@@ -117,7 +117,7 @@ def _local_postgres_database_url_without_tracked_password(
     from awf.profiles import compose as compose_module
 
     return (
-        (parsed.scheme == "postgresql" or parsed.scheme.startswith("postgresql+"))
+        (parsed.scheme in {"postgres", "postgresql"} or parsed.scheme.startswith("postgresql+"))
         and hostname == "postgres"
         and password is None
         and not any(
