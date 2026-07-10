@@ -169,7 +169,6 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
         "PASSWORD",
         "SECRET",
         "TOKEN",
-        "WEBHOOK",
     }
 )
 _SECRET_LIKE_PROFILE_ENV_NAME_CONCATENATED_TOKENS = frozenset(

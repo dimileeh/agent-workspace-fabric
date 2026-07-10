@@ -75,6 +75,8 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
     if tokens and tokens[-1] in _NON_SECRET_PROFILE_ENV_NAME_ENDPOINT_SUFFIX_TOKENS:
         endpoint_name_tokens = tokens[:-1]
         endpoint_secret_tokens = _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS - frozenset({"TOKEN"})
+        if "WEBHOOK" in endpoint_name_tokens:
+            return True
         if any(token in endpoint_secret_tokens for token in endpoint_name_tokens):
             return True
         if any(token == "TOKEN" for token in endpoint_name_tokens) and not {"OAUTH", "OIDC"} & set(

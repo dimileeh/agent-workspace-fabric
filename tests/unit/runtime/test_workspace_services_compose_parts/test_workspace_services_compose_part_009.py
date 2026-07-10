@@ -27,6 +27,9 @@ def test_url_and_secret_like_profile_env_detection_covers_query_credentials() ->
     assert compose_module._is_secret_like_profile_env_name("SLACK_WEBHOOK_URL") is True
     assert compose_module._is_secret_like_profile_env_name("DISCORD_WEBHOOK_URL") is True
     assert compose_module._is_secret_like_profile_env_name("SLACK_WEBHOOK_SECRET_URL") is True
+    assert compose_module._is_secret_like_profile_env_name("WEBHOOK_TIMEOUT") is False
+    assert compose_module._is_secret_like_profile_env_name("WEBHOOK_ENABLED") is False
+    assert compose_module._is_secret_like_profile_env_name("WEBHOOK_RETRY_COUNT") is False
     assert compose_module._is_secret_like_profile_env_name("PASSWORD_ENDPOINT") is True
     assert compose_module._is_secret_like_profile_env_name("PAYMENTS_CLIENT_SECRET_URI") is True
     assert compose_module._is_secret_like_profile_env_name("SERVICE_ACCESS_KEY_URL") is True
@@ -370,6 +373,37 @@ def test_literal_profile_env_from_compose_preserves_authorization_endpoints(
         profile_env["OIDC_AUTHORIZATION_ENDPOINT"] == "https://issuer.example/oauth2/v1/authorize"
     )
     assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_non_secret_webhook_config(
+    tmp_path: Path,
+) -> None:
+    """Webhook operational settings are carried while webhook URL secrets are skipped."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "WEBHOOK_TIMEOUT": "30",
+                "WEBHOOK_ENABLED": "false",
+                "WEBHOOK_RETRY_COUNT": "3",
+                "SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/raw-slack-path-secret",
+                "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/raw-discord-path-secret",
+                "WEBHOOK_SECRET": "raw-webhook-secret",
+            },
+            worker_env={},
+        )
+    )
+
+    assert profile_env["WEBHOOK_TIMEOUT"] == "30"
+    assert profile_env["WEBHOOK_ENABLED"] == "false"
+    assert profile_env["WEBHOOK_RETRY_COUNT"] == "3"
+    assert "SLACK_WEBHOOK_URL" not in profile_env
+    assert "DISCORD_WEBHOOK_URL" not in profile_env
+    assert "WEBHOOK_SECRET" not in profile_env
 
 
 @pytest.mark.unit
