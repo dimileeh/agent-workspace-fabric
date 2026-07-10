@@ -149,6 +149,16 @@ _NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES = frozenset(
     }
 )
 
+_SECRET_LIKE_PROFILE_ENV_EXACT_NAMES = frozenset(
+    {
+        # Standard database client password env aliases do not split into the
+        # generic PASSWORD/PASSWD tokens below (`PGPASSWORD` is one token and
+        # `MYSQL_PWD` uses `PWD`), but their literal values are credentials.
+        "MYSQL_PWD",
+        "PGPASSWORD",
+    }
+)
+
 _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
     {
         "AUTHORIZATION",
@@ -194,6 +204,8 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
     normalized = name.upper().replace("-", "_")
     if normalized in _NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES:
         return False
+    if normalized in _SECRET_LIKE_PROFILE_ENV_EXACT_NAMES:
+        return True
     tokens = tuple(token for token in normalized.split("_") if token)
     if any(token in _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS for token in tokens):
         return True
