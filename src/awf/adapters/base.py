@@ -137,7 +137,7 @@ def _prepend_missing_streamed_output(*, chunks: list[str], buffered: str) -> str
     streamed = "".join(chunks)
     if not streamed:
         return buffered
-    if streamed in buffered:
+    if buffered.startswith(streamed):
         return buffered
     return streamed + buffered
 
