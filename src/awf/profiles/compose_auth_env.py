@@ -200,7 +200,7 @@ _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKEN_SEQUENCES = (("REACT", "APP"),)
 _NON_SECRET_PROFILE_ENV_NAME_ENDPOINT_SUFFIX_TOKENS = frozenset({"ENDPOINT", "URI", "URL"})
 
 _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
-    r"(?:^\s*(?:basic|bearer)\s+\S+|(?<![A-Za-z0-9_-])[\"']?(?:(?:proxy[-_]?)?authorization|cookie|(?:x[-_]?)?api[-_]?key)[\"']?\s*:\s*[\"']?\S+)",
+    r"(?:^\s*(?:basic|bearer)\s+\S+|(?<![A-Za-z0-9_-])[\"']?(?:(?:proxy[-_]?)?authorization|cookie|(?:x[-_]?)?api[-_]?key|(?:x[-_]?)?(?:(?:access|auth|csrf|id|refresh|session)[-_]?)?token)[\"']?\s*:\s*[\"']?\S+)",
     re.IGNORECASE,
 )
 _URL_SECRET_CREDENTIAL_FIELD_NAMES = frozenset(

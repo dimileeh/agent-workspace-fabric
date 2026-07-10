@@ -310,6 +310,34 @@ def test_literal_profile_env_from_compose_redacts_api_key_header_values(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_auth_token_header_values(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile_env does not carry token headers hidden in generic values."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "REQUEST_HEADERS": '{"X-Auth-Token":"profile-header-token"}',
+                "CURL_ARGS": "-fsS -H 'X-Auth-Token: profile-curl-token'",
+                "OLLAMA_HOST": "http://ollama.profile:11434",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "REQUEST_HEADERS" not in profile_env
+    assert "CURL_ARGS" not in profile_env
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    blob = "\x00".join(profile_env.values())
+    assert "profile-header-token" not in blob
+    assert "profile-curl-token" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_cookie_header_values(
     tmp_path: Path,
 ) -> None:
