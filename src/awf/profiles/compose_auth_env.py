@@ -163,6 +163,7 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
     {
         "CREDENTIAL",
         "CREDENTIALS",
+        "JWT",
         "PASSWD",
         "PASSWORD",
         "SECRET",
