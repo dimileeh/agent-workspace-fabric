@@ -147,11 +147,29 @@ def _url_component_has_secret_credential_field(component: str) -> bool:
         return True
     if any("://" in value and _value_has_url_userinfo(value) for _key, value in query_pairs):
         return True
+    if any(_relative_url_value_has_secret_credential_field(value) for _key, value in query_pairs):
+        return True
     for raw_part in re.split(r"[&;]", component):
         key, separator, value = raw_part.partition("=")
         if separator and value and _url_field_name_has_secret_credential(key):
             return True
     return False
+
+
+def _relative_url_value_has_secret_credential_field(value: str) -> bool:
+    if not value or ("?" not in value and "#" not in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    if parsed.scheme or parsed.netloc:
+        return False
+    return any(
+        _url_component_has_secret_credential_field(component)
+        for raw_component in (parsed.query, parsed.fragment)
+        for component in _url_component_variants(raw_component)
+    )
 
 
 def _url_component_variants(component: str) -> tuple[str, ...]:

@@ -182,6 +182,34 @@ def test_literal_profile_env_from_compose_redacts_session_url_fields(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_nested_relative_query_credentials(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile_env skips redirect URLs with relative credential-bearing targets."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "CALLBACK_URL": "https://proxy.example/cb?return_to=%2Ffinish%3Fsession%3Draw-session",
+                "NEXT_CALLBACK_URL": "https://proxy.example/cb?next=/finish?auth=raw-auth",
+                "PUBLIC_CALLBACK_URL": "https://proxy.example/cb?return_to=/finish?state=public",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "CALLBACK_URL" not in profile_env
+    assert "NEXT_CALLBACK_URL" not in profile_env
+    assert (
+        profile_env["PUBLIC_CALLBACK_URL"]
+        == "https://proxy.example/cb?return_to=/finish?state=public"
+    )
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_secret_named_url_literals(
     tmp_path: Path,
 ) -> None:
