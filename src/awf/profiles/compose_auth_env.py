@@ -207,6 +207,9 @@ _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?:^\s*(?:basic|bearer)\s+\S+|(?<![A-Za-z0-9_-])[\"']?_?(?:(?:proxy[-_]?)?authorization|cookie|credentials?|(?:(?:x[-_]?)|(?:[A-Za-z0-9]+[-_])+)?api[-_]?key|(?:[A-Za-z0-9]+[-_])*subscription[-_]?key|(?:account|access|private)[-_]?key|(?:client[-_]?)?key[-_]?data|private[-_]?key[-_]?data|(?:aws[-_]?)?secret[-_]?access[-_]?key|client[-_]?secret|(?:[A-Za-z0-9]+[-_])*(?:client[-_]?|signing[-_]?)?secret|(?-i:[A-Za-z0-9]+SigningSecret)|(?:[A-Za-z0-9]+[-_]?)*(?:password|passwd|pwd)|(?:x[-_]?)?(?:(?:[A-Za-z0-9]+[-_])*(?:access|api|auth|bearer|csrf|id|job|oauth|private|refresh|session)[-_]?)?token|(?:x[-_]?)?(?:amz[-_]?)?security[-_]?token)[\"']?\s*[:=]\s*[\"']?\S+|[\"']auth[\"']\s*:\s*[\"'][^\"']+|[\"']private[_-]key[\"']\s*:\s*[\"'][^\"']+|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)",
     re.IGNORECASE,
 )
+_CAMELCASE_API_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+ApiKey[\"']?\s*[:=]\s*[\"']?\S+"
+)
 _NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?:^|[\r\n])\s*(?://[^\s=]+:\s*)?_?auth\s*=\s*\S+",
     re.IGNORECASE,

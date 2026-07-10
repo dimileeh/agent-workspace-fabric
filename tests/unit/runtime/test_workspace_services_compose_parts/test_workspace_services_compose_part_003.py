@@ -444,6 +444,39 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_camelcase_vendor_api_key_fields(
+    tmp_path: Path,
+) -> None:
+    """Neutral config/header blobs with vendor camelCase API-key fields are secret."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_CONFIG": '{"googleApiKey":"google-profile-key"}',
+                            "REQUEST_HEADERS": '{"xGoogApiKey":"goog-header-key"}',
+                            "SAFE_CONFIG": '{"feature":"enabled"}',
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert "APP_CONFIG" not in carried
+    assert "REQUEST_HEADERS" not in carried
+    assert carried["SAFE_CONFIG"] == '{"feature":"enabled"}'
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_preserves_public_frontend_api_keys(
     tmp_path: Path,
 ) -> None:
