@@ -324,6 +324,67 @@ def test_hosted_github_token_passthrough_names_accepts_same_name_defaulted_worke
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("worker_env", "expected_names"),
+    [
+        (
+            {"AWF_GITHUB_TOKEN": "ghp_awf_worker_secret"},
+            ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
+        ),
+        (
+            {"GH_TOKEN": "ghp_gh_worker_secret"},
+            ("GH_TOKEN", "GITHUB_TOKEN"),
+        ),
+        (
+            {"GITHUB_TOKEN": "ghp_github_worker_secret"},
+            ("GH_TOKEN", "GITHUB_TOKEN"),
+        ),
+    ],
+)
+def test_hosted_github_token_passthrough_names_accepts_github_fallback_chains(
+    tmp_path: Path,
+    worker_env: dict[str, str],
+    expected_names: tuple[str, ...],
+) -> None:
+    """Defaulted GitHub fallback chains preserve the selected worker token source.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6QA0Q6: hosted GitHub matching
+    must use the selected worker source name for common fallback chains such as
+    ``${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}``, not require the
+    selected name to equal the target alias. Local Compose injects whichever
+    worker source the chain selects into the gh-visible aliases; hosted must
+    surface the same names for out-of-band resolution.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    fallback_chain = "${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GH_TOKEN": fallback_chain,
+                            "GITHUB_TOKEN": fallback_chain,
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = hosted_github_token_passthrough_names(compose_file, worker_env=worker_env)
+
+    assert names == expected_names
+    for value in worker_env.values():
+        assert value not in names
+    assert fallback_chain not in names
+
+
+@pytest.mark.unit
 def test_hosted_github_token_passthrough_names_skips_profile_owned_awf_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -766,6 +766,11 @@ def _github_token_slot_matches_worker(
             raw is not None
             and _compose_defaulted_reference_name(raw, worker_env=worker_env) == token_name
         )
+        or (
+            raw is not None
+            and _compose_selected_worker_reference_name(raw, worker_env=worker_env)
+            == _github_token_source_name(worker_env)
+        )
     )
 
 
