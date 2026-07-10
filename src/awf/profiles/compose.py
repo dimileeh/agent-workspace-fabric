@@ -151,6 +151,8 @@ _NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES = frozenset(
 
 _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
     {
+        "AUTH",
+        "AUTHORIZATION",
         "CREDENTIAL",
         "CREDENTIALS",
         "PASSWD",

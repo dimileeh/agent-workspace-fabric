@@ -317,6 +317,10 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                             "NPM_TOKEN": "npm_profile_token",
                             "CUSTOM_API_TOKEN": "custom_profile_token",
                             "PAYMENTS_CLIENT_SECRET": "client_secret",
+                            "AUTHORIZATION": "Bearer profile-token",
+                            "HTTP_AUTHORIZATION": "Basic profile-token",
+                            "UPSTREAM_AUTH": "Bearer upstream-token",
+                            "GEMINI_API_KEY_AUTH_MECHANISM": "api-key",
                             "OLLAMA_HOST": "http://ollama.profile:11434",
                             "AWS_REGION": "us-west-2",
                             "APP_MODE": "ci",
@@ -333,6 +337,10 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert "NPM_TOKEN" not in carried
     assert "CUSTOM_API_TOKEN" not in carried
     assert "PAYMENTS_CLIENT_SECRET" not in carried
+    assert "AUTHORIZATION" not in carried
+    assert "HTTP_AUTHORIZATION" not in carried
+    assert "UPSTREAM_AUTH" not in carried
+    assert carried["GEMINI_API_KEY_AUTH_MECHANISM"] == "api-key"
     assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
     assert carried["AWS_REGION"] == "us-west-2"
     assert carried["APP_MODE"] == "ci"
