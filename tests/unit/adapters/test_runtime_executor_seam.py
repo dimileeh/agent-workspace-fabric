@@ -427,6 +427,73 @@ class TestRuntimeExecutorSeam:
         assert "hosted runtime executor timed out" in exc.value.result.stderr
 
     @pytest.mark.unit
+    async def test_hosted_watchdog_detaches_slow_cancel_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slow hosted cleanup after cancellation must not block timeout synthesis."""
+
+        monkeypatch.setattr(
+            base_module, "_HOSTED_CANCEL_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False
+        )
+
+        class _SlowCancelCleanupExecutor:
+            def __init__(self) -> None:
+                self.cleanup_started = asyncio.Event()
+                self.cleanup_release = asyncio.Event()
+                self.cleanup_finished = asyncio.Event()
+
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None:
+                        task.uncancel()
+                    self.cleanup_started.set()
+                    try:
+                        await self.cleanup_release.wait()
+                    finally:
+                        self.cleanup_finished.set()
+                    return AgentRuntimeExecResult(
+                        returncode=0, stdout="cleanup eventually returned", stderr=""
+                    )
+
+        executor = _SlowCancelCleanupExecutor()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+            agent_wall_timeout_seconds=0.01,
+        )
+
+        run_task = asyncio.create_task(
+            adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_slow_cancel_cleanup",
+            )
+        )
+
+        try:
+            await asyncio.wait_for(executor.cleanup_started.wait(), timeout=0.2)
+            done, _pending = await asyncio.wait({run_task}, timeout=0.05)
+            assert run_task in done
+            with pytest.raises(AgentRunError) as exc:
+                await run_task
+        finally:
+            executor.cleanup_release.set()
+            if not run_task.done():
+                await asyncio.wait_for(
+                    asyncio.gather(run_task, return_exceptions=True), timeout=0.2
+                )
+            await asyncio.wait_for(executor.cleanup_finished.wait(), timeout=0.2)
+
+        assert exc.value.reason_code == "AGENT_TIMEOUT"
+        assert exc.value.result.returncode == 124
+        assert exc.value.result.reason_code == "COMMAND_TIMEOUT"
+
+    @pytest.mark.unit
     async def test_hosted_watchdog_logs_timeout_after_streamed_stderr(self) -> None:
         """The synthesized timeout line is appended after live stderr chunks."""
 

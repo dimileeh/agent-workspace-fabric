@@ -60,6 +60,9 @@ DEFAULT_AGENT_WALL_TIMEOUT_SECONDS = 7200.0
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 3600.0
 """Default maximum stdout/stderr silence for a single agent CLI run."""
 
+_HOSTED_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
+"""Maximum time to wait for hosted executor cleanup after adapter timeout."""
+
 _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES = frozenset(
     {
         # ADC is a filesystem path whose local Compose contract includes an auth
@@ -119,6 +122,15 @@ branch that AWF has already created for you. Your contract:
 ---
 
 """
+
+
+def _discard_hosted_execute_task_result(task: asyncio.Task[AgentRuntimeExecResult]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -635,11 +647,17 @@ class AgentAdapter(ABC):
                 else:
                     execute_task.cancel()
                     try:
-                        await execute_task
+                        done_after_cancel, _pending_after_cancel = await asyncio.wait(
+                            {execute_task},
+                            timeout=_HOSTED_CANCEL_DRAIN_TIMEOUT_SECONDS,
+                        )
                     except asyncio.CancelledError:
-                        pass
-                    except Exception:
-                        pass
+                        execute_task.add_done_callback(_discard_hosted_execute_task_result)
+                        raise
+                    if execute_task in done_after_cancel or execute_task.done():
+                        _discard_hosted_execute_task_result(execute_task)
+                    else:
+                        execute_task.add_done_callback(_discard_hosted_execute_task_result)
                     hosted_watchdog_timed_out = True
                     hosted_result = AgentRuntimeExecResult(
                         returncode=_HOSTED_TIMEOUT_RETURN_CODE,
