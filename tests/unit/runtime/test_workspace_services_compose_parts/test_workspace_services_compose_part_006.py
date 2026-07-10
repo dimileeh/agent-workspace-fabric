@@ -54,6 +54,44 @@ def test_literal_profile_env_from_compose_skips_mount_backed_bitbucket_askpass(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_hosted_bitbucket_rewrites(
+    tmp_path: Path,
+) -> None:
+    """Hosted jobs keep Bitbucket agent rewrites when no local askpass mount exists."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GIT_CONFIG_KEY_0": (
+                                "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+                            ),
+                            "GIT_CONFIG_VALUE_0": "https://bitbucket.org/",
+                            "GIT_CONFIG_COUNT": "1",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    assert carried["GIT_CONFIG_COUNT"] == "1"
+    assert (
+        carried["GIT_CONFIG_KEY_0"]
+        == "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+    )
+    assert carried["GIT_CONFIG_VALUE_0"] == "https://bitbucket.org/"
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_reindexes_remaining_git_config(
     tmp_path: Path,
 ) -> None:

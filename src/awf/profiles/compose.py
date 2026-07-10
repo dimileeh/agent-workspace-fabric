@@ -1308,7 +1308,7 @@ def _hosted_git_config_env(
         )
         if key_resolution is not _ComposeEnvResolution.LITERAL:
             continue
-        if _value_has_url_userinfo(config_key):
+        if config_key != _BITBUCKET_AGENT_INSTEADOF_KEY and _value_has_url_userinfo(config_key):
             continue
         if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
             continue
