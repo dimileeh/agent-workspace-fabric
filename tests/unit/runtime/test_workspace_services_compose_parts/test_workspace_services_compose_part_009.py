@@ -19,6 +19,10 @@ def test_url_and_secret_like_profile_env_detection_covers_query_credentials() ->
 
     assert compose_module._is_secret_like_profile_env_name("SERVICE_ACCESS_KEY") is True
     assert compose_module._is_secret_like_profile_env_name("CUSTOM_AUTH_TOKEN") is True
+    assert compose_module._is_secret_like_profile_env_name("AUTHORIZATION") is True
+    assert compose_module._is_secret_like_profile_env_name("HTTP_AUTHORIZATION") is True
+    assert compose_module._is_secret_like_profile_env_name("AUTHORIZATION_URL") is False
+    assert compose_module._is_secret_like_profile_env_name("OIDC_AUTHORIZATION_ENDPOINT") is False
     assert compose_module._is_secret_like_profile_env_name("PUBLIC_API_URL") is False
 
     assert compose_module._value_has_url_userinfo("https://user:pass@example.test/repo") is True
@@ -71,6 +75,38 @@ def test_name_only_credential_identifier_uses_passthrough_not_profile_env(
     assert "AWS_ACCESS_KEY_ID" not in profile_env
     assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
     assert names == ("AWS_ACCESS_KEY_ID",)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_authorization_endpoints(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile_env carries non-secret auth endpoint config."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "AUTHORIZATION": "Digest profile-auth-header",
+                "HTTP_AUTHORIZATION": "Negotiate profile-auth-header",
+                "AUTHORIZATION_URL": "https://issuer.example/oauth/authorize",
+                "OIDC_AUTHORIZATION_ENDPOINT": "https://issuer.example/oauth2/v1/authorize",
+                "UPSTREAM_AUTH": "Bearer upstream-token",
+                "OLLAMA_HOST": "http://ollama.profile:11434",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "AUTHORIZATION" not in profile_env
+    assert "HTTP_AUTHORIZATION" not in profile_env
+    assert "UPSTREAM_AUTH" not in profile_env
+    assert profile_env["AUTHORIZATION_URL"] == "https://issuer.example/oauth/authorize"
+    assert (
+        profile_env["OIDC_AUTHORIZATION_ENDPOINT"] == "https://issuer.example/oauth2/v1/authorize"
+    )
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
 
 
 @pytest.mark.unit

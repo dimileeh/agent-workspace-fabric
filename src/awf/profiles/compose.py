@@ -156,17 +156,19 @@ _SECRET_LIKE_PROFILE_ENV_EXACT_NAMES = frozenset(
         # Standard auth-bearing client/env aliases likewise use ``AUTH`` as an
         # auth-mode noun in some non-secret config, so keep them exact-name
         # redactions instead of making ``AUTH`` a generic secret token.
+        "AUTHORIZATION",
         "DOCKER_AUTH_CONFIG",
+        "HTTP_AUTHORIZATION",
         "MYSQL_PWD",
         "NPM_CONFIG__AUTH",
         "PGPASSWORD",
+        "PROXY_AUTHORIZATION",
         "REDISCLI_AUTH",
     }
 )
 
 _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
     {
-        "AUTHORIZATION",
         "CREDENTIAL",
         "CREDENTIALS",
         "PASSWD",
