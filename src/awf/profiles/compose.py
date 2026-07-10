@@ -519,6 +519,8 @@ _GIT_ASKPASS_KEY = "GIT_ASKPASS"
 _GIT_TERMINAL_PROMPT_KEY = "GIT_TERMINAL_PROMPT"
 _BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
 _BITBUCKET_AGENT_INSTEADOF_KEY = "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+_GIT_CONFIG_URL_KEY_PREFIX = "url."
+_GIT_CONFIG_INSTEADOF_KEY_SUFFIX = ".insteadOf"
 _BITBUCKET_AGENT_SAFE_INSTEADOF_VALUES = frozenset(
     {
         "https://bitbucket.org/",
@@ -581,6 +583,32 @@ def _is_safe_bitbucket_agent_insteadof_value(config_key: str, config_value: str)
     return (
         config_key == _BITBUCKET_AGENT_INSTEADOF_KEY
         and config_value in _BITBUCKET_AGENT_SAFE_INSTEADOF_VALUES
+    )
+
+
+def _is_safe_ssh_git_config_insteadof_key(config_key: str) -> bool:
+    if not (
+        config_key.startswith(_GIT_CONFIG_URL_KEY_PREFIX)
+        and config_key.endswith(_GIT_CONFIG_INSTEADOF_KEY_SUFFIX)
+    ):
+        return False
+    config_url = config_key[
+        len(_GIT_CONFIG_URL_KEY_PREFIX) : -len(_GIT_CONFIG_INSTEADOF_KEY_SUFFIX)
+    ]
+    try:
+        parsed = urlsplit(config_url)
+    except ValueError:
+        return False
+    if (
+        parsed.scheme != "ssh"
+        or parsed.username != "git"
+        or parsed.password is not None
+        or not parsed.hostname
+    ):
+        return False
+    return not any(
+        _url_component_has_secret_credential_field(component)
+        for component in (parsed.netloc, parsed.path, parsed.query, parsed.fragment)
     )
 
 
@@ -1425,7 +1453,11 @@ def _hosted_git_config_env(
         )
         if key_resolution is not _ComposeEnvResolution.LITERAL:
             continue
-        if config_key != _BITBUCKET_AGENT_INSTEADOF_KEY and _value_has_url_userinfo(config_key):
+        if (
+            config_key != _BITBUCKET_AGENT_INSTEADOF_KEY
+            and _value_has_url_userinfo(config_key)
+            and not _is_safe_ssh_git_config_insteadof_key(config_key)
+        ):
             continue
         if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
             continue
