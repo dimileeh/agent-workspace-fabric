@@ -926,6 +926,49 @@ class TestRuntimeExecutorSeam:
         assert log_store.sinks.closed is True
 
     @pytest.mark.unit
+    async def test_hosted_streamed_failure_result_does_not_duplicate_buffered_prefix(
+        self,
+    ) -> None:
+        class _StreamingFailureExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                if request.on_stdout is not None:
+                    maybe = request.on_stdout("progress\nfinal stdout\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                if request.on_stderr is not None:
+                    maybe = request.on_stderr("warning\nfinal stderr\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                return AgentRuntimeExecResult(
+                    returncode=2,
+                    stdout="progress\n",
+                    stderr="warning\n",
+                )
+
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            default_model="gpt-5",
+            runtime_executor=_StreamingFailureExecutor(),
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_streamed_failure_buffer_prefix",
+            )
+
+        assert exc.value.reason_code == "AGENT_CLI_FAILED"
+        assert exc.value.result.stdout == "progress\nfinal stdout\n"
+        assert exc.value.result.stderr == "warning\nfinal stderr\n"
+        assert log_store.sinks.stdout_data == ["progress\nfinal stdout\n"]
+        assert log_store.sinks.stderr_data == ["warning\nfinal stderr\n"]
+        assert log_store.sinks.closed is True
+
+    @pytest.mark.unit
     async def test_hosted_non_streaming_executor_still_writes_buffered_result(self) -> None:
         # Backward-compat: an executor that does not invoke the streaming
         # callbacks still gets its buffered result written to the sinks after
