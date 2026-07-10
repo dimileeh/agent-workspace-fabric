@@ -114,10 +114,16 @@ def _local_postgres_database_url_without_tracked_password(
         password = parsed.password
     except ValueError:
         return False
+    from awf.profiles import compose as compose_module
+
     return (
         (parsed.scheme == "postgresql" or parsed.scheme.startswith("postgresql+"))
         and hostname == "postgres"
         and password is None
+        and not any(
+            compose_module._url_component_has_secret_credential_field(component)
+            for component in (parsed.path, parsed.query, parsed.fragment)
+        )
     )
 
 

@@ -55,6 +55,46 @@ def test_literal_profile_env_from_compose_redacts_local_postgres_url_userinfo_pa
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "database_url,secret",
+    [
+        ("postgresql://postgres@postgres:5432/app?password=s3cr3t", "s3cr3t"),
+        ("postgresql+asyncpg://postgres@postgres:5432/app#token=s3cr3t", "s3cr3t"),
+    ],
+)
+def test_literal_profile_env_from_compose_redacts_local_postgres_url_query_credentials(
+    tmp_path: Path,
+    database_url: str,
+    secret: str,
+) -> None:
+    """Local Postgres URL bypass must not carry query or fragment credentials."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": database_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    assert "DATABASE_URL" not in dict(profile_env)
+    assert secret not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_postgres_password_from_service_env_file(
     tmp_path: Path,
 ) -> None:
