@@ -1158,6 +1158,17 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_refer
     assert "X" in filtered
     assert "SECRET" in filtered
 
+    aliases = hosted_profile_env_passthrough_aliases(
+        compose_file,
+        worker_env=worker_env,
+    )
+    assert aliases == (
+        ("ANTHROPIC_API_KEY", "MY_ANTHROPIC_TOKEN"),
+        ("AWS_REGION", "AWS_DEFAULT_REGION"),
+        ("REQUIRED_TARGET", "REQUIRED_SOURCE"),
+        ("SECRET_DEFAULT", "X"),
+    )
+
 
 @pytest.mark.unit
 def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(

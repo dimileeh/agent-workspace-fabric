@@ -953,11 +953,11 @@ def hosted_profile_env_passthrough_aliases(
     """Return cross-name env aliases the hosted executor must resolve by source.
 
     Profile-declared env secret leases can render Compose env as
-    ``TARGET: ${SOURCE}``. Local Compose substitutes ``SOURCE`` into ``TARGET``
-    at stack launch, but hosted target-name passthrough cannot reconstruct that
-    relationship. Return names only so hosted executors can resolve
-    ``source_name`` out-of-band and inject it as ``target_name`` without
-    transporting the secret value in the request.
+    ``TARGET: ${SOURCE}`` or ``TARGET: ${SOURCE:-}``. Local Compose substitutes
+    ``SOURCE`` into ``TARGET`` at stack launch, but hosted target-name
+    passthrough cannot reconstruct that relationship. Return names only so
+    hosted executors can resolve ``source_name`` out-of-band and inject it as
+    ``target_name`` without transporting the secret value in the request.
     """
     if compose_env is None:
         compose_env = _try_agent_environment_from_compose_file(compose_file)
@@ -968,12 +968,13 @@ def hosted_profile_env_passthrough_aliases(
     for name, raw in compose_env.items():
         if raw == _COMPOSE_PASSTHROUGH:
             continue
-        if (
-            _compose_resolve_value(raw, worker_env=env)[1]
-            is not _ComposeEnvResolution.WORKER_RESOLVED_SLOT
-        ):
+        resolution = _compose_resolve_value(raw, worker_env=env)[1]
+        if resolution is _ComposeEnvResolution.WORKER_RESOLVED_SLOT:
+            source_name = _compose_bare_reference_name(raw)
+        elif resolution is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED:
+            source_name = _compose_defaulted_reference_name(raw, worker_env=env)
+        else:
             continue
-        source_name = _compose_bare_reference_name(raw)
         if source_name is None or source_name == name or not env.get(source_name):
             continue
         aliases.append((name, source_name))
