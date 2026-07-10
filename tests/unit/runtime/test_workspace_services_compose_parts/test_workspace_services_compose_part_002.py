@@ -924,6 +924,57 @@ def test_literal_profile_env_from_compose_skips_embedded_auth_header_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_neutral_private_key_literals(
+    tmp_path: Path,
+) -> None:
+    """Neutral env names carrying private-key values are NOT carried.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6P5ELs: a service-account JSON
+    value or PEM block under a neutral profile env name does not necessarily
+    match secret-name redaction, URL userinfo redaction, or auth-header value
+    redaction. Hosted ``profile_env`` must still not transport the private key.
+    """
+
+    private_key_header = "-----BEGIN " + "PRIVATE KEY-----"
+    private_key_footer = "-----END " + "PRIVATE KEY-----"
+    service_account_json = (
+        '{"type":"service_account","project_id":"demo",'
+        '"private_key_id":"not-secret-by-itself",'
+        f'"private_key":"{private_key_header}\\njson-private-key-secret\\n'
+        f'{private_key_footer}\\n","client_email":"firebase@example.test"}}'
+    )
+    pem_private_key = f"{private_key_header}\npem-private-key-secret\n{private_key_footer}"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "FIREBASE_SERVICE_ACCOUNT": service_account_json,
+                            "SIGNING_MATERIAL": pem_private_key,
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "FIREBASE_SERVICE_ACCOUNT" not in carried
+    assert "SIGNING_MATERIAL" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "json-private-key-secret" not in blob
+    assert "pem-private-key-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_standard_auth_credential_literals(
     tmp_path: Path,
 ) -> None:
