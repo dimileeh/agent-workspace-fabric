@@ -319,13 +319,18 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                             "STRIPE_KEY": "sk_live_profile",
                             "SENDGRID_KEY": "sendgrid_profile_key",
                             "PAYMENTS_CLIENT_SECRET": "client_secret",
+                            "DB_PASS": "database_profile_password",
+                            "REDIS_PASS": "redis_profile_password",
+                            "POSTGRES_PWD": "postgres_profile_pwd",
                             "PGPASSWORD": "postgres_profile_password",
                             "MYSQL_PWD": "mysql_profile_password",
+                            "PWD": "/workspace",
                             "AUTHORIZATION": "Bearer profile-token",
                             "HTTP_AUTHORIZATION": "Basic profile-token",
                             "UPSTREAM_AUTH": "Bearer upstream-token",
                             "AUTH_MODE": "disabled",
                             "AUTH_PROVIDER": "local",
+                            "PASS_THROUGH_MODE": "enabled",
                             "POSTGRES_HOST_AUTH_METHOD": "trust",
                             "GEMINI_API_KEY_AUTH_MECHANISM": "api-key",
                             "OLLAMA_HOST": "http://ollama.profile:11434",
@@ -346,13 +351,18 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert "STRIPE_KEY" not in carried
     assert "SENDGRID_KEY" not in carried
     assert "PAYMENTS_CLIENT_SECRET" not in carried
+    assert "DB_PASS" not in carried
+    assert "REDIS_PASS" not in carried
+    assert "POSTGRES_PWD" not in carried
     assert "PGPASSWORD" not in carried
     assert "MYSQL_PWD" not in carried
+    assert carried["PWD"] == "/workspace"
     assert "AUTHORIZATION" not in carried
     assert "HTTP_AUTHORIZATION" not in carried
     assert "UPSTREAM_AUTH" not in carried
     assert carried["AUTH_MODE"] == "disabled"
     assert carried["AUTH_PROVIDER"] == "local"
+    assert carried["PASS_THROUGH_MODE"] == "enabled"
     assert carried["POSTGRES_HOST_AUTH_METHOD"] == "trust"
     assert carried["GEMINI_API_KEY_AUTH_MECHANISM"] == "api-key"
     assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"

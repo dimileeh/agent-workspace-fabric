@@ -171,6 +171,8 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
     }
 )
 
+_SECRET_LIKE_PROFILE_ENV_NAME_ABBREVIATION_TOKENS = frozenset({"PASS", "PWD"})
+
 _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS = frozenset(
     {
         ("ACCESS", "KEY"),
@@ -217,6 +219,8 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
         return True
     tokens = tuple(token for token in normalized.split("_") if token)
     if any(token in _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS for token in tokens):
+        return True
+    if len(tokens) >= 2 and tokens[-1] in _SECRET_LIKE_PROFILE_ENV_NAME_ABBREVIATION_TOKENS:
         return True
     if any(
         (left, right) in _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS
