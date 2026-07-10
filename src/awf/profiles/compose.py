@@ -1063,11 +1063,13 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     out-of-band rather than drop the name (which would leave the hosted job with
     neither the worker override nor the profile default). A name whose value is
     a pass-through slot (``environment: [NAME]`` with no ``=``, ``NAME:`` /
-    ``NAME: null``) is likewise NOT excluded: Docker Compose took its value from
-    the worker shell at stack launch, so the hosted executor must resolve the same
-    worker value out-of-band. A name whose value resolves to ``LITERAL`` (a pure
-    literal, an *explicit* empty value ``NAME: ""`` / ``NAME=``, a defaulted form
-    with the variable unset, or an ``:+`` / ``+`` alternate form) IS excluded —
+    ``NAME: null``) is likewise NOT excluded when the same name exists in
+    ``worker_env``: Docker Compose took its value from the worker shell at stack
+    launch, so the hosted executor must resolve the same worker value
+    out-of-band. An unset pass-through slot IS excluded because Compose had no
+    local worker value to mirror. A name whose value resolves to ``LITERAL`` (a
+    pure literal, an *explicit* empty value ``NAME: ""`` / ``NAME=``, a defaulted
+    form with the variable unset, or an ``:+`` / ``+`` alternate form) IS excluded —
     its concrete value reaches the hosted job via ``profile_env`` instead. A
     bare ``${NAME}`` / ``$NAME`` single reference whose variable is worker-set
     is NOT excluded either: the local Compose container received the worker
@@ -1082,7 +1084,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     and PR #751 threads PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm /
     PRRT_kwDOSJAM6s6PYnJJ / PRRT_kwDOSJAM6s6PY6Rn / PRRT_kwDOSJAM6s6PY8zB /
     PRRT_kwDOSJAM6s6Pi7sN. A
-    pass-through slot is removed from the baseline
+    worker-present pass-through slot is removed from the baseline
     ``_compose_env_passthrough_exclusions`` set even when its name is in
     ``AGENT_AUTH_ENV_VARS`` (``_profile_owned_auth_keys`` treats any auth key
     declared on the agent service as profile-owned regardless of value); the
@@ -1098,7 +1100,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # Exclude compose-declared names UNLESS their value is worker-resolved
         # and the local container received the worker value at stack launch:
         # ``WORKER_RESOLVED_DEFAULTED`` (``:-`` / ``-`` / ``:?`` / ``?`` with the
-        # variable set) and a pass-through slot (raw value ==
+        # variable set) and a worker-present pass-through slot (raw value ==
         # :data:`_COMPOSE_PASSTHROUGH` — ``environment: [NAME]`` with no ``=``,
         # ``NAME:`` / ``NAME: null``; Docker Compose took the value from the
         # worker shell) stay in passthrough for hosted out-of-band resolution.
@@ -1112,15 +1114,17 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose variable
         # IS set in the worker env stays in passthrough too — see below.
         #
-        # A pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH`) is
-        # removed from the baseline ``_compose_env_passthrough_exclusions`` set
-        # first: that set treats any ``AGENT_AUTH_ENV_VARS`` key declared on the
-        # agent service as profile-owned (``_profile_owned_auth_keys``)
-        # regardless of value, so an auth pass-through slot would be excluded
-        # before the worker-resolved exception below (which only prevents
-        # *adding* a name) could keep it. The local Compose container received
-        # the worker shell value for such a slot, so the hosted executor must
-        # resolve it out-of-band too (PR #751 thread PRRT_kwDOSJAM6s6PY6Rn).
+        # A worker-present pass-through slot (raw value ==
+        # :data:`_COMPOSE_PASSTHROUGH`) is removed from the baseline
+        # ``_compose_env_passthrough_exclusions`` set first: that set treats any
+        # ``AGENT_AUTH_ENV_VARS`` key declared on the agent service as
+        # profile-owned (``_profile_owned_auth_keys``) regardless of value, so
+        # an auth pass-through slot would be excluded before the worker-resolved
+        # exception below (which only prevents *adding* a name) could keep it.
+        # The local Compose container received the worker shell value for such a
+        # slot, so the hosted executor must resolve it out-of-band too (PR #751
+        # thread PRRT_kwDOSJAM6s6PY6Rn). An unset pass-through slot stays
+        # excluded because the local Compose run had no worker value to mirror.
         #
         # An *explicit* empty value (``NAME: ""`` / ``NAME=``) is normalized to
         # the plain string ``""`` (NOT the sentinel): Docker Compose sets a
@@ -1131,7 +1135,9 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # pass-through slot; ``_compose_resolve_value("")`` -> ``("", LITERAL)``
         # so an explicit empty is excluded by the LITERAL branch below.
         passthrough_slots = frozenset(
-            name for name, raw in compose_env.items() if raw == _COMPOSE_PASSTHROUGH
+            name
+            for name, raw in compose_env.items()
+            if raw == _COMPOSE_PASSTHROUGH and name in worker_env
         )
         # Worker-resolved same-name defaulted/required forms resolve to a worker
         # value at stack launch, exactly like pass-through slots. Keep those
@@ -1218,11 +1224,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             | worker_resolved_slots
             | name_only_credential_identifiers
         )
-        excluded = (excluded - keep) | frozenset(
-            name
-            for name, raw in compose_env.items()
-            if name not in keep and raw != _COMPOSE_PASSTHROUGH
-        )
+        excluded = (excluded - keep) | frozenset(name for name in compose_env if name not in keep)
     return tuple(name for name in names if name not in excluded)
 
 

@@ -1414,6 +1414,8 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
                             "UNSET_ALIAS": "${UNSET_SOURCE}",
                             "MIXED_ALIAS": "prefix-${MY_ANTHROPIC_TOKEN}",
                             "LITERAL_VALUE": "literal",
+                            # Pass-through slot with no worker value: the local
+                            # Compose run had no value to mirror by name.
                             "PASSTHROUGH_SLOT": None,
                         },
                     }
@@ -1454,11 +1456,12 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
     assert "UNSET_ALIAS" not in filtered
     assert "MIXED_ALIAS" not in filtered
     assert "LITERAL_VALUE" not in filtered
-    assert "PASSTHROUGH_SLOT" in filtered
+    assert "PASSTHROUGH_SLOT" not in filtered
 
     # The cross-name bare slots are NOT carried in profile_env (worker-resolved;
     # carrying the worker value would embed a secret), and the same-name slot is
-    # skipped too. None of the alias values reach profile_env.
+    # skipped too. The unset pass-through slot is not carried either. None of
+    # the alias values reach profile_env.
     profile_env = literal_profile_env_from_compose(compose_file, worker_env=worker_env)
     carried = dict(profile_env)
     assert "ANTHROPIC_API_KEY" not in carried

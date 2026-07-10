@@ -16,6 +16,7 @@ import yaml
 from awf.profiles.compose import (
     filter_hosted_env_passthrough_names,
     hosted_profile_env_passthrough_aliases,
+    hosted_profile_env_passthrough_names,
 )
 
 FILTER = filter_hosted_env_passthrough_names
@@ -71,6 +72,45 @@ def test_compose_passthrough_env_slot_list_form_not_carried(
     assert "AWS_REGION" in filtered
     assert "OTHER" not in filtered
     assert "ANTHROPIC_API_KEY" in filtered
+
+
+@pytest.mark.unit
+def test_hosted_profile_env_passthrough_names_excludes_unset_pass_through_slot(
+    tmp_path: Path,
+) -> None:
+    """Unset Compose pass-through slots must not become hosted credentials.
+
+    Docker Compose mirrors a no-value slot such as ``environment: [NPM_TOKEN]``
+    only when the same variable exists in the worker shell. If it is unset,
+    there is no local value for hosted execution to mirror by name.
+    """
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": [
+                            "NPM_TOKEN",
+                            "AWS_REGION",
+                            "OTHER=literal",
+                        ],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = hosted_profile_env_passthrough_names(
+        compose_file,
+        worker_env={"AWS_REGION": "us-west-2"},
+    )
+
+    assert "NPM_TOKEN" not in names
+    assert "AWS_REGION" in names
+    assert "OTHER" not in names
 
 
 @pytest.mark.unit
