@@ -280,6 +280,40 @@ def test_literal_profile_env_from_compose_skips_url_userinfo_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_embedded_url_userinfo_literals(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile env must not carry credentials embedded in argument text."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "EXTRA_ARGS": "--broker=redis://:s3cr3t@redis:6379/0 --verbose",
+                            "SAFE_ARGS": "--broker=redis://redis:6379/0 --verbose",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "EXTRA_ARGS" not in carried
+    assert carried["SAFE_ARGS"] == "--broker=redis://redis:6379/0 --verbose"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "s3cr3t" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_external_postgres_url_userinfo(
     tmp_path: Path,
 ) -> None:

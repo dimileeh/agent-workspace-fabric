@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -180,6 +181,8 @@ _OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
 # so injecting a worker token under an earlier alias shadows a profile-owned later one.
 _GITHUB_TOKEN_ALIAS_PRECEDENCE = ("GH_TOKEN", "GITHUB_TOKEN")
 
+_URL_LIKE_SUBSTRING_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
+
 
 def _is_secret_like_profile_env_name(name: str) -> bool:
     normalized = name.upper().replace("-", "_")
@@ -201,7 +204,10 @@ def _value_has_url_userinfo(value: str) -> bool:
     except ValueError:
         return False
     if not parsed.scheme:
-        return False
+        return any(
+            _value_has_url_userinfo(match.group(0))
+            for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(value)
+        )
     if parsed.netloc:
         if "@" not in parsed.netloc:
             return False
