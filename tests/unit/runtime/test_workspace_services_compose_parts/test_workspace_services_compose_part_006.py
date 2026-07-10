@@ -391,6 +391,45 @@ def test_literal_profile_env_from_compose_skips_url_query_token_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_url_query_api_key_literals(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile env must not carry API-key URL query parameters."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "CALLBACK_URL": "https://api.example/cb?api_key=sk-live",
+                            "OAUTH_CALLBACK_URL": (
+                                "https://api.example/cb?client_secret=oauth-secret"
+                            ),
+                            "SAFE_CALLBACK_URL": "https://api.example/cb?next=/ready",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "CALLBACK_URL" not in carried
+    assert "OAUTH_CALLBACK_URL" not in carried
+    assert carried["SAFE_CALLBACK_URL"] == "https://api.example/cb?next=/ready"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "sk-live" not in blob
+    assert "oauth-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_embedded_url_userinfo_literals(
     tmp_path: Path,
 ) -> None:

@@ -182,7 +182,16 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS = frozenset(
 _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS = frozenset({"PUBLIC", "PUBLISHABLE", "SITE"})
 
 _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(r"^\s*(?:basic|bearer)\s+\S+", re.IGNORECASE)
-_URL_SECRET_CREDENTIAL_FIELD_NAMES = frozenset({"PASSWORD", "PASSWD", "TOKEN"})
+_URL_SECRET_CREDENTIAL_FIELD_NAMES = frozenset({"PASSWORD", "PASSWD", "SECRET", "TOKEN"})
+_URL_SECRET_CREDENTIAL_FIELD_EXACT_NAMES = frozenset({"APIKEY", "CLIENTSECRET"})
+_URL_SECRET_CREDENTIAL_FIELD_NAME_TOKEN_PAIRS = frozenset(
+    {
+        ("ACCESS", "KEY"),
+        ("API", "KEY"),
+        ("CLIENT", "SECRET"),
+        ("PRIVATE", "KEY"),
+    }
+)
 
 
 # Ollama base-URL env keys in precedence order (highest first) — the OpenCode
@@ -225,8 +234,13 @@ def _is_auth_credential_like_profile_env_value(value: str) -> bool:
 
 def _url_field_name_has_secret_credential(name: str) -> bool:
     normalized = re.sub(r"[^A-Za-z0-9]+", "_", name).upper()
+    if normalized in _URL_SECRET_CREDENTIAL_FIELD_EXACT_NAMES:
+        return True
     tokens = tuple(token for token in normalized.split("_") if token)
-    return any(token in _URL_SECRET_CREDENTIAL_FIELD_NAMES for token in tokens)
+    return any(token in _URL_SECRET_CREDENTIAL_FIELD_NAMES for token in tokens) or any(
+        (left, right) in _URL_SECRET_CREDENTIAL_FIELD_NAME_TOKEN_PAIRS
+        for left, right in zip(tokens, tokens[1:], strict=False)
+    )
 
 
 def _url_component_has_secret_credential_field(component: str) -> bool:
