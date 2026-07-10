@@ -151,6 +151,7 @@ _SECRET_LIKE_PROFILE_ENV_EXACT_NAMES = frozenset(
         "AUTHORIZATION",
         "DOCKER_AUTH_CONFIG",
         "HTTP_AUTHORIZATION",
+        "JWT",
         "MYSQL_PWD",
         "NPM_CONFIG__AUTH",
         "PGPASSWORD",
@@ -163,7 +164,6 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
     {
         "CREDENTIAL",
         "CREDENTIALS",
-        "JWT",
         "PASSWD",
         "PASSWORD",
         "SECRET",

@@ -64,6 +64,41 @@ def test_url_and_secret_like_profile_env_detection_covers_query_credentials() ->
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_carries_jwt_validation_config(
+    tmp_path: Path,
+) -> None:
+    """JWT namespace config is carried, while exact raw JWT secrets are skipped."""
+
+    assert compose_module._is_secret_like_profile_env_name("JWT") is True
+    assert compose_module._is_secret_like_profile_env_name("JWT_SECRET") is True
+    assert compose_module._is_secret_like_profile_env_name("JWT_ALGORITHM") is False
+    assert compose_module._is_secret_like_profile_env_name("JWT_ISSUER") is False
+    assert compose_module._is_secret_like_profile_env_name("JWT_AUDIENCE") is False
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "JWT": "header.payload.signature",
+                "JWT_SECRET": "jwt-secret",
+                "JWT_ALGORITHM": "RS256",
+                "JWT_ISSUER": "https://issuer.example",
+                "JWT_AUDIENCE": "awf-api",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "JWT" not in profile_env
+    assert "JWT_SECRET" not in profile_env
+    assert profile_env["JWT_ALGORITHM"] == "RS256"
+    assert profile_env["JWT_ISSUER"] == "https://issuer.example"
+    assert profile_env["JWT_AUDIENCE"] == "awf-api"
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_camelcase_url_token_fields(
     tmp_path: Path,
 ) -> None:
