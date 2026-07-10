@@ -181,6 +181,37 @@ def test_literal_profile_env_from_compose_redacts_secret_named_url_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_equals_delimited_credential_blobs(
+    tmp_path: Path,
+) -> None:
+    """Neutral env names do not carry dotenv/INI/npmrc credential assignments."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "APP_CONFIG": "client_secret=raw-client-secret",
+                "NPMRC": "//registry.npmjs.org/:_authToken=raw-npm-token",
+                "APP_JSON": '{"client_secret":"raw-json-secret"}',
+                "APP_SETTINGS": "mode=hosted retries=3",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "APP_CONFIG" not in profile_env
+    assert "NPMRC" not in profile_env
+    assert "APP_JSON" not in profile_env
+    assert profile_env["APP_SETTINGS"] == "mode=hosted retries=3"
+    blob = "\x00".join(profile_env.values())
+    assert "raw-client-secret" not in blob
+    assert "raw-npm-token" not in blob
+    assert "raw-json-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_preserves_local_postgres_dsn_aliases(
     tmp_path: Path,
 ) -> None:
