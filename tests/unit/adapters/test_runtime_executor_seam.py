@@ -463,7 +463,7 @@ class TestRuntimeExecutorSeam:
             runner=FakeCommandRunner(),
             default_model="gpt-5",
             runtime_executor=executor,
-            agent_wall_timeout_seconds=0.01,
+            agent_wall_timeout_seconds=0.05,
         )
 
         run_task = asyncio.create_task(

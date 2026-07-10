@@ -15,6 +15,7 @@ import yaml
 
 from awf.profiles.compose import (
     filter_hosted_env_passthrough_names,
+    literal_profile_env_from_compose,
 )
 from tests.unit.runtime.test_workspace_services_compose_parts import (
     test_workspace_services_compose_part_001 as _part_001,
@@ -527,7 +528,6 @@ def test_literal_profile_env_from_compose_unreadable_is_empty(
     tmp_path: Path,
 ) -> None:
     """An unreadable compose yields no profile env (fail-closed, no values)."""
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     missing = tmp_path / "missing.yml"
     assert not missing.exists()
@@ -553,7 +553,6 @@ def test_literal_profile_env_from_compose_skips_postgres_password_bearing_values
     the resulting literal verbatim, handing the workspace DB password to a
     hosted executor / request object.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -622,7 +621,6 @@ def test_literal_profile_env_from_compose_skips_profile_owned_auth_literals(
     declared on the agent service is a profile-owned auth slot and its literal
     value must never reach ``profile_env``.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -700,7 +698,6 @@ def test_literal_profile_env_from_compose_skips_profile_owned_claude_backend_sec
     must be added to the redaction set while still carrying non-secret backend
     config (regions, profile names, project ids, endpoint regions).
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -775,7 +772,6 @@ def test_literal_profile_env_from_compose_skips_profile_owned_github_token_liter
     names must be redacted before carrying profile env values, while non-secret
     profile config still reaches the hosted executor.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -828,7 +824,6 @@ def test_literal_profile_env_from_compose_skips_embedded_auth_header_literals(
     credentials. Those values must be skipped before building the hosted
     ``profile_env`` request payload.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -875,7 +870,6 @@ def test_literal_profile_env_from_compose_skips_standard_auth_credential_literal
     do not match the generic secret-name tokens because ``AUTH`` itself is not a
     redaction token.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -916,7 +910,6 @@ def test_literal_profile_env_from_compose_preserves_public_key_literals(
     tmp_path: Path,
 ) -> None:
     """Public frontend key literals are profile config, not hosted secrets."""
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -967,7 +960,6 @@ def test_literal_profile_env_from_compose_skips_jdbc_url_userinfo(
     was not itself secret-like, and ``literal_profile_env_from_compose`` carried
     the raw JDBC URL into ``AgentRuntimeExecRequest.profile_env``.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -1011,7 +1003,6 @@ def test_literal_profile_env_from_compose_carries_values_without_postgres_servic
     before. This guards against over-redacting when the postgres password is
     absent.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -1056,7 +1047,6 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_under_nonsta
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PWUIl.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -1122,7 +1112,6 @@ def test_literal_profile_env_from_compose_redacts_all_distinct_postgres_password
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PWsKk.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -1195,7 +1184,6 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_interpolatio
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PWsKk.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -1267,7 +1255,6 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_bare_slot(
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PaFeB.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -1338,7 +1325,6 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_passthrough_
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PjBsM.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -1398,7 +1384,6 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_passthrough_
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PjBsM.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -1466,7 +1451,6 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_from_service
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PZuE2.
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     env_file = tmp_path / "postgres.env"
     env_file.write_text("POSTGRES_PASSWORD=env-file-secret\n", encoding="utf-8")
@@ -1541,7 +1525,6 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_from_relativ
     parent directory before parsing, matching Docker Compose's documented
     resolution rule (PR #751 thread PRRT_kwDOSJAM6s6PaMeK).
     """
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_dir = tmp_path / "compose.d"
     compose_dir.mkdir()
@@ -1625,8 +1608,6 @@ def test_literal_profile_env_from_compose_redacts_percent_encoded_postgres_passw
     (or decode DB URL userinfo) so an encoded secret-bearing URL is redacted.
     """
     from urllib.parse import quote
-
-    from awf.profiles.compose import literal_profile_env_from_compose
 
     raw_password = "p@ss/word"
     encoded_password = quote(raw_password, safe="")
