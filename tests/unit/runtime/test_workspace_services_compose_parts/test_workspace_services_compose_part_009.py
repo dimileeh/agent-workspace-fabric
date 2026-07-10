@@ -450,6 +450,39 @@ def test_literal_profile_env_from_compose_redacts_cookie_header_values(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credentials(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile_env skips common credential fields in neutral config blobs."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "OAUTH_CONFIG": '{"client_secret":"profile-oauth-client-secret"}',
+                "APP_CONFIG": "{'password':'profile-app-password'}",
+                "SDK_CONFIG": '{"apiKey":"profile-sdk-api-key"}',
+                "SAFE_CONFIG": '{"issuer":"https://issuer.example","timeout":30}',
+                "OLLAMA_HOST": "http://ollama.profile:11434",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "OAUTH_CONFIG" not in profile_env
+    assert "APP_CONFIG" not in profile_env
+    assert "SDK_CONFIG" not in profile_env
+    assert profile_env["SAFE_CONFIG"] == '{"issuer":"https://issuer.example","timeout":30}'
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    blob = "\x00".join(profile_env.values())
+    assert "profile-oauth-client-secret" not in blob
+    assert "profile-app-password" not in blob
+    assert "profile-sdk-api-key" not in blob
+
+
+@pytest.mark.unit
 def test_hosted_git_config_filters_unsafe_entries_and_reindexes_safe_ones() -> None:
     """Hosted git config keeps only safe literal and worker-resolved entries."""
 
