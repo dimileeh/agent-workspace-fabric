@@ -56,6 +56,9 @@ def test_url_and_secret_like_profile_env_detection_covers_query_credentials() ->
         is True
     )
     assert (
+        compose_module._value_has_url_userinfo("https://example.test/callback?auth=secret") is True
+    )
+    assert (
         compose_module._value_has_url_userinfo("https://example.test/callback?ok=1;password=secret")
         is True
     )
@@ -102,10 +105,10 @@ def test_literal_profile_env_from_compose_carries_jwt_validation_config(
 
 
 @pytest.mark.unit
-def test_literal_profile_env_from_compose_redacts_camelcase_url_token_fields(
+def test_literal_profile_env_from_compose_redacts_url_auth_token_fields(
     tmp_path: Path,
 ) -> None:
-    """Hosted profile_env skips URLs with camelCase credential parameters."""
+    """Hosted profile_env skips URLs with auth/token credential parameters."""
 
     compose_file = tmp_path / "missing-compose.yml"
 
@@ -116,6 +119,7 @@ def test_literal_profile_env_from_compose_redacts_camelcase_url_token_fields(
                 "CALLBACK_URL": "https://app.example/cb?accessToken=raw-access",
                 "REFRESH_CALLBACK_URL": "https://app.example/cb?refreshToken=raw-refresh",
                 "AUTH_CALLBACK_URL": "https://app.example/cb?authToken=raw-auth",
+                "AUTH_URL": "https://app.example/cb?auth=raw-auth",
                 "PUBLIC_CALLBACK_URL": "https://app.example/cb?state=public",
             },
             worker_env={},
@@ -125,6 +129,7 @@ def test_literal_profile_env_from_compose_redacts_camelcase_url_token_fields(
     assert "CALLBACK_URL" not in profile_env
     assert "REFRESH_CALLBACK_URL" not in profile_env
     assert "AUTH_CALLBACK_URL" not in profile_env
+    assert "AUTH_URL" not in profile_env
     assert profile_env["PUBLIC_CALLBACK_URL"] == "https://app.example/cb?state=public"
 
 
