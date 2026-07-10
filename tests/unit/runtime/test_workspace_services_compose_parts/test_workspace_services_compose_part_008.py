@@ -43,6 +43,49 @@ def test_literal_profile_env_from_compose_preserves_passwordless_local_postgres_
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_custom_postgres_service_hostnames(
+    tmp_path: Path,
+) -> None:
+    """Passwordless DB URLs may point at custom local Postgres service names."""
+
+    compose_file = tmp_path / "compose.yml"
+    database_url = "postgresql://awf@db:5432/app"
+    awf_database_url = "postgresql+asyncpg://awf@database:5432/app"
+    redis_database_url = "postgresql://awf@redis:5432/app"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "db": {"image": "registry.local:5000/postgres:16-alpine"},
+                    "database": {
+                        "image": "example/database-wrapper:latest",
+                        "environment": {"POSTGRES_DB": "app"},
+                    },
+                    "redis": {"image": "redis:7-alpine"},
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": database_url,
+                            "AWF_DATABASE_URL": awf_database_url,
+                            "AWF_TEST_DATABASE_URL": redis_database_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert profile_env["DATABASE_URL"] == database_url
+    assert profile_env["AWF_DATABASE_URL"] == awf_database_url
+    assert "AWF_TEST_DATABASE_URL" not in profile_env
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_local_postgres_url_userinfo_passwords(
     tmp_path: Path,
 ) -> None:

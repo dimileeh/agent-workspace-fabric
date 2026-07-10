@@ -16,6 +16,31 @@ from awf.profiles.compose_env import (
 )
 from awf.service.environment import compose_env_file_values
 
+_POSTGRES_SERVICE_ENV_NAMES = frozenset(
+    {"POSTGRES_DB", "POSTGRES_HOST_AUTH_METHOD", "POSTGRES_PASSWORD", "POSTGRES_USER"}
+)
+
+
+def compose_postgres_service_hostnames(compose_file: Path) -> frozenset[str]:
+    """Return Compose service names that are local Postgres sidecar hostnames."""
+    try:
+        payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return frozenset()
+    if not isinstance(payload, Mapping):
+        return frozenset()
+    services = payload.get("services")
+    if not isinstance(services, Mapping):
+        return frozenset()
+
+    hostnames: set[str] = set()
+    for service_name, service in services.items():
+        if not isinstance(service_name, str) or not isinstance(service, Mapping):
+            continue
+        if _compose_service_is_postgres(service):
+            hostnames.add(service_name.lower())
+    return frozenset(hostnames)
+
 
 def try_compose_agent_env_and_postgres_passwords(
     compose_file: Path,
@@ -68,6 +93,20 @@ def try_compose_agent_env_and_postgres_passwords(
                 worker_env=worker_env,
             )
     return agent_env, frozenset(postgres_passwords)
+
+
+def _compose_service_is_postgres(service: Mapping[object, object]) -> bool:
+    image = service.get("image")
+    if isinstance(image, str) and _compose_image_is_postgres(image):
+        return True
+    service_env = _compose_environment_mapping(service.get("environment"))
+    return bool(_POSTGRES_SERVICE_ENV_NAMES.intersection(service_env))
+
+
+def _compose_image_is_postgres(image: str) -> bool:
+    basename = image.split("@", 1)[0].rsplit("/", 1)[-1]
+    repository = basename.split(":", 1)[0]
+    return repository == "postgres"
 
 
 def compose_service_env_file_paths(

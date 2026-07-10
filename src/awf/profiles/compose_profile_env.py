@@ -13,7 +13,10 @@ from awf.profiles.compose_env import (
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
 )
-from awf.profiles.compose_postgres_env import try_compose_agent_env_and_postgres_passwords
+from awf.profiles.compose_postgres_env import (
+    compose_postgres_service_hostnames,
+    try_compose_agent_env_and_postgres_passwords,
+)
 
 _LOCAL_POSTGRES_DATABASE_URL_ENV_NAMES = frozenset(
     {"DATABASE_URL", "AWF_DATABASE_URL", "AWF_TEST_DATABASE_URL"}
@@ -47,6 +50,9 @@ def literal_profile_env_from_compose(
     if compose_env is None:
         return ()
 
+    local_postgres_hostnames = frozenset({"postgres"}) | compose_postgres_service_hostnames(
+        compose_file
+    )
     postgres_passwords = file_postgres_passwords | (postgres_passwords or frozenset())
     auth_secret_keys = compose_module._AGENT_AUTH_SECRET_ENV_VARS & compose_env.keys()
     mount_backed_bitbucket_askpass = compose_module._has_mount_backed_bitbucket_askpass(
@@ -72,6 +78,7 @@ def literal_profile_env_from_compose(
         ) and not _local_postgres_database_url_without_tracked_password(
             key,
             expanded,
+            local_postgres_hostnames=local_postgres_hostnames,
             postgres_passwords=postgres_passwords,
         ):
             continue
@@ -100,6 +107,7 @@ def _local_postgres_database_url_without_tracked_password(
     key: str,
     value: str,
     *,
+    local_postgres_hostnames: frozenset[str],
     postgres_passwords: frozenset[str],
 ) -> bool:
     """Return whether a local Postgres URL should survive generic userinfo redaction."""
@@ -118,7 +126,7 @@ def _local_postgres_database_url_without_tracked_password(
 
     return (
         (parsed.scheme in {"postgres", "postgresql"} or parsed.scheme.startswith("postgresql+"))
-        and hostname == "postgres"
+        and hostname in local_postgres_hostnames
         and password is None
         and not any(
             compose_module._url_component_has_secret_credential_field(component)
