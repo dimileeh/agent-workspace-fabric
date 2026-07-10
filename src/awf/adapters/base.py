@@ -519,12 +519,10 @@ class AgentAdapter(ABC):
                 if name not in existing_names
                 and name not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
             )
-        # Surface the GitHub token source name when the local Compose path would
-        # inject gh-visible aliases (``GH_TOKEN`` / ``GITHUB_TOKEN``) from that
-        # source. Alias targets already carried in ``env_passthrough_aliases``
-        # must NOT also be plain names: hosted executors resolve plain names by
-        # their own name, while aliases preserve the source->target mapping
-        # needed when the worker only has ``AWF_GITHUB_TOKEN``.
+        # Surface GitHub token names only when they are not already represented
+        # by alias mappings. Hosted executors resolve plain names by their own
+        # name, while aliases preserve the source->target mapping needed when
+        # the worker only has ``AWF_GITHUB_TOKEN``.
         github_token_names = await asyncio.to_thread(
             hosted_github_token_passthrough_names,
             compose_file,
@@ -534,13 +532,16 @@ class AgentAdapter(ABC):
             # Union after the filter: the filter excludes compose-declared
             # profile-owned slots, and the helper already skips profile-owned
             # aliases. De-duplicate preserving filter order while keeping alias
-            # targets out of plain passthrough names.
+            # targets and sources out of plain passthrough names.
             existing_names = set(env_passthrough_names)
             alias_targets = {target for target, _source in env_passthrough_aliases}
+            alias_sources = {source for _target, source in env_passthrough_aliases}
             env_passthrough_names = env_passthrough_names + tuple(
                 name
                 for name in github_token_names
-                if name not in existing_names and name not in alias_targets
+                if name not in existing_names
+                and name not in alias_targets
+                and name not in alias_sources
             )
         # Carry profile-owned env values to the hosted executor. The local
         # ``docker compose exec`` path does not forward profile-owned env

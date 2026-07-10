@@ -706,10 +706,10 @@ class TestNonCodexHostedCredentials:
         adapter = _build(OpenCodeAdapter)
         request = await _run(adapter, compose_file=compose_file)
 
-        # The documented worker source is available, and both gh-visible names
-        # are mapped from it instead of being emitted as plain passthrough names
-        # that would resolve by their own absent worker-env name.
-        assert "AWF_GITHUB_TOKEN" in request.env_passthrough_names
+        # The documented worker source is carried only as the source of
+        # gh-visible aliases instead of being emitted as a plain passthrough
+        # name that local Compose does not expose.
+        assert "AWF_GITHUB_TOKEN" not in request.env_passthrough_names
         assert "GH_TOKEN" not in request.env_passthrough_names
         assert "GITHUB_TOKEN" not in request.env_passthrough_names
         assert ("GH_TOKEN", "AWF_GITHUB_TOKEN") in request.env_passthrough_aliases
@@ -770,11 +770,11 @@ class TestNonCodexHostedCredentials:
         adapter = _build(OpenCodeAdapter)
         request = await _run(adapter, compose_file=compose_file)
 
-        # The chosen source name is surfaced so the hosted executor can resolve
-        # the credential from it, and the gh-visible aliases are preserved as
-        # source mappings instead of plain names that would resolve to nothing
-        # in this setup.
-        assert "AWF_GITHUB_TOKEN" in request.env_passthrough_names
+        # The chosen source name is carried only as the source of gh-visible
+        # aliases. Plain passthrough names resolve by their own name, so adding
+        # ``AWF_GITHUB_TOKEN`` there would expose an extra env var that the
+        # local Compose path does not expose.
+        assert "AWF_GITHUB_TOKEN" not in request.env_passthrough_names
         assert "GH_TOKEN" not in request.env_passthrough_names
         assert "GITHUB_TOKEN" not in request.env_passthrough_names
         assert ("GH_TOKEN", "AWF_GITHUB_TOKEN") in request.env_passthrough_aliases
