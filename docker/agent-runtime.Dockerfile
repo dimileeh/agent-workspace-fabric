@@ -145,14 +145,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 #
 # npm-backed CLIs are pinned to a version. Bump via PR so we can verify the
 # output format hasn't drifted in the adapters.
-ARG CODEX_VERSION=0.130.0
+ARG CODEX_VERSION=0.144.1
 # 2.1.154+ is required for Claude Opus 4.8 (the default model in defaults.py);
 # older CLIs reject `--model claude-opus-4-8`. Keep this >= the default model's
 # minimum supported CLI.
-ARG CLAUDE_CODE_VERSION=2.1.158
-ARG GEMINI_VERSION=0.42.0
-ARG OPENCODE_VERSION=1.15.2
-ARG GROK_VERSION=0.2.14
+ARG CLAUDE_CODE_VERSION=2.1.206
+ARG GEMINI_VERSION=0.50.0
+ARG OPENCODE_VERSION=1.17.18
+ARG GROK_VERSION=0.2.93
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
 ARG CCUSAGE_VERSION=20.0.3
