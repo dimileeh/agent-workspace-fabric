@@ -23,7 +23,12 @@ from awf.profiles.compose import (
     hosted_profile_env_passthrough_aliases,
     literal_profile_env_from_compose,
 )
-from awf.profiles.compose_env import _compose_bare_reference_name
+from awf.profiles.compose_env import (
+    _compose_bare_reference_name,
+    _compose_default_word_is_worker_resolved,
+    _compose_defaulted_reference_name,
+    _compose_selected_worker_reference_name,
+)
 
 
 def _write(tmp_path: Path, payload: object) -> Path:
@@ -40,6 +45,144 @@ def test_compose_bare_reference_name_accepts_only_single_reference() -> None:
     assert _compose_bare_reference_name("${OPENAI_API_KEY}suffix") is None
     assert _compose_bare_reference_name("$OPENAI_API_KEY-suffix") is None
     assert _compose_bare_reference_name("literal") is None
+
+
+@pytest.mark.unit
+def test_compose_defaulted_reference_name_accepts_only_selected_outer_source() -> None:
+    """Defaulted/required source extraction is intentionally exact and selected."""
+    worker_env = {"AWS_REGION": "eu-central-1", "EMPTY": "", "REQUIRED": "value"}
+
+    assert (
+        _compose_defaulted_reference_name(
+            "${AWS_REGION:-us-west-2}",
+            worker_env=worker_env,
+        )
+        == "AWS_REGION"
+    )
+    assert (
+        _compose_defaulted_reference_name(
+            "${EMPTY-default}",
+            worker_env=worker_env,
+        )
+        == "EMPTY"
+    )
+    assert (
+        _compose_defaulted_reference_name(
+            "${EMPTY?required}",
+            worker_env=worker_env,
+        )
+        == "EMPTY"
+    )
+    assert (
+        _compose_defaulted_reference_name(
+            "${REQUIRED:?required}",
+            worker_env=worker_env,
+        )
+        == "REQUIRED"
+    )
+    assert (
+        _compose_defaulted_reference_name(
+            "prefix-${AWS_REGION:-us-west-2}",
+            worker_env=worker_env,
+        )
+        is None
+    )
+    assert (
+        _compose_defaulted_reference_name(
+            "${AWS_REGION:-us-west-2}suffix",
+            worker_env=worker_env,
+        )
+        is None
+    )
+    assert _compose_defaulted_reference_name("${!:-fallback}", worker_env=worker_env) is None
+    assert (
+        _compose_defaulted_reference_name(
+            "${MISSING:?required}",
+            worker_env=worker_env,
+        )
+        is None
+    )
+    assert _compose_defaulted_reference_name("${AWS_REGION}", worker_env=worker_env) is None
+
+
+@pytest.mark.unit
+def test_compose_selected_worker_reference_name_tracks_selected_nested_source() -> None:
+    """Selected worker-source extraction rejects mixed, unselected, and literal forms."""
+    worker_env = {
+        "FLAG": "1",
+        "EMPTY": "",
+        "TOKEN": "secret-token",
+        "REQUIRED": "required-secret",
+    }
+
+    assert _compose_selected_worker_reference_name("${TOKEN}", worker_env=worker_env) == "TOKEN"
+    assert _compose_selected_worker_reference_name("$TOKEN", worker_env=worker_env) == "TOKEN"
+    assert (
+        _compose_selected_worker_reference_name(
+            "${MISSING:-${TOKEN}}",
+            worker_env=worker_env,
+        )
+        == "TOKEN"
+    )
+    assert (
+        _compose_selected_worker_reference_name(
+            "${FLAG:+${TOKEN}}",
+            worker_env=worker_env,
+        )
+        == "TOKEN"
+    )
+    assert (
+        _compose_selected_worker_reference_name(
+            "${REQUIRED:?required}",
+            worker_env=worker_env,
+        )
+        == "REQUIRED"
+    )
+    assert (
+        _compose_selected_worker_reference_name(
+            "prefix-${TOKEN}",
+            worker_env=worker_env,
+        )
+        is None
+    )
+    assert _compose_selected_worker_reference_name("${TOKEN", worker_env=worker_env) is None
+    assert _compose_selected_worker_reference_name("${!:-${TOKEN}}", worker_env=worker_env) is None
+    assert (
+        _compose_selected_worker_reference_name("${TOKEN=literal}", worker_env=worker_env) is None
+    )
+    assert _compose_selected_worker_reference_name("${TOKEN}", worker_env={}) == "TOKEN"
+    assert _compose_selected_worker_reference_name("${TOKEN:-literal}", worker_env={}) is None
+    assert (
+        _compose_selected_worker_reference_name("${EMPTY:+${TOKEN}}", worker_env=worker_env) is None
+    )
+    assert _compose_selected_worker_reference_name("${MISSING:?required}", worker_env={}) is None
+
+
+@pytest.mark.unit
+def test_compose_default_word_is_worker_resolved_only_for_worker_selected_defaults() -> None:
+    """Default-word classification detects when a default embeds worker state."""
+    worker_env = {"TOKEN": "secret-token"}
+
+    assert (
+        _compose_default_word_is_worker_resolved(
+            "${MISSING:-${TOKEN}}",
+            worker_env=worker_env,
+        )
+        is True
+    )
+    assert (
+        _compose_default_word_is_worker_resolved(
+            "${MISSING:-literal}",
+            worker_env=worker_env,
+        )
+        is False
+    )
+    assert _compose_default_word_is_worker_resolved("literal", worker_env=worker_env) is False
+    assert _compose_default_word_is_worker_resolved("${TOKEN", worker_env=worker_env) is False
+    assert (
+        _compose_default_word_is_worker_resolved("${!:-${TOKEN}}", worker_env=worker_env) is False
+    )
+    assert _compose_default_word_is_worker_resolved("${TOKEN}", worker_env=worker_env) is False
 
 
 @pytest.mark.unit
@@ -102,6 +245,41 @@ def test_literal_profile_env_carries_unparseable_braced_verbatim(tmp_path: Path)
     carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
     assert carried.get("UNPARSEABLE") == "${!}"
     assert carried.get("UNKNOWN_OP") == "${FOO=bar}"
+
+
+@pytest.mark.unit
+def test_literal_profile_env_applies_compose_alternate_and_unset_required_semantics(
+    tmp_path: Path,
+) -> None:
+    """Alternate and unset-required forms mirror Compose carry/skip semantics."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "ALT_LITERAL": "${FLAG:+profile-owned}",
+                        "ALT_SECRET": "${FLAG:+${TOKEN}}",
+                        "ALT_UNSET": "${MISSING:+profile-owned}",
+                        "REQUIRED_UNSET": "${MISSING:?required}",
+                    },
+                }
+            }
+        },
+    )
+    carried = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            worker_env={"FLAG": "1", "TOKEN": "worker-secret-value"},
+        )
+    )
+
+    assert carried["ALT_LITERAL"] == "profile-owned"
+    assert "ALT_SECRET" not in carried
+    assert carried["ALT_UNSET"] == ""
+    assert "REQUIRED_UNSET" not in carried
+    assert "worker-secret-value" not in "\x00".join(carried.values())
 
 
 @pytest.mark.unit
@@ -203,6 +381,44 @@ def test_literal_profile_env_redacts_required_form_postgres_password(
     assert carried.get("OLLAMA_HOST") == "http://ollama.profile:11434"
     assert "DATABASE_URL" not in carried
     assert "resolved-pw" not in "".join(carried.values())
+
+
+@pytest.mark.unit
+def test_literal_profile_env_redacts_defaulted_postgres_password_from_worker(
+    tmp_path: Path,
+) -> None:
+    """A set worker password selected by ``:-`` redacts rendered DB URLs."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "postgres": {
+                    "image": "postgres:16-alpine",
+                    "environment": {
+                        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:-fallback-pw}",
+                    },
+                },
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "OLLAMA_HOST": "http://ollama.profile:11434",
+                        "DATABASE_URL": "postgresql://awf:worker-pw@postgres:5432/awf",
+                    },
+                },
+            }
+        },
+    )
+
+    carried = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            worker_env={"POSTGRES_PASSWORD": "worker-pw"},
+        )
+    )
+
+    assert carried.get("OLLAMA_HOST") == "http://ollama.profile:11434"
+    assert "DATABASE_URL" not in carried
+    assert "worker-pw" not in "".join(carried.values())
 
 
 @pytest.mark.unit

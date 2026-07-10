@@ -1,0 +1,136 @@
+"""No-Docker compose coverage for hosted env safety edge cases (part 9)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from awf.profiles import compose as compose_module
+from awf.profiles.compose import (
+    filter_hosted_env_passthrough_names,
+    literal_profile_env_from_compose,
+)
+
+
+@pytest.mark.unit
+def test_url_and_secret_like_profile_env_detection_covers_query_credentials() -> None:
+    """URL credential detection includes userinfo and query/fragment fields."""
+
+    assert compose_module._is_secret_like_profile_env_name("SERVICE_ACCESS_KEY") is True
+    assert compose_module._is_secret_like_profile_env_name("CUSTOM_AUTH_TOKEN") is True
+    assert compose_module._is_secret_like_profile_env_name("PUBLIC_API_URL") is False
+
+    assert compose_module._value_has_url_userinfo("https://user:pass@example.test/repo") is True
+    assert (
+        compose_module._value_has_url_userinfo("git remote https://user:pass@example.test/repo.git")
+        is True
+    )
+    assert (
+        compose_module._value_has_url_userinfo("https://example.test/callback?access_key=secret")
+        is True
+    )
+    assert (
+        compose_module._value_has_url_userinfo("https://example.test/callback?ok=1;password=secret")
+        is True
+    )
+    assert (
+        compose_module._value_has_url_userinfo("https://example.test/callback#token=secret") is True
+    )
+    assert compose_module._value_has_url_userinfo("https://[::1") is False
+    assert compose_module._value_has_url_userinfo("https://example.test/repo") is False
+
+
+@pytest.mark.unit
+def test_name_only_credential_identifier_uses_passthrough_not_profile_env(
+    tmp_path: Path,
+) -> None:
+    """Hosted resolves credential identifiers by name without direct env carry."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+    compose_env = {
+        "AWS_ACCESS_KEY_ID": "AKIA_PROFILE_IDENTIFIER",
+        "OLLAMA_HOST": "http://ollama.profile:11434",
+    }
+    worker_env = {"AWS_ACCESS_KEY_ID": "AKIA_PROFILE_IDENTIFIER"}
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env=compose_env,
+            worker_env=worker_env,
+        )
+    )
+    names = filter_hosted_env_passthrough_names(
+        ("AWS_ACCESS_KEY_ID", "OLLAMA_HOST"),
+        compose_file=compose_file,
+        compose_env=compose_env,
+        worker_env=worker_env,
+    )
+
+    assert "AWS_ACCESS_KEY_ID" not in profile_env
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert names == ("AWS_ACCESS_KEY_ID",)
+
+
+@pytest.mark.unit
+def test_hosted_git_config_filters_unsafe_entries_and_reindexes_safe_ones() -> None:
+    """Hosted git config keeps only safe literal and worker-resolved entries."""
+
+    profile_env, aliases = compose_module._hosted_git_config_env(
+        {
+            "GIT_CONFIG_COUNT": "8",
+            # Missing value -> skipped.
+            "GIT_CONFIG_KEY_0": "user.name",
+            # Worker-resolved key -> skipped.
+            "GIT_CONFIG_KEY_1": "${GIT_CONFIG_KEY_SOURCE}",
+            "GIT_CONFIG_VALUE_1": "ignored",
+            # Credential-bearing key URL -> skipped.
+            "GIT_CONFIG_KEY_2": "url.https://user:pass@example.test/.insteadOf",
+            "GIT_CONFIG_VALUE_2": "https://example.test/",
+            # Bitbucket agent rewrite -> skipped when mount-backed askpass owns it.
+            "GIT_CONFIG_KEY_3": compose_module._BITBUCKET_AGENT_INSTEADOF_KEY,
+            "GIT_CONFIG_VALUE_3": "https://bitbucket.org/",
+            # Credential-bearing literal value -> skipped.
+            "GIT_CONFIG_KEY_4": "credential.helper",
+            "GIT_CONFIG_VALUE_4": "https://user:pass@example.test/helper",
+            # Bearer-token literal value -> skipped.
+            "GIT_CONFIG_KEY_5": "credential.helper",
+            "GIT_CONFIG_VALUE_5": "Authorization: Bearer bearerToken123456",
+            # Safe literal value -> carried and reindexed to slot 0.
+            "GIT_CONFIG_KEY_6": "user.email",
+            "GIT_CONFIG_VALUE_6": "mona@example.test",
+            # Safe worker-resolved value -> alias and reindexed to slot 1.
+            "GIT_CONFIG_KEY_7": "user.name",
+            "GIT_CONFIG_VALUE_7": "${GIT_AUTHOR_NAME}",
+        },
+        worker_env={
+            "GIT_CONFIG_KEY_SOURCE": "user.name",
+            "GIT_AUTHOR_NAME": "Mona",
+        },
+        skip_bitbucket_agent_rewrites=True,
+    )
+
+    assert profile_env == (
+        ("GIT_CONFIG_KEY_0", "user.email"),
+        ("GIT_CONFIG_VALUE_0", "mona@example.test"),
+        ("GIT_CONFIG_KEY_1", "user.name"),
+        ("GIT_CONFIG_COUNT", "2"),
+    )
+    assert aliases == (("GIT_CONFIG_VALUE_1", "GIT_AUTHOR_NAME"),)
+
+
+@pytest.mark.unit
+def test_hosted_git_config_ignores_unusable_count_values() -> None:
+    """Nonliteral and noninteger git-config counts produce no hosted block."""
+
+    assert compose_module._hosted_git_config_env(
+        {"GIT_CONFIG_COUNT": "${GIT_CONFIG_COUNT}"},
+        worker_env={"GIT_CONFIG_COUNT": "1"},
+        skip_bitbucket_agent_rewrites=False,
+    ) == ((), ())
+    assert compose_module._hosted_git_config_env(
+        {"GIT_CONFIG_COUNT": "not-an-int"},
+        worker_env={},
+        skip_bitbucket_agent_rewrites=False,
+    ) == ((), ())

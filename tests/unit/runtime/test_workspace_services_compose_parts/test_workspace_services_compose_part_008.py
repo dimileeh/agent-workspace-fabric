@@ -165,3 +165,85 @@ def test_literal_profile_env_from_compose_redacts_percent_encoded_postgres_passw
     assert "AWF_DATABASE_URL" not in carried
     assert raw_password not in "".join(v for _k, v in profile_env)
     assert encoded_password not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_malformed_url_with_postgres_password(
+    tmp_path: Path,
+) -> None:
+    """Malformed URL-like values still use fallback password redaction."""
+
+    password = "env-file-secret"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(
+        compose_file,
+        compose_env={
+            "OLLAMA_HOST": "http://ollama.profile:11434",
+            "AWF_DATABASE_URL": f"postgresql://awf:{password}@[::1",
+        },
+        worker_env={},
+        postgres_passwords=frozenset({password}),
+    )
+
+    carried = dict(profile_env)
+    assert carried.get("OLLAMA_HOST") == "http://ollama.profile:11434"
+    assert "AWF_DATABASE_URL" not in carried
+    assert password not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_encoded_postgres_password_in_literal(
+    tmp_path: Path,
+) -> None:
+    """Non-URL literals embedding encoded Postgres passwords are redacted too."""
+
+    raw_password = "p@ss/word"
+    encoded_password = quote(raw_password, safe="")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(
+        compose_file,
+        compose_env={
+            "OLLAMA_HOST": "http://ollama.profile:11434",
+            "POSTGRES_DIAGNOSTIC": f"rendered-password={encoded_password}",
+        },
+        worker_env={},
+        postgres_passwords=frozenset({raw_password}),
+    )
+
+    carried = dict(profile_env)
+    assert carried.get("OLLAMA_HOST") == "http://ollama.profile:11434"
+    assert "POSTGRES_DIAGNOSTIC" not in carried
+    assert raw_password not in "".join(v for _k, v in profile_env)
+    assert encoded_password not in "".join(v for _k, v in profile_env)
