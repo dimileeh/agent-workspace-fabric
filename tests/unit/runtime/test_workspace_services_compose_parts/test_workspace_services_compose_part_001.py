@@ -1207,6 +1207,40 @@ def test_hosted_profile_env_passthrough_aliases_preserves_empty_worker_source(
 
 
 @pytest.mark.unit
+def test_hosted_profile_env_passthrough_aliases_excludes_file_backed_adc_target(
+    tmp_path: Path,
+) -> None:
+    """File-backed credential targets must not be surfaced as hosted env aliases."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GOOGLE_APPLICATION_CREDENTIALS": "${ADC_PATH}",
+                            "ANTHROPIC_API_KEY": "${MY_ANTHROPIC_TOKEN}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    aliases = hosted_profile_env_passthrough_aliases(
+        compose_file,
+        worker_env={
+            "ADC_PATH": "/host/application_default_credentials.json",
+            "MY_ANTHROPIC_TOKEN": "anthropic-worker-secret",
+        },
+    )
+
+    assert aliases == (("ANTHROPIC_API_KEY", "MY_ANTHROPIC_TOKEN"),)
+
+
+@pytest.mark.unit
 def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
     tmp_path: Path,
 ) -> None:

@@ -136,6 +136,16 @@ _AGENT_AUTH_SECRET_ENV_VARS = frozenset(
     }
 )
 
+_HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES = frozenset(
+    {
+        # ADC is a filesystem path whose local Compose contract includes an auth
+        # bind mount. Hosted requests currently carry env values only, so
+        # profile passthrough names and aliases must not re-add it after
+        # adapters omit it.
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    }
+)
+
 # Credential identifiers that are not secrets by themselves but still must not
 # be transported as direct hosted job env values. Hosted executors should resolve
 # them from name-only passthrough alongside the corresponding secret material.
@@ -1153,6 +1163,8 @@ def hosted_profile_env_passthrough_aliases(
         else:
             continue
         if source_name is None or source_name == name or source_name not in env:
+            continue
+        if name in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES:
             continue
         aliases.append((name, source_name))
     aliases.extend(
