@@ -494,6 +494,85 @@ class TestRuntimeExecutorSeam:
         assert exc.value.result.reason_code == "COMMAND_TIMEOUT"
 
     @pytest.mark.unit
+    async def test_hosted_adapter_cancellation_detaches_slow_executor_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Adapter cancellation must detach hosted cleanup that outlives the caller."""
+
+        discarded_tasks: list[asyncio.Task[AgentRuntimeExecResult]] = []
+        original_discard = base_module._discard_hosted_execute_task_result
+
+        def _record_discard(task: asyncio.Task[AgentRuntimeExecResult]) -> None:
+            discarded_tasks.append(task)
+            original_discard(task)
+
+        monkeypatch.setattr(base_module, "_discard_hosted_execute_task_result", _record_discard)
+
+        class _SlowCancelCleanupExecutor:
+            def __init__(self) -> None:
+                self.execute_started = asyncio.Event()
+                self.cleanup_started = asyncio.Event()
+                self.cleanup_release = asyncio.Event()
+                self.cleanup_finished = asyncio.Event()
+
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                self.execute_started.set()
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None:
+                        task.uncancel()
+                    self.cleanup_started.set()
+                    try:
+                        await self.cleanup_release.wait()
+                    finally:
+                        self.cleanup_finished.set()
+                    return AgentRuntimeExecResult(
+                        returncode=0, stdout="cleanup eventually returned", stderr=""
+                    )
+                raise AssertionError("execute should be cancelled by the adapter")
+
+        executor = _SlowCancelCleanupExecutor()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            default_model="gpt-5",
+            runtime_executor=executor,
+            agent_wall_timeout_seconds=60.0,
+        )
+
+        run_task = asyncio.create_task(
+            adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cancel_detaches_hosted_cleanup",
+            )
+        )
+
+        try:
+            await asyncio.wait_for(executor.execute_started.wait(), timeout=0.2)
+            run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+
+            await asyncio.wait_for(executor.cleanup_started.wait(), timeout=0.2)
+            assert discarded_tasks == []
+
+            executor.cleanup_release.set()
+            await asyncio.wait_for(executor.cleanup_finished.wait(), timeout=0.2)
+            await asyncio.sleep(0)
+        finally:
+            executor.cleanup_release.set()
+            if not run_task.done():
+                await asyncio.wait_for(
+                    asyncio.gather(run_task, return_exceptions=True), timeout=0.2
+                )
+
+        assert len(discarded_tasks) == 1
+        assert discarded_tasks[0].done()
+
+    @pytest.mark.unit
     async def test_hosted_watchdog_logs_timeout_after_streamed_stderr(self) -> None:
         """The synthesized timeout line is appended after live stderr chunks."""
 

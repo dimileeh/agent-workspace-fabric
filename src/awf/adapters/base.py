@@ -641,6 +641,10 @@ class AgentAdapter(ABC):
                     )
                 except asyncio.CancelledError:
                     execute_task.cancel()
+                    if execute_task.done():
+                        _discard_hosted_execute_task_result(execute_task)
+                    else:
+                        execute_task.add_done_callback(_discard_hosted_execute_task_result)
                     raise
                 if execute_task in done or execute_task.done():
                     hosted_result = execute_task.result()
