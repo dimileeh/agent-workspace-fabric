@@ -152,6 +152,44 @@ async def test_compose_runtime_usable_after_restart_failure_rejects_inspection_e
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "compose_text",
+    [
+        None,
+        "services: [\n",
+    ],
+)
+async def test_compose_runtime_usable_after_restart_failure_rejects_unreadable_services(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    compose_text: str | None,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    if compose_text is not None:
+        compose_file.write_text(compose_text, encoding="utf-8")
+
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        return monitor_handoff_module.RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-id",
+                    image="awf-agent",
+                    state="running",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+        "awf_x",
+        compose_file,
+    )
+
+
+@pytest.mark.unit
 async def test_compose_runtime_usable_after_restart_failure_rejects_partial_stack(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
