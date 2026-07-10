@@ -948,6 +948,55 @@ def test_literal_profile_env_from_compose_preserves_public_key_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_token_endpoint_literals(
+    tmp_path: Path,
+) -> None:
+    """OAuth/OIDC token endpoint names are config, not credentials.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6Pydva: endpoint variables such
+    as ``OIDC_TOKEN_URL`` and ``OAUTH_TOKEN_ENDPOINT`` include the token
+    vocabulary but their literal values are provider URLs required by hosted
+    repairs/builds. Credential-bearing endpoint values must still be redacted by
+    the value checks.
+    """
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "OIDC_TOKEN_URL": "https://issuer.example/oauth/token",
+                            "OAUTH_TOKEN_ENDPOINT": "https://auth.example/token",
+                            "OAUTH_TOKEN_URI": "https://auth.example/token-uri",
+                            "NPM_TOKEN": "npm-profile-secret",
+                            "OAUTH_TOKEN_ENDPOINT_URL": (
+                                "https://issuer.example/oauth/token?token=endpoint-secret"
+                            ),
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried["OIDC_TOKEN_URL"] == "https://issuer.example/oauth/token"
+    assert carried["OAUTH_TOKEN_ENDPOINT"] == "https://auth.example/token"
+    assert carried["OAUTH_TOKEN_URI"] == "https://auth.example/token-uri"
+    assert "NPM_TOKEN" not in carried
+    assert "OAUTH_TOKEN_ENDPOINT_URL" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "npm-profile-secret" not in blob
+    assert "endpoint-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_jdbc_url_userinfo(
     tmp_path: Path,
 ) -> None:
