@@ -721,6 +721,37 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_netrc_password_records(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile_env skips netrc password records in neutral env values."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "NETRC_CONTENT": (
+                    "machine github.com login bot password ghp_profile_netrc_secret\n"
+                    "machine api.example.test login deploy password example_netrc_secret"
+                ),
+                "SAFE_CONFIG": "machine-readable profile metadata",
+                "OLLAMA_HOST": "http://ollama.profile:11434",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "NETRC_CONTENT" not in profile_env
+    assert profile_env["SAFE_CONFIG"] == "machine-readable profile metadata"
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    blob = "\x00".join(profile_env.values())
+    assert "ghp_profile_netrc_secret" not in blob
+    assert "example_netrc_secret" not in blob
+
+
+@pytest.mark.unit
 def test_hosted_git_config_filters_unsafe_entries_and_reindexes_safe_ones() -> None:
     """Hosted git config keeps only safe literal and worker-resolved entries."""
 

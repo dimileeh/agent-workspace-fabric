@@ -211,6 +211,11 @@ _NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?:^|[\r\n])\s*(?://[^\s=]+:\s*)?_?auth\s*=\s*\S+",
     re.IGNORECASE,
 )
+_NETRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?:^|[\r\n])\s*(?:machine[^\S\r\n]+\S+|default)(?:[^\S\r\n]+\S+)*"
+    r"[^\S\r\n]+password[^\S\r\n]+\S+",
+    re.IGNORECASE,
+)
 _URL_SECRET_CREDENTIAL_FIELD_NAMES = frozenset(
     {"JWT", "PASSWORD", "PASSWD", "SECRET", "SIGNATURE", "TOKEN"}
 )
