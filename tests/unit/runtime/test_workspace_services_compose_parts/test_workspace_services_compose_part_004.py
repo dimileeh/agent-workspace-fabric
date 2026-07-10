@@ -755,6 +755,35 @@ def test_literal_profile_env_tolerates_unreadable_env_file(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_literal_profile_env_tolerates_env_file_required_interpolation(
+    tmp_path: Path,
+) -> None:
+    """A companion ``env_file`` with missing required interpolation is skipped."""
+
+    env_file = tmp_path / "redis.env"
+    env_file.write_text("REDIS_PASSWORD=${REDIS_PASSWORD:?required}\n", encoding="utf-8")
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "redis": {
+                    "image": "redis:7-alpine",
+                    "env_file": [str(env_file)],
+                },
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {"OLLAMA_HOST": "http://ollama.profile:11434"},
+                },
+            }
+        },
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert carried.get("OLLAMA_HOST") == "http://ollama.profile:11434"
+
+
+@pytest.mark.unit
 def test_literal_profile_env_handles_non_mapping_services(tmp_path: Path) -> None:
     """A compose file whose top-level ``services`` is not a mapping yields no carry.
 

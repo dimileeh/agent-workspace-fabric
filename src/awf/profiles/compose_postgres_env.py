@@ -85,7 +85,7 @@ def try_compose_agent_env_and_postgres_passwords(
         ):
             try:
                 env_file_env = compose_env_file_values(env_file_path, environ=worker_env)
-            except (OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError, ValueError):
                 continue
             collect_postgres_password(
                 env_file_env.get("POSTGRES_PASSWORD"),
