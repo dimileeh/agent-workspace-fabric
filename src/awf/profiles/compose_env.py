@@ -75,9 +75,10 @@ _COMPOSE_DEFAULT_OPERATORS = (":-", "-")
 # (``:+`` tests non-empty, ``+`` tests set-ness). The alternate word is
 # profile-owned config (literal text in the compose file), so it is carried as a
 # literal when the test passes (the local container received the alternate word);
-# when the test fails Compose resolves to "" and that empty literal is carried.
-# An alternate word that references a worker secret propagates the worker-resolved
-# classification so the secret never reaches ``profile_env``.
+# when the test fails Compose resolves to "" without evaluating the alternate
+# word, and that empty literal is carried. A selected alternate word that
+# references a worker secret propagates the worker-resolved classification so
+# the secret never reaches ``profile_env``.
 _COMPOSE_ALTERNATE_OPERATORS = (":+", "+")
 
 # Sentinel used to mask ``$$`` escapes before interpolation scanning so an
@@ -163,9 +164,10 @@ def _compose_resolve_value(
       for ``:+``) resolves to the concrete ``alternate`` and is carried — the
       local container received the alternate word (profile-owned config, not a
       worker value), so the hosted job must too. When ``NAME`` is unset (or empty
-      for ``:+``) Compose resolves to ``""`` and that empty literal is carried. An
-      alternate word that references a worker secret propagates the worker-resolved
-      classification so the secret never reaches ``profile_env``.
+      for ``:+``) Compose resolves to ``""`` without evaluating the alternate
+      word, and that empty literal is carried. A selected alternate word that
+      references a worker secret propagates the worker-resolved classification so
+      the secret never reaches ``profile_env``.
     - ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME`` set (non-empty for ``:?``)
       resolves to the worker value and is ``WORKER_RESOLVED_DEFAULTED`` — kept in
       ``env_passthrough_names`` for hosted out-of-band resolution (the local
@@ -402,10 +404,11 @@ def _compose_resolve_braced(
       the alternate word is recursively expanded; if that expansion is a literal
       it is carried as ``LITERAL`` (the local container received the alternate
       word, which is profile-owned config, not a worker value). When the variable
-      is unset (or empty for ``:+``) Compose resolves to ``""`` and that empty
-      literal is carried so the hosted job matches the local container. An
-      alternate word that itself references a worker secret (e.g.
-      ``${FLAG:+${SECRET}}``) propagates the worker-resolved classification so the
+      is unset (or empty for ``:+``) Compose resolves to ``""`` without
+      evaluating the alternate word, and that empty literal is carried so the
+      hosted job matches the local container. A selected alternate word that
+      itself references a worker secret (e.g. ``${FLAG:+${SECRET}}`` with
+      ``FLAG`` non-empty) propagates the worker-resolved classification so the
       secret is never embedded in ``profile_env``.
     - ``:?`` / ``?`` (required): when the variable is set (non-empty for ``:?``)
       Compose resolves the worker value, so the slot is ``WORKER_RESOLVED_DEFAULTED``
@@ -461,14 +464,9 @@ def _compose_resolve_braced(
             if alternate_resolution is not _ComposeEnvResolution.LITERAL:
                 return "", alternate_resolution
             return alternate, _ComposeEnvResolution.LITERAL
-        # Variable unset (or empty for :+) -> Compose resolves to "". When the
-        # unselected alternate word would have resolved from the worker, keep
-        # the worker-resolved classification so the hosted profile env does not
-        # carry an empty alias for a secret-bearing slot.
-        _alternate, alternate_resolution = _compose_resolve_value(word, worker_env=worker_env)
-        if alternate_resolution is not _ComposeEnvResolution.LITERAL:
-            return "", alternate_resolution
-        # Literal alternate words are safe to mirror as Compose's empty result.
+        # Variable unset (or empty for :+) -> Compose resolves to "" without
+        # evaluating the alternate word, so even an unselected word containing a
+        # worker reference is mirrored as Compose's empty literal.
         return "", _ComposeEnvResolution.LITERAL
     # ``:?`` / ``?`` (required): a set variable resolves to the worker value
     # (a secret), so the slot is worker-resolved-defaulted — kept in passthrough

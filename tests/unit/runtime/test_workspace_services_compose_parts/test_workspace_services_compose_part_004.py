@@ -283,6 +283,47 @@ def test_literal_profile_env_applies_compose_alternate_and_unset_required_semant
 
 
 @pytest.mark.unit
+def test_literal_profile_env_preserves_unselected_alternate_empty_literal(
+    tmp_path: Path,
+) -> None:
+    """Unselected alternate words are not evaluated before carrying ``""``."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "ALT_COLON_UNSET": "${FLAG:+${WORKER_VALUE}}",
+                        "ALT_COLON_EMPTY": "${EMPTY_FLAG:+${WORKER_VALUE}}",
+                        "ALT_PLUS_UNSET": "${FLAG+${WORKER_VALUE}}",
+                    },
+                }
+            }
+        },
+    )
+    worker_env = {
+        "EMPTY_FLAG": "",
+        "WORKER_VALUE": "worker-resolved-value",
+    }
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    filtered = filter_hosted_env_passthrough_names(
+        tuple(carried),
+        compose_file=compose_file,
+        worker_env=worker_env,
+    )
+
+    assert carried == {
+        "ALT_COLON_UNSET": "",
+        "ALT_COLON_EMPTY": "",
+        "ALT_PLUS_UNSET": "",
+    }
+    assert filtered == ()
+    assert "worker-resolved-value" not in "\x00".join(carried.values())
+
+
+@pytest.mark.unit
 def test_literal_profile_env_skips_default_word_referencing_worker_secret(
     tmp_path: Path,
 ) -> None:
