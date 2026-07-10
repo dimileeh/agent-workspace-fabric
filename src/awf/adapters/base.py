@@ -133,6 +133,15 @@ def _discard_hosted_execute_task_result(task: asyncio.Task[AgentRuntimeExecResul
         pass
 
 
+def _prepend_missing_streamed_output(*, chunks: list[str], buffered: str) -> str:
+    streamed = "".join(chunks)
+    if not streamed:
+        return buffered
+    if streamed in buffered:
+        return buffered
+    return streamed + buffered
+
+
 @dataclass(frozen=True)
 class AgentRunResult:
     """Structured result of one coding-CLI run."""
@@ -699,6 +708,18 @@ class AgentAdapter(ABC):
                     await sinks.write_stderr(hosted_result.stderr)
                 elif hosted_watchdog_timed_out and hosted_watchdog_timeout_stderr:
                     await sinks.write_stderr(hosted_watchdog_timeout_stderr)
+            hosted_result = AgentRuntimeExecResult(
+                returncode=hosted_result.returncode,
+                stdout=_prepend_missing_streamed_output(
+                    chunks=streamed_stdout_chunks,
+                    buffered=hosted_result.stdout,
+                ),
+                stderr=_prepend_missing_streamed_output(
+                    chunks=streamed_stderr_chunks,
+                    buffered=hosted_result.stderr,
+                ),
+                timeout_reason=hosted_result.timeout_reason,
+            )
             result = self._classify_hosted_result(
                 hosted_result=hosted_result,
                 model=model,
