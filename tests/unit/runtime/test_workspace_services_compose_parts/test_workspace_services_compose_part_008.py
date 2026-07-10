@@ -171,6 +171,39 @@ def test_literal_profile_env_from_compose_redacts_local_postgres_url_query_crede
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_libpq_keyword_password(
+    tmp_path: Path,
+) -> None:
+    """Keyword DSN password fields are database credentials, not safe config."""
+
+    compose_file = tmp_path / "compose.yml"
+    keyword_dsn = "host=postgres user=app password=s3cr3t dbname=app"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": keyword_dsn,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "DATABASE_URL" not in carried
+    assert "s3cr3t" not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_postgres_password_from_service_env_file(
     tmp_path: Path,
 ) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -34,6 +35,22 @@ _LOCAL_POSTGRES_DATABASE_URL_ENV_NAME_SUFFIXES = (
     "_DATABASE_URL",
     "_POSTGRES_URI",
     "_POSTGRES_URL",
+)
+_LIBPQ_KEYWORD_FIELD_PATTERN = re.compile(r"(?<!\S)([A-Za-z_][A-Za-z0-9_]*)\s*=")
+_LIBPQ_KEYWORD_DSN_CONTEXT_FIELD_NAMES = frozenset(
+    {
+        "APPLICATION_NAME",
+        "CONNECT_TIMEOUT",
+        "DBNAME",
+        "HOST",
+        "HOSTADDR",
+        "OPTIONS",
+        "PORT",
+        "SERVICE",
+        "SSLMODE",
+        "TARGET_SESSION_ATTRS",
+        "USER",
+    }
 )
 
 
@@ -99,6 +116,8 @@ def literal_profile_env_from_compose(
             postgres_passwords=postgres_passwords,
         ):
             continue
+        if _expanded_value_has_libpq_keyword_dsn_secret_field(key, expanded):
+            continue
         if (
             mount_backed_bitbucket_askpass
             and key == compose_module._GIT_ASKPASS_KEY
@@ -155,6 +174,23 @@ def _is_local_postgres_database_url_env_name(key: str) -> bool:
     normalized = key.upper().replace("-", "_")
     return normalized in _LOCAL_POSTGRES_DATABASE_URL_ENV_NAMES or normalized.endswith(
         _LOCAL_POSTGRES_DATABASE_URL_ENV_NAME_SUFFIXES
+    )
+
+
+def _expanded_value_has_libpq_keyword_dsn_secret_field(key: str, value: str) -> bool:
+    fields = tuple(match.group(1) for match in _LIBPQ_KEYWORD_FIELD_PATTERN.finditer(value))
+    if not fields:
+        return False
+    from awf.profiles import compose as compose_module
+
+    has_secret_field = any(
+        compose_module._url_field_name_has_secret_credential(field) for field in fields
+    )
+    if not has_secret_field:
+        return False
+    normalized_fields = {field.upper() for field in fields}
+    return _is_local_postgres_database_url_env_name(key) or bool(
+        normalized_fields & _LIBPQ_KEYWORD_DSN_CONTEXT_FIELD_NAMES
     )
 
 
