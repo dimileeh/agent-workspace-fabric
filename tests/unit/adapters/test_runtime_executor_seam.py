@@ -266,10 +266,20 @@ class TestRuntimeExecutorSeam:
     ) -> None:
         class _FailingExecutor:
             async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                if request.on_stdout is not None:
+                    maybe = request.on_stdout("streamed stdout before failure\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                if request.on_stderr is not None:
+                    maybe = request.on_stderr("streamed stderr before failure\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
                 raise RuntimeError("k8s api unavailable")
 
+        log_store = _RecordingLogStore()
         adapter = CodexAdapter(
             runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
             default_model="gpt-5",
             runtime_executor=_FailingExecutor(),
         )
@@ -295,8 +305,12 @@ class TestRuntimeExecutorSeam:
         assert exc.value.agent is AgentRuntime.codex
         assert exc.value.reason_code == "AGENT_HOSTED_EXECUTOR_ERROR"
         assert exc.value.result.returncode == 1
-        assert exc.value.result.stdout == ""
-        assert "k8s api unavailable" in exc.value.result.stderr
+        assert exc.value.result.stdout == "streamed stdout before failure\n"
+        assert exc.value.result.stderr == (
+            "streamed stderr before failure\nRuntimeError: k8s api unavailable"
+        )
+        assert log_store.sinks.stdout_data == ["streamed stdout before failure\n"]
+        assert log_store.sinks.stderr_data == ["streamed stderr before failure\n"]
         assert finalize_calls == [(None, "failed", "ws_hosted_executor_error")]
 
     @pytest.mark.unit

@@ -687,12 +687,19 @@ class AgentAdapter(ABC):
             except AgentRunError:
                 raise
             except Exception as exc:
+                error_stderr = f"{type(exc).__name__}: {exc}"
                 raise AgentRunError(
                     agent=self.name,
                     result=CommandResult(
                         returncode=1,
-                        stdout="",
-                        stderr=f"{type(exc).__name__}: {exc}",
+                        stdout=_prepend_missing_streamed_output(
+                            chunks=streamed_stdout_chunks,
+                            buffered="",
+                        ),
+                        stderr=_prepend_missing_streamed_output(
+                            chunks=streamed_stderr_chunks,
+                            buffered=error_stderr,
+                        ),
                     ),
                     reason_code="AGENT_HOSTED_EXECUTOR_ERROR",
                 ) from exc
