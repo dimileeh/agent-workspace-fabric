@@ -37,7 +37,7 @@ def compose_postgres_service_hostnames(compose_file: Path) -> frozenset[str]:
     for service_name, service in services.items():
         if not isinstance(service_name, str) or not isinstance(service, Mapping):
             continue
-        if _compose_service_is_postgres(service):
+        if _compose_service_is_postgres(service, compose_dir=compose_file.parent):
             hostnames.add(service_name.lower())
     return frozenset(hostnames)
 
@@ -95,12 +95,26 @@ def try_compose_agent_env_and_postgres_passwords(
     return agent_env, frozenset(postgres_passwords)
 
 
-def _compose_service_is_postgres(service: Mapping[object, object]) -> bool:
+def _compose_service_is_postgres(
+    service: Mapping[object, object], *, compose_dir: Path | None = None
+) -> bool:
     image = service.get("image")
     if isinstance(image, str) and _compose_image_is_postgres(image):
         return True
     service_env = _compose_environment_mapping(service.get("environment"))
-    return bool(_POSTGRES_SERVICE_ENV_NAMES.intersection(service_env))
+    if _POSTGRES_SERVICE_ENV_NAMES.intersection(service_env):
+        return True
+    for env_file_path in compose_service_env_file_paths(
+        service.get("env_file"),
+        compose_dir=compose_dir,
+    ):
+        try:
+            env_file_env = compose_env_file_values(env_file_path, environ={})
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        if _POSTGRES_SERVICE_ENV_NAMES.intersection(env_file_env):
+            return True
+    return False
 
 
 def _compose_image_is_postgres(image: str) -> bool:

@@ -607,6 +607,36 @@ def test_collect_postgres_password_tolerates_empty_concrete_value(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_preserves_env_file_only_custom_image_postgres_url(
+    tmp_path: Path,
+) -> None:
+    """A custom-image Postgres sidecar may declare its Postgres env only in env_file."""
+    env_file = tmp_path / "db.env"
+    env_file.write_text("POSTGRES_PASSWORD=env-file-secret\n", encoding="utf-8")
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "db": {
+                    "image": "registry.example.com/postgres-compatible:latest",
+                    "env_file": str(env_file),
+                },
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "DATABASE_URL": "postgresql://awf@db:5432/app",
+                    },
+                },
+            }
+        },
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert carried["DATABASE_URL"] == "postgresql://awf@db:5432/app"
+
+
+@pytest.mark.unit
 def test_literal_profile_env_redacts_postgres_password_from_string_env_file(
     tmp_path: Path,
 ) -> None:
