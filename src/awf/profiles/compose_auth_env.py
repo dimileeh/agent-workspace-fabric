@@ -204,7 +204,7 @@ _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKEN_SEQUENCES = (("REACT", "APP"),)
 _NON_SECRET_PROFILE_ENV_NAME_ENDPOINT_SUFFIX_TOKENS = frozenset({"ENDPOINT", "URI", "URL"})
 
 _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
-    r"(?:^\s*(?:basic|bearer)\s+\S+|(?<![A-Za-z0-9_-])[\"']?_?(?:(?:proxy[-_]?)?authorization|cookie|(?:(?:x[-_]?)|(?:[A-Za-z0-9]+[-_])+)?api[-_]?key|(?:access|private)[-_]?key|(?:client[-_]?)?key[-_]?data|private[-_]?key[-_]?data|(?:aws[-_]?)?secret[-_]?access[-_]?key|client[-_]?secret|password|passwd|pwd|secret|(?:x[-_]?)?(?:(?:access|auth|csrf|id|job|oauth|private|refresh|session)[-_]?)?token|(?:x[-_]?)?(?:amz[-_]?)?security[-_]?token)[\"']?\s*[:=]\s*[\"']?\S+|[\"']auth[\"']\s*:\s*[\"'][^\"']+|[\"']private[_-]key[\"']\s*:\s*[\"'][^\"']+|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)",
+    r"(?:^\s*(?:basic|bearer)\s+\S+|(?<![A-Za-z0-9_-])[\"']?_?(?:(?:proxy[-_]?)?authorization|cookie|(?:(?:x[-_]?)|(?:[A-Za-z0-9]+[-_])+)?api[-_]?key|(?:[A-Za-z0-9]+[-_])*subscription[-_]?key|(?:access|private)[-_]?key|(?:client[-_]?)?key[-_]?data|private[-_]?key[-_]?data|(?:aws[-_]?)?secret[-_]?access[-_]?key|client[-_]?secret|password|passwd|pwd|secret|(?:x[-_]?)?(?:(?:access|auth|csrf|id|job|oauth|private|refresh|session)[-_]?)?token|(?:x[-_]?)?(?:amz[-_]?)?security[-_]?token)[\"']?\s*[:=]\s*[\"']?\S+|[\"']auth[\"']\s*:\s*[\"'][^\"']+|[\"']private[_-]key[\"']\s*:\s*[\"'][^\"']+|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)",
     re.IGNORECASE,
 )
 _NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
@@ -235,6 +235,7 @@ _URL_SECRET_CREDENTIAL_FIELD_NAME_TOKEN_PAIRS = frozenset(
         ("API", "KEY"),
         ("CLIENT", "SECRET"),
         ("PRIVATE", "KEY"),
+        ("SUBSCRIPTION", "KEY"),
     }
 )
 
