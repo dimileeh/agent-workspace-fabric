@@ -10,8 +10,8 @@ from urllib.parse import unquote, urlsplit
 
 from awf.profiles.compose_env import (
     _COMPOSE_PASSTHROUGH,
-    _compose_bare_reference_name,
     _compose_resolve_value,
+    _compose_unselected_alternate_worker_reference_name,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
 )
@@ -103,10 +103,13 @@ def literal_profile_env_from_compose(
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)
         if resolution is not _ComposeEnvResolution.LITERAL:
             continue
-        bare_reference_name = _compose_bare_reference_name(raw)
-        if expanded == "" and bare_reference_name is not None and bare_reference_name != key:
-            continue
         if key in compose_module._HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
+            continue
+        if (
+            expanded == ""
+            and compose_module._is_secret_like_profile_env_name(key)
+            and _compose_unselected_alternate_worker_reference_name(raw, worker_env=env) is not None
+        ):
             continue
         if expanded == "" and (
             key in auth_secret_keys or compose_module._is_secret_like_profile_env_name(key)

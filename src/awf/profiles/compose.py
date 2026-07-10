@@ -1011,10 +1011,13 @@ def hosted_profile_env_passthrough_names(
     if compose_env is None:
         return ()
     env = os.environ if worker_env is None else worker_env
-    return _filter_hosted_env_passthrough_names_from_compose_env(
+    names = _filter_hosted_env_passthrough_names_from_compose_env(
         tuple(compose_env),
         compose_env,
         worker_env=env,
+    )
+    return tuple(
+        name for name in names if compose_env.get(name) != _COMPOSE_PASSTHROUGH or name in env
     )
 
 
@@ -1165,9 +1168,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # pass-through slot; ``_compose_resolve_value("")`` -> ``("", LITERAL)``
         # so an explicit empty is excluded by the LITERAL branch below.
         passthrough_slots = frozenset(
-            name
-            for name, raw in compose_env.items()
-            if raw == _COMPOSE_PASSTHROUGH and name in worker_env
+            name for name, raw in compose_env.items() if raw == _COMPOSE_PASSTHROUGH
         )
         # Worker-resolved same-name defaulted/required forms resolve to a worker
         # value at stack launch, exactly like pass-through slots. Keep those
@@ -1380,6 +1381,8 @@ def _hosted_git_config_env(
         if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
             continue
         if value_resolution is _ComposeEnvResolution.LITERAL:
+            if config_value == "" and _compose_bare_reference_name(config_value_raw) is not None:
+                continue
             if not _is_safe_bitbucket_agent_insteadof_value(
                 config_key,
                 config_value,
@@ -1458,6 +1461,7 @@ from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
     _compose_resolve_braced,
     _compose_resolve_value,
     _compose_selected_worker_reference_name,
+    _compose_unselected_alternate_worker_reference_name,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
 )
