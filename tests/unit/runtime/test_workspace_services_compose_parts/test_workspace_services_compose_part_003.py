@@ -387,6 +387,8 @@ def test_literal_profile_env_from_compose_preserves_public_frontend_api_keys(
                         "environment": {
                             "NEXT_PUBLIC_FIREBASE_API_KEY": "public-next-firebase-key",
                             "VITE_FIREBASE_API_KEY": "public-vite-firebase-key",
+                            "REACT_APP_FIREBASE_API_KEY": "public-react-firebase-key",
+                            "GATSBY_FIREBASE_API_KEY": "public-gatsby-firebase-key",
                             "STRIPE_PUBLISHABLE_KEY": "pk_test_public",
                             "CUSTOM_API_KEY": "secret-custom-api-key",
                             "PRIVATE_KEY": "secret-private-key",
@@ -402,6 +404,8 @@ def test_literal_profile_env_from_compose_preserves_public_frontend_api_keys(
 
     assert carried["NEXT_PUBLIC_FIREBASE_API_KEY"] == "public-next-firebase-key"
     assert carried["VITE_FIREBASE_API_KEY"] == "public-vite-firebase-key"
+    assert carried["REACT_APP_FIREBASE_API_KEY"] == "public-react-firebase-key"
+    assert carried["GATSBY_FIREBASE_API_KEY"] == "public-gatsby-firebase-key"
     assert carried["STRIPE_PUBLISHABLE_KEY"] == "pk_test_public"
     assert "CUSTOM_API_KEY" not in carried
     assert "PRIVATE_KEY" not in carried

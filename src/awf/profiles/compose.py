@@ -187,7 +187,8 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS = frozenset(
 )
 
 _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS = frozenset({"PUBLIC", "PUBLISHABLE", "SITE"})
-_PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKENS = frozenset({"VITE"})
+_PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKENS = frozenset({"GATSBY", "VITE"})
+_PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKEN_SEQUENCES = (("REACT", "APP"),)
 
 _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?:^\s*|\bauthorization\s*:\s*)(?:basic|bearer)\s+\S+",
@@ -236,6 +237,10 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
             and (
                 any(token in _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS for token in tokens[:-2])
                 or tokens[0] in _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKENS
+                or any(
+                    tokens[: len(prefix)] == prefix
+                    for prefix in _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKEN_SEQUENCES
+                )
             )
         ):
             return False
