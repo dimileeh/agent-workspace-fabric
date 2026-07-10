@@ -318,6 +318,45 @@ def test_literal_profile_env_from_compose_redacts_encoded_nested_url_credentials
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_azure_storage_account_key(
+    tmp_path: Path,
+) -> None:
+    """Azure Storage connection strings carry account keys in value fields."""
+
+    compose_file = tmp_path / "compose.yml"
+    account_key = "azure-account-key-secret"
+    connection_string = (
+        "DefaultEndpointsProtocol=https;"
+        "AccountName=storageaccount;"
+        f"AccountKey={account_key};"
+        "EndpointSuffix=core.windows.net"
+    )
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "AZURE_STORAGE_CONNECTION_STRING": connection_string,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "AZURE_STORAGE_CONNECTION_STRING" not in carried
+    assert account_key not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_libpq_keyword_password(
     tmp_path: Path,
 ) -> None:
