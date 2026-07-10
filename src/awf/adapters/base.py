@@ -747,11 +747,9 @@ class AgentAdapter(ABC):
         only a watchdog-set ``reason_code`` yields ``AGENT_TIMEOUT``.
         """
         # Only classify a hosted ``124`` as a timeout when the executor
-        # signals an explicit, valid timeout reason. A ``124`` with an
-        # unset-default (``COMMAND_TIMEOUT_REASON``) still maps to a wall-clock
-        # timeout (backwards-compat for executors that only set ``returncode``),
-        # but a ``124`` carrying any other value is treated as an ordinary CLI
-        # failure instead of being forced into ``COMMAND_TIMEOUT``.
+        # signals an explicit, valid timeout reason. A ``124`` without such a
+        # reason is treated as an ordinary CLI failure instead of being forced
+        # into ``COMMAND_TIMEOUT``.
         timeout_reason = (
             hosted_result.timeout_reason
             if hosted_result.returncode == _HOSTED_TIMEOUT_RETURN_CODE

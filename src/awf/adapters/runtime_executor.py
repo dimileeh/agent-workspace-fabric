@@ -19,7 +19,7 @@ never argv, and MUST NOT log or persist secret values.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol
 
 from awf.common.commands import (
@@ -107,15 +107,15 @@ class AgentRuntimeExecResult:
     the hosted result carries the same distinction on the ``timeout_reason``
     field so the adapter can map idle timeouts to ``AGENT_IDLE_TIMEOUT``
     instead of collapsing every 124 into a wall-clock timeout.
-    ``timeout_reason`` defaults to wall-clock (``COMMAND_TIMEOUT_REASON``)
-    when unset to preserve the pre-existing contract for executors that only
-    set ``returncode``.
+    ``timeout_reason`` is empty by default; hosted executors must set it
+    explicitly when the hosted runner, not the agent CLI or an inner wrapper,
+    enforced a watchdog timeout.
     """
 
     returncode: int
     stdout: str
     stderr: str
-    timeout_reason: str = field(default=COMMAND_TIMEOUT_REASON)
+    timeout_reason: str = ""
 
 
 class AgentRuntimeExecutor(Protocol):

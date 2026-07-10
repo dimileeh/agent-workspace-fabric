@@ -35,7 +35,7 @@ from awf.adapters.runtime_executor import (
     AgentRuntimeExecRequest,
     AgentRuntimeExecResult,
 )
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import COMMAND_TIMEOUT_REASON, FakeCommandRunner
 from awf.db.enums import AgentRuntime
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
@@ -331,7 +331,12 @@ class TestRuntimeExecutorSeam:
         self,
     ) -> None:
         executor = _RecordingExecutor(
-            result=AgentRuntimeExecResult(returncode=124, stdout="partial", stderr="watchdog fired")
+            result=AgentRuntimeExecResult(
+                returncode=124,
+                stdout="partial",
+                stderr="watchdog fired",
+                timeout_reason=COMMAND_TIMEOUT_REASON,
+            )
         )
         adapter = CodexAdapter(
             runner=FakeCommandRunner(),
@@ -455,15 +460,14 @@ class TestRuntimeExecutorSeam:
         # valid timeout reason must NOT be misclassified as a wall-clock
         # timeout. The Compose path only reports ``AGENT_TIMEOUT`` when the
         # watchdog sets ``reason_code``; the hosted path mirrors that, so a
-        # real CLI failure that happens to exit 124 (with an explicit non-
-        # timeout ``timeout_reason``) classifies as an ordinary CLI failure
+        # real CLI failure that happens to exit 124 (with an omitted
+        # ``timeout_reason``) classifies as an ordinary CLI failure
         # instead of triggering timeout recovery.
         executor = _RecordingExecutor(
             result=AgentRuntimeExecResult(
                 returncode=124,
                 stdout="",
                 stderr="cli exited 124 for its own reason",
-                timeout_reason="",
             )
         )
         adapter = CodexAdapter(
