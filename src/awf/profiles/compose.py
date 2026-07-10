@@ -661,12 +661,11 @@ def hosted_github_token_passthrough_names(
 
     A compose *pass-through* slot (``environment: [GH_TOKEN]`` with no ``=``,
     ``GH_TOKEN:`` / ``GH_TOKEN: null``) declares no value — Docker Compose
-    takes it from the worker shell at stack launch — so it is worker-resolved
-    and is treated as matching the corresponding worker source (the local
-    Compose agent received the worker value for that name), NOT as a distinct
-    profile-owned token. The pass-through alias name is surfaced so the hosted
-    executor resolves it out-of-band, mirroring the local container (PR #751
-    thread PRRT_kwDOSJAM6s6PZkRH).
+    takes it from the worker shell at stack launch. It is worker-resolved only
+    when that same name exists in the worker environment; if the worker has only
+    ``AWF_GITHUB_TOKEN``, local Compose does not give the agent ``GH_TOKEN`` and
+    the hosted path must not surface ``GH_TOKEN`` as a pass-through name (PR
+    #754 thread PRRT_kwDOSJAM6s6P6an-).
     """
     source_env = os.environ if worker_env is None else worker_env
     worker_placeholder = _github_token_placeholder(source_env)
@@ -681,13 +680,15 @@ def hosted_github_token_passthrough_names(
     # credential. Surface nothing so a worker source/alias cannot shadow it on
     # the hosted path (the profile-owned name itself is a worker-resolved secret
     # slot the hosted path does not re-resolve from the worker env). A
-    # pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH`) is
-    # worker-resolved, not profile-owned — the local Compose container received
-    # the worker shell value for that name — so it is NOT a distinct
-    # profile-owned token and does not trigger the group-suppression branch (PR
-    # #751 thread PRRT_kwDOSJAM6s6PZkRH).
+    # pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH`) is not
+    # profile-owned; it is either worker-resolved for that same name or absent
+    # from the local container. An absent pass-through slot does not suppress
+    # other explicit aliases, but it is not surfaced as its own hosted
+    # pass-through name.
     for token_name in _GITHUB_TOKEN_SOURCE_PRECEDENCE:
         raw = compose_env.get(token_name)
+        if raw == _COMPOSE_PASSTHROUGH and not source_env.get(token_name):
+            continue
         if token_name in compose_env and not _github_token_slot_matches_worker(
             token_name,
             raw,
@@ -697,11 +698,12 @@ def hosted_github_token_passthrough_names(
             return ()
     # Surface every alias whose value matches the worker token placeholder
     # (AWF-injected, or a GitHub lease rendering to the same source), plus
-    # pass-through slots (worker-resolved — the local Compose container received
-    # the worker shell value for that name, so the hosted executor resolves the
-    # same worker value out-of-band). These are exactly the aliases the local
-    # Compose container receives the worker token in, so the hosted executor
-    # resolving them out-of-band reproduces the same credential.
+    # pass-through slots when the same name exists in the worker env
+    # (worker-resolved — the local Compose container received the worker shell
+    # value for that name, so the hosted executor resolves the same worker value
+    # out-of-band). These are exactly the aliases the local Compose container
+    # receives the worker token in, so the hosted executor resolving them
+    # out-of-band reproduces the same credential.
     aliases = tuple(
         alias
         for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE
@@ -733,9 +735,13 @@ def _github_token_slot_matches_worker(
     worker_env: Mapping[str, str],
 ) -> bool:
     """Return whether a compose GitHub token slot resolves to the worker token."""
-    return raw in (worker_placeholder, _COMPOSE_PASSTHROUGH) or (
-        raw is not None
-        and _compose_defaulted_reference_name(raw, worker_env=worker_env) == token_name
+    return (
+        raw == worker_placeholder
+        or (raw == _COMPOSE_PASSTHROUGH and bool(worker_env.get(token_name)))
+        or (
+            raw is not None
+            and _compose_defaulted_reference_name(raw, worker_env=worker_env) == token_name
+        )
     )
 
 

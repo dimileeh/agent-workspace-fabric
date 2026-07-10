@@ -468,28 +468,21 @@ def test_hosted_github_token_passthrough_names_unreadable_compose_is_empty(
         "list",  # ``environment: [GH_TOKEN]`` — bare-name pass-through slot
     ],
 )
-def test_hosted_github_token_passthrough_names_pass_through_alias_matches_worker_source(
+def test_hosted_github_token_passthrough_names_skips_absent_pass_through_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     compose_alias_value: object,
 ) -> None:
-    """A pass-through GitHub alias is treated as the worker source, not suppressed.
+    """A pass-through GitHub alias is surfaced only when that worker name exists.
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PZkRH: when a compose-declared
     GitHub alias is a true pass-through slot (``environment: [GH_TOKEN]`` with
     no ``=``, ``GH_TOKEN:`` / ``GH_TOKEN: null``), ``_compose_environment_mapping``
-    normalizes it to the :data:`_COMPOSE_PASSTHROUGH` sentinel. The local Compose
-    agent still receives the worker token at stack launch (Docker Compose takes
-    the pass-through slot's value from the worker shell), so the hosted path must
-    treat the pass-through alias as matching the corresponding worker source
-    rather than suppressing the whole group. Without this, hosted monitor-repair
-    loses ``gh`` auth in that pass-through configuration.
-
-    The pass-through alias itself is a worker-resolved slot the hosted executor
-    resolves out-of-band (its name is surfaced so the hosted executor mirrors
-    the worker shell value, the same way local Compose took it from the worker
-    shell); it is NOT a profile-owned distinct token, so it does not trigger the
-    group-suppression branch.
+    normalizes it to the :data:`_COMPOSE_PASSTHROUGH` sentinel. Docker Compose
+    only gives the local agent a value for that exact name when it exists in the
+    worker shell. Regression for PR #754 thread PRRT_kwDOSJAM6s6P6an-: a bare
+    ``GH_TOKEN`` slot must not be surfaced as a hosted pass-through when the
+    worker has only ``AWF_GITHUB_TOKEN``.
     """
     from awf.profiles.compose import _COMPOSE_PASSTHROUGH, hosted_github_token_passthrough_names
 
@@ -511,15 +504,46 @@ def test_hosted_github_token_passthrough_names_pass_through_alias_matches_worker
 
     names = hosted_github_token_passthrough_names(compose_file)
 
-    # The pass-through GH_TOKEN is worker-resolved (the local container received
-    # the worker shell value), so it does NOT suppress the group. The matching
-    # GITHUB_TOKEN alias and the AWF source name are surfaced so the hosted
-    # executor can resolve the credential out-of-band. The pass-through sentinel
-    # value itself is never returned (names only).
+    # The bare GH_TOKEN slot has no same-name worker value, so local Compose did
+    # not give the agent GH_TOKEN and the hosted path must not invent it. The
+    # explicit GITHUB_TOKEN alias and AWF source remain surfaced.
     assert "AWF_GITHUB_TOKEN" in names
     assert "GITHUB_TOKEN" in names
-    assert "GH_TOKEN" in names
+    assert "GH_TOKEN" not in names
     assert _COMPOSE_PASSTHROUGH not in names
+    assert "ghp_worker_secret" not in names
+
+
+@pytest.mark.unit
+def test_hosted_github_token_passthrough_names_accepts_same_name_pass_through_alias(
+    tmp_path: Path,
+) -> None:
+    """A bare GitHub alias is surfaced when the same worker name is set."""
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": ["GH_TOKEN", "GITHUB_TOKEN=${GH_TOKEN}"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = hosted_github_token_passthrough_names(
+        compose_file,
+        worker_env={"GH_TOKEN": "ghp_worker_secret"},
+    )
+
+    assert names.count("GH_TOKEN") == 1
+    assert "GITHUB_TOKEN" in names
+    assert "AWF_GITHUB_TOKEN" not in names
     assert "ghp_worker_secret" not in names
 
 
