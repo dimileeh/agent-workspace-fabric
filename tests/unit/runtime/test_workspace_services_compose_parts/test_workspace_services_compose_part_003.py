@@ -316,6 +316,8 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                         "environment": {
                             "NPM_TOKEN": "npm_profile_token",
                             "CUSTOM_API_TOKEN": "custom_profile_token",
+                            "STRIPE_KEY": "sk_live_profile",
+                            "SENDGRID_KEY": "sendgrid_profile_key",
                             "PAYMENTS_CLIENT_SECRET": "client_secret",
                             "AUTHORIZATION": "Bearer profile-token",
                             "HTTP_AUTHORIZATION": "Basic profile-token",
@@ -339,6 +341,8 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
 
     assert "NPM_TOKEN" not in carried
     assert "CUSTOM_API_TOKEN" not in carried
+    assert "STRIPE_KEY" not in carried
+    assert "SENDGRID_KEY" not in carried
     assert "PAYMENTS_CLIENT_SECRET" not in carried
     assert "AUTHORIZATION" not in carried
     assert "HTTP_AUTHORIZATION" not in carried

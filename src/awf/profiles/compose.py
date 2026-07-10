@@ -194,6 +194,8 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
     tokens = tuple(token for token in normalized.split("_") if token)
     if any(token in _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS for token in tokens):
         return True
+    if tokens and tokens[-1] == "KEY":
+        return True
     return any(
         (left, right) in _SECRET_LIKE_PROFILE_ENV_NAME_TOKEN_PAIRS
         for left, right in zip(tokens, tokens[1:], strict=False)
