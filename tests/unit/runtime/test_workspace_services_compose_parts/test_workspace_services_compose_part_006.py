@@ -404,8 +404,14 @@ def test_literal_profile_env_from_compose_skips_url_query_api_key_literals(
                         "image": "agent:latest",
                         "environment": {
                             "CALLBACK_URL": "https://api.example/cb?api_key=sk-live",
+                            "MAPS_URL": (
+                                "https://maps.googleapis.com/maps/api/geocode/json?key=AIza-secret"
+                            ),
                             "OAUTH_CALLBACK_URL": (
                                 "https://api.example/cb?client_secret=oauth-secret"
+                            ),
+                            "SAFE_MAPS_URL": (
+                                "https://maps.googleapis.com/maps/api/geocode/json?address=Boston"
                             ),
                             "SAFE_CALLBACK_URL": "https://api.example/cb?next=/ready",
                             "APP_BASE_URL": "http://app:8080",
@@ -421,11 +427,17 @@ def test_literal_profile_env_from_compose_skips_url_query_api_key_literals(
     carried = dict(profile_env)
 
     assert "CALLBACK_URL" not in carried
+    assert "MAPS_URL" not in carried
     assert "OAUTH_CALLBACK_URL" not in carried
+    assert (
+        carried["SAFE_MAPS_URL"]
+        == "https://maps.googleapis.com/maps/api/geocode/json?address=Boston"
+    )
     assert carried["SAFE_CALLBACK_URL"] == "https://api.example/cb?next=/ready"
     assert carried["APP_BASE_URL"] == "http://app:8080"
     blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
     assert "sk-live" not in blob
+    assert "AIza-secret" not in blob
     assert "oauth-secret" not in blob
 
 
