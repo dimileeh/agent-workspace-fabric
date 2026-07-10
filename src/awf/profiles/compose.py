@@ -1106,11 +1106,12 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     rather than drop the name (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN). Cross-name
     worker-resolved aliases stay excluded because target-name-only passthrough
     cannot recover the source-name value. A bare slot whose variable is unset IS
-    excluded (Compose substitutes ``""``; out of scope), as are nested/mixed
-    worker-resolved forms (e.g. ``${X:-${SECRET}}`` / ``prefix-${NAME}``) — the
-    hosted executor cannot reconstruct a profile-owned literal interpolating a
-    worker value from the name alone. See ``filter_hosted_env_passthrough_names``
-    and PR #751 threads PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm /
+    excluded because Compose substitutes ``""`` and the empty value reaches
+    hosted through ``profile_env``, as are nested/mixed worker-resolved forms
+    (e.g. ``${X:-${SECRET}}`` / ``prefix-${NAME}``) — the hosted executor cannot
+    reconstruct a profile-owned literal interpolating a worker value from the
+    name alone. See ``filter_hosted_env_passthrough_names`` and PR #751 threads
+    PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm /
     PRRT_kwDOSJAM6s6PYnJJ / PRRT_kwDOSJAM6s6PY6Rn / PRRT_kwDOSJAM6s6PY8zB /
     PRRT_kwDOSJAM6s6Pi7sN. A pass-through slot is removed from the baseline
     ``_compose_env_passthrough_exclusions`` set even when its name is in
@@ -1222,12 +1223,13 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # name local Compose selected. Mixed forms (e.g. ``prefix-${NAME}``)
         # still cannot be reconstructed from the name alone. A bare slot whose
         # variable is UNSET stays excluded too: Compose substitutes "" for an
-        # unset bare reference, Core only injects the bare form when the worker
-        # value is present (``source_env.get(name)`` is truthy), and the unset
-        # ``${NAME:?err}`` / ``${NAME?err}`` form would fail Compose at stack
-        # launch (unreachable for a running container). The ``in worker_env``
-        # test gates on the local container actually receiving a worker value
-        # (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN).
+        # unset bare reference, and ``literal_profile_env_from_compose`` carries
+        # that empty literal into ``profile_env``. Core only injects the bare form
+        # when the worker value is present (``source_env.get(name)`` is truthy),
+        # and the unset ``${NAME:?err}`` / ``${NAME?err}`` form would fail Compose
+        # at stack launch (unreachable for a running container). The
+        # ``in worker_env`` test gates on the local container actually receiving a
+        # worker value (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN).
         worker_resolved_slots = frozenset(
             name
             for name, raw in compose_env.items()

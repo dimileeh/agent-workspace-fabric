@@ -667,8 +667,8 @@ def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_auth_keys(
     assert "ANTHROPIC_API_KEY" in filtered
     assert "AWS_REGION" in filtered
 
-    # With the variable UNSET the bare slot stays excluded (out of scope; no
-    # worker value to resolve out-of-band — Compose substitutes "").
+    # With the variable UNSET the bare slot stays excluded because Compose
+    # substitutes "" and the empty value is carried through profile_env.
     filtered_unset = filter_hosted_env_passthrough_names(
         names, compose_file=compose_file, worker_env={}
     )
@@ -1300,8 +1300,9 @@ def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
     ``env_passthrough_names`` for hosted out-of-band resolution, mirroring the
     pass-through-slot (PRRT_kwDOSJAM6s6PY6Rn) and worker-resolved-defaulted
     (PRRT_kwDOSJAM6s6PiGHK) fixes. A bare slot whose variable is UNSET stays
-    excluded (out of scope; Core only injects the bare form when the worker value
-    is present, and Compose substitutes "" for an unset bare reference).
+    excluded from passthrough because Compose substitutes "" and that empty value
+    is carried via ``profile_env``; Core only injects the bare form when the
+    worker value is present.
     """
     from awf.profiles.compose import literal_profile_env_from_compose
 
@@ -1322,8 +1323,8 @@ def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
                             # (hosted executor resolves the worker credential
                             # out-of-band, mirroring the local Compose run).
                             "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-                            # Bare ${NAME} with the variable UNSET -> stays
-                            # excluded (out of scope; no divergence).
+                            # Bare ${NAME} with the variable UNSET -> excluded
+                            # from passthrough and carried as "".
                             "UNSET_ENDPOINT": "${UNSET_ENDPOINT}",
                             # Pure literal -> excluded (carried via profile_env).
                             "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
@@ -1352,7 +1353,7 @@ def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
     # stack launch).
     assert "OLLAMA_HOST" in filtered
     assert "OPENAI_API_KEY" in filtered
-    # Bare ${NAME} with the variable UNSET -> stays excluded (out of scope).
+    # Bare ${NAME} with the variable UNSET -> excluded from passthrough.
     assert "UNSET_ENDPOINT" not in filtered
     # Pure literal -> excluded (carried via profile_env instead).
     assert "ANTHROPIC_VERTEX_PROJECT_ID" not in filtered
@@ -1366,6 +1367,7 @@ def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
     carried = dict(profile_env)
     assert "OLLAMA_HOST" not in carried
     assert "OPENAI_API_KEY" not in carried
+    assert carried.get("UNSET_ENDPOINT") == ""
     assert carried.get("ANTHROPIC_VERTEX_PROJECT_ID") == "proj-123"
 
 
