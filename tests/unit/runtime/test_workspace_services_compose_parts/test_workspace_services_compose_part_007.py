@@ -41,10 +41,11 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
 
     Now a pass-through slot is skipped from ``profile_env`` (an empty literal
     would clobber the real worker value) and kept in ``env_passthrough_names``
-    for hosted out-of-band resolution, mirroring the local Compose container. A
-    literal empty resolved from an interpolation default (e.g. ``${MISSING:-}``
-    with ``MISSING`` unset) is still carried as ``LITERAL`` (the local container
-    received that empty default, not a worker shell value).
+    for hosted out-of-band resolution only when the worker supplied a value,
+    mirroring the local Compose container. A literal empty resolved from an
+    interpolation default (e.g. ``${MISSING:-}`` with ``MISSING`` unset) is still
+    carried as ``LITERAL`` (the local container received that empty default, not
+    a worker shell value).
     """
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -93,7 +94,7 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
         names, compose_file=compose_file, worker_env=worker_env
     )
     assert "AWS_REGION" in filtered
-    assert "AWS_NULL_REGION" in filtered
+    assert "AWS_NULL_REGION" not in filtered
     assert "AWS_EMPTY_REGION" not in filtered
     assert "ANTHROPIC_VERTEX_PROJECT_ID" not in filtered
     assert "OPENAI_API_KEY" in filtered
