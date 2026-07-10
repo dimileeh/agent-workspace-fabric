@@ -1164,7 +1164,10 @@ def hosted_profile_env_passthrough_aliases(
             continue
         if source_name is None or source_name == name or source_name not in env:
             continue
-        if name in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES:
+        if (
+            name in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+            or source_name in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+        ):
             continue
         aliases.append((name, source_name))
     aliases.extend(
