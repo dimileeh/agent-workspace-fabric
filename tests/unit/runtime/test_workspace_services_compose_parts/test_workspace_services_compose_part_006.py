@@ -70,7 +70,23 @@ def test_literal_profile_env_from_compose_preserves_hosted_bitbucket_rewrites(
                                 "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
                             ),
                             "GIT_CONFIG_VALUE_0": "https://bitbucket.org/",
-                            "GIT_CONFIG_COUNT": "1",
+                            "GIT_CONFIG_KEY_1": (
+                                "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+                            ),
+                            "GIT_CONFIG_VALUE_1": "https://bitbucket.org:443/",
+                            "GIT_CONFIG_KEY_2": (
+                                "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+                            ),
+                            "GIT_CONFIG_VALUE_2": "git@bitbucket.org:",
+                            "GIT_CONFIG_KEY_3": (
+                                "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+                            ),
+                            "GIT_CONFIG_VALUE_3": "ssh://git@bitbucket.org/",
+                            "GIT_CONFIG_KEY_4": (
+                                "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+                            ),
+                            "GIT_CONFIG_VALUE_4": "ssh://git@bitbucket.org:22/",
+                            "GIT_CONFIG_COUNT": "5",
                             "APP_BASE_URL": "http://app:8080",
                         },
                     }
@@ -83,12 +99,32 @@ def test_literal_profile_env_from_compose_preserves_hosted_bitbucket_rewrites(
     carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
 
     assert carried["APP_BASE_URL"] == "http://app:8080"
-    assert carried["GIT_CONFIG_COUNT"] == "1"
+    assert carried["GIT_CONFIG_COUNT"] == "5"
     assert (
         carried["GIT_CONFIG_KEY_0"]
         == "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
     )
     assert carried["GIT_CONFIG_VALUE_0"] == "https://bitbucket.org/"
+    assert (
+        carried["GIT_CONFIG_KEY_1"]
+        == "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+    )
+    assert carried["GIT_CONFIG_VALUE_1"] == "https://bitbucket.org:443/"
+    assert (
+        carried["GIT_CONFIG_KEY_2"]
+        == "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+    )
+    assert carried["GIT_CONFIG_VALUE_2"] == "git@bitbucket.org:"
+    assert (
+        carried["GIT_CONFIG_KEY_3"]
+        == "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+    )
+    assert carried["GIT_CONFIG_VALUE_3"] == "ssh://git@bitbucket.org/"
+    assert (
+        carried["GIT_CONFIG_KEY_4"]
+        == "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+    )
+    assert carried["GIT_CONFIG_VALUE_4"] == "ssh://git@bitbucket.org:22/"
 
 
 @pytest.mark.unit

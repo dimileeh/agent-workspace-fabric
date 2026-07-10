@@ -519,6 +519,15 @@ _GIT_ASKPASS_KEY = "GIT_ASKPASS"
 _GIT_TERMINAL_PROMPT_KEY = "GIT_TERMINAL_PROMPT"
 _BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
 _BITBUCKET_AGENT_INSTEADOF_KEY = "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+_BITBUCKET_AGENT_SAFE_INSTEADOF_VALUES = frozenset(
+    {
+        "https://bitbucket.org/",
+        "https://bitbucket.org:443/",
+        "git@bitbucket.org:",
+        "ssh://git@bitbucket.org/",
+        "ssh://git@bitbucket.org:22/",
+    }
+)
 
 
 def _is_git_config_protocol_key(key: str) -> bool:
@@ -566,6 +575,13 @@ def _split_git_config_entries(
         entries.append((config_key, config_value))
     others = tuple((k, v) for k, v in pairs if not _is_git_config_protocol_key(k))
     return entries, others
+
+
+def _is_safe_bitbucket_agent_insteadof_value(config_key: str, config_value: str) -> bool:
+    return (
+        config_key == _BITBUCKET_AGENT_INSTEADOF_KEY
+        and config_value in _BITBUCKET_AGENT_SAFE_INSTEADOF_VALUES
+    )
 
 
 def merge_agent_environment(
@@ -1414,8 +1430,12 @@ def _hosted_git_config_env(
         if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
             continue
         if value_resolution is _ComposeEnvResolution.LITERAL:
-            if _value_has_url_userinfo(config_value) or _is_auth_credential_like_profile_env_value(
-                config_value
+            if not _is_safe_bitbucket_agent_insteadof_value(
+                config_key,
+                config_value,
+            ) and (
+                _value_has_url_userinfo(config_value)
+                or _is_auth_credential_like_profile_env_value(config_value)
             ):
                 continue
             carried_entries.append((config_key, config_value, None))
