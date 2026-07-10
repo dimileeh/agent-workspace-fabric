@@ -528,7 +528,7 @@ async def _compose_runtime_usable_after_restart_failure(
             compose_project_name=compose_project,
             compose_file=str(compose_file),
         )
-        return True
+        return False
     if not expected_services:
         _log.warning(
             "executor.resume_compose_runtime_missing_expected_services",
