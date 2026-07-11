@@ -43,6 +43,7 @@ from awf.db.enums import AgentRuntime
 from awf.profiles.compose import (
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
+    hosted_file_auth_mount_targets,
     hosted_github_token_passthrough_names,
     hosted_profile_env_passthrough_aliases,
     hosted_profile_env_passthrough_names,
@@ -585,6 +586,10 @@ class AgentAdapter(ABC):
             compose_env=compose_env,
             postgres_passwords=postgres_passwords,
         )
+        file_auth_mount_targets = await asyncio.to_thread(
+            hosted_file_auth_mount_targets,
+            compose_file,
+        )
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
@@ -623,6 +628,7 @@ class AgentAdapter(ABC):
             effort=self._default_effort,
             env_passthrough_names=env_passthrough_names,
             env_passthrough_aliases=env_passthrough_aliases,
+            file_auth_mount_targets=file_auth_mount_targets,
             profile_env=profile_env,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
@@ -643,6 +649,7 @@ class AgentAdapter(ABC):
             env_passthrough_aliases=[
                 {"target": target, "source": source} for target, source in env_passthrough_aliases
             ],
+            file_auth_mount_targets=list(file_auth_mount_targets),
             # Log profile_env *keys* only — values are literal profile config
             # (e.g. an Ollama daemon URL) but never secret placeholders; still,
             # a value could be sensitive config, so do not log values.

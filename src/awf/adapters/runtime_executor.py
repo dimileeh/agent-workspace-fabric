@@ -12,9 +12,10 @@ Docker Compose.
 
 Secret *names* may be passed as env-passthrough intent (e.g.
 ``CODEX_API_KEY``); cross-name env aliases may be passed as source/target
-names; secret *values* are NEVER included — the hosted runtime resolves them
-out-of-band. Implementations MUST stream the prompt via stdin (``prompt_stdin``),
-never argv, and MUST NOT log or persist secret values.
+names; file-backed auth may be represented by container mount targets; secret
+*values* and host source paths are NEVER included — the hosted runtime resolves
+them out-of-band. Implementations MUST stream the prompt via stdin
+(``prompt_stdin``), never argv, and MUST NOT log or persist secret values.
 """
 
 from __future__ import annotations
@@ -70,6 +71,12 @@ class AgentRuntimeExecRequest:
     secrets and stay in ``env_passthrough_names`` for out-of-band resolution
     (never carried in ``profile_env``).
 
+    File-auth contract: ``file_auth_mount_targets`` carries only recognized
+    container target paths for local provider auth mounts (for example
+    ``/home/agent/.codex``). It never carries host source paths or credential
+    contents; hosted executors resolve any equivalent secret or file mount
+    out-of-band from those target identifiers.
+
     Streaming contract: when ``on_stdout`` / ``on_stderr`` callbacks are
     supplied, implementations SHOULD invoke them with stdout/stderr chunks as
     they arrive so the log store fills *during* execution (mirroring the
@@ -90,6 +97,7 @@ class AgentRuntimeExecRequest:
     effort: str | None
     env_passthrough_names: tuple[str, ...] = ()
     env_passthrough_aliases: tuple[tuple[str, str], ...] = ()
+    file_auth_mount_targets: tuple[str, ...] = ()
     profile_env: tuple[tuple[str, str], ...] = ()
     wall_timeout_seconds: float | None = None
     idle_timeout_seconds: float | None = None
@@ -126,7 +134,7 @@ class AgentRuntimeExecutor(Protocol):
     Core ships no Kubernetes implementation. Implementations MUST stream the
     prompt via stdin/context, never argv, and MUST NOT log or persist secret
     values (resolve them out-of-band from ``env_passthrough_names`` and
-    ``env_passthrough_aliases``).
+    ``env_passthrough_aliases`` / ``file_auth_mount_targets``).
     ``request.profile_env`` carries literal profile-owned env values the
     executor injects directly (not worker-resolved); those are non-secret
     profile configuration (e.g. ``OLLAMA_HOST``) and may be set on the job env.

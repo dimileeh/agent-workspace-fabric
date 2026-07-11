@@ -146,6 +146,7 @@ async def _run(
 def _write_compose(
     tmp_path: Path,
     environment: dict[str, str] | None = None,
+    volumes: tuple[str | dict[str, str], ...] = (),
 ) -> Path:
     """Write a minimal readable compose file with a single ``agent`` service.
 
@@ -157,6 +158,8 @@ def _write_compose(
     services: dict[str, dict[str, object]] = {"agent": {"image": "agent:latest"}}
     if environment is not None:
         services["agent"]["environment"] = environment
+    if volumes:
+        services["agent"]["volumes"] = list(volumes)
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         yaml.safe_dump({"services": services}),
@@ -350,6 +353,46 @@ class TestNonCodexHostedCredentials:
             assert "GOOGLE_APPLICATION_CREDENTIALS" not in dict(request.profile_env)
             assert "NPM_TOKEN" in request.env_passthrough_names
             assert "NPM_TOKEN" not in dict(request.profile_env)
+
+    @pytest.mark.unit
+    async def test_hosted_request_carries_file_auth_mount_targets(self, tmp_path: Path) -> None:
+        """Hosted requests preserve file-backed provider auth mount signals.
+
+        Regression for PR #754 thread PRRT_kwDOSJAM6s6QDOhZ: local readiness can
+        be satisfied by isolated provider auth directories mounted into the
+        agent container. The hosted request must carry a secret-free target list
+        so a hosted executor can resolve equivalent file-backed credentials
+        instead of launching with env names only.
+        """
+        compose_file = _write_compose(
+            tmp_path,
+            volumes=(
+                "/host/worktree:/workspace",
+                "/host/auth/ws/codex:/home/agent/.codex:rw",
+                "/host/auth/ws/opencode:/home/agent/.config/opencode:rw",
+                "/host/auth/ws/ollama:/home/agent/.ollama:rw",
+                "/host/auth/ws/grok:/home/agent/.grok:rw",
+                {
+                    "type": "bind",
+                    "source": "/host/auth/ws/gemini",
+                    "target": "/home/agent/.gemini",
+                    "read_only": False,
+                },
+            ),
+        )
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert request.file_auth_mount_targets == (
+            "/home/agent/.codex",
+            "/home/agent/.config/opencode",
+            "/home/agent/.ollama",
+            "/home/agent/.grok",
+            "/home/agent/.gemini",
+        )
+        blob = "\x00".join(request.file_auth_mount_targets)
+        assert "/host/auth" not in blob
+        assert "/host/worktree" not in blob
 
     @pytest.mark.unit
     async def test_hosted_request_carries_cross_name_env_secret_aliases(

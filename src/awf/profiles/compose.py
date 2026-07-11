@@ -55,6 +55,22 @@ from awf.profiles.models import (
     _normalized_endpoint_env_name,
 )
 
+_HOSTED_FILE_AUTH_MOUNT_TARGETS = frozenset(
+    {
+        "/home/agent/.claude",
+        "/home/agent/.claude.json",
+        "/home/agent/.codex",
+        "/home/agent/.config/gh",
+        "/home/agent/.config/gcloud",
+        "/home/agent/.config/opencode",
+        "/home/agent/.gemini",
+        "/home/agent/.gitconfig",
+        "/home/agent/.grok",
+        "/home/agent/.ollama",
+        "/home/agent/.ssh",
+    }
+)
+
 
 def _is_secret_like_profile_env_name(name: str) -> bool:
     normalized = name.upper().replace("-", "_")
@@ -849,6 +865,55 @@ def _try_agent_environment_from_compose_file(
     if not isinstance(agent, Mapping):
         return None
     return _compose_environment_mapping(agent.get("environment"))
+
+
+def hosted_file_auth_mount_targets(compose_file: Path) -> tuple[str, ...]:
+    """Return secret-free provider auth mount targets for hosted agent runs.
+
+    The rendered Compose file includes host source paths for local auth mounts;
+    hosted requests must not carry those host paths or credential contents.
+    Only recognized container targets are returned so a hosted executor can
+    resolve equivalent file-backed credentials out-of-band.
+    """
+
+    try:
+        payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return ()
+    if not isinstance(payload, Mapping):
+        return ()
+    services = payload.get("services")
+    if not isinstance(services, Mapping):
+        return ()
+    agent = services.get("agent")
+    if not isinstance(agent, Mapping):
+        return ()
+    volumes = agent.get("volumes")
+    if not isinstance(volumes, list):
+        return ()
+
+    targets: list[str] = []
+    seen: set[str] = set()
+    for volume in volumes:
+        target = _compose_volume_target(volume)
+        if target not in _HOSTED_FILE_AUTH_MOUNT_TARGETS or target in seen:
+            continue
+        targets.append(target)
+        seen.add(target)
+    return tuple(targets)
+
+
+def _compose_volume_target(volume: object) -> str | None:
+    if isinstance(volume, str):
+        parts = volume.split(":")
+        if len(parts) < 2:
+            return None
+        return parts[1]
+    if isinstance(volume, Mapping):
+        target = volume.get("target") or volume.get("dst") or volume.get("destination")
+        if isinstance(target, str):
+            return target
+    return None
 
 
 def _try_agent_environment_keys_from_compose_file(
