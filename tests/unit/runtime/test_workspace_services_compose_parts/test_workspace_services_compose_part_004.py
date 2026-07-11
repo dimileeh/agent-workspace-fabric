@@ -1035,6 +1035,39 @@ def test_hosted_git_config_preserves_worker_resolved_value_block(
 
 
 @pytest.mark.unit
+def test_hosted_git_config_preserves_empty_passthrough_value(
+    tmp_path: Path,
+) -> None:
+    """An empty git-config pass-through value stays an explicit empty literal."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "credential.helper",
+                        "GIT_CONFIG_VALUE_0": None,
+                    },
+                }
+            }
+        },
+    )
+    worker_env = {"GIT_CONFIG_VALUE_0": ""}
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    aliases = hosted_profile_env_passthrough_aliases(compose_file, worker_env=worker_env)
+
+    assert profile_env == {
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "",
+        "GIT_CONFIG_COUNT": "1",
+    }
+    assert aliases == ()
+
+
+@pytest.mark.unit
 def test_hosted_git_config_preserves_empty_worker_resolved_value_alias(
     tmp_path: Path,
 ) -> None:

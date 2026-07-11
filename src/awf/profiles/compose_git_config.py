@@ -202,6 +202,9 @@ def _hosted_git_config_env(
             pass_through_value_source = f"{_GIT_CONFIG_VALUE_PREFIX}{index}"
             if pass_through_value_source not in worker_env:
                 continue
+            if worker_env[pass_through_value_source] == "":
+                carried_entries.append((config_key, "", None))
+                continue
             carried_entries.append((config_key, None, pass_through_value_source))
             continue
         config_value, value_resolution = _compose_resolve_value(
