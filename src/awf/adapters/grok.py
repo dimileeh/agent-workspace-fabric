@@ -160,6 +160,7 @@ def main():
     prompt = sys.stdin.read()
     proc = subprocess.Popen(
         ["grok", *sys.argv[1:], "agent", "stdio"],
+        bufsize=0,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
     )
