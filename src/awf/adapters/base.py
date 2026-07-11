@@ -582,6 +582,7 @@ class AgentAdapter(ABC):
         file_auth_mount_targets = await asyncio.to_thread(
             hosted_file_auth_mount_targets,
             compose_file,
+            compose_env=compose_env,
         )
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"

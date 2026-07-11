@@ -71,9 +71,10 @@ class AgentRuntimeExecRequest:
     secrets and stay in ``env_passthrough_names`` for out-of-band resolution
     (never carried in ``profile_env``).
 
-    File-auth contract: ``file_auth_mount_targets`` carries only recognized
+    File-auth contract: ``file_auth_mount_targets`` carries recognized
     container target paths for local provider auth mounts (for example
-    ``/home/agent/.codex``). It never carries host source paths or credential
+    ``/home/agent/.codex``), plus dynamic file targets such as the path named
+    by ``GOOGLE_APPLICATION_CREDENTIALS``. It never carries credential
     contents; hosted executors resolve any equivalent secret or file mount
     out-of-band from those target identifiers.
 

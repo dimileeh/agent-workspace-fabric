@@ -69,13 +69,9 @@ _CLAUDE_CODE_BACKEND_AUTH_NAMES = (
     "CLOUD_ML_REGION",
 )
 # ``GOOGLE_APPLICATION_CREDENTIALS`` is intentionally NOT surfaced here — it is a
-# file-backed credential (its value is a filesystem path), and the hosted
-# request (``AgentRuntimeExecRequest``) carries no file/secret ref or mount. The
-# local Compose path bind-mounts the referenced file via ``_build_host_auth_mounts``
-# so ADC works locally, but env-only passthrough on the hosted path would inject a
-# dangling path and silently break Vertex/ADC auth (PR #751 thread
-# PRRT_kwDOSJAM6s6Pas4k). A future file/secret-ref mechanism on the hosted
-# request is required to support it; until then it is not advertised as env-only.
+# file-backed credential (its value is a filesystem path). Hosted requests carry
+# the matching auth mount target via ``file_auth_mount_targets`` instead of
+# injecting a dangling env-only path.
 _CLAUDE_NAMES = _CLAUDE_CODE_DERIVED_AUTH_NAMES
 _CURSOR_NAMES = ("CURSOR_API_KEY",)
 _GEMINI_NAMES = (
@@ -182,9 +178,8 @@ class TestNonCodexHostedCredentials:
         # ``GOOGLE_APPLICATION_CREDENTIALS`` is file-backed and must NOT be
         # advertised as env-only passthrough — see
         # ``test_gemini_does_not_advertise_file_backed_google_application_credentials``
-        # (PR #751 thread PRRT_kwDOSJAM6s6Pas4k). The local Compose path
-        # bind-mounts the file; the hosted request has no file/secret ref, so
-        # surfacing it would inject a dangling path and break Vertex/ADC auth.
+        # (PR #751 thread PRRT_kwDOSJAM6s6Pas4k). The hosted request carries
+        # file-backed ADC through ``file_auth_mount_targets`` instead.
         assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
 
     @pytest.mark.unit
@@ -213,18 +208,11 @@ class TestNonCodexHostedCredentials:
         Regression for PR #751 thread PRRT_kwDOSJAM6s6Pas4k: the local Compose
         path bind-mounts the referenced credentials file into the agent
         container via ``_build_host_auth_mounts`` so the path the env var points
-        at actually exists and ADC/Vertex auth works. The hosted (non-compose)
-        path resolves env-passthrough names to env *values* out-of-band and
-        injects them as env vars, but ``AgentRuntimeExecRequest`` carries no
-        file/secret ref or mount, so the hosted executor has no signal that this
-        name is file-backed and must also mount the file. Surfacing it would
-        inject a dangling ``GOOGLE_APPLICATION_CREDENTIALS=/some/path`` with the
-        file absent, silently breaking ADC/Vertex auth even though the same
-        workspace is ready under Compose. The name must NOT be advertised as
-        env-only passthrough until a file/secret-ref mechanism exists on the
-        hosted request; the value/config names (API keys, Vertex toggles,
-        project/location, access token) are still surfaced because they are not
-        file paths.
+        at actually exists and ADC/Vertex auth works. The hosted path carries
+        that file-backed signal through ``file_auth_mount_targets`` instead of
+        injecting a dangling env-only path. The value/config names (API keys,
+        Vertex toggles, project/location, access token) are still surfaced
+        because they are not file paths.
         """
         compose_file = _write_compose(tmp_path)
         adapter = _build(GeminiAdapter)
@@ -233,6 +221,35 @@ class TestNonCodexHostedCredentials:
         # The value/config names that ARE env-safe remain surfaced.
         for name in _GEMINI_NAMES:
             assert name in request.env_passthrough_names, name
+
+    @pytest.mark.unit
+    async def test_gemini_carries_google_application_credentials_file_auth_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ADC-only Gemini hosted runs preserve the local file-backed auth target.
+
+        Regression for PR #754 thread PRRT_kwDOSJAM6s6QDzjU: provider readiness
+        accepts a readable ``GOOGLE_APPLICATION_CREDENTIALS`` file and local
+        Compose bind-mounts it, so hosted Gemini must carry the corresponding
+        file-auth mount target instead of launching without ADC.
+        """
+        credentials_target = "/home/agent/.config/gcloud/adc.json"
+        compose_file = _write_compose(
+            tmp_path,
+            environment={"GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS}"},
+            volumes=(
+                "/host/worktree:/workspace",
+                f"/host/auth/adc.json:{credentials_target}:ro",
+            ),
+        )
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials_target)
+
+        adapter = _build(GeminiAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
+        assert credentials_target in request.file_auth_mount_targets
+        assert "/host/auth/adc.json" not in request.file_auth_mount_targets
 
     @pytest.mark.unit
     async def test_grok_surfaces_xai_api_key_name(self, tmp_path: Path) -> None:

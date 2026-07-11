@@ -824,13 +824,21 @@ def _try_agent_environment_from_compose_file(
     return _compose_environment_mapping(agent.get("environment"))
 
 
-def hosted_file_auth_mount_targets(compose_file: Path) -> tuple[str, ...]:
+def hosted_file_auth_mount_targets(
+    compose_file: Path,
+    *,
+    compose_env: Mapping[str, str] | None = None,
+    worker_env: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
     """Return secret-free provider auth mount targets for hosted agent runs.
 
     The rendered Compose file includes host source paths for local auth mounts;
     hosted requests must not carry those host paths or credential contents.
-    Only recognized container targets are returned so a hosted executor can
-    resolve equivalent file-backed credentials out-of-band.
+    Recognized container targets are returned so a hosted executor can resolve
+    equivalent file-backed credentials out-of-band. ADC files are mounted at
+    the same path named by ``GOOGLE_APPLICATION_CREDENTIALS`` rather than a
+    fixed provider directory, so accept that dynamic target only when the
+    Compose agent environment resolves the matching credential path.
     """
 
     try:
@@ -849,15 +857,47 @@ def hosted_file_auth_mount_targets(compose_file: Path) -> tuple[str, ...]:
     if not isinstance(volumes, list):
         return ()
 
+    if compose_env is None:
+        compose_env = _try_agent_environment_from_compose_file(compose_file)
+    adc_targets = _hosted_google_application_credentials_mount_targets(
+        compose_env,
+        worker_env=os.environ if worker_env is None else worker_env,
+    )
     targets: list[str] = []
     seen: set[str] = set()
     for volume in volumes:
         target = _compose_volume_target(volume)
-        if target not in _HOSTED_FILE_AUTH_MOUNT_TARGETS or target in seen:
+        if (
+            target not in _HOSTED_FILE_AUTH_MOUNT_TARGETS and target not in adc_targets
+        ) or target in seen:
             continue
         targets.append(target)
         seen.add(target)
     return tuple(targets)
+
+
+def _hosted_google_application_credentials_mount_targets(
+    compose_env: Mapping[str, str] | None,
+    *,
+    worker_env: Mapping[str, str],
+) -> frozenset[str]:
+    if compose_env is None:
+        return frozenset()
+    raw = compose_env.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if raw is None or raw == _COMPOSE_PASSTHROUGH:
+        return frozenset()
+    target, resolution = _compose_resolve_value(raw, worker_env=worker_env)
+    if resolution in (
+        _ComposeEnvResolution.WORKER_RESOLVED_SLOT,
+        _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED,
+    ):
+        source_name = _compose_selected_worker_reference_name(raw, worker_env=worker_env)
+        target = worker_env.get(source_name, "") if source_name is not None else ""
+    elif resolution is not _ComposeEnvResolution.LITERAL:
+        return frozenset()
+    if not target or not Path(target).is_absolute():
+        return frozenset()
+    return frozenset({target})
 
 
 def _compose_volume_target(volume: object) -> str | None:
