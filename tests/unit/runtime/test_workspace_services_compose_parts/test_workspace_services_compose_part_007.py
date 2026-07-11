@@ -341,3 +341,39 @@ def test_literal_profile_env_from_compose_redacts_set_cookie_header_blobs(
     assert "RESPONSE_HEADERS" not in profile_env
     assert "JSON_RESPONSE_HEADERS" not in profile_env
     assert profile_env["SAFE_RESPONSE_HEADERS"] == '{"Cache-Control":"no-store"}'
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_camelcase_prefixed_secret_literals(
+    tmp_path: Path,
+) -> None:
+    """Neutral config env values carrying camelCase secret fields are NOT carried."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_CONFIG": '{"stripeClientSecret":"stripe-profile-secret"}',
+                            "WEBHOOK_CONFIG": "webhookSecret=webhook-profile-secret",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "APP_CONFIG" not in carried
+    assert "WEBHOOK_CONFIG" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "stripe-profile-secret" not in blob
+    assert "webhook-profile-secret" not in blob

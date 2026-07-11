@@ -182,15 +182,10 @@ def _hosted_git_config_env(
             config_key_raw is None
             or config_value_raw is None
             or config_key_raw == _COMPOSE_PASSTHROUGH
-            or config_value_raw == _COMPOSE_PASSTHROUGH
         ):
             continue
         config_key, key_resolution = _compose_resolve_value(
             config_key_raw,
-            worker_env=worker_env,
-        )
-        config_value, value_resolution = _compose_resolve_value(
-            config_value_raw,
             worker_env=worker_env,
         )
         if key_resolution is not _ComposeEnvResolution.LITERAL:
@@ -203,6 +198,16 @@ def _hosted_git_config_env(
             continue
         if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
             continue
+        if config_value_raw == _COMPOSE_PASSTHROUGH:
+            pass_through_value_source = f"{_GIT_CONFIG_VALUE_PREFIX}{index}"
+            if pass_through_value_source not in worker_env:
+                continue
+            carried_entries.append((config_key, None, pass_through_value_source))
+            continue
+        config_value, value_resolution = _compose_resolve_value(
+            config_value_raw,
+            worker_env=worker_env,
+        )
         if value_resolution is _ComposeEnvResolution.LITERAL:
             if not _is_safe_bitbucket_agent_insteadof_value(
                 config_key,

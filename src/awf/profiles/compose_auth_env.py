@@ -223,6 +223,9 @@ _PREFIXED_SECRET_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
 _CAMELCASE_SECRET_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+SecretKey[\"']?\s*[:=]\s*[\"']?\S+"
 )
+_CAMELCASE_SECRET_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+(?:Client)?Secret[\"']?\s*[:=]\s*[\"']?\S+"
+)
 _PREFIXED_COOKIE_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])[\"']?"
     r"(?:[A-Za-z0-9]+[-_])+(?:set[-_]?)?cookie"
