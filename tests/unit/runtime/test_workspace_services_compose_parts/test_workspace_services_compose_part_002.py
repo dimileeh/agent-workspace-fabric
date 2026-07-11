@@ -647,6 +647,48 @@ def test_hosted_github_token_passthrough_names_accepts_same_name_pass_through_al
 
 
 @pytest.mark.unit
+def test_hosted_github_token_passthrough_names_keeps_pass_through_alias_precedence(
+    tmp_path: Path,
+) -> None:
+    """A lower same-name pass-through alias must not surface a higher source.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6QDx0T: when local Compose
+    receives only ``GITHUB_TOKEN`` from a pass-through slot, but the worker also
+    has a different higher-precedence ``GH_TOKEN``, hosted passthrough must not
+    prepend ``GH_TOKEN``. Otherwise hosted ``gh`` would prefer a credential the
+    local Compose workspace never exposed.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": ["GITHUB_TOKEN"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = hosted_github_token_passthrough_names(
+        compose_file,
+        worker_env={
+            "GH_TOKEN": "ghp_higher_precedence_worker_secret",
+            "GITHUB_TOKEN": "ghp_lower_precedence_worker_secret",
+        },
+    )
+
+    assert names == ("GITHUB_TOKEN",)
+    assert "ghp_higher_precedence_worker_secret" not in names
+    assert "ghp_lower_precedence_worker_secret" not in names
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_unreadable_is_empty(
     tmp_path: Path,
 ) -> None:

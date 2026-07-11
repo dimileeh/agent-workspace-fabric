@@ -690,17 +690,44 @@ def hosted_github_token_passthrough_names(
     if not aliases:
         return aliases
     # Surface the chosen source name first so a hosted executor can resolve the
-    # credential from the source name when the worker only carries the AWF
-    # source and Compose rendered that source into at least one gh-visible alias
-    # at stack launch (the hosted path has no equivalent substitution).
+    # credential from the source name when Compose rendered that source into at
+    # least one gh-visible alias at stack launch (the hosted path has no
+    # equivalent substitution). Do not prepend a higher-precedence source merely
+    # because a lower-precedence same-name pass-through alias matched; local
+    # Compose did not render the higher source into that alias.
     # De-duplicate against the surfaced aliases so a source that is itself a
     # gh-visible alias (e.g. ``GH_TOKEN``) appears exactly once. Source first
     # preserves the scan order's precedence intent (``AWF_GITHUB_TOKEN`` before
     # the aliases).
     source_name = _github_token_source_name(source_env)
-    if source_name is not None and source_name not in aliases:
+    if (
+        source_name is not None
+        and source_name not in aliases
+        and any(
+            _github_token_alias_selects_source(
+                compose_env.get(alias),
+                source_name,
+                worker_env=source_env,
+            )
+            for alias in aliases
+        )
+    ):
         return (source_name, *aliases)
     return aliases
+
+
+def _github_token_alias_selects_source(
+    raw: str | None,
+    source_name: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> bool:
+    """Return whether a rendered alias selected the chosen worker source."""
+    return (
+        raw is not None
+        and raw != _COMPOSE_PASSTHROUGH
+        and _compose_selected_worker_reference_name(raw, worker_env=worker_env) == source_name
+    )
 
 
 def _github_token_slot_matches_worker(
