@@ -291,14 +291,12 @@ def _value_has_url_userinfo(value: str) -> bool:
         for component in _url_component_variants(raw_component)
     ):
         return True
-    if "://" in parsed.path or "://" in parsed.query or "://" in parsed.fragment:
-        return any(
-            _value_has_url_userinfo(match.group(0))
-            for raw_component in (parsed.path, parsed.query, parsed.fragment)
-            for component in _url_component_variants(raw_component)
-            for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(component)
-        )
-    return False
+    return any(
+        _value_has_url_userinfo(match.group(0))
+        for raw_component in (parsed.path, parsed.query, parsed.fragment)
+        for component in _url_component_variants(raw_component)
+        for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(component)
+    )
 
 
 _GITHUB_TOKEN_SOURCE_PRECEDENCE = ("AWF_GITHUB_TOKEN", *_GITHUB_TOKEN_ALIAS_PRECEDENCE)

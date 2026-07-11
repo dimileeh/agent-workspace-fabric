@@ -70,6 +70,41 @@ def test_url_and_secret_like_profile_env_detection_covers_query_credentials() ->
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_percent_encoded_nested_url_userinfo(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile_env skips percent-encoded nested URLs with credentials."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "APP_BASE_URL": "https://app.example",
+                "APP_PATH_CALLBACK": ("callback:https%3A%2F%2Fuser%3Apathpw%40example.test%2Fcb"),
+                "APP_FRAGMENT_CALLBACK": (
+                    "callback:/cb#https%3A%2F%2Fuser%3Afra9mentpw%40example.test%2Fcb"
+                ),
+                "APP_QUERY_CALLBACK": (
+                    "callback:?https%3A%2F%2Fuser%3Aquerypw%40example.test%2Fcb"
+                ),
+            },
+            worker_env={},
+        )
+    )
+
+    assert profile_env["APP_BASE_URL"] == "https://app.example"
+    assert "APP_PATH_CALLBACK" not in profile_env
+    assert "APP_FRAGMENT_CALLBACK" not in profile_env
+    assert "APP_QUERY_CALLBACK" not in profile_env
+    blob = "\x00".join(profile_env.values())
+    assert "pathpw" not in blob
+    assert "fra9mentpw" not in blob
+    assert "querypw" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_carries_jwt_validation_config(
     tmp_path: Path,
 ) -> None:
