@@ -507,83 +507,93 @@ class AgentAdapter(ABC):
             compose_file,
             worker_env=os.environ,
         )
-        env_passthrough_names = await asyncio.to_thread(
-            filter_hosted_env_passthrough_names,
-            self.hosted_env_passthrough_names,
-            compose_file=compose_file,
-            compose_env=compose_env,
-        )
-        profile_env_passthrough_names = await asyncio.to_thread(
-            hosted_profile_env_passthrough_names,
-            compose_file,
-            compose_env=compose_env,
-        )
-        env_passthrough_aliases = await asyncio.to_thread(
-            hosted_profile_env_passthrough_aliases,
-            compose_file,
-            compose_env=compose_env,
-        )
-        if profile_env_passthrough_names:
-            # Include non-adapter profile env secrets that local Compose
-            # resolved at stack launch (e.g. ``NPM_TOKEN: ${NPM_TOKEN}``). The
-            # helper returns names only; worker-resolved values still stay out
-            # of ``profile_env`` and the request payload.
-            existing_names = set(env_passthrough_names)
-            env_passthrough_names = env_passthrough_names + tuple(
-                name
-                for name in profile_env_passthrough_names
-                if name not in existing_names
-                and name not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+        env_passthrough_names: tuple[str, ...]
+        env_passthrough_aliases: tuple[tuple[str, str], ...]
+        profile_env: tuple[tuple[str, str], ...]
+        file_auth_mount_targets: tuple[str, ...]
+        if compose_env is None:
+            env_passthrough_names = ()
+            env_passthrough_aliases = ()
+            profile_env = ()
+            file_auth_mount_targets = ()
+        else:
+            env_passthrough_names = await asyncio.to_thread(
+                filter_hosted_env_passthrough_names,
+                self.hosted_env_passthrough_names,
+                compose_file=compose_file,
+                compose_env=compose_env,
             )
-        # Surface GitHub token names only when they are not already represented
-        # by alias mappings. Hosted executors resolve plain names by their own
-        # name, while aliases preserve the source->target mapping needed when
-        # the worker only has ``AWF_GITHUB_TOKEN``.
-        github_token_names = await asyncio.to_thread(
-            hosted_github_token_passthrough_names,
-            compose_file,
-            compose_env=compose_env,
-        )
-        if github_token_names:
-            # Union after the filter: the filter excludes compose-declared
-            # profile-owned slots, and the helper already skips profile-owned
-            # aliases. De-duplicate preserving filter order while keeping alias
-            # targets and sources out of plain passthrough names.
-            existing_names = set(env_passthrough_names)
-            alias_targets = {target for target, _source in env_passthrough_aliases}
-            alias_sources = {source for _target, source in env_passthrough_aliases}
-            env_passthrough_names = env_passthrough_names + tuple(
-                name
-                for name in github_token_names
-                if name not in existing_names
-                and name not in alias_targets
-                and name not in alias_sources
+            profile_env_passthrough_names = await asyncio.to_thread(
+                hosted_profile_env_passthrough_names,
+                compose_file,
+                compose_env=compose_env,
             )
-        # Carry profile-owned env values to the hosted executor. The local
-        # ``docker compose exec`` path does not forward profile-owned env
-        # because the running container already has it (substituted from the
-        # compose env block at stack launch); the hosted path has no compose env
-        # block, so without these values a profile-owned endpoint (e.g.
-        # ``OLLAMA_HOST``) never reaches the hosted job and OpenCode falls back to
-        # the default daemon. Compose interpolation is rendered against the
-        # worker env so the hosted job receives the same concrete value the
-        # local container gets at stack launch: a defaulted
-        # ``${NAME:-default}`` with ``NAME`` unset is carried as the default, an
-        # escaped ``$$`` is carried as a single ``$``, and a pure literal is
-        # carried verbatim. Bare ``${NAME}`` / ``$NAME`` worker-resolved slots are
-        # skipped (the profile owns them locally; the hosted path resolves
-        # credentials via its own adapter contract, not from the worker).
-        profile_env = await asyncio.to_thread(
-            literal_profile_env_from_compose,
-            compose_file,
-            compose_env=compose_env,
-            postgres_passwords=postgres_passwords,
-        )
-        file_auth_mount_targets = await asyncio.to_thread(
-            hosted_file_auth_mount_targets,
-            compose_file,
-            compose_env=compose_env,
-        )
+            env_passthrough_aliases = await asyncio.to_thread(
+                hosted_profile_env_passthrough_aliases,
+                compose_file,
+                compose_env=compose_env,
+            )
+            if profile_env_passthrough_names:
+                # Include non-adapter profile env secrets that local Compose
+                # resolved at stack launch (e.g. ``NPM_TOKEN: ${NPM_TOKEN}``). The
+                # helper returns names only; worker-resolved values still stay out
+                # of ``profile_env`` and the request payload.
+                existing_names = set(env_passthrough_names)
+                env_passthrough_names = env_passthrough_names + tuple(
+                    name
+                    for name in profile_env_passthrough_names
+                    if name not in existing_names
+                    and name not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+                )
+            # Surface GitHub token names only when they are not already represented
+            # by alias mappings. Hosted executors resolve plain names by their own
+            # name, while aliases preserve the source->target mapping needed when
+            # the worker only has ``AWF_GITHUB_TOKEN``.
+            github_token_names = await asyncio.to_thread(
+                hosted_github_token_passthrough_names,
+                compose_file,
+                compose_env=compose_env,
+            )
+            if github_token_names:
+                # Union after the filter: the filter excludes compose-declared
+                # profile-owned slots, and the helper already skips profile-owned
+                # aliases. De-duplicate preserving filter order while keeping alias
+                # targets and sources out of plain passthrough names.
+                existing_names = set(env_passthrough_names)
+                alias_targets = {target for target, _source in env_passthrough_aliases}
+                alias_sources = {source for _target, source in env_passthrough_aliases}
+                env_passthrough_names = env_passthrough_names + tuple(
+                    name
+                    for name in github_token_names
+                    if name not in existing_names
+                    and name not in alias_targets
+                    and name not in alias_sources
+                )
+            # Carry profile-owned env values to the hosted executor. The local
+            # ``docker compose exec`` path does not forward profile-owned env
+            # because the running container already has it (substituted from the
+            # compose env block at stack launch); the hosted path has no compose env
+            # block, so without these values a profile-owned endpoint (e.g.
+            # ``OLLAMA_HOST``) never reaches the hosted job and OpenCode falls back to
+            # the default daemon. Compose interpolation is rendered against the
+            # worker env so the hosted job receives the same concrete value the
+            # local container gets at stack launch: a defaulted
+            # ``${NAME:-default}`` with ``NAME`` unset is carried as the default, an
+            # escaped ``$$`` is carried as a single ``$``, and a pure literal is
+            # carried verbatim. Bare ``${NAME}`` / ``$NAME`` worker-resolved slots are
+            # skipped (the profile owns them locally; the hosted path resolves
+            # credentials via its own adapter contract, not from the worker).
+            profile_env = await asyncio.to_thread(
+                literal_profile_env_from_compose,
+                compose_file,
+                compose_env=compose_env,
+                postgres_passwords=postgres_passwords,
+            )
+            file_auth_mount_targets = await asyncio.to_thread(
+                hosted_file_auth_mount_targets,
+                compose_file,
+                compose_env=compose_env,
+            )
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)

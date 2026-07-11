@@ -297,6 +297,32 @@ class TestNonCodexHostedCredentials:
         assert request.profile_env == ()
 
     @pytest.mark.unit
+    async def test_hosted_request_fails_closed_after_initial_compose_env_parse_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed initial compose scan must not be treated as "parse later"."""
+        import awf.adapters.base as base_module
+
+        compose_file = _write_compose(tmp_path)
+
+        def _failed_initial_parse(
+            compose_file: Path, *, worker_env: object
+        ) -> tuple[None, frozenset[str]]:
+            return None, frozenset()
+
+        monkeypatch.setattr(
+            base_module,
+            "try_compose_agent_env_and_postgres_passwords",
+            _failed_initial_parse,
+        )
+
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert request.env_passthrough_names == ()
+        assert request.profile_env == ()
+
+    @pytest.mark.unit
     async def test_hosted_request_has_no_secret_values(self, tmp_path: Path) -> None:
         # Run ClaudeCodeAdapter against a populated ``profile_env`` so the leak
         # path is exercised for real profile-owned values (not just the empty
