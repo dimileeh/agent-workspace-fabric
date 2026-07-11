@@ -101,6 +101,8 @@ def literal_profile_env_from_compose(
     for key, raw in compose_env.items():
         if raw == _COMPOSE_PASSTHROUGH:
             continue
+        if compose_module._is_git_config_protocol_key(key):
+            continue
         if _compose_empty_setness_reference_name(raw, worker_env=env) is not None:
             carried.append((key, ""))
             continue
@@ -138,8 +140,6 @@ def literal_profile_env_from_compose(
             and key == compose_module._GIT_ASKPASS_KEY
             and expanded == compose_module._BITBUCKET_ASKPASS_TARGET
         ):
-            continue
-        if compose_module._is_git_config_protocol_key(key):
             continue
         if key in auth_secret_keys:
             continue

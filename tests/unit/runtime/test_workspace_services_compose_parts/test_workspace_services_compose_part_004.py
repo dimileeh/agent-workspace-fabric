@@ -1034,7 +1034,7 @@ def test_hosted_git_config_preserves_worker_resolved_value_block(
 def test_hosted_git_config_preserves_empty_worker_resolved_value_alias(
     tmp_path: Path,
 ) -> None:
-    """A worker-resolved empty git-config value keeps its alias."""
+    """An empty set-ness git-config value stays an explicit empty literal."""
     compose_file = _write(
         tmp_path,
         {
@@ -1057,9 +1057,10 @@ def test_hosted_git_config_preserves_empty_worker_resolved_value_alias(
 
     assert profile_env == {
         "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "",
         "GIT_CONFIG_COUNT": "1",
     }
-    assert aliases == (("GIT_CONFIG_VALUE_0", "EMPTY_GIT_HELPER"),)
+    assert aliases == ()
 
 
 @pytest.mark.unit

@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from awf.profiles.compose_env import (
     _COMPOSE_PASSTHROUGH,
     _compose_bare_reference_name,
+    _compose_empty_setness_reference_name,
     _compose_resolve_value,
     _compose_selected_worker_reference_name,
     _ComposeEnvResolution,
@@ -216,6 +217,12 @@ def _hosted_git_config_env(
                 continue
             carried_entries.append((config_key, config_value, None))
             continue
+        if (
+            _compose_empty_setness_reference_name(config_value_raw, worker_env=worker_env)
+            is not None
+        ):
+            carried_entries.append((config_key, "", None))
+            continue
         value_source = _hosted_git_config_value_alias_source(
             config_value_raw,
             value_resolution=value_resolution,
@@ -254,6 +261,8 @@ def _hosted_git_config_value_alias_source(
     ):
         source_name = _compose_selected_worker_reference_name(raw, worker_env=worker_env)
     else:
+        return None
+    if _compose_empty_setness_reference_name(raw, worker_env=worker_env) is not None:
         return None
     if source_name is None or source_name not in worker_env:
         return None
