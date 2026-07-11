@@ -1291,8 +1291,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
             and _compose_defaulted_reference_name(raw, worker_env=worker_env) == name
-            and _compose_empty_setness_reference_name(raw, worker_env=worker_env, operators=("-",))
-            != name
+            and _compose_empty_setness_reference_name(raw, worker_env=worker_env) != name
         )
         # A bare ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose
         # variable has a non-empty worker value resolves to the worker value at
