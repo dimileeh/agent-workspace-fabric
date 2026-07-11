@@ -33,25 +33,18 @@ _clear_host_auth = _part_001._clear_host_auth
 
 
 @pytest.mark.unit
-def test_filter_hosted_env_passthrough_names_keeps_required_set_worker_value(
+def test_filter_hosted_env_passthrough_names_handles_required_worker_values(
     tmp_path: Path,
 ) -> None:
-    """``:?`` / ``?`` with the variable set keep the name in hosted passthrough.
+    """Required forms distinguish non-empty values from explicit empty overrides.
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PVhhm: for an agent env value
     such as ``API_KEY: ${API_KEY:?set}``, Docker Compose resolves the worker value
-    of ``API_KEY`` into the local agent container at stack launch when ``API_KEY``
-    is set (non-empty for ``:?``, set for ``?``). The previous code classified every
-    ``:?`` / ``?`` form as ``WORKER_RESOLVED_SLOT``, dropping the key from
-    ``profile_env`` (correct — carrying the worker value would embed a secret) AND
-    excluding it from ``env_passthrough_names`` — so the hosted job received
-    neither the worker value nor any profile default, while the local container
-    received the worker value. Such a name is classified
-    ``WORKER_RESOLVED_DEFAULTED`` so it stays in ``env_passthrough_names`` for
-    hosted out-of-band resolution, mirroring the local Compose container. When the
-    variable is unset the local stack would fail to launch (``:?`` / ``?`` raise),
-    so that branch is unreachable for a running container and stays classified as a
-    worker-resolved slot.
+    of ``API_KEY`` into the local container when its non-empty ``:?`` requirement
+    succeeds, so hosted execution keeps the name for out-of-band resolution. A
+    set-but-empty ``?`` value is instead an explicit empty override: it is carried
+    through ``profile_env`` and excluded from passthrough so a hosted credential
+    cannot replace Compose's selected empty value.
     """
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -64,8 +57,7 @@ def test_filter_hosted_env_passthrough_names_keeps_required_set_worker_value(
                             # :? with API_KEY set & non-empty -> worker value
                             # resolved out-of-band on the hosted path.
                             "API_KEY": "${API_KEY:?set}",
-                            # ? with API_KEY_Q set (even empty) -> worker value
-                            # resolved out-of-band on the hosted path.
+                            # ? with API_KEY_Q set empty -> explicit empty override.
                             "API_KEY_Q": "${API_KEY_Q?set}",
                             # Pure literal -> excluded (carried via profile_env).
                             "LITERAL_CONFIG": "static-value",
@@ -83,10 +75,9 @@ def test_filter_hosted_env_passthrough_names_keeps_required_set_worker_value(
         names, compose_file=compose_file, worker_env=worker_env
     )
 
-    # :? / ? with variable set -> stays in passthrough for hosted out-of-band
-    # resolution (the local container received the worker value at stack launch).
+    # Non-empty :? stays in passthrough; empty ? is carried as a literal override.
     assert "API_KEY" in filtered
-    assert "API_KEY_Q" in filtered
+    assert "API_KEY_Q" not in filtered
     # Pure literal -> excluded (carried via profile_env instead).
     assert "LITERAL_CONFIG" not in filtered
     # A name absent from the compose env block still passes through.

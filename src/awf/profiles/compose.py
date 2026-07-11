@@ -1431,7 +1431,6 @@ from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
     _compose_resolve_braced,
     _compose_resolve_value,
     _compose_selected_worker_reference_name,
-    _compose_unselected_alternate_worker_reference_name,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
 )

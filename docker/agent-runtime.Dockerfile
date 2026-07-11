@@ -145,14 +145,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 #
 # npm-backed CLIs are pinned to a version. Bump via PR so we can verify the
 # output format hasn't drifted in the adapters.
-ARG CODEX_VERSION=0.130.0
+ARG CODEX_VERSION=0.144.1
 # 2.1.154+ is required for Claude Opus 4.8 (the default model in defaults.py);
 # older CLIs reject `--model claude-opus-4-8`. Keep this >= the default model's
 # minimum supported CLI.
-ARG CLAUDE_CODE_VERSION=2.1.158
-ARG GEMINI_VERSION=0.42.0
-ARG OPENCODE_VERSION=1.15.2
-ARG GROK_VERSION=0.2.14
+ARG CLAUDE_CODE_VERSION=2.1.206
+ARG GEMINI_VERSION=0.50.0
+ARG OPENCODE_VERSION=1.17.18
+ARG GROK_VERSION=0.2.94
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
 ARG CCUSAGE_VERSION=20.0.3
@@ -194,15 +194,18 @@ RUN set -eux; \
       attempt=$((attempt + 1)); \
     done; \
     npm cache clean --force; \
-    codex --version || true; \
+    codex --version; \
+    codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.5 -c 'model_reasoning_effort="xhigh"' --help >/dev/null; \
     claude --version || true; \
     cursor-agent --version || true; \
-    gemini --version || true; \
+    gemini --version; \
+    gemini --skip-trust --yolo -p "" --model gemini-3.1-pro-preview --help >/dev/null; \
     opencode --version || true; \
-    grok --version || true; \
+    grok --version; \
+    grok -p "" --always-approve --no-alt-screen --no-auto-update --output-format plain --model grok-build --help >/dev/null; \
     ccusage --version
 
-# Gemini CLI 0.42.0 only enables its ripgrep-backed search tool when a bundled
+# Gemini CLI 0.50.0 only enables its ripgrep-backed search tool when a bundled
 # platform-specific rg binary exists; it does not fall back to the system rg on
 # PATH. Link the Debian ripgrep package into the bundled layout so Gemini uses
 # its file-aware RipGrepTool instead of the directory-only GrepTool fallback.

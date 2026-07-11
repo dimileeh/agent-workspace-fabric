@@ -88,12 +88,12 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     """Verify agent runtime installs all supported coding clis."""
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "ARG CODEX_VERSION=0.130.0" in dockerfile
-    assert "ARG CLAUDE_CODE_VERSION=2.1.158" in dockerfile
-    assert "ARG GEMINI_VERSION=0.42.0" in dockerfile
-    assert "ARG OPENCODE_VERSION=1.15.2" in dockerfile
+    assert "ARG CODEX_VERSION=0.144.1" in dockerfile
+    assert "ARG CLAUDE_CODE_VERSION=2.1.206" in dockerfile
+    assert "ARG GEMINI_VERSION=0.50.0" in dockerfile
+    assert "ARG OPENCODE_VERSION=1.17.18" in dockerfile
     assert "Cursor CLI tracks the official installer" in dockerfile
-    assert "ARG GROK_VERSION=0.2.14" in dockerfile
+    assert "ARG GROK_VERSION=0.2.94" in dockerfile
     assert "ARG CODEX_VERSION=latest" not in dockerfile
     assert "ARG CLAUDE_CODE_VERSION=latest" not in dockerfile
     assert "ARG GEMINI_VERSION=latest" not in dockerfile
@@ -140,6 +140,29 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "gemini --version" in dockerfile
     assert "opencode --version" in dockerfile
     assert "grok --version" in dockerfile
+
+
+@pytest.mark.unit
+def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
+    """Verify pinned CLIs still parse the arguments used by AWF adapters."""
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "codex --version || true" not in dockerfile
+    assert (
+        "codex exec --dangerously-bypass-approvals-and-sandbox "
+        "--model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
+    ) in dockerfile
+
+    assert "gemini --version || true" not in dockerfile
+    assert (
+        'gemini --skip-trust --yolo -p "" --model gemini-3.1-pro-preview --help >/dev/null'
+    ) in dockerfile
+
+    assert "grok --version || true" not in dockerfile
+    assert (
+        'grok -p "" --always-approve --no-alt-screen --no-auto-update '
+        "--output-format plain --model grok-build --help >/dev/null"
+    ) in dockerfile
 
 
 @pytest.mark.unit
