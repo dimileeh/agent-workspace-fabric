@@ -211,6 +211,11 @@ _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
 _CAMELCASE_API_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+ApiKey[\"']?\s*[:=]\s*[\"']?\S+"
 )
+_PREFIXED_PRIVATE_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?"
+    r"(?:(?:[A-Za-z0-9]+[-_])+private[-_]?key(?:[-_]?data)?|[A-Za-z0-9]+PrivateKey(?:Data)?)"
+    r"[\"']?\s*[:=]\s*[\"']?\S+"
+)
 _NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?:^|[\r\n])\s*(?://[^\s=]+:\s*)?_?auth\s*=\s*\S+",
     re.IGNORECASE,
