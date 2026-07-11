@@ -262,3 +262,34 @@ def test_unset_bare_compose_placeholder_carried_as_empty_literal(
     assert "PLAIN_FEATURE_FLAG" not in filtered
     assert "MIXED_FEATURE_FLAG" not in filtered
     assert "OPENAI_API_KEY" in filtered
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_set_cookie_header_blobs(
+    tmp_path: Path,
+) -> None:
+    """Neutral env names carrying Set-Cookie headers must not reach profile_env."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "RESPONSE_HEADERS": "Set-Cookie: sid=session-secret; HttpOnly",
+                            "JSON_RESPONSE_HEADERS": '{"Set-Cookie":"sid=json-secret"}',
+                            "SAFE_RESPONSE_HEADERS": '{"Cache-Control":"no-store"}',
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert "RESPONSE_HEADERS" not in profile_env
+    assert "JSON_RESPONSE_HEADERS" not in profile_env
+    assert profile_env["SAFE_RESPONSE_HEADERS"] == '{"Cache-Control":"no-store"}'
