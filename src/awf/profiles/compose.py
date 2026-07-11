@@ -208,6 +208,8 @@ def _url_component_has_secret_credential_field(component: str) -> bool:
         for _key, value in query_pairs
     ):
         return True
+    if any(_url_query_value_has_secret_credential_field(value) for _key, value in query_pairs):
+        return True
     if any(_relative_url_value_has_secret_credential_field(value) for _key, value in query_pairs):
         return True
     for raw_part in re.split(r"[&;]", component):
@@ -215,6 +217,12 @@ def _url_component_has_secret_credential_field(component: str) -> bool:
         if separator and value and _url_field_name_has_secret_credential(key):
             return True
     return False
+
+
+def _url_query_value_has_secret_credential_field(value: str) -> bool:
+    if not value or not any(separator in value for separator in ("=", "&", ";")):
+        return False
+    return _url_component_has_secret_credential_field(value)
 
 
 def _relative_url_value_has_secret_credential_field(value: str) -> bool:

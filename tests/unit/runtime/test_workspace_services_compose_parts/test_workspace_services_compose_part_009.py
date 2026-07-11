@@ -134,6 +134,30 @@ def test_literal_profile_env_from_compose_redacts_url_auth_token_fields(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_encoded_query_value_credentials(
+    tmp_path: Path,
+) -> None:
+    """Decoded query values with credential fields must not reach profile_env."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "APP_URL": "https://app.example/callback?state=api_key%3Dprofile-value",
+                "PUBLIC_CALLBACK_URL": "https://app.example/callback?state=public-value",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "APP_URL" not in profile_env
+    assert profile_env["PUBLIC_CALLBACK_URL"] == ("https://app.example/callback?state=public-value")
+    assert "profile-value" not in "\x00".join(profile_env.values())
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_neutral_docker_auth_blob(
     tmp_path: Path,
 ) -> None:
