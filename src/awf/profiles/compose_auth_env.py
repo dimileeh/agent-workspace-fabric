@@ -258,6 +258,7 @@ _URL_SECRET_CREDENTIAL_FIELD_EXACT_NAMES = frozenset(
         "APIKEY",
         "AUTH",
         "CLIENTSECRET",
+        "JSESSIONID",
         "KEY",
         "PRIVATEKEY",
         "SECRETKEY",

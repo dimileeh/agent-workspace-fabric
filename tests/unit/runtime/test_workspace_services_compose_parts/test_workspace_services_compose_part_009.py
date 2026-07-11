@@ -255,6 +255,8 @@ def test_literal_profile_env_from_compose_redacts_session_url_fields(
             compose_env={
                 "CALLBACK_URL": "https://app.example/cb?session=raw-session",
                 "SESSION_CALLBACK_URL": "https://app.example/cb?sessionId=raw-session-id",
+                "SERVLET_CALLBACK_URL": "https://app.example/cb;jsessionid=raw-servlet-session",
+                "SERVLET_QUERY_URL": "https://app.example/cb?jsessionid=raw-query-session",
                 "PUBLIC_CALLBACK_URL": "https://app.example/cb?state=public",
             },
             worker_env={},
@@ -263,6 +265,8 @@ def test_literal_profile_env_from_compose_redacts_session_url_fields(
 
     assert "CALLBACK_URL" not in profile_env
     assert "SESSION_CALLBACK_URL" not in profile_env
+    assert "SERVLET_CALLBACK_URL" not in profile_env
+    assert "SERVLET_QUERY_URL" not in profile_env
     assert profile_env["PUBLIC_CALLBACK_URL"] == "https://app.example/cb?state=public"
 
 
