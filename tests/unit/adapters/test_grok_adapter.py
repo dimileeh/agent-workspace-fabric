@@ -239,3 +239,55 @@ class TestGrokAdapter:
 
         assert proc.returncode == 0, stderr.decode()
         assert json.loads(auth_method_copy.read_text()) == expected_method
+
+    @pytest.mark.unit
+    async def test_launcher_returns_child_exit_code_after_successful_prompt(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake_grok = bin_dir / "grok"
+        fake_grok.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "for line in sys.stdin:\n"
+            "    request = json.loads(line)\n"
+            "    method = request['method']\n"
+            "    if method == 'initialize':\n"
+            "        result = {'authMethods': [{'id': 'cached_token'}]}\n"
+            "    elif method == 'session/new':\n"
+            "        result = {'sessionId': 'session-1'}\n"
+            "    elif method == 'session/prompt':\n"
+            "        print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'text': 'partial'}}}}), flush=True)\n"
+            "        result = {'stopReason': 'end_turn'}\n"
+            "    else:\n"
+            "        result = {}\n"
+            "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)\n"
+            "sys.exit(23)\n"
+        )
+        fake_grok.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            _grok_launcher_script(),
+            "awf-grok",
+            "--always-approve",
+            "--no-auto-update",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdin is not None
+        proc.stdin.write(b"workspace prompt\n")
+        await proc.stdin.drain()
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+
+        stdout, stderr = await proc.communicate()
+
+        assert proc.returncode == 23, stderr.decode()
+        assert stdout == b"partial\n"

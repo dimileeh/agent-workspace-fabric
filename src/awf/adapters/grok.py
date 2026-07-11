@@ -144,13 +144,16 @@ def _close_grok(proc):
         except BrokenPipeError:
             pass
     if proc.poll() is not None:
-        return
-    proc.terminate()
+        return proc.returncode or 0
     try:
-        proc.wait(timeout=1)
+        return proc.wait(timeout=1)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+        proc.terminate()
+        try:
+            return proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return proc.wait()
 
 
 def main():
@@ -220,10 +223,11 @@ def main():
             if not output.endswith("\n"):
                 sys.stdout.write("\n")
             sys.stdout.flush()
-        return 0
+        return _close_grok(proc)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
-        return proc.returncode if proc.returncode is not None else 1
+        exit_code = _close_grok(proc)
+        return exit_code if exit_code != 0 else 1
     finally:
         _close_grok(proc)
 
