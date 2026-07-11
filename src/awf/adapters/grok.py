@@ -73,9 +73,10 @@ import os
 import select
 import subprocess
 import sys
+import time
 
 _DRAIN_INTERVAL_SECONDS = 0.15
-_STABLE_DRAIN_CHECKS = 2
+_DRAIN_IDLE_TIMEOUT_SECONDS = 5.0
 
 
 def _request(proc, request_id, method, params, text_chunks):
@@ -113,18 +114,26 @@ def _capture_text_update(message, text_chunks):
 
 
 def _drain_remaining_updates(proc, text_chunks):
-    stable_checks = 0
-    while stable_checks < _STABLE_DRAIN_CHECKS:
+    _close_stdin(proc)
+    idle_deadline = time.monotonic() + _DRAIN_IDLE_TIMEOUT_SECONDS
+    while True:
         assert proc.stdout is not None
-        readable, _, _ = select.select([proc.stdout], [], [], _DRAIN_INTERVAL_SECONDS)
+        remaining = idle_deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        readable, _, _ = select.select(
+            [proc.stdout],
+            [],
+            [],
+            min(_DRAIN_INTERVAL_SECONDS, remaining),
+        )
         if not readable:
-            stable_checks += 1
             continue
         line = proc.stdout.readline()
         if not line:
             break
         _capture_text_update(json.loads(line.decode("utf-8")), text_chunks)
-        stable_checks = 0
+        idle_deadline = time.monotonic() + _DRAIN_IDLE_TIMEOUT_SECONDS
 
 
 def _auth_method_ids(auth_methods):
@@ -137,12 +146,16 @@ def _auth_method_ids(auth_methods):
     return ids
 
 
-def _close_grok(proc):
+def _close_stdin(proc):
     if proc.stdin is not None:
         try:
             proc.stdin.close()
-        except BrokenPipeError:
+        except (BrokenPipeError, OSError):
             pass
+
+
+def _close_grok(proc):
+    _close_stdin(proc)
     if proc.poll() is not None:
         return proc.returncode or 0
     try:
