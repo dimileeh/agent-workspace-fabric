@@ -297,6 +297,7 @@ def test_literal_profile_env_preserves_unselected_alternate_empty_literal(
                         "ALT_COLON_UNSET": "${FLAG:+${WORKER_VALUE}}",
                         "ALT_COLON_EMPTY": "${EMPTY_FLAG:+${WORKER_VALUE}}",
                         "ALT_PLUS_UNSET": "${FLAG+${WORKER_VALUE}}",
+                        "OPENAI_API_KEY": "${ENABLE_OPENAI:+${OPENAI_API_KEY}}",
                     },
                 }
             }
@@ -304,6 +305,7 @@ def test_literal_profile_env_preserves_unselected_alternate_empty_literal(
     )
     worker_env = {
         "EMPTY_FLAG": "",
+        "OPENAI_API_KEY": "sk-worker-secret",
         "WORKER_VALUE": "worker-resolved-value",
     }
 
@@ -318,9 +320,11 @@ def test_literal_profile_env_preserves_unselected_alternate_empty_literal(
         "ALT_COLON_UNSET": "",
         "ALT_COLON_EMPTY": "",
         "ALT_PLUS_UNSET": "",
+        "OPENAI_API_KEY": "",
     }
     assert filtered == ()
     assert "worker-resolved-value" not in "\x00".join(carried.values())
+    assert "sk-worker-secret" not in "\x00".join(carried.values())
 
 
 @pytest.mark.unit
