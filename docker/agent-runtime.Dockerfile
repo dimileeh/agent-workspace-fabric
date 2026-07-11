@@ -152,7 +152,7 @@ ARG CODEX_VERSION=0.144.1
 ARG CLAUDE_CODE_VERSION=2.1.206
 ARG GEMINI_VERSION=0.50.0
 ARG OPENCODE_VERSION=1.17.18
-ARG GROK_VERSION=0.2.93
+ARG GROK_VERSION=0.2.94
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
 ARG CCUSAGE_VERSION=20.0.3
@@ -195,7 +195,7 @@ RUN set -eux; \
     done; \
     npm cache clean --force; \
     codex --version; \
-    codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.4 -c 'model_reasoning_effort="high"' --help >/dev/null; \
+    codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.5 -c 'model_reasoning_effort="xhigh"' --help >/dev/null; \
     claude --version || true; \
     cursor-agent --version || true; \
     gemini --version; \

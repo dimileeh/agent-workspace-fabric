@@ -93,7 +93,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "ARG GEMINI_VERSION=0.50.0" in dockerfile
     assert "ARG OPENCODE_VERSION=1.17.18" in dockerfile
     assert "Cursor CLI tracks the official installer" in dockerfile
-    assert "ARG GROK_VERSION=0.2.93" in dockerfile
+    assert "ARG GROK_VERSION=0.2.94" in dockerfile
     assert "ARG CODEX_VERSION=latest" not in dockerfile
     assert "ARG CLAUDE_CODE_VERSION=latest" not in dockerfile
     assert "ARG GEMINI_VERSION=latest" not in dockerfile
@@ -150,7 +150,7 @@ def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
     assert "codex --version || true" not in dockerfile
     assert (
         "codex exec --dangerously-bypass-approvals-and-sandbox "
-        "--model gpt-5.4 -c 'model_reasoning_effort=\"high\"' --help >/dev/null"
+        "--model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
     ) in dockerfile
 
     assert "gemini --version || true" not in dockerfile
