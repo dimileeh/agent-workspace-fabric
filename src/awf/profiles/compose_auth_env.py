@@ -214,6 +214,15 @@ _CAMELCASE_API_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
 _CAMELCASE_ENCRYPTION_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+EncryptionKey[\"']?\s*[:=]\s*[\"']?\S+"
 )
+_PREFIXED_COOKIE_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?"
+    r"(?:[A-Za-z0-9]+[-_])+(?:set[-_]?)?cookie"
+    r"[\"']?\s*[:=]\s*[\"']?\S+",
+    re.IGNORECASE,
+)
+_CAMELCASE_COOKIE_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+(?:Set)?Cookie[\"']?\s*[:=]\s*[\"']?\S+"
+)
 _PREFIXED_PRIVATE_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])[\"']?"
     r"(?:(?:[A-Za-z0-9]+[-_])+private[-_]?key(?:[-_]?data)?|[A-Za-z0-9]+PrivateKey(?:Data)?)"

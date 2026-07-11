@@ -727,6 +727,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
                 "DOTENV_CONFIG": "jwt=profile-dotenv-jwt",
                 "APP_CONFIG": "github_pat=ghp_profile_app_pat_secret",
                 "FEATURE_FLAGS": '{"pat":"profile-json-pat-secret"}',
+                "COOKIE_CONFIG": "session_cookie=sid=profile-prefixed-cookie-secret",
+                "JSON_COOKIE_CONFIG": '{"sessionCookie":"sid=profile-camel-cookie-secret"}',
                 "SAFE_CONFIG": '{"issuer":"https://issuer.example","timeout":30}',
                 "OLLAMA_HOST": "http://ollama.profile:11434",
             },
@@ -749,6 +751,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
     assert "DOTENV_CONFIG" not in profile_env
     assert "APP_CONFIG" not in profile_env
     assert "FEATURE_FLAGS" not in profile_env
+    assert "COOKIE_CONFIG" not in profile_env
+    assert "JSON_COOKIE_CONFIG" not in profile_env
     assert profile_env["SAFE_CONFIG"] == '{"issuer":"https://issuer.example","timeout":30}'
     assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
     blob = "\x00".join(profile_env.values())
@@ -767,6 +771,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
     assert "profile-dotenv-jwt" not in blob
     assert "ghp_profile_app_pat_secret" not in blob
     assert "profile-json-pat-secret" not in blob
+    assert "profile-prefixed-cookie-secret" not in blob
+    assert "profile-camel-cookie-secret" not in blob
 
 
 @pytest.mark.unit
