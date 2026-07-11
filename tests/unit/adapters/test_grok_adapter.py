@@ -52,16 +52,13 @@ class TestGrokAdapter:
         sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
         assert args[sh_start : sh_start + 3] == ["sh", "-c", args[sh_start + 2]]
         script = args[sh_start + 2]
-        assert 'prompt="$(cat; printf x)"' in script
-        assert 'prompt="${prompt%x}"' in script
-        assert 'exec grok -p "$prompt" "$@"' in script
+        assert "grok agent stdio" in script
+        assert "-p" not in script
+        assert "$prompt" not in script
         grok_args = args[sh_start + 4 :]
         assert grok_args == [
             "--always-approve",
-            "--no-alt-screen",
             "--no-auto-update",
-            "--output-format",
-            "plain",
             "-m",
             "grok-build",
         ]
@@ -83,10 +80,7 @@ class TestGrokAdapter:
         sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
         assert args[sh_start + 4 :] == [
             "--always-approve",
-            "--no-alt-screen",
             "--no-auto-update",
-            "--output-format",
-            "plain",
         ]
         assert "-m" not in args
         assert "--model" not in args
@@ -98,7 +92,7 @@ class TestGrokAdapter:
         assert _model_for_effort(model=None, effort="xhigh") is None
 
     @pytest.mark.unit
-    async def test_launcher_reads_stdin_and_passes_prompt_to_official_single_flag(
+    async def test_launcher_reads_stdin_and_forwards_prompt_over_acp_stdio(
         self,
         tmp_path: Path,
     ) -> None:
@@ -106,13 +100,30 @@ class TestGrokAdapter:
         bin_dir.mkdir()
         fake_grok = bin_dir / "grok"
         argv_copy = tmp_path / "argv.json"
+        prompt_copy = tmp_path / "prompt.json"
         fake_grok.write_text(
-            "#!/bin/sh\n"
-            '"$AWF_TEST_PYTHON" - <<\'PY\' "$@"\n'
+            "#!/usr/bin/env python3\n"
             "import json, os, sys\n"
             "with open(os.environ['AWF_FAKE_GROK_ARGV'], 'w', encoding='utf-8') as fh:\n"
             "    json.dump(sys.argv[1:], fh)\n"
-            "PY\n"
+            "for line in sys.stdin:\n"
+            "    request = json.loads(line)\n"
+            "    method = request['method']\n"
+            "    if method == 'initialize':\n"
+            "        result = {'authMethods': [{'id': 'cached_token'}]}\n"
+            "    elif method == 'authenticate':\n"
+            "        result = {}\n"
+            "    elif method == 'session/new':\n"
+            "        result = {'sessionId': 'session-1'}\n"
+            "    elif method == 'session/prompt':\n"
+            "        prompt = request['params']['prompt'][0]['text']\n"
+            "        with open(os.environ['AWF_FAKE_GROK_PROMPT'], 'w', encoding='utf-8') as fh:\n"
+            "            json.dump(prompt, fh)\n"
+            "        print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'text': 'done'}}}}), flush=True)\n"
+            "        result = {'stopReason': 'end_turn'}\n"
+            "    else:\n"
+            "        result = {}\n"
+            "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)\n"
         )
         fake_grok.chmod(0o755)
         env = os.environ.copy()
@@ -120,6 +131,7 @@ class TestGrokAdapter:
             {
                 "PATH": f"{bin_dir}:{env['PATH']}",
                 "AWF_FAKE_GROK_ARGV": str(argv_copy),
+                "AWF_FAKE_GROK_PROMPT": str(prompt_copy),
                 "AWF_TEST_PYTHON": sys.executable,
             }
         )
@@ -129,10 +141,7 @@ class TestGrokAdapter:
             _grok_launcher_script(),
             "awf-grok",
             "--always-approve",
-            "--no-alt-screen",
             "--no-auto-update",
-            "--output-format",
-            "plain",
             "-m",
             "grok-build",
             stdin=asyncio.subprocess.PIPE,
@@ -149,15 +158,13 @@ class TestGrokAdapter:
         stdout, stderr = await proc.communicate()
 
         assert proc.returncode == 0, stderr.decode()
-        assert stdout == b""
+        assert stdout == b"done\n"
         assert json.loads(argv_copy.read_text()) == [
-            "-p",
-            "workspace prompt\n\n",
             "--always-approve",
-            "--no-alt-screen",
             "--no-auto-update",
-            "--output-format",
-            "plain",
             "-m",
             "grok-build",
+            "agent",
+            "stdio",
         ]
+        assert json.loads(prompt_copy.read_text()) == "workspace prompt\n\n"
