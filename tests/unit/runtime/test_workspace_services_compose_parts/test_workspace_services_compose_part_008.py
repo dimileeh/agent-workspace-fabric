@@ -155,6 +155,43 @@ def test_literal_profile_env_from_compose_preserves_custom_postgres_service_host
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_detects_custom_postgres_env_file_with_worker_env(
+    tmp_path: Path,
+) -> None:
+    """Required env-file interpolation should not hide local Postgres services."""
+
+    compose_file = tmp_path / "compose.yml"
+    env_file = tmp_path / "postgres.env"
+    env_file.write_text("POSTGRES_PASSWORD=${PGPW:?required}\n", encoding="utf-8")
+    database_url = "postgresql://awf@db:5432/app"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "db": {"image": "example/database-wrapper:latest", "env_file": "postgres.env"},
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": database_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = dict(
+        literal_profile_env_from_compose(compose_file, worker_env={"PGPW": "tracked-secret"})
+    )
+
+    assert profile_env["DATABASE_URL"] == database_url
+    assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "tracked-secret" not in "\x00".join(profile_env.values())
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_local_postgres_url_userinfo_passwords(
     tmp_path: Path,
 ) -> None:
@@ -237,6 +274,132 @@ def test_literal_profile_env_from_compose_redacts_local_postgres_url_query_crede
     assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
     assert "DATABASE_URL" not in dict(profile_env)
     assert secret not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://awf@postgres:5432/app/"
+        + quote("https://callback.example/cb?access_token=nested-secret", safe=""),
+        "postgresql://awf@postgres:5432/app#"
+        + quote("https://callback.example/cb?access_token=nested-secret", safe=""),
+    ],
+)
+def test_literal_profile_env_from_compose_redacts_encoded_nested_url_credentials(
+    tmp_path: Path,
+    database_url: str,
+) -> None:
+    """Local Postgres URL bypass must inspect decoded nested URL credentials."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "DATABASE_URL": database_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
+    assert "DATABASE_URL" not in dict(profile_env)
+    assert "nested-secret" not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_azure_storage_account_key(
+    tmp_path: Path,
+) -> None:
+    """Azure Storage connection strings carry account keys in value fields."""
+
+    compose_file = tmp_path / "compose.yml"
+    account_key = "azure-account-key-secret"
+    connection_string = (
+        "DefaultEndpointsProtocol=https;"
+        "AccountName=storageaccount;"
+        f"AccountKey={account_key};"
+        "EndpointSuffix=core.windows.net"
+    )
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "AZURE_STORAGE_CONNECTION_STRING": connection_string,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "AZURE_STORAGE_CONNECTION_STRING" not in carried
+    assert account_key not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_azure_shared_access_connection_strings(
+    tmp_path: Path,
+) -> None:
+    """Azure Service Bus/Event Hubs connection strings carry shared-access secrets."""
+
+    compose_file = tmp_path / "compose.yml"
+    shared_access_key = "azure-shared-access-key-secret"
+    shared_access_signature = "azure-shared-access-signature-secret"
+    service_bus_connection_string = (
+        "Endpoint=bus.servicebus.windows.net;"
+        "SharedAccessKeyName=RootManageSharedAccessKey;"
+        f"SharedAccessKey={shared_access_key}"
+    )
+    event_hubs_connection_string = (
+        f"Endpoint=events.servicebus.windows.net;SharedAccessSignature={shared_access_signature}"
+    )
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "AZURE_SERVICE_BUS_CONNECTION_STRING": service_bus_connection_string,
+                            "AZURE_EVENT_HUBS_CONNECTION_STRING": event_hubs_connection_string,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "AZURE_SERVICE_BUS_CONNECTION_STRING" not in carried
+    assert "AZURE_EVENT_HUBS_CONNECTION_STRING" not in carried
+    blob = "\x00".join(v for _k, v in profile_env)
+    assert shared_access_key not in blob
+    assert shared_access_signature not in blob
 
 
 @pytest.mark.unit
@@ -370,6 +533,68 @@ def test_literal_profile_env_from_compose_redacts_generic_url_userinfo(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_prefixed_token_secret_config_fields(
+    tmp_path: Path,
+) -> None:
+    """Neutral config env values can still embed token or secret fields."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump({"services": {"agent": {"image": "agent:latest"}}}),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(
+        compose_file,
+        compose_env={
+            "APP_CONFIG": "api_token=token-secret",
+            "JSON_CONFIG": '{"bearerToken":"bearer-secret"}',
+            "SLACK_CONFIG": "slack_signing_secret=signing-secret",
+            "CAMEL_CONFIG": '{"slackSigningSecret":"camel-secret"}',
+            "SAFE_CONFIG": "feature=enabled",
+        },
+        worker_env={},
+    )
+
+    carried = dict(profile_env)
+    assert carried == {"SAFE_CONFIG": "feature=enabled"}
+    blob = "\x00".join(v for _k, v in profile_env)
+    assert "token-secret" not in blob
+    assert "bearer-secret" not in blob
+    assert "signing-secret" not in blob
+    assert "camel-secret" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_prefixed_password_config_fields(
+    tmp_path: Path,
+) -> None:
+    """Neutral config env values can still embed prefixed password fields."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump({"services": {"agent": {"image": "agent:latest"}}}),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(
+        compose_file,
+        compose_env={
+            "APP_CONFIG": '{"db_password":"db-secret"}',
+            "CAMEL_CONFIG": '{"databasePassword":"camel-secret"}',
+            "SAFE_CONFIG": "feature=enabled",
+        },
+        worker_env={},
+    )
+
+    carried = dict(profile_env)
+    assert carried == {"SAFE_CONFIG": "feature=enabled"}
+    blob = "\x00".join(v for _k, v in profile_env)
+    assert "db-secret" not in blob
+    assert "camel-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_encoded_nested_url_query_credentials(
     tmp_path: Path,
 ) -> None:
@@ -437,6 +662,39 @@ def test_literal_profile_env_from_compose_redacts_encoded_nested_url_path_creden
     assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
     assert "CALLBACK_URL" not in carried
     assert nested_secret not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_protocol_relative_url_userinfo(
+    tmp_path: Path,
+) -> None:
+    """Protocol-relative URLs can still carry credential-bearing hosts."""
+
+    callback_url = "//user:callback-secret@example.com/path"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "CALLBACK_URL": callback_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "CALLBACK_URL" not in carried
+    assert "callback-secret" not in "\x00".join(v for _k, v in profile_env)
 
 
 @pytest.mark.unit

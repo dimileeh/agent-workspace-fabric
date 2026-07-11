@@ -21,7 +21,9 @@ _POSTGRES_SERVICE_ENV_NAMES = frozenset(
 )
 
 
-def compose_postgres_service_hostnames(compose_file: Path) -> frozenset[str]:
+def compose_postgres_service_hostnames(
+    compose_file: Path, *, worker_env: Mapping[str, str] | None = None
+) -> frozenset[str]:
     """Return Compose service names that are local Postgres sidecar hostnames."""
     try:
         payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -34,12 +36,30 @@ def compose_postgres_service_hostnames(compose_file: Path) -> frozenset[str]:
         return frozenset()
 
     hostnames: set[str] = set()
+    env = {} if worker_env is None else worker_env
     for service_name, service in services.items():
         if not isinstance(service_name, str) or not isinstance(service, Mapping):
             continue
-        if _compose_service_is_postgres(service):
+        if _compose_service_is_postgres(service, compose_dir=compose_file.parent, worker_env=env):
             hostnames.add(service_name.lower())
+            hostnames.update(_compose_service_network_aliases(service))
     return frozenset(hostnames)
+
+
+def _compose_service_network_aliases(service: Mapping[object, object]) -> frozenset[str]:
+    """Return string network aliases declared on a Compose service."""
+    networks = service.get("networks")
+    if not isinstance(networks, Mapping):
+        return frozenset()
+    aliases: set[str] = set()
+    for network_config in networks.values():
+        if not isinstance(network_config, Mapping):
+            continue
+        raw_aliases = network_config.get("aliases")
+        if not isinstance(raw_aliases, list):
+            continue
+        aliases.update(alias.lower() for alias in raw_aliases if isinstance(alias, str))
+    return frozenset(aliases)
 
 
 def try_compose_agent_env_and_postgres_passwords(
@@ -85,7 +105,7 @@ def try_compose_agent_env_and_postgres_passwords(
         ):
             try:
                 env_file_env = compose_env_file_values(env_file_path, environ=worker_env)
-            except (OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError, ValueError):
                 continue
             collect_postgres_password(
                 env_file_env.get("POSTGRES_PASSWORD"),
@@ -95,12 +115,29 @@ def try_compose_agent_env_and_postgres_passwords(
     return agent_env, frozenset(postgres_passwords)
 
 
-def _compose_service_is_postgres(service: Mapping[object, object]) -> bool:
+def _compose_service_is_postgres(
+    service: Mapping[object, object],
+    *,
+    compose_dir: Path | None = None,
+    worker_env: Mapping[str, str],
+) -> bool:
     image = service.get("image")
     if isinstance(image, str) and _compose_image_is_postgres(image):
         return True
     service_env = _compose_environment_mapping(service.get("environment"))
-    return bool(_POSTGRES_SERVICE_ENV_NAMES.intersection(service_env))
+    if _POSTGRES_SERVICE_ENV_NAMES.intersection(service_env):
+        return True
+    for env_file_path in compose_service_env_file_paths(
+        service.get("env_file"),
+        compose_dir=compose_dir,
+    ):
+        try:
+            env_file_env = compose_env_file_values(env_file_path, environ=worker_env)
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        if _POSTGRES_SERVICE_ENV_NAMES.intersection(env_file_env):
+            return True
+    return False
 
 
 def _compose_image_is_postgres(image: str) -> bool:

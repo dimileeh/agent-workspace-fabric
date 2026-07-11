@@ -553,6 +553,76 @@ def test_literal_profile_env_from_compose_skips_url_query_api_key_literals(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_subscription_key_header_literals(
+    tmp_path: Path,
+) -> None:
+    """Neutral env names must not carry Azure/APIM subscription-key headers."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "REQUEST_HEADERS": (
+                                '{"Ocp-Apim-Subscription-Key":"profile-subscription-key"}'
+                            ),
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "REQUEST_HEADERS" not in carried
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "profile-subscription-key" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_url_query_subscription_key_literals(
+    tmp_path: Path,
+) -> None:
+    """Hosted profile env must not carry subscription-key URL query parameters."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "CALLBACK_URL": (
+                                "https://api.example/cb?subscription-key=query-subscription-key"
+                            ),
+                            "SAFE_CALLBACK_URL": "https://api.example/cb?next=/ready",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert "CALLBACK_URL" not in carried
+    assert carried["SAFE_CALLBACK_URL"] == "https://api.example/cb?next=/ready"
+    assert carried["APP_BASE_URL"] == "http://app:8080"
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "query-subscription-key" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_url_fragment_credential_literals(
     tmp_path: Path,
 ) -> None:
@@ -807,3 +877,73 @@ def test_literal_profile_env_from_compose_skips_proxy_auth_header_value(
     blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
     assert "Proxy-Authorization" not in blob
     assert "test-proxy-token" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_aws_secret_access_key_config_blobs(
+    tmp_path: Path,
+) -> None:
+    """Neutral env names must not carry AWS-prefixed secret access key fields."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_CONFIG": "AWS_SECRET_ACCESS_KEY=profile-secret",
+                            "JSON_CONFIG": '{"aws_secret_access_key":"json-profile-secret"}',
+                            "APP_BASE_URL": "https://app.example",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried["APP_BASE_URL"] == "https://app.example"
+    assert "APP_CONFIG" not in carried
+    assert "JSON_CONFIG" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "profile-secret" not in blob
+    assert "json-profile-secret" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_passphrase_config_blobs(
+    tmp_path: Path,
+) -> None:
+    """Neutral env names must not carry passphrase fields from config blobs."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_CONFIG": "ssh_passphrase=profile-passphrase",
+                            "JSON_CONFIG": '{"passphrase":"json-profile-passphrase"}',
+                            "APP_BASE_URL": "https://app.example",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried["APP_BASE_URL"] == "https://app.example"
+    assert "APP_CONFIG" not in carried
+    assert "JSON_CONFIG" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "profile-passphrase" not in blob
+    assert "json-profile-passphrase" not in blob

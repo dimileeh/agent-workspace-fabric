@@ -38,11 +38,11 @@ _COMPOSE_FILE = Path("/fake/path/compose.yml")
 _SECRET_VALUE = "sk-non-codex-secret-do-not-leak"
 
 # Claude Code auth / backend-toggle names are derived from AGENT_AUTH_ENV_VARS so
-# the hosted contract cannot drift from the shared source of truth. The Bedrock /
-# Vertex *backend* credentials (AWS_*, ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION,
-# GOOGLE_APPLICATION_CREDENTIALS) are NOT in AGENT_AUTH_ENV_VARS — the toggle is,
-# the credentials it requires are not — so they stay a static supplement asserted
-# alongside the derived set.
+# the hosted contract cannot drift from the shared source of truth. Backend
+# credentials/config (AWS_*, ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION,
+# GOOGLE_APPLICATION_CREDENTIALS) are NOT in AGENT_AUTH_ENV_VARS, so they must
+# not be advertised as ambient hosted passthrough by default. Profile-declared
+# same-name slots are covered separately below.
 _CLAUDE_CODE_DERIVED_AUTH_NAMES = frozenset(
     name
     for name in AGENT_AUTH_ENV_VARS
@@ -69,14 +69,10 @@ _CLAUDE_CODE_BACKEND_AUTH_NAMES = (
     "CLOUD_ML_REGION",
 )
 # ``GOOGLE_APPLICATION_CREDENTIALS`` is intentionally NOT surfaced here — it is a
-# file-backed credential (its value is a filesystem path), and the hosted
-# request (``AgentRuntimeExecRequest``) carries no file/secret ref or mount. The
-# local Compose path bind-mounts the referenced file via ``_build_host_auth_mounts``
-# so ADC works locally, but env-only passthrough on the hosted path would inject a
-# dangling path and silently break Vertex/ADC auth (PR #751 thread
-# PRRT_kwDOSJAM6s6Pas4k). A future file/secret-ref mechanism on the hosted
-# request is required to support it; until then it is not advertised as env-only.
-_CLAUDE_NAMES = _CLAUDE_CODE_DERIVED_AUTH_NAMES | frozenset(_CLAUDE_CODE_BACKEND_AUTH_NAMES)
+# file-backed credential (its value is a filesystem path). Hosted requests carry
+# the matching auth mount target via ``file_auth_mount_targets`` instead of
+# injecting a dangling env-only path.
+_CLAUDE_NAMES = _CLAUDE_CODE_DERIVED_AUTH_NAMES
 _CURSOR_NAMES = ("CURSOR_API_KEY",)
 _GEMINI_NAMES = (
     "GEMINI_API_KEY",
@@ -146,6 +142,7 @@ async def _run(
 def _write_compose(
     tmp_path: Path,
     environment: dict[str, str] | None = None,
+    volumes: tuple[str | dict[str, str], ...] = (),
 ) -> Path:
     """Write a minimal readable compose file with a single ``agent`` service.
 
@@ -157,6 +154,8 @@ def _write_compose(
     services: dict[str, dict[str, object]] = {"agent": {"image": "agent:latest"}}
     if environment is not None:
         services["agent"]["environment"] = environment
+    if volumes:
+        services["agent"]["volumes"] = list(volumes)
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         yaml.safe_dump({"services": services}),
@@ -167,68 +166,129 @@ def _write_compose(
 
 class TestNonCodexHostedCredentials:
     @pytest.mark.unit
-    async def test_claude_code_surfaces_anthropic_env_names(self) -> None:
+    async def test_claude_code_surfaces_anthropic_env_names(self, tmp_path: Path) -> None:
+        compose_file = _write_compose(tmp_path)
         adapter = _build(ClaudeCodeAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert request.agent_runtime is AgentRuntime.claude_code
         for name in _CLAUDE_NAMES:
             assert name in request.env_passthrough_names, name
+        for name in _CLAUDE_CODE_BACKEND_AUTH_NAMES:
+            assert name not in request.env_passthrough_names, name
         # ``GOOGLE_APPLICATION_CREDENTIALS`` is file-backed and must NOT be
         # advertised as env-only passthrough — see
         # ``test_gemini_does_not_advertise_file_backed_google_application_credentials``
-        # (PR #751 thread PRRT_kwDOSJAM6s6Pas4k). The local Compose path
-        # bind-mounts the file; the hosted request has no file/secret ref, so
-        # surfacing it would inject a dangling path and break Vertex/ADC auth.
+        # (PR #751 thread PRRT_kwDOSJAM6s6Pas4k). The hosted request carries
+        # file-backed ADC through ``file_auth_mount_targets`` instead.
         assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
 
     @pytest.mark.unit
-    async def test_cursor_surfaces_cursor_api_key_name(self) -> None:
+    async def test_cursor_surfaces_cursor_api_key_name(self, tmp_path: Path) -> None:
+        compose_file = _write_compose(tmp_path)
         adapter = _build(CursorAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert request.agent_runtime is AgentRuntime.cursor
         assert "CURSOR_API_KEY" in request.env_passthrough_names
 
     @pytest.mark.unit
-    async def test_gemini_surfaces_google_env_names(self) -> None:
+    async def test_gemini_surfaces_google_env_names(self, tmp_path: Path) -> None:
+        compose_file = _write_compose(tmp_path)
         adapter = _build(GeminiAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert request.agent_runtime is AgentRuntime.gemini
         for name in _GEMINI_NAMES:
             assert name in request.env_passthrough_names, name
 
     @pytest.mark.unit
     async def test_gemini_does_not_advertise_file_backed_google_application_credentials(
-        self,
+        self, tmp_path: Path
     ) -> None:
         """``GOOGLE_APPLICATION_CREDENTIALS`` is file-backed and must not be env-only passthrough.
 
         Regression for PR #751 thread PRRT_kwDOSJAM6s6Pas4k: the local Compose
         path bind-mounts the referenced credentials file into the agent
         container via ``_build_host_auth_mounts`` so the path the env var points
-        at actually exists and ADC/Vertex auth works. The hosted (non-compose)
-        path resolves env-passthrough names to env *values* out-of-band and
-        injects them as env vars, but ``AgentRuntimeExecRequest`` carries no
-        file/secret ref or mount, so the hosted executor has no signal that this
-        name is file-backed and must also mount the file. Surfacing it would
-        inject a dangling ``GOOGLE_APPLICATION_CREDENTIALS=/some/path`` with the
-        file absent, silently breaking ADC/Vertex auth even though the same
-        workspace is ready under Compose. The name must NOT be advertised as
-        env-only passthrough until a file/secret-ref mechanism exists on the
-        hosted request; the value/config names (API keys, Vertex toggles,
-        project/location, access token) are still surfaced because they are not
-        file paths.
+        at actually exists and ADC/Vertex auth works. The hosted path carries
+        that file-backed signal through ``file_auth_mount_targets`` instead of
+        injecting a dangling env-only path. The value/config names (API keys,
+        Vertex toggles, project/location, access token) are still surfaced
+        because they are not file paths.
         """
+        compose_file = _write_compose(tmp_path)
         adapter = _build(GeminiAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
         # The value/config names that ARE env-safe remain surfaced.
         for name in _GEMINI_NAMES:
             assert name in request.env_passthrough_names, name
 
     @pytest.mark.unit
-    async def test_grok_surfaces_xai_api_key_name(self) -> None:
+    async def test_gemini_carries_google_application_credentials_file_auth_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ADC-only Gemini hosted runs preserve the local file-backed auth target.
+
+        Regression for PR #754 thread PRRT_kwDOSJAM6s6QDzjU: provider readiness
+        accepts a readable ``GOOGLE_APPLICATION_CREDENTIALS`` file and local
+        Compose bind-mounts it, so hosted Gemini must carry the corresponding
+        file-auth mount target instead of launching without ADC.
+        """
+        credentials_target = "/home/agent/.config/gcloud/adc.json"
+        compose_file = _write_compose(
+            tmp_path,
+            environment={"GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS}"},
+            volumes=(
+                "/host/worktree:/workspace",
+                f"/host/auth/adc.json:{credentials_target}:ro",
+            ),
+        )
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials_target)
+
+        adapter = _build(GeminiAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
+        assert credentials_target in request.file_auth_mount_targets
+        assert "/host/auth/adc.json" not in request.file_auth_mount_targets
+
+    @pytest.mark.unit
+    async def test_gemini_carries_pass_through_google_application_credentials_file_auth_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Compose pass-through ADC slots preserve the same file-auth target."""
+        credentials_target = "/home/agent/.config/gcloud/application_default_credentials.json"
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump(
+                {
+                    "services": {
+                        "agent": {
+                            "image": "agent:latest",
+                            "environment": ["GOOGLE_APPLICATION_CREDENTIALS"],
+                            "volumes": [
+                                "/host/worktree:/workspace",
+                                f"/host/auth/adc.json:{credentials_target}:ro",
+                            ],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials_target)
+
+        adapter = _build(GeminiAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
+        assert credentials_target in request.file_auth_mount_targets
+        assert "/host/auth/adc.json" not in request.file_auth_mount_targets
+
+    @pytest.mark.unit
+    async def test_grok_surfaces_xai_api_key_name(self, tmp_path: Path) -> None:
+        compose_file = _write_compose(tmp_path)
         adapter = _build(GrokAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert request.agent_runtime is AgentRuntime.grok
         assert "XAI_API_KEY" in request.env_passthrough_names
 
@@ -247,6 +307,52 @@ class TestNonCodexHostedCredentials:
         for name in _OPENCODE_NAMES:
             assert name in request.env_passthrough_names, name
         # No profile-owned env declared on the agent service -> empty profile_env.
+        assert request.profile_env == ()
+
+    @pytest.mark.unit
+    async def test_hosted_request_fails_closed_when_compose_env_unreadable(
+        self, tmp_path: Path
+    ) -> None:
+        """Hosted request filtering must not bypass unreadable compose metadata.
+
+        Regression for PR #754 thread PRRT_kwDOSJAM6s6QDySj: if the hosted path
+        cannot parse the rendered compose agent env, it must apply the same
+        fail-closed filter as local exec passthrough instead of forwarding the
+        adapter's full ambient hosted passthrough list.
+        """
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text("services:\n  agent: [\n", encoding="utf-8")
+
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert request.env_passthrough_names == ()
+        assert request.profile_env == ()
+
+    @pytest.mark.unit
+    async def test_hosted_request_fails_closed_after_initial_compose_env_parse_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed initial compose scan must not be treated as "parse later"."""
+        import awf.adapters.base as base_module
+
+        compose_file = _write_compose(tmp_path)
+
+        def _failed_initial_parse(
+            compose_file: Path, *, worker_env: object
+        ) -> tuple[None, frozenset[str]]:
+            return None, frozenset()
+
+        monkeypatch.setattr(
+            base_module,
+            "try_compose_agent_env_and_postgres_passwords",
+            _failed_initial_parse,
+        )
+
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert request.env_passthrough_names == ()
         assert request.profile_env == ()
 
     @pytest.mark.unit
@@ -348,6 +454,46 @@ class TestNonCodexHostedCredentials:
             assert "GOOGLE_APPLICATION_CREDENTIALS" not in dict(request.profile_env)
             assert "NPM_TOKEN" in request.env_passthrough_names
             assert "NPM_TOKEN" not in dict(request.profile_env)
+
+    @pytest.mark.unit
+    async def test_hosted_request_carries_file_auth_mount_targets(self, tmp_path: Path) -> None:
+        """Hosted requests preserve file-backed provider auth mount signals.
+
+        Regression for PR #754 thread PRRT_kwDOSJAM6s6QDOhZ: local readiness can
+        be satisfied by isolated provider auth directories mounted into the
+        agent container. The hosted request must carry a secret-free target list
+        so a hosted executor can resolve equivalent file-backed credentials
+        instead of launching with env names only.
+        """
+        compose_file = _write_compose(
+            tmp_path,
+            volumes=(
+                "/host/worktree:/workspace",
+                "/host/auth/ws/codex:/home/agent/.codex:rw",
+                "/host/auth/ws/opencode:/home/agent/.config/opencode:rw",
+                "/host/auth/ws/ollama:/home/agent/.ollama:rw",
+                "/host/auth/ws/grok:/home/agent/.grok:rw",
+                {
+                    "type": "bind",
+                    "source": "/host/auth/ws/gemini",
+                    "target": "/home/agent/.gemini",
+                    "read_only": False,
+                },
+            ),
+        )
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert request.file_auth_mount_targets == (
+            "/home/agent/.codex",
+            "/home/agent/.config/opencode",
+            "/home/agent/.ollama",
+            "/home/agent/.grok",
+            "/home/agent/.gemini",
+        )
+        blob = "\x00".join(request.file_auth_mount_targets)
+        assert "/host/auth" not in blob
+        assert "/host/worktree" not in blob
 
     @pytest.mark.unit
     async def test_hosted_request_carries_cross_name_env_secret_aliases(
@@ -493,6 +639,60 @@ class TestNonCodexHostedCredentials:
         assert "AWS_REGION" not in dict(request.profile_env)
         # No ${...} placeholder leaks into profile_env.
         assert not any("${" in value for _key, value in request.profile_env)
+
+    @pytest.mark.unit
+    async def test_claude_code_profile_declared_bedrock_slots_are_resolvable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Profile-declared Bedrock slots preserve local Compose parity.
+
+        Regression for PR #754 thread PRRT_kwDOSJAM6s6P8RKB: Claude backend
+        credentials must not be surfaced from ambient hosted-worker env by
+        default, but a profile that explicitly declares same-name Bedrock slots
+        still makes the local Compose container receive those values at stack
+        launch. Hosted runs must carry the names for out-of-band resolution
+        without transporting the secret values in the request payload.
+        """
+        compose_file = _write_compose(
+            tmp_path,
+            environment={
+                "CLAUDE_CODE_USE_BEDROCK": "${CLAUDE_CODE_USE_BEDROCK}",
+                "AWS_REGION": "${AWS_REGION}",
+                "AWS_ACCESS_KEY_ID": "${AWS_ACCESS_KEY_ID}",
+                "AWS_SECRET_ACCESS_KEY": "${AWS_SECRET_ACCESS_KEY}",
+                "AWS_SESSION_TOKEN": "${AWS_SESSION_TOKEN}",
+                "AWS_BEARER_TOKEN_BEDROCK": "${AWS_BEARER_TOKEN_BEDROCK}",
+            },
+        )
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        monkeypatch.setenv("AWS_REGION", "us-west-2")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA_TEST_IDENTIFIER")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws_secret_do_not_leak")
+        monkeypatch.setenv("AWS_SESSION_TOKEN", "aws_session_do_not_leak")
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock_bearer_do_not_leak")
+
+        adapter = _build(ClaudeCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        for name in (
+            "CLAUDE_CODE_USE_BEDROCK",
+            "AWS_REGION",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_BEARER_TOKEN_BEDROCK",
+        ):
+            assert name in request.env_passthrough_names, name
+            assert name not in dict(request.profile_env)
+        blob = (
+            request.prompt_stdin.decode("utf-8", "replace")
+            + "\x00".join(request.cli_args)
+            + "\x00".join(request.env_passthrough_names)
+            + "\x00".join(f"{key}={value}" for key, value in request.profile_env)
+        )
+        assert "aws_secret_do_not_leak" not in blob
+        assert "aws_session_do_not_leak" not in blob
+        assert "bedrock_bearer_do_not_leak" not in blob
 
     @pytest.mark.unit
     async def test_hosted_offloads_blocking_compose_parse_to_worker_thread(
@@ -650,10 +850,10 @@ class TestNonCodexHostedCredentials:
         adapter = _build(OpenCodeAdapter)
         request = await _run(adapter, compose_file=compose_file)
 
-        # The documented worker source is available, and both gh-visible names
-        # are mapped from it instead of being emitted as plain passthrough names
-        # that would resolve by their own absent worker-env name.
-        assert "AWF_GITHUB_TOKEN" in request.env_passthrough_names
+        # The documented worker source is carried only as the source of
+        # gh-visible aliases instead of being emitted as a plain passthrough
+        # name that local Compose does not expose.
+        assert "AWF_GITHUB_TOKEN" not in request.env_passthrough_names
         assert "GH_TOKEN" not in request.env_passthrough_names
         assert "GITHUB_TOKEN" not in request.env_passthrough_names
         assert ("GH_TOKEN", "AWF_GITHUB_TOKEN") in request.env_passthrough_aliases
@@ -714,11 +914,11 @@ class TestNonCodexHostedCredentials:
         adapter = _build(OpenCodeAdapter)
         request = await _run(adapter, compose_file=compose_file)
 
-        # The chosen source name is surfaced so the hosted executor can resolve
-        # the credential from it, and the gh-visible aliases are preserved as
-        # source mappings instead of plain names that would resolve to nothing
-        # in this setup.
-        assert "AWF_GITHUB_TOKEN" in request.env_passthrough_names
+        # The chosen source name is carried only as the source of gh-visible
+        # aliases. Plain passthrough names resolve by their own name, so adding
+        # ``AWF_GITHUB_TOKEN`` there would expose an extra env var that the
+        # local Compose path does not expose.
+        assert "AWF_GITHUB_TOKEN" not in request.env_passthrough_names
         assert "GH_TOKEN" not in request.env_passthrough_names
         assert "GITHUB_TOKEN" not in request.env_passthrough_names
         assert ("GH_TOKEN", "AWF_GITHUB_TOKEN") in request.env_passthrough_aliases

@@ -6,10 +6,11 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from awf.profiles.compose_env import (
     _COMPOSE_PASSTHROUGH,
+    _compose_empty_setness_reference_name,
     _compose_resolve_value,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
@@ -82,7 +83,7 @@ def literal_profile_env_from_compose(
         return ()
 
     local_postgres_hostnames = frozenset({"postgres"}) | compose_postgres_service_hostnames(
-        compose_file
+        compose_file, worker_env=env
     )
     postgres_passwords = file_postgres_passwords | (postgres_passwords or frozenset())
     auth_secret_keys = compose_module._AGENT_AUTH_SECRET_ENV_VARS & compose_env.keys()
@@ -99,13 +100,18 @@ def literal_profile_env_from_compose(
     for key, raw in compose_env.items():
         if raw == _COMPOSE_PASSTHROUGH:
             continue
+        if compose_module._is_git_config_protocol_key(key):
+            continue
+        if _compose_empty_setness_reference_name(raw, worker_env=env) is not None:
+            carried.append((key, ""))
+            continue
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)
         if resolution is not _ComposeEnvResolution.LITERAL:
             continue
+        if key in compose_module._HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
+            continue
         if expanded == "" and (
-            key in auth_secret_keys
-            or key in compose_module._HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS
-            or compose_module._is_secret_like_profile_env_name(key)
+            key in auth_secret_keys or compose_module._is_secret_like_profile_env_name(key)
         ):
             carried.append((key, expanded))
             continue
@@ -128,11 +134,7 @@ def literal_profile_env_from_compose(
             and expanded == compose_module._BITBUCKET_ASKPASS_TARGET
         ):
             continue
-        if compose_module._is_git_config_protocol_key(key):
-            continue
         if key in auth_secret_keys:
-            continue
-        if key in compose_module._HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
             continue
         if compose_module._is_secret_like_profile_env_name(
             key
@@ -169,9 +171,20 @@ def _local_postgres_database_url_without_tracked_password(
         and password is None
         and not any(
             compose_module._url_component_has_secret_credential_field(component)
-            for component in (parsed.path, parsed.query, parsed.fragment)
+            or compose_module._value_has_url_userinfo(component)
+            for raw_component in (parsed.path, parsed.query, parsed.fragment)
+            for component in _url_component_variants(raw_component)
         )
     )
+
+
+def _url_component_variants(component: str) -> tuple[str, ...]:
+    if not component:
+        return ()
+    decoded = unquote(component)
+    if decoded == component:
+        return (component,)
+    return (component, decoded)
 
 
 def _is_local_postgres_database_url_env_name(key: str) -> bool:

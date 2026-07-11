@@ -202,17 +202,22 @@ class TestRuntimeExecutorSeam:
         assert request.idle_timeout_seconds is not None and request.idle_timeout_seconds > 0
 
     @pytest.mark.unit
-    async def test_env_passthrough_names_carry_names_only_no_values(self) -> None:
+    async def test_env_passthrough_names_carry_names_only_no_values(self, tmp_path: Path) -> None:
         executor = _RecordingExecutor()
         adapter = CodexAdapter(
             runner=FakeCommandRunner(),
             default_model="gpt-5",
             runtime_executor=executor,
         )
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            "services:\n  agent:\n    image: agent:latest\n",
+            encoding="utf-8",
+        )
 
         await adapter.run(
             compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
+            compose_file=compose_file,
             prompt=_PROMPT,
             workspace_id="ws_env",
         )
@@ -266,10 +271,20 @@ class TestRuntimeExecutorSeam:
     ) -> None:
         class _FailingExecutor:
             async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                if request.on_stdout is not None:
+                    maybe = request.on_stdout("streamed stdout before failure\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                if request.on_stderr is not None:
+                    maybe = request.on_stderr("streamed stderr before failure\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
                 raise RuntimeError("k8s api unavailable")
 
+        log_store = _RecordingLogStore()
         adapter = CodexAdapter(
             runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
             default_model="gpt-5",
             runtime_executor=_FailingExecutor(),
         )
@@ -295,8 +310,12 @@ class TestRuntimeExecutorSeam:
         assert exc.value.agent is AgentRuntime.codex
         assert exc.value.reason_code == "AGENT_HOSTED_EXECUTOR_ERROR"
         assert exc.value.result.returncode == 1
-        assert exc.value.result.stdout == ""
-        assert "k8s api unavailable" in exc.value.result.stderr
+        assert exc.value.result.stdout == "streamed stdout before failure\n"
+        assert exc.value.result.stderr == (
+            "streamed stderr before failure\nRuntimeError: k8s api unavailable"
+        )
+        assert log_store.sinks.stdout_data == ["streamed stdout before failure\n"]
+        assert log_store.sinks.stderr_data == ["streamed stderr before failure\n"]
         assert finalize_calls == [(None, "failed", "ws_hosted_executor_error")]
 
     @pytest.mark.unit
@@ -775,6 +794,183 @@ class TestRuntimeExecutorSeam:
         # Buffered result was NOT re-written (no duplicate entries).
         assert len(log_store.sinks.stdout_data) == 2
         assert len(log_store.sinks.stderr_data) == 1
+        assert log_store.sinks.closed is True
+
+    @pytest.mark.unit
+    async def test_hosted_streaming_executor_appends_buffered_tail_to_log_store(self) -> None:
+        class _StreamingTailExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                if request.on_stdout is not None:
+                    maybe = request.on_stdout("progress\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                if request.on_stderr is not None:
+                    maybe = request.on_stderr("warn\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                return AgentRuntimeExecResult(
+                    returncode=0,
+                    stdout="progress\nfinal\n",
+                    stderr="warn\nfinal warning\n",
+                )
+
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            runtime_executor=_StreamingTailExecutor(),
+        )
+
+        result = await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_streamed_buffered_tail",
+        )
+
+        assert result.ok
+        assert result.stdout == "progress\nfinal\n"
+        assert result.stderr == "warn\nfinal warning\n"
+        assert log_store.sinks.stdout_data == ["progress\n", "final\n"]
+        assert log_store.sinks.stderr_data == ["warn\n", "final warning\n"]
+        assert log_store.sinks.closed is True
+
+    @pytest.mark.unit
+    async def test_hosted_streamed_failure_result_preserves_streamed_output(self) -> None:
+        class _StreamingFailureExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                if request.on_stdout is not None:
+                    maybe = request.on_stdout("actionable stdout\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                if request.on_stderr is not None:
+                    maybe = request.on_stderr("actionable stderr\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                return AgentRuntimeExecResult(
+                    returncode=2,
+                    stdout="",
+                    stderr="hosted diagnostic stderr\n",
+                )
+
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            default_model="gpt-5",
+            runtime_executor=_StreamingFailureExecutor(),
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_streamed_failure",
+            )
+
+        assert exc.value.reason_code == "AGENT_CLI_FAILED"
+        assert exc.value.result.stdout == "actionable stdout\n"
+        assert exc.value.result.stderr == "actionable stderr\nhosted diagnostic stderr\n"
+        assert log_store.sinks.stdout_data == ["actionable stdout\n"]
+        assert log_store.sinks.stderr_data == [
+            "actionable stderr\n",
+            "hosted diagnostic stderr\n",
+        ]
+        assert log_store.sinks.closed is True
+
+    @pytest.mark.unit
+    async def test_hosted_streamed_failure_result_keeps_streamed_substring_prefix(self) -> None:
+        class _StreamingFailureExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                if request.on_stdout is not None:
+                    maybe = request.on_stdout("actionable stdout\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                if request.on_stderr is not None:
+                    maybe = request.on_stderr("actionable stderr\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                return AgentRuntimeExecResult(
+                    returncode=2,
+                    stdout="diagnostic stdout later quotes actionable stdout\n",
+                    stderr="diagnostic stderr later quotes actionable stderr\n",
+                )
+
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            default_model="gpt-5",
+            runtime_executor=_StreamingFailureExecutor(),
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_streamed_failure_substring",
+            )
+
+        assert exc.value.reason_code == "AGENT_CLI_FAILED"
+        assert exc.value.result.stdout == (
+            "actionable stdout\ndiagnostic stdout later quotes actionable stdout\n"
+        )
+        assert exc.value.result.stderr == (
+            "actionable stderr\ndiagnostic stderr later quotes actionable stderr\n"
+        )
+        assert log_store.sinks.stdout_data == [
+            "actionable stdout\n",
+            "diagnostic stdout later quotes actionable stdout\n",
+        ]
+        assert log_store.sinks.stderr_data == [
+            "actionable stderr\n",
+            "diagnostic stderr later quotes actionable stderr\n",
+        ]
+        assert log_store.sinks.closed is True
+
+    @pytest.mark.unit
+    async def test_hosted_streamed_failure_result_does_not_duplicate_buffered_prefix(
+        self,
+    ) -> None:
+        class _StreamingFailureExecutor:
+            async def execute(self, request: AgentRuntimeExecRequest) -> AgentRuntimeExecResult:
+                if request.on_stdout is not None:
+                    maybe = request.on_stdout("progress\nfinal stdout\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                if request.on_stderr is not None:
+                    maybe = request.on_stderr("warning\nfinal stderr\n")
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                return AgentRuntimeExecResult(
+                    returncode=2,
+                    stdout="progress\n",
+                    stderr="warning\n",
+                )
+
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=FakeCommandRunner(),
+            log_store=log_store,  # type: ignore[arg-type]
+            default_model="gpt-5",
+            runtime_executor=_StreamingFailureExecutor(),
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_streamed_failure_buffer_prefix",
+            )
+
+        assert exc.value.reason_code == "AGENT_CLI_FAILED"
+        assert exc.value.result.stdout == "progress\nfinal stdout\n"
+        assert exc.value.result.stderr == "warning\nfinal stderr\n"
+        assert log_store.sinks.stdout_data == ["progress\nfinal stdout\n"]
+        assert log_store.sinks.stderr_data == ["warning\nfinal stderr\n"]
         assert log_store.sinks.closed is True
 
     @pytest.mark.unit

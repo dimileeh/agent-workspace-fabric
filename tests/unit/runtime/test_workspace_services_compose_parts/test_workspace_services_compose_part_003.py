@@ -289,11 +289,12 @@ def test_literal_profile_env_from_compose_skips_placeholders(
       it leaves the hosted job missing the profile-owned value).
     - ``$$`` escapes -> collapsed to a single ``$`` and carried (Compose models
       ``$$`` as a literal dollar, not a reference).
-    - Bare ``${NAME}`` / ``$NAME`` / ``${NAME:?...}`` / ``${NAME:+...}``
-      references -> skipped (worker-resolved secrets the profile owns locally;
-      the hosted path resolves credentials via its own adapter contract, not by
-      re-resolving ``${NAME}`` from the worker, and carrying the worker value
-      would embed a secret in ``profile_env``).
+    - Bare ``${NAME}`` / ``$NAME`` references with ``NAME`` unset -> carried as
+      empty literals, matching Compose's stack-launch expansion.
+    - Bare ``${NAME}`` / ``$NAME`` references with ``NAME`` set, and
+      ``${NAME:?...}`` references -> skipped (worker-resolved secrets the profile
+      owns locally; carrying the worker value would embed a secret in
+      ``profile_env``).
     - ``${NAME:-default}`` with ``NAME`` set in the worker env -> skipped
       (worker-resolved value; carrying it would embed a worker secret).
     """
@@ -309,7 +310,7 @@ def test_literal_profile_env_from_compose_skips_placeholders(
                         "environment": {
                             # Literal profile value -> carried.
                             "OLLAMA_HOST": "http://ollama.profile:11434",
-                            # Worker-resolved secret placeholder -> skipped.
+                            # Unset bare placeholder -> carried as empty.
                             "OPENAI_API_KEY": "${OPENAI_API_KEY}",
                             # Required placeholder -> skipped.
                             "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY:?set}",
@@ -337,8 +338,9 @@ def test_literal_profile_env_from_compose_skips_placeholders(
     assert ("LITERAL_DOLLAR", "$NOT_A_VAR") in profile_env
     # Defaulted expression with the variable unset -> concrete default carried.
     assert ("AWS_REGION", "us-west-2") in profile_env
-    # Worker-resolved placeholders are not carried as values.
-    assert "OPENAI_API_KEY" not in dict(profile_env)
+    # Unset bare placeholders are carried as Compose's empty expansion.
+    assert ("OPENAI_API_KEY", "") in profile_env
+    # Required placeholders are not carried as values.
     assert "ANTHROPIC_API_KEY" not in dict(profile_env)
 
 
@@ -359,6 +361,8 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                         "environment": {
                             "NPM_TOKEN": "",
                             "CUSTOM_API_TOKEN": "custom_profile_token",
+                            "GITHUB_PAT": "ghp_profile_pat",
+                            "BITBUCKET_PAT": "bitbucket_profile_pat",
                             "SENDGRID_APIKEY": "sendgrid_profile_apikey",
                             "NPM_CONFIG_REGISTRY_AUTHTOKEN": "npm_profile_authtoken",
                             "STRIPE_KEY": "sk_live_profile",
@@ -369,6 +373,10 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                             "JWTSECRET": "jwt_secret_value",
                             "DB_PASS": "database_profile_password",
                             "REDIS_PASS": "redis_profile_password",
+                            "SSH_PASSPHRASE": "ssh_profile_passphrase",
+                            "GPG_PASSPHRASE": "gpg_profile_passphrase",
+                            "KEY_PASSPHRASE": "key_profile_passphrase",
+                            "EMPTY_SSH_PASSPHRASE": "",
                             "POSTGRES_PWD": "postgres_profile_pwd",
                             "PGPASSWORD": "postgres_profile_password",
                             "EMPTY_PGPASSWORD": "",
@@ -401,6 +409,8 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
 
     assert carried["NPM_TOKEN"] == ""
     assert "CUSTOM_API_TOKEN" not in carried
+    assert "GITHUB_PAT" not in carried
+    assert "BITBUCKET_PAT" not in carried
     assert "SENDGRID_APIKEY" not in carried
     assert "NPM_CONFIG_REGISTRY_AUTHTOKEN" not in carried
     assert "STRIPE_KEY" not in carried
@@ -411,6 +421,10 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert "JWTSECRET" not in carried
     assert "DB_PASS" not in carried
     assert "REDIS_PASS" not in carried
+    assert "SSH_PASSPHRASE" not in carried
+    assert "GPG_PASSPHRASE" not in carried
+    assert "KEY_PASSPHRASE" not in carried
+    assert carried["EMPTY_SSH_PASSPHRASE"] == ""
     assert "POSTGRES_PWD" not in carried
     assert "PGPASSWORD" not in carried
     assert carried["EMPTY_PGPASSWORD"] == ""
@@ -427,10 +441,76 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
     assert carried["PASS_THROUGH_MODE"] == "enabled"
     assert carried["POSTGRES_HOST_AUTH_METHOD"] == "trust"
     assert carried["GEMINI_API_KEY_AUTH_MECHANISM"] == "api-key"
-    assert carried["AWS_ACCESS_KEY_ID"] == ""
+    assert "AWS_ACCESS_KEY_ID" not in carried
     assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
     assert carried["AWS_REGION"] == "us-west-2"
     assert carried["APP_MODE"] == "ci"
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_camelcase_vendor_api_key_fields(
+    tmp_path: Path,
+) -> None:
+    """Neutral config/header blobs with vendor camelCase API-key fields are secret."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_CONFIG": '{"googleApiKey":"google-profile-key"}',
+                            "REQUEST_HEADERS": '{"xGoogApiKey":"goog-header-key"}',
+                            "SAFE_CONFIG": '{"feature":"enabled"}',
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert "APP_CONFIG" not in carried
+    assert "REQUEST_HEADERS" not in carried
+    assert carried["SAFE_CONFIG"] == '{"feature":"enabled"}'
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_protocol_relative_url_userinfo_in_query(
+    tmp_path: Path,
+) -> None:
+    """Query values containing protocol-relative URLs with userinfo are secret."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_URL": "https://app/callback?next=//user:pass@example.com",
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert "APP_URL" not in carried
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "user:pass@example.com" not in "".join(v for _key, v in profile_env)
 
 
 @pytest.mark.unit
@@ -515,7 +595,7 @@ def test_literal_profile_env_from_compose_resolves_defaults_and_escapes(
                             "PASSWORD": "pa$$word",
                             # :- with empty default and unset var -> carried as "".
                             "EMPTY_DEFAULT": "${MISSING:-}",
-                            # Bare $NAME (no braces) worker-resolved -> skipped.
+                            # Bare $NAME with the variable unset -> carried as "".
                             "BARE_PLAIN": "$BARE_PLAIN_VAR",
                         },
                     }
@@ -541,8 +621,8 @@ def test_literal_profile_env_from_compose_resolves_defaults_and_escapes(
     assert "PASSWORD" not in carried
     # Empty default with unset var -> carried as empty string (matches local).
     assert carried.get("EMPTY_DEFAULT") == ""
-    # Bare $NAME worker-resolved -> skipped.
-    assert "BARE_PLAIN" not in carried
+    # Bare $NAME with the variable unset -> carried as Compose's empty expansion.
+    assert carried.get("BARE_PLAIN") == ""
 
 
 @pytest.mark.unit
@@ -559,7 +639,8 @@ def test_literal_profile_env_from_compose_dash_dash_tests_non_empty(
     previous code used a presence check for both ``:-`` and ``-``, so an empty
     worker value was treated as worker-resolved and the default was dropped,
     leaving hosted runs without ``AWS_REGION``. ``-`` tests set-ness, so an
-    empty-but-present value resolves to the empty value (worker-resolved, skip).
+    empty-but-present value resolves to the empty value, which hosted carries as
+    an explicit empty target value.
     """
     from awf.profiles.compose import literal_profile_env_from_compose
 
@@ -573,7 +654,7 @@ def test_literal_profile_env_from_compose_dash_dash_tests_non_empty(
                         "environment": {
                             # :- with empty worker value -> default carried.
                             "AWS_REGION": "${AWS_REGION:-us-west-2}",
-                            # - with empty worker value -> worker-resolved, skip.
+                            # - with empty worker value -> empty override carried.
                             "AWS_REGION_DASH": "${AWS_REGION-us-west-2}",
                             # :- with non-empty worker value -> worker-resolved, skip.
                             "AWS_REGION_SET": "${AWS_REGION_SET:-us-west-2}",
@@ -593,8 +674,8 @@ def test_literal_profile_env_from_compose_dash_dash_tests_non_empty(
 
     # :-) empty worker value -> default carried (local container gets us-west-2).
     assert carried.get("AWS_REGION") == "us-west-2"
-    # - : empty-but-present -> worker-resolved empty value, skip (no carry).
-    assert "AWS_REGION_DASH" not in carried
+    # - : empty-but-present -> empty target value carried.
+    assert carried.get("AWS_REGION_DASH") == ""
     # :-) non-empty worker value -> worker-resolved, skip.
     assert "AWS_REGION_SET" not in carried
     # - : non-empty worker value -> worker-resolved, skip.
@@ -644,11 +725,14 @@ def test_literal_profile_env_from_compose_alternate_carries_word_when_set(
                             "ENDPOINT_PLUS_SET": "${FLAG_PLUS_SET+https://eu.example.com}",
                             # + with FLAG unset -> local container gets "", carried.
                             "ENDPOINT_PLUS_UNSET": "${FLAG_PLUS_UNSET+https://eu.example.com}",
+                            # :+ whose alternate word references an unset
+                            # placeholder resolves to Compose's empty expansion.
+                            "SECRET_BEARING_UNSET": "${FLAG_SET:+${SECRET}}",
                             # :+ whose alternate word references a worker secret:
-                            # when FLAG is set the word ${SECRET} expands to the
-                            # worker value (a secret), so the whole value must NOT
-                            # be carried as a literal — it stays worker-resolved.
-                            "SECRET_BEARING": "${FLAG_SET:+${SECRET}}",
+                            # when FLAG is set the word ${SECRET_SET} expands to
+                            # the worker value (a secret), so the whole value must
+                            # NOT be carried as a literal — it stays worker-resolved.
+                            "SECRET_BEARING_SET": "${FLAG_SET:+${SECRET_SET}}",
                         },
                     }
                 }
@@ -661,6 +745,7 @@ def test_literal_profile_env_from_compose_alternate_carries_word_when_set(
         "FLAG_SET": "true",
         "FLAG_EMPTY": "",
         "FLAG_PLUS_SET": "",
+        "SECRET_SET": "sk-secret",
     }
     profile_env = literal_profile_env_from_compose(compose_file, worker_env=worker_env)
     carried = dict(profile_env)
@@ -675,8 +760,10 @@ def test_literal_profile_env_from_compose_alternate_carries_word_when_set(
     assert carried.get("ENDPOINT_PLUS_SET") == "https://eu.example.com"
     # + unset -> local container got "", carried as empty.
     assert carried.get("ENDPOINT_PLUS_UNSET") == ""
+    # :+ whose word references an unset placeholder -> carried as empty.
+    assert carried.get("SECRET_BEARING_UNSET") == ""
     # :+ whose word references a worker secret -> not carried (worker-resolved).
-    assert "SECRET_BEARING" not in carried
+    assert "SECRET_BEARING_SET" not in carried
 
 
 @pytest.mark.unit

@@ -45,17 +45,17 @@ class _ComposeEnvResolution(StrEnum):
     # ``env_passthrough_names`` — that would drop it entirely, diverging from the
     # local run). See PR #751 thread PRRT_kwDOSJAM6s6PVH0t.
     WORKER_RESOLVED_DEFAULTED = "worker_resolved_defaulted"
-    # Worker-resolved via bare ``${NAME}`` / ``$NAME`` and ``${NAME:?...}`` /
-    # ``${NAME?...}`` with the variable unset (the local stack would fail to
-    # launch, so this is unreachable for a running container) — profile-owned
-    # secret slots the local path keeps out of exec-time passthrough; the hosted
-    # path resolves them via its own adapter contract, not by re-resolving
-    # ``${NAME}`` from the worker. ``${NAME:?...}`` / ``${NAME?...}`` with the
-    # variable set resolve to the worker value and are classified
-    # ``WORKER_RESOLVED_DEFAULTED`` (kept in passthrough). ``${NAME:+...}`` /
-    # ``${NAME+...}`` with the variable set carry the profile-owned alternate word
-    # as ``LITERAL`` (the local container received the alternate, not a worker
-    # value).
+    # Worker-resolved via bare ``${NAME}`` / ``$NAME`` when ``NAME`` has a
+    # non-empty worker value, and via ``${NAME:?...}`` / ``${NAME?...}`` with the
+    # variable unset (the local stack would fail to launch, so this is unreachable
+    # for a running container). Bare references whose source is absent or empty
+    # resolve to literal ``""`` because that is what Compose injects locally.
+    # ``${NAME:?...}`` /
+    # ``${NAME?...}`` with the variable set resolve to the worker value and are
+    # classified ``WORKER_RESOLVED_DEFAULTED`` (kept in passthrough).
+    # ``${NAME:+...}`` / ``${NAME+...}`` with the variable set carry the
+    # profile-owned alternate word as ``LITERAL`` (the local container received
+    # the alternate, not a worker value).
     WORKER_RESOLVED_SLOT = "worker_resolved_slot"
 
 
@@ -76,9 +76,10 @@ _COMPOSE_DEFAULT_OPERATORS = (":-", "-")
 # (``:+`` tests non-empty, ``+`` tests set-ness). The alternate word is
 # profile-owned config (literal text in the compose file), so it is carried as a
 # literal when the test passes (the local container received the alternate word);
-# when the test fails Compose resolves to "" and that empty literal is carried.
-# An alternate word that references a worker secret propagates the worker-resolved
-# classification so the secret never reaches ``profile_env``.
+# when the test fails Compose resolves to "" without evaluating the alternate
+# word, and that empty literal is carried. A selected alternate word that
+# references a worker secret propagates the worker-resolved classification so
+# the secret never reaches ``profile_env``.
 _COMPOSE_ALTERNATE_OPERATORS = (":+", "+")
 
 # Sentinel used to mask ``$$`` escapes before interpolation scanning so an
@@ -137,8 +138,8 @@ def _compose_resolve_value(
     value carries a concrete profile-owned literal (``LITERAL``) or pulls a
     worker-resolved value (``WORKER_RESOLVED_DEFAULTED`` for defaulted / required
     forms with the variable set; ``WORKER_RESOLVED_SLOT`` for bare ``${NAME}`` /
-    ``$NAME`` and unset required forms). See :class:`_ComposeEnvResolution` for the
-    carry vs passthrough rules.
+    ``$NAME`` with the variable set and unset required forms). See
+    :class:`_ComposeEnvResolution` for the carry vs passthrough rules.
 
     Carry rule (mirrors what the local agent container receives at stack
     launch, without embedding worker secrets in ``profile_env``):
@@ -164,9 +165,10 @@ def _compose_resolve_value(
       for ``:+``) resolves to the concrete ``alternate`` and is carried — the
       local container received the alternate word (profile-owned config, not a
       worker value), so the hosted job must too. When ``NAME`` is unset (or empty
-      for ``:+``) Compose resolves to ``""`` and that empty literal is carried. An
-      alternate word that references a worker secret propagates the worker-resolved
-      classification so the secret never reaches ``profile_env``.
+      for ``:+``) Compose resolves to ``""`` without evaluating the alternate
+      word, and that empty literal is carried. A selected alternate word that
+      references a worker secret propagates the worker-resolved classification so
+      the secret never reaches ``profile_env``.
     - ``${NAME:?err}`` / ``${NAME?err}`` with ``NAME`` set (non-empty for ``:?``)
       resolves to the worker value and is ``WORKER_RESOLVED_DEFAULTED`` — kept in
       ``env_passthrough_names`` for hosted out-of-band resolution (the local
@@ -174,10 +176,12 @@ def _compose_resolve_value(
       would embed a secret). An unset required form would fail Compose at stack
       launch, so that branch is ``WORKER_RESOLVED_SLOT`` (unreachable for a
       running container).
-    - A bare ``${NAME}`` / ``$NAME`` (no operator) is ``WORKER_RESOLVED_SLOT``: a
-      worker-resolved slot the profile owns locally; the hosted path resolves
-      credentials via its own adapter contract, not by re-resolving ``${NAME}``
-      from the worker.
+    - A bare ``${NAME}`` / ``$NAME`` (no operator) with ``NAME`` set to a
+      non-empty worker value is ``WORKER_RESOLVED_SLOT``: a worker-resolved slot
+      the profile owns locally; the hosted path resolves credentials via its own
+      adapter contract, not by carrying the worker value in ``profile_env``.
+      With ``NAME`` unset or present-but-empty, Compose expands the reference to
+      ``""`` and the empty literal is carried.
 
     The default / alternate word is itself recursively expanded against the
     worker env, mirroring ``awf.service.environment``'s env-file interpolator.
@@ -210,8 +214,12 @@ def _compose_resolve_value(
             expanded.append(char)
             index += 1
             continue
-        # Bare ``$NAME`` (no default operator) -> worker-resolved slot, skip.
-        return "", _ComposeEnvResolution.WORKER_RESOLVED_SLOT
+        name = plain_match.group(0)
+        if worker_env.get(name):
+            # Bare ``$NAME`` (no default operator) with a worker value -> skip.
+            return "", _ComposeEnvResolution.WORKER_RESOLVED_SLOT
+        expanded.append("")
+        index = plain_match.end()
     return "".join(expanded).replace(_COMPOSE_ESCAPED_DOLLAR, "$"), _ComposeEnvResolution.LITERAL
 
 
@@ -297,6 +305,30 @@ def _compose_defaulted_reference_name(
     return None
 
 
+def _compose_empty_setness_reference_name(
+    value: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> str | None:
+    """Return the variable name for a single ``-`` / ``?`` reference selecting ``""``."""
+    escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
+    if not escaped.startswith("${"):
+        return None
+    end = _compose_braced_expression_end(escaped, 1)
+    if end is None or end != len(escaped) - 1:
+        return None
+    inner = escaped[2:end]
+    name_match = _COMPOSE_ENV_NAME_PATTERN.match(inner)
+    if name_match is None:
+        return None
+    name = name_match.group(0)
+    remainder = inner[name_match.end() :]
+    for operator in ("-", "?"):
+        if remainder.startswith(operator) and name in worker_env and worker_env.get(name) == "":
+            return name
+    return None
+
+
 def _compose_selected_worker_reference_name(
     value: str,
     *,
@@ -350,6 +382,44 @@ def _compose_selected_worker_reference_name(
     return None
 
 
+def _compose_unselected_alternate_worker_reference_name(
+    value: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> str | None:
+    """Return the source name for an unselected alternate worker reference."""
+    escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
+    if not escaped.startswith("${"):
+        return None
+    end = _compose_braced_expression_end(escaped, 1)
+    if end is None or end != len(escaped) - 1:
+        return None
+    inner = escaped[2:end]
+    name_match = _COMPOSE_ENV_NAME_PATTERN.match(inner)
+    if name_match is None:
+        return None
+    name = name_match.group(0)
+    remainder = inner[name_match.end() :]
+    operator = ""
+    word = ""
+    for candidate in _COMPOSE_ALTERNATE_OPERATORS:
+        if remainder.startswith(candidate):
+            operator = candidate
+            word = remainder[len(candidate) :]
+            break
+    if not operator:
+        return None
+    worker_value = worker_env.get(name)
+    is_set = name in worker_env
+    is_non_empty = bool(worker_value)
+    if (operator == ":+" and is_non_empty) or (operator == "+" and is_set):
+        return None
+    source_name = _compose_selected_worker_reference_name(word, worker_env=worker_env)
+    if source_name is None or source_name not in worker_env:
+        return None
+    return source_name
+
+
 def _compose_default_word_is_worker_resolved(
     value: str,
     *,
@@ -398,10 +468,11 @@ def _compose_resolve_braced(
       the alternate word is recursively expanded; if that expansion is a literal
       it is carried as ``LITERAL`` (the local container received the alternate
       word, which is profile-owned config, not a worker value). When the variable
-      is unset (or empty for ``:+``) Compose resolves to ``""`` and that empty
-      literal is carried so the hosted job matches the local container. An
-      alternate word that itself references a worker secret (e.g.
-      ``${FLAG:+${SECRET}}``) propagates the worker-resolved classification so the
+      is unset (or empty for ``:+``) Compose resolves to ``""`` without
+      evaluating the alternate word, and that empty literal is carried so the
+      hosted job matches the local container. A selected alternate word that
+      itself references a worker secret (e.g. ``${FLAG:+${SECRET}}`` with
+      ``FLAG`` non-empty) propagates the worker-resolved classification so the
       secret is never embedded in ``profile_env``.
     - ``:?`` / ``?`` (required): when the variable is set (non-empty for ``:?``)
       Compose resolves the worker value, so the slot is ``WORKER_RESOLVED_DEFAULTED``
@@ -409,6 +480,10 @@ def _compose_resolve_braced(
       ``profile_env``). When the variable is unset/empty the local stack would fail
       to launch, so that branch is unreachable for a running container and stays
       ``WORKER_RESOLVED_SLOT``.
+    - bare ``${NAME}``: when the variable is set to a non-empty value, Compose
+      resolves the worker value and the slot is ``WORKER_RESOLVED_SLOT``. When it
+      is unset or present-but-empty, Compose resolves to ``""`` and the empty
+      literal is carried so hosted matches local.
     """
     name_match = _COMPOSE_ENV_NAME_PATTERN.match(expression)
     if name_match is None:
@@ -417,8 +492,10 @@ def _compose_resolve_braced(
     name = name_match.group(0)
     remainder = expression[name_match.end() :]
     if not remainder:
-        # Bare ``${NAME}`` -> worker-resolved slot, skip.
-        return "", _ComposeEnvResolution.WORKER_RESOLVED_SLOT
+        if worker_env.get(name):
+            # Bare ``${NAME}`` with a worker value -> worker-resolved slot, skip.
+            return "", _ComposeEnvResolution.WORKER_RESOLVED_SLOT
+        return "", _ComposeEnvResolution.LITERAL
     operator = ""
     word = ""
     for candidate in _COMPOSE_BRACED_OPERATORS:
@@ -452,7 +529,9 @@ def _compose_resolve_braced(
             if alternate_resolution is not _ComposeEnvResolution.LITERAL:
                 return "", alternate_resolution
             return alternate, _ComposeEnvResolution.LITERAL
-        # Variable unset (or empty for :+) -> Compose resolves to "", carried.
+        # Variable unset (or empty for :+) -> Compose resolves to "" without
+        # evaluating the alternate word, so even an unselected word containing a
+        # worker reference is mirrored as Compose's empty literal.
         return "", _ComposeEnvResolution.LITERAL
     # ``:?`` / ``?`` (required): a set variable resolves to the worker value
     # (a secret), so the slot is worker-resolved-defaulted — kept in passthrough

@@ -50,7 +50,12 @@ class _RecordingExecutor:
 
 class TestCodexHostedCredentials:
     @pytest.mark.unit
-    async def test_hosted_path_surfaces_codex_openai_env_names(self) -> None:
+    async def test_hosted_path_surfaces_codex_openai_env_names(self, tmp_path: Path) -> None:
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump({"services": {"agent": {"image": "agent:latest"}}}),
+            encoding="utf-8",
+        )
         executor = _RecordingExecutor()
         adapter = CodexAdapter(
             runner=FakeCommandRunner(),
@@ -60,7 +65,7 @@ class TestCodexHostedCredentials:
 
         await adapter.run(
             compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
+            compose_file=compose_file,
             prompt=_PROMPT,
             workspace_id="ws_codex",
         )

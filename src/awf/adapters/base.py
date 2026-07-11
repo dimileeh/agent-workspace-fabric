@@ -43,6 +43,7 @@ from awf.db.enums import AgentRuntime
 from awf.profiles.compose import (
     agent_exec_env_passthrough,
     filter_hosted_env_passthrough_names,
+    hosted_file_auth_mount_targets,
     hosted_github_token_passthrough_names,
     hosted_profile_env_passthrough_aliases,
     hosted_profile_env_passthrough_names,
@@ -131,6 +132,30 @@ def _discard_hosted_execute_task_result(task: asyncio.Task[AgentRuntimeExecResul
         pass
     except Exception:
         pass
+
+
+def _prepend_missing_streamed_output(*, chunks: list[str], buffered: str) -> str:
+    streamed = "".join(chunks)
+    if not streamed:
+        return buffered
+    if buffered.startswith(streamed):
+        return buffered
+    if streamed.startswith(buffered):
+        return streamed
+    return streamed + buffered
+
+
+def _buffered_output_not_streamed(*, chunks: list[str], buffered: str) -> str:
+    if not buffered:
+        return ""
+    streamed = "".join(chunks)
+    if not streamed:
+        return buffered
+    if buffered.startswith(streamed):
+        return buffered[len(streamed) :]
+    if streamed.startswith(buffered):
+        return ""
+    return buffered
 
 
 @dataclass(frozen=True)
@@ -482,77 +507,93 @@ class AgentAdapter(ABC):
             compose_file,
             worker_env=os.environ,
         )
-        env_passthrough_names = await asyncio.to_thread(
-            filter_hosted_env_passthrough_names,
-            self.hosted_env_passthrough_names,
-            compose_file=compose_file,
-            compose_env=compose_env,
-        )
-        profile_env_passthrough_names = await asyncio.to_thread(
-            hosted_profile_env_passthrough_names,
-            compose_file,
-            compose_env=compose_env,
-        )
-        env_passthrough_aliases = await asyncio.to_thread(
-            hosted_profile_env_passthrough_aliases,
-            compose_file,
-            compose_env=compose_env,
-        )
-        if profile_env_passthrough_names:
-            # Include non-adapter profile env secrets that local Compose
-            # resolved at stack launch (e.g. ``NPM_TOKEN: ${NPM_TOKEN}``). The
-            # helper returns names only; worker-resolved values still stay out
-            # of ``profile_env`` and the request payload.
-            existing_names = set(env_passthrough_names)
-            env_passthrough_names = env_passthrough_names + tuple(
-                name
-                for name in profile_env_passthrough_names
-                if name not in existing_names
-                and name not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+        env_passthrough_names: tuple[str, ...]
+        env_passthrough_aliases: tuple[tuple[str, str], ...]
+        profile_env: tuple[tuple[str, str], ...]
+        file_auth_mount_targets: tuple[str, ...]
+        if compose_env is None:
+            env_passthrough_names = ()
+            env_passthrough_aliases = ()
+            profile_env = ()
+            file_auth_mount_targets = ()
+        else:
+            env_passthrough_names = await asyncio.to_thread(
+                filter_hosted_env_passthrough_names,
+                self.hosted_env_passthrough_names,
+                compose_file=compose_file,
+                compose_env=compose_env,
             )
-        # Surface the GitHub token source name when the local Compose path would
-        # inject gh-visible aliases (``GH_TOKEN`` / ``GITHUB_TOKEN``) from that
-        # source. Alias targets already carried in ``env_passthrough_aliases``
-        # must NOT also be plain names: hosted executors resolve plain names by
-        # their own name, while aliases preserve the source->target mapping
-        # needed when the worker only has ``AWF_GITHUB_TOKEN``.
-        github_token_names = await asyncio.to_thread(
-            hosted_github_token_passthrough_names,
-            compose_file,
-            compose_env=compose_env,
-        )
-        if github_token_names:
-            # Union after the filter: the filter excludes compose-declared
-            # profile-owned slots, and the helper already skips profile-owned
-            # aliases. De-duplicate preserving filter order while keeping alias
-            # targets out of plain passthrough names.
-            existing_names = set(env_passthrough_names)
-            alias_targets = {target for target, _source in env_passthrough_aliases}
-            env_passthrough_names = env_passthrough_names + tuple(
-                name
-                for name in github_token_names
-                if name not in existing_names and name not in alias_targets
+            profile_env_passthrough_names = await asyncio.to_thread(
+                hosted_profile_env_passthrough_names,
+                compose_file,
+                compose_env=compose_env,
             )
-        # Carry profile-owned env values to the hosted executor. The local
-        # ``docker compose exec`` path does not forward profile-owned env
-        # because the running container already has it (substituted from the
-        # compose env block at stack launch); the hosted path has no compose env
-        # block, so without these values a profile-owned endpoint (e.g.
-        # ``OLLAMA_HOST``) never reaches the hosted job and OpenCode falls back to
-        # the default daemon. Compose interpolation is rendered against the
-        # worker env so the hosted job receives the same concrete value the
-        # local container gets at stack launch: a defaulted
-        # ``${NAME:-default}`` with ``NAME`` unset is carried as the default, an
-        # escaped ``$$`` is carried as a single ``$``, and a pure literal is
-        # carried verbatim. Bare ``${NAME}`` / ``$NAME`` worker-resolved slots are
-        # skipped (the profile owns them locally; the hosted path resolves
-        # credentials via its own adapter contract, not from the worker).
-        profile_env = await asyncio.to_thread(
-            literal_profile_env_from_compose,
-            compose_file,
-            compose_env=compose_env,
-            postgres_passwords=postgres_passwords,
-        )
+            env_passthrough_aliases = await asyncio.to_thread(
+                hosted_profile_env_passthrough_aliases,
+                compose_file,
+                compose_env=compose_env,
+            )
+            if profile_env_passthrough_names:
+                # Include non-adapter profile env secrets that local Compose
+                # resolved at stack launch (e.g. ``NPM_TOKEN: ${NPM_TOKEN}``). The
+                # helper returns names only; worker-resolved values still stay out
+                # of ``profile_env`` and the request payload.
+                existing_names = set(env_passthrough_names)
+                env_passthrough_names = env_passthrough_names + tuple(
+                    name
+                    for name in profile_env_passthrough_names
+                    if name not in existing_names
+                    and name not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+                )
+            # Surface GitHub token names only when they are not already represented
+            # by alias mappings. Hosted executors resolve plain names by their own
+            # name, while aliases preserve the source->target mapping needed when
+            # the worker only has ``AWF_GITHUB_TOKEN``.
+            github_token_names = await asyncio.to_thread(
+                hosted_github_token_passthrough_names,
+                compose_file,
+                compose_env=compose_env,
+            )
+            if github_token_names:
+                # Union after the filter: the filter excludes compose-declared
+                # profile-owned slots, and the helper already skips profile-owned
+                # aliases. De-duplicate preserving filter order while keeping alias
+                # targets and sources out of plain passthrough names.
+                existing_names = set(env_passthrough_names)
+                alias_targets = {target for target, _source in env_passthrough_aliases}
+                alias_sources = {source for _target, source in env_passthrough_aliases}
+                env_passthrough_names = env_passthrough_names + tuple(
+                    name
+                    for name in github_token_names
+                    if name not in existing_names
+                    and name not in alias_targets
+                    and name not in alias_sources
+                )
+            # Carry profile-owned env values to the hosted executor. The local
+            # ``docker compose exec`` path does not forward profile-owned env
+            # because the running container already has it (substituted from the
+            # compose env block at stack launch); the hosted path has no compose env
+            # block, so without these values a profile-owned endpoint (e.g.
+            # ``OLLAMA_HOST``) never reaches the hosted job and OpenCode falls back to
+            # the default daemon. Compose interpolation is rendered against the
+            # worker env so the hosted job receives the same concrete value the
+            # local container gets at stack launch: a defaulted
+            # ``${NAME:-default}`` with ``NAME`` unset is carried as the default, an
+            # escaped ``$$`` is carried as a single ``$``, and a pure literal is
+            # carried verbatim. Bare ``${NAME}`` / ``$NAME`` worker-resolved slots are
+            # skipped (the profile owns them locally; the hosted path resolves
+            # credentials via its own adapter contract, not from the worker).
+            profile_env = await asyncio.to_thread(
+                literal_profile_env_from_compose,
+                compose_file,
+                compose_env=compose_env,
+                postgres_passwords=postgres_passwords,
+            )
+            file_auth_mount_targets = await asyncio.to_thread(
+                hosted_file_auth_mount_targets,
+                compose_file,
+                compose_env=compose_env,
+            )
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         sinks = await self._open_command_streams(workspace_id=workspace_id, log_source=log_source)
@@ -565,21 +606,15 @@ class AgentAdapter(ABC):
         # below. Either way the log store ends up with the run's output; the
         # streaming path additionally fills it live, so a long-running hosted
         # monitor repair no longer leaves the log stream empty until completion.
-        streamed_stdout = False
-        streamed_stderr = False
         streamed_stdout_chunks: list[str] = []
         streamed_stderr_chunks: list[str] = []
 
         async def _on_stdout(data: str) -> None:
-            nonlocal streamed_stdout
-            streamed_stdout = True
             streamed_stdout_chunks.append(data)
             if sinks is not None:
                 await sinks.write_stdout(data)
 
         async def _on_stderr(data: str) -> None:
-            nonlocal streamed_stderr
-            streamed_stderr = True
             streamed_stderr_chunks.append(data)
             if sinks is not None:
                 await sinks.write_stderr(data)
@@ -597,6 +632,7 @@ class AgentAdapter(ABC):
             effort=self._default_effort,
             env_passthrough_names=env_passthrough_names,
             env_passthrough_aliases=env_passthrough_aliases,
+            file_auth_mount_targets=file_auth_mount_targets,
             profile_env=profile_env,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
@@ -617,6 +653,7 @@ class AgentAdapter(ABC):
             env_passthrough_aliases=[
                 {"target": target, "source": source} for target, source in env_passthrough_aliases
             ],
+            file_auth_mount_targets=list(file_auth_mount_targets),
             # Log profile_env *keys* only — values are literal profile config
             # (e.g. an Ollama daemon URL) but never secret placeholders; still,
             # a value could be sensitive config, so do not log values.
@@ -629,8 +666,6 @@ class AgentAdapter(ABC):
                     agent=self.name.value,
                     workspace_id=workspace_id,
                 )
-            hosted_watchdog_timed_out = False
-            hosted_watchdog_timeout_stderr = ""
             try:
                 execute_task = asyncio.create_task(runtime_executor.execute(request))
                 try:
@@ -661,7 +696,6 @@ class AgentAdapter(ABC):
                         _discard_hosted_execute_task_result(execute_task)
                     else:
                         execute_task.add_done_callback(_discard_hosted_execute_task_result)
-                    hosted_watchdog_timed_out = True
                     hosted_watchdog_timeout_stderr = (
                         "hosted runtime executor timed out after "
                         f"{self._agent_wall_timeout_seconds:g}s\n"
@@ -678,27 +712,49 @@ class AgentAdapter(ABC):
             except AgentRunError:
                 raise
             except Exception as exc:
+                error_stderr = f"{type(exc).__name__}: {exc}"
                 raise AgentRunError(
                     agent=self.name,
                     result=CommandResult(
                         returncode=1,
-                        stdout="",
-                        stderr=f"{type(exc).__name__}: {exc}",
+                        stdout=_prepend_missing_streamed_output(
+                            chunks=streamed_stdout_chunks,
+                            buffered="",
+                        ),
+                        stderr=_prepend_missing_streamed_output(
+                            chunks=streamed_stderr_chunks,
+                            buffered=error_stderr,
+                        ),
                     ),
                     reason_code="AGENT_HOSTED_EXECUTOR_ERROR",
                 ) from exc
             if sinks is not None:
-                # Buffered fallback: write the hosted executor's buffered
-                # stdout/stderr to the sinks only when that fd was not already
-                # streamed during execution. If the adapter watchdog synthesized
-                # the result, only the timeout diagnostic is new sink output and
-                # must be appended after any earlier streamed stderr.
-                if hosted_result.stdout and not streamed_stdout:
-                    await sinks.write_stdout(hosted_result.stdout)
-                if hosted_result.stderr and not streamed_stderr:
-                    await sinks.write_stderr(hosted_result.stderr)
-                elif hosted_watchdog_timed_out and hosted_watchdog_timeout_stderr:
-                    await sinks.write_stderr(hosted_watchdog_timeout_stderr)
+                # Buffered fallback: write only the hosted executor output not
+                # already streamed during execution.
+                stdout_not_streamed = _buffered_output_not_streamed(
+                    chunks=streamed_stdout_chunks,
+                    buffered=hosted_result.stdout,
+                )
+                stderr_not_streamed = _buffered_output_not_streamed(
+                    chunks=streamed_stderr_chunks,
+                    buffered=hosted_result.stderr,
+                )
+                if stdout_not_streamed:
+                    await sinks.write_stdout(stdout_not_streamed)
+                if stderr_not_streamed:
+                    await sinks.write_stderr(stderr_not_streamed)
+            hosted_result = AgentRuntimeExecResult(
+                returncode=hosted_result.returncode,
+                stdout=_prepend_missing_streamed_output(
+                    chunks=streamed_stdout_chunks,
+                    buffered=hosted_result.stdout,
+                ),
+                stderr=_prepend_missing_streamed_output(
+                    chunks=streamed_stderr_chunks,
+                    buffered=hosted_result.stderr,
+                ),
+                timeout_reason=hosted_result.timeout_reason,
+            )
             result = self._classify_hosted_result(
                 hosted_result=hosted_result,
                 model=model,

@@ -25,6 +25,7 @@ from awf.profiles.compose import (
     filter_hosted_env_passthrough_names,
     hosted_profile_env_passthrough_aliases,
     hosted_profile_env_passthrough_names,
+    literal_profile_env_from_compose,
     profile_agent_environment,
     profile_app_endpoint_environment,
     profile_services,
@@ -667,8 +668,8 @@ def test_filter_hosted_env_passthrough_names_suppresses_profile_owned_auth_keys(
     assert "ANTHROPIC_API_KEY" in filtered
     assert "AWS_REGION" in filtered
 
-    # With the variable UNSET the bare slot stays excluded (out of scope; no
-    # worker value to resolve out-of-band — Compose substitutes "").
+    # With the variable UNSET the bare slot stays excluded because Compose
+    # substitutes "" and the empty value is carried through profile_env.
     filtered_unset = filter_hosted_env_passthrough_names(
         names, compose_file=compose_file, worker_env={}
     )
@@ -740,6 +741,66 @@ def test_filter_hosted_env_passthrough_names_keeps_auth_pass_through_slot(
     assert "ANTHROPIC_API_KEY" not in filtered
     # An auth name absent from the compose env block still passes through.
     assert "ANTHROPIC_BASE_URL" in filtered
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_excludes_unset_auth_pass_through_slot(
+    tmp_path: Path,
+) -> None:
+    """An unset auth pass-through slot must not introduce a hosted-only value."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {"OPENAI_API_KEY": None},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    filtered = filter_hosted_env_passthrough_names(
+        ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
+        compose_file=compose_file,
+        worker_env={},
+    )
+
+    assert "OPENAI_API_KEY" not in filtered
+    assert "ANTHROPIC_API_KEY" in filtered
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_excludes_empty_auth_pass_through_slot(
+    tmp_path: Path,
+) -> None:
+    """An empty auth pass-through slot must not introduce a hosted-only value."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {"OPENAI_API_KEY": None},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    filtered = filter_hosted_env_passthrough_names(
+        ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
+        compose_file=compose_file,
+        worker_env={"OPENAI_API_KEY": ""},
+    )
+
+    assert "OPENAI_API_KEY" not in filtered
+    assert "ANTHROPIC_API_KEY" in filtered
 
 
 @pytest.mark.unit
@@ -881,16 +942,14 @@ def test_filter_hosted_env_passthrough_names_suppresses_shadowing_worker_ollama_
 def test_filter_hosted_env_passthrough_names_fails_closed_on_unreadable_compose(
     tmp_path: Path,
 ) -> None:
-    """Unreadable compose fails closed: suppress the higher-precedence Ollama base URL key."""
+    """Unreadable compose fails closed: suppress all hosted passthrough names."""
     missing = tmp_path / "missing.yml"
     assert not missing.exists()
 
     names = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST", "OPENAI_API_KEY")
     filtered = filter_hosted_env_passthrough_names(names, compose_file=missing)
 
-    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in filtered
-    assert "OLLAMA_HOST" in filtered
-    assert "OPENAI_API_KEY" in filtered
+    assert filtered == ()
 
 
 @pytest.mark.unit
@@ -1174,7 +1233,7 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_refer
 def test_hosted_profile_env_passthrough_aliases_preserves_empty_worker_source(
     tmp_path: Path,
 ) -> None:
-    """Cross-name aliases preserve explicitly empty worker source values."""
+    """Empty set-ness cross-name aliases preserve the empty target literal."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         yaml.safe_dump(
@@ -1185,6 +1244,7 @@ def test_hosted_profile_env_passthrough_aliases_preserves_empty_worker_source(
                         "environment": {
                             "EMPTY_BARE_TARGET": "${EMPTY_SOURCE}",
                             "EMPTY_DEFAULT_TARGET": "${EMPTY_SOURCE-default}",
+                            "EMPTY_REQUIRED_TARGET": "${EMPTY_SOURCE?required}",
                             "MISSING_BARE_TARGET": "${MISSING_SOURCE}",
                             "MISSING_DEFAULT_TARGET": "${MISSING_SOURCE-default}",
                         },
@@ -1195,15 +1255,23 @@ def test_hosted_profile_env_passthrough_aliases_preserves_empty_worker_source(
         encoding="utf-8",
     )
 
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            worker_env={"EMPTY_SOURCE": ""},
+        )
+    )
     aliases = hosted_profile_env_passthrough_aliases(
         compose_file,
         worker_env={"EMPTY_SOURCE": ""},
     )
 
-    assert aliases == (
-        ("EMPTY_BARE_TARGET", "EMPTY_SOURCE"),
-        ("EMPTY_DEFAULT_TARGET", "EMPTY_SOURCE"),
-    )
+    assert profile_env["EMPTY_BARE_TARGET"] == ""
+    assert profile_env["EMPTY_DEFAULT_TARGET"] == ""
+    assert profile_env["EMPTY_REQUIRED_TARGET"] == ""
+    assert profile_env["MISSING_BARE_TARGET"] == ""
+    assert profile_env["MISSING_DEFAULT_TARGET"] == "default"
+    assert aliases == ()
 
 
 @pytest.mark.unit
@@ -1300,8 +1368,9 @@ def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
     ``env_passthrough_names`` for hosted out-of-band resolution, mirroring the
     pass-through-slot (PRRT_kwDOSJAM6s6PY6Rn) and worker-resolved-defaulted
     (PRRT_kwDOSJAM6s6PiGHK) fixes. A bare slot whose variable is UNSET stays
-    excluded (out of scope; Core only injects the bare form when the worker value
-    is present, and Compose substitutes "" for an unset bare reference).
+    excluded from passthrough because Compose substitutes "" and that empty value
+    is carried via ``profile_env``; Core only injects the bare form when the
+    worker value is present.
     """
     from awf.profiles.compose import literal_profile_env_from_compose
 
@@ -1322,8 +1391,8 @@ def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
                             # (hosted executor resolves the worker credential
                             # out-of-band, mirroring the local Compose run).
                             "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-                            # Bare ${NAME} with the variable UNSET -> stays
-                            # excluded (out of scope; no divergence).
+                            # Bare ${NAME} with the variable UNSET -> excluded
+                            # from passthrough and carried as "".
                             "UNSET_ENDPOINT": "${UNSET_ENDPOINT}",
                             # Pure literal -> excluded (carried via profile_env).
                             "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
@@ -1352,7 +1421,7 @@ def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
     # stack launch).
     assert "OLLAMA_HOST" in filtered
     assert "OPENAI_API_KEY" in filtered
-    # Bare ${NAME} with the variable UNSET -> stays excluded (out of scope).
+    # Bare ${NAME} with the variable UNSET -> excluded from passthrough.
     assert "UNSET_ENDPOINT" not in filtered
     # Pure literal -> excluded (carried via profile_env instead).
     assert "ANTHROPIC_VERTEX_PROJECT_ID" not in filtered
@@ -1366,31 +1435,15 @@ def test_filter_hosted_env_passthrough_names_keeps_bare_worker_resolved_slot(
     carried = dict(profile_env)
     assert "OLLAMA_HOST" not in carried
     assert "OPENAI_API_KEY" not in carried
+    assert carried.get("UNSET_ENDPOINT") == ""
     assert carried.get("ANTHROPIC_VERTEX_PROJECT_ID") == "proj-123"
 
 
 @pytest.mark.unit
-def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
+def test_filter_hosted_env_passthrough_names_carries_empty_bare_reference_override(
     tmp_path: Path,
 ) -> None:
-    """A bare ``${SOURCE}`` slot whose target name differs from SOURCE stays excluded.
-
-    Regression for PR #751 thread PRRT_kwDOSJAM6s6PjYmf: a bare reference to a
-    *different* worker variable (e.g. a declared env secret lease rendering
-    ``ANTHROPIC_API_KEY: ${MY_ANTHROPIC_TOKEN}`` or
-    ``AWS_REGION: ${AWS_DEFAULT_REGION}``) classifies ``WORKER_RESOLVED_SLOT``
-    and the source name exists in ``worker_env``, so the previous
-    ``worker_resolved_slots`` comprehension kept the *target* key in
-    ``env_passthrough_names``. ``literal_profile_env_from_compose`` skips the
-    slot (worker-resolved), so the hosted request carried neither the
-    source-to-target mapping nor the resolved value; the hosted executor then
-    resolved the target by name and found nothing (the worker env has the
-    *source* name, not the target). Only a same-name bare slot (the exact form
-    Core injects via ``agent_environment_with_legacy_host_auth``) takes the
-    passthrough path; a cross-name bare slot stays excluded from target-name
-    passthrough and is carried as explicit source-to-target alias metadata
-    instead.
-    """
+    """A same-name bare reference with an empty worker value stays an empty override."""
     from awf.profiles.compose import literal_profile_env_from_compose
 
     compose_file = tmp_path / "compose.yml"
@@ -1401,22 +1454,8 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
                     "agent": {
                         "image": "agent:latest",
                         "environment": {
-                            # Cross-name bare reference: target != source. The
-                            # source is worker-set, but the hosted executor
-                            # resolves by TARGET name (absent from worker_env),
-                            # so keeping it in passthrough resolves nothing.
-                            "ANTHROPIC_API_KEY": "${MY_ANTHROPIC_TOKEN}",
-                            "AWS_REGION": "${AWS_DEFAULT_REGION}",
-                            # Same-name bare reference (Core-injected form) ->
-                            # stays in passthrough (worker value resolves by name).
-                            "OLLAMA_HOST": "${OLLAMA_HOST}",
-                            # Non-alias forms must not appear in the alias list.
-                            "UNSET_ALIAS": "${UNSET_SOURCE}",
-                            "MIXED_ALIAS": "prefix-${MY_ANTHROPIC_TOKEN}",
-                            "LITERAL_VALUE": "literal",
-                            # Pass-through slot with no worker value: the local
-                            # Compose run had no value to mirror by name.
-                            "PASSTHROUGH_SLOT": None,
+                            "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+                            "PLAIN_EMPTY": "$PLAIN_EMPTY",
                         },
                     }
                 }
@@ -1424,59 +1463,28 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
         ),
         encoding="utf-8",
     )
+    worker_env = {"OPENAI_API_KEY": "", "PLAIN_EMPTY": ""}
 
-    names = (
-        "ANTHROPIC_API_KEY",
-        "AWS_REGION",
-        "OLLAMA_HOST",
-        "MY_ANTHROPIC_TOKEN",
-        "AWS_DEFAULT_REGION",
-        "UNSET_ALIAS",
-        "MIXED_ALIAS",
-        "LITERAL_VALUE",
-        "PASSTHROUGH_SLOT",
-    )
-    worker_env = {
-        "MY_ANTHROPIC_TOKEN": "sk-ant-secret",
-        "AWS_DEFAULT_REGION": "eu-central-1",
-        "OLLAMA_HOST": "http://ollama:11434",
-    }
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
     filtered = filter_hosted_env_passthrough_names(
-        names, compose_file=compose_file, worker_env=worker_env
-    )
-
-    # Cross-name bare references are EXCLUDED — the hosted executor resolves
-    # by the target name, which is not in the worker env, so the passthrough
-    # slot would resolve to nothing and silently drop the credential.
-    assert "ANTHROPIC_API_KEY" not in filtered
-    assert "AWS_REGION" not in filtered
-    # Same-name bare reference stays in passthrough (the Core-injected form;
-    # the hosted executor resolves the worker value by name).
-    assert "OLLAMA_HOST" in filtered
-    assert "UNSET_ALIAS" not in filtered
-    assert "MIXED_ALIAS" not in filtered
-    assert "LITERAL_VALUE" not in filtered
-    assert "PASSTHROUGH_SLOT" not in filtered
-
-    # The cross-name bare slots are NOT carried in profile_env (worker-resolved;
-    # carrying the worker value would embed a secret), and the same-name slot is
-    # skipped too. The unset pass-through slot is not carried either. None of
-    # the alias values reach profile_env.
-    profile_env = literal_profile_env_from_compose(compose_file, worker_env=worker_env)
-    carried = dict(profile_env)
-    assert "ANTHROPIC_API_KEY" not in carried
-    assert "AWS_REGION" not in carried
-    assert "OLLAMA_HOST" not in carried
-    assert "UNSET_ALIAS" not in carried
-    assert "MIXED_ALIAS" not in carried
-    assert carried["LITERAL_VALUE"] == "literal"
-    assert "PASSTHROUGH_SLOT" not in carried
-
-    aliases = hosted_profile_env_passthrough_aliases(
-        compose_file,
+        ("OPENAI_API_KEY", "PLAIN_EMPTY"),
+        compose_file=compose_file,
         worker_env=worker_env,
     )
-    assert aliases == (
-        ("ANTHROPIC_API_KEY", "MY_ANTHROPIC_TOKEN"),
-        ("AWS_REGION", "AWS_DEFAULT_REGION"),
+
+    assert profile_env["OPENAI_API_KEY"] == ""
+    assert profile_env["PLAIN_EMPTY"] == ""
+    assert "OPENAI_API_KEY" not in filtered
+    assert "PLAIN_EMPTY" not in filtered
+
+
+@pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
+    tmp_path: Path,
+) -> None:
+    """Compatibility wrapper for the focused CI node id."""
+    from tests.unit.runtime.test_workspace_services_compose_parts.test_workspace_services_compose_part_007 import (
+        test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference as impl,
     )
+
+    impl(tmp_path)

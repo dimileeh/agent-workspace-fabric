@@ -13,16 +13,26 @@ from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 import yaml
 
 from awf.node.compose_manager import ComposeService
+from awf.profiles import compose_git_config as _compose_git_config
 from awf.profiles.compose_auth_env import (
     _AGENT_AUTH_SECRET_ENV_VARS as _AGENT_AUTH_SECRET_ENV_VARS,
 )
 from awf.profiles.compose_auth_env import (
     _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN,
+    _CAMELCASE_API_KEY_CREDENTIAL_LIKE_VALUE_PATTERN,
+    _CAMELCASE_COOKIE_CREDENTIAL_LIKE_VALUE_PATTERN,
+    _CAMELCASE_ENCRYPTION_KEY_CREDENTIAL_LIKE_VALUE_PATTERN,
+    _CAMELCASE_SECRET_KEY_CREDENTIAL_LIKE_VALUE_PATTERN,
     _GITHUB_TOKEN_ALIAS_PRECEDENCE,
     _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES,
+    _NETRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN,
     _NON_SECRET_PROFILE_ENV_NAME_ENDPOINT_SUFFIX_TOKENS,
     _NON_SECRET_SECRET_LIKE_PROFILE_ENV_NAMES,
+    _NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN,
     _OLLAMA_BASE_URL_ENV_KEYS,
+    _PREFIXED_COOKIE_CREDENTIAL_LIKE_VALUE_PATTERN,
+    _PREFIXED_PRIVATE_KEY_CREDENTIAL_LIKE_VALUE_PATTERN,
+    _PREFIXED_SECRET_KEY_CREDENTIAL_LIKE_VALUE_PATTERN,
     _PUBLIC_PROFILE_ENV_NAME_KEY_QUALIFIERS,
     _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKEN_SEQUENCES,
     _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKENS,
@@ -51,6 +61,45 @@ from awf.profiles.models import (
     _normalized_endpoint_env_name,
 )
 
+_BITBUCKET_AGENT_INSTEADOF_KEY = _compose_git_config._BITBUCKET_AGENT_INSTEADOF_KEY
+_BITBUCKET_AGENT_SAFE_INSTEADOF_VALUES = _compose_git_config._BITBUCKET_AGENT_SAFE_INSTEADOF_VALUES
+_BITBUCKET_ASKPASS_TARGET = _compose_git_config._BITBUCKET_ASKPASS_TARGET
+_GIT_ASKPASS_KEY = _compose_git_config._GIT_ASKPASS_KEY
+_GIT_CONFIG_COUNT_KEY = _compose_git_config._GIT_CONFIG_COUNT_KEY
+_GIT_CONFIG_INSTEADOF_KEY_SUFFIX = _compose_git_config._GIT_CONFIG_INSTEADOF_KEY_SUFFIX
+_GIT_CONFIG_KEY_PREFIX = _compose_git_config._GIT_CONFIG_KEY_PREFIX
+_GIT_CONFIG_URL_KEY_PREFIX = _compose_git_config._GIT_CONFIG_URL_KEY_PREFIX
+_GIT_CONFIG_VALUE_PREFIX = _compose_git_config._GIT_CONFIG_VALUE_PREFIX
+_GIT_TERMINAL_PROMPT_KEY = _compose_git_config._GIT_TERMINAL_PROMPT_KEY
+_git_config_count = _compose_git_config._git_config_count
+_has_mount_backed_bitbucket_askpass = _compose_git_config._has_mount_backed_bitbucket_askpass
+_hosted_git_config_env = _compose_git_config._hosted_git_config_env
+_hosted_git_config_passthrough_aliases = _compose_git_config._hosted_git_config_passthrough_aliases
+_hosted_git_config_profile_env = _compose_git_config._hosted_git_config_profile_env
+_hosted_git_config_value_alias_source = _compose_git_config._hosted_git_config_value_alias_source
+_is_git_config_protocol_key = _compose_git_config._is_git_config_protocol_key
+_is_safe_bitbucket_agent_insteadof_value = (
+    _compose_git_config._is_safe_bitbucket_agent_insteadof_value
+)
+_is_safe_ssh_git_config_insteadof_key = _compose_git_config._is_safe_ssh_git_config_insteadof_key
+_split_git_config_entries = _compose_git_config._split_git_config_entries
+
+_HOSTED_FILE_AUTH_MOUNT_TARGETS = frozenset(
+    {
+        "/home/agent/.claude",
+        "/home/agent/.claude.json",
+        "/home/agent/.codex",
+        "/home/agent/.config/gh",
+        "/home/agent/.config/gcloud",
+        "/home/agent/.config/opencode",
+        "/home/agent/.gemini",
+        "/home/agent/.gitconfig",
+        "/home/agent/.grok",
+        "/home/agent/.ollama",
+        "/home/agent/.ssh",
+    }
+)
+
 
 def _is_secret_like_profile_env_name(name: str) -> bool:
     normalized = name.upper().replace("-", "_")
@@ -74,6 +123,8 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
     if tokens and tokens[-1] in _NON_SECRET_PROFILE_ENV_NAME_ENDPOINT_SUFFIX_TOKENS:
         endpoint_name_tokens = tokens[:-1]
         endpoint_secret_tokens = _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS - frozenset({"TOKEN"})
+        if "WEBHOOK" in endpoint_name_tokens:
+            return True
         if any(token in endpoint_secret_tokens for token in endpoint_name_tokens):
             return True
         if any(token == "TOKEN" for token in endpoint_name_tokens) and not {"OAUTH", "OIDC"} & set(
@@ -109,7 +160,18 @@ def _is_secret_like_profile_env_name(name: str) -> bool:
 
 
 def _is_auth_credential_like_profile_env_value(value: str) -> bool:
-    return bool(_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value))
+    return bool(
+        _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _CAMELCASE_API_KEY_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _CAMELCASE_ENCRYPTION_KEY_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _PREFIXED_SECRET_KEY_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _CAMELCASE_SECRET_KEY_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _PREFIXED_COOKIE_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _CAMELCASE_COOKIE_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _PREFIXED_PRIVATE_KEY_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _NETRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+    )
 
 
 def _url_field_name_tokens(name: str) -> tuple[str, ...]:
@@ -139,13 +201,34 @@ def _url_component_has_secret_credential_field(component: str) -> bool:
         query_pairs = []
     if any(_url_field_name_has_secret_credential(key) for key, _value in query_pairs):
         return True
-    if any("://" in value and _value_has_url_userinfo(value) for _key, value in query_pairs):
+    if any(
+        ("://" in value or value.startswith("//")) and _value_has_url_userinfo(value)
+        for _key, value in query_pairs
+    ):
+        return True
+    if any(_relative_url_value_has_secret_credential_field(value) for _key, value in query_pairs):
         return True
     for raw_part in re.split(r"[&;]", component):
         key, separator, value = raw_part.partition("=")
         if separator and value and _url_field_name_has_secret_credential(key):
             return True
     return False
+
+
+def _relative_url_value_has_secret_credential_field(value: str) -> bool:
+    if not value or ("?" not in value and "#" not in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    if parsed.scheme or parsed.netloc:
+        return False
+    return any(
+        _url_component_has_secret_credential_field(component)
+        for raw_component in (parsed.query, parsed.fragment)
+        for component in _url_component_variants(raw_component)
+    )
 
 
 def _url_component_variants(component: str) -> tuple[str, ...]:
@@ -167,11 +250,6 @@ def _value_has_url_userinfo(value: str) -> bool:
         parsed = urlsplit(value)
     except ValueError:
         return False
-    if not parsed.scheme:
-        return any(
-            _value_has_url_userinfo(match.group(0))
-            for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(value)
-        )
     if parsed.netloc:
         if "@" in parsed.netloc:
             userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
@@ -191,6 +269,11 @@ def _value_has_url_userinfo(value: str) -> bool:
             for raw_component in (parsed.path, parsed.query, parsed.fragment)
             for component in _url_component_variants(raw_component)
             for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(component)
+        )
+    if not parsed.scheme:
+        return any(
+            _value_has_url_userinfo(match.group(0))
+            for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(value)
         )
     if any(
         _url_component_has_secret_credential_field(component)
@@ -384,106 +467,6 @@ def _endpoint_url(endpoint: ProfileAppEndpoint, path: str) -> str:
     return urlunsplit((endpoint.scheme, f"{endpoint.service}:{endpoint.port}", path, "", ""))
 
 
-_GIT_CONFIG_COUNT_KEY = "GIT_CONFIG_COUNT"
-_GIT_CONFIG_KEY_PREFIX = "GIT_CONFIG_KEY_"
-_GIT_CONFIG_VALUE_PREFIX = "GIT_CONFIG_VALUE_"
-_GIT_ASKPASS_KEY = "GIT_ASKPASS"
-_GIT_TERMINAL_PROMPT_KEY = "GIT_TERMINAL_PROMPT"
-_BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
-_BITBUCKET_AGENT_INSTEADOF_KEY = "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
-_GIT_CONFIG_URL_KEY_PREFIX = "url."
-_GIT_CONFIG_INSTEADOF_KEY_SUFFIX = ".insteadOf"
-_BITBUCKET_AGENT_SAFE_INSTEADOF_VALUES = frozenset(
-    {
-        "https://bitbucket.org/",
-        "https://bitbucket.org:443/",
-        "git@bitbucket.org:",
-        "ssh://git@bitbucket.org/",
-        "ssh://git@bitbucket.org:22/",
-    }
-)
-
-
-def _is_git_config_protocol_key(key: str) -> bool:
-    # Only the numerically-indexed protocol vars (``GIT_CONFIG_KEY_<n>`` /
-    # ``GIT_CONFIG_VALUE_<n>``) and ``GIT_CONFIG_COUNT`` belong to the block that is
-    # split out and re-emitted contiguously. A key that merely shares the prefix but
-    # has a non-numeric suffix (e.g. ``GIT_CONFIG_KEY_THRESHOLD``) is not a protocol
-    # entry: matching it here would strip it from ``others`` yet, lacking a numeric
-    # index, it would never be re-emitted — silently dropping it from the merged env.
-    if key == _GIT_CONFIG_COUNT_KEY:
-        return True
-    for prefix in (_GIT_CONFIG_KEY_PREFIX, _GIT_CONFIG_VALUE_PREFIX):
-        if key.startswith(prefix):
-            return key[len(prefix) :].isdigit()
-    return False
-
-
-def _git_config_count(pairs: tuple[tuple[str, str], ...]) -> int:
-    for key, value in pairs:
-        if key == _GIT_CONFIG_COUNT_KEY:
-            try:
-                return int(value)
-            except ValueError:
-                return 0
-    return 0
-
-
-def _split_git_config_entries(
-    pairs: tuple[tuple[str, str], ...],
-) -> tuple[list[tuple[str, str]], tuple[tuple[str, str], ...]]:
-    """Split env pairs into ordered git-config (key, value) entries and the rest.
-
-    The git-config entries are returned in index order (``0..GIT_CONFIG_COUNT-1``);
-    every ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_n``/``GIT_CONFIG_VALUE_n`` var is
-    stripped from the second tuple so the protocol can be re-emitted contiguously
-    by the caller without leaking stray indices.
-    """
-    mapping = dict(pairs)
-    entries: list[tuple[str, str]] = []
-    for index in range(_git_config_count(pairs)):
-        config_key = mapping.get(f"{_GIT_CONFIG_KEY_PREFIX}{index}")
-        config_value = mapping.get(f"{_GIT_CONFIG_VALUE_PREFIX}{index}")
-        if config_key is None or config_value is None:
-            continue
-        entries.append((config_key, config_value))
-    others = tuple((k, v) for k, v in pairs if not _is_git_config_protocol_key(k))
-    return entries, others
-
-
-def _is_safe_bitbucket_agent_insteadof_value(config_key: str, config_value: str) -> bool:
-    return (
-        config_key == _BITBUCKET_AGENT_INSTEADOF_KEY
-        and config_value in _BITBUCKET_AGENT_SAFE_INSTEADOF_VALUES
-    )
-
-
-def _is_safe_ssh_git_config_insteadof_key(config_key: str) -> bool:
-    if not (
-        config_key.startswith(_GIT_CONFIG_URL_KEY_PREFIX)
-        and config_key.endswith(_GIT_CONFIG_INSTEADOF_KEY_SUFFIX)
-    ):
-        return False
-    config_url = config_key[
-        len(_GIT_CONFIG_URL_KEY_PREFIX) : -len(_GIT_CONFIG_INSTEADOF_KEY_SUFFIX)
-    ]
-    try:
-        parsed = urlsplit(config_url)
-    except ValueError:
-        return False
-    if (
-        parsed.scheme.lower() not in {"ssh", "git+ssh"}
-        or parsed.username != "git"
-        or parsed.password is not None
-        or not parsed.hostname
-    ):
-        return False
-    return not any(
-        _url_component_has_secret_credential_field(component)
-        for component in (parsed.netloc, parsed.path, parsed.query, parsed.fragment)
-    )
-
-
 def merge_agent_environment(
     base_environment: tuple[tuple[str, str], ...],
     additions: tuple[tuple[str, str], ...],
@@ -622,14 +605,17 @@ def hosted_github_token_passthrough_names(
     so the local agent container can run ``gh``; the hosted path has no
     equivalent substitution — it resolves ``env_passthrough_names`` by name
     out-of-band, so resolving ``GH_TOKEN`` / ``GITHUB_TOKEN`` finds nothing in
-    that common setup. The helper therefore also surfaces the chosen source
+    that common setup. When at least one gh-visible alias was rendered in the
+    Compose environment, the helper therefore also surfaces the chosen source
     *name* so the hosted executor can resolve the credential from the source
     name and mirror it into the gh-visible aliases (the same
     ``AWF_GITHUB_TOKEN`` -> ``GH_TOKEN`` / ``GITHUB_TOKEN`` mirroring
     ``_service_git_environment`` / ``_check_github`` / ``_gh_probe_environ``
     already apply). The source name is de-duplicated against the surfaced
     aliases (when the source is itself a gh-visible alias, e.g. ``GH_TOKEN``, it
-    appears once).
+    appears once). If no gh-visible alias was rendered, no source name is
+    surfaced because the local Compose agent did not receive a GitHub CLI token
+    alias to mirror.
 
     Names only — secret values are NEVER transported; the hosted executor
     resolves them out-of-band, mirroring ``env_passthrough_names``. The
@@ -661,12 +647,11 @@ def hosted_github_token_passthrough_names(
 
     A compose *pass-through* slot (``environment: [GH_TOKEN]`` with no ``=``,
     ``GH_TOKEN:`` / ``GH_TOKEN: null``) declares no value — Docker Compose
-    takes it from the worker shell at stack launch — so it is worker-resolved
-    and is treated as matching the corresponding worker source (the local
-    Compose agent received the worker value for that name), NOT as a distinct
-    profile-owned token. The pass-through alias name is surfaced so the hosted
-    executor resolves it out-of-band, mirroring the local container (PR #751
-    thread PRRT_kwDOSJAM6s6PZkRH).
+    takes it from the worker shell at stack launch. It is worker-resolved only
+    when that same name exists in the worker environment; if the worker has only
+    ``AWF_GITHUB_TOKEN``, local Compose does not give the agent ``GH_TOKEN`` and
+    the hosted path must not surface ``GH_TOKEN`` as a pass-through name (PR
+    #754 thread PRRT_kwDOSJAM6s6P6an-).
     """
     source_env = os.environ if worker_env is None else worker_env
     worker_placeholder = _github_token_placeholder(source_env)
@@ -681,13 +666,15 @@ def hosted_github_token_passthrough_names(
     # credential. Surface nothing so a worker source/alias cannot shadow it on
     # the hosted path (the profile-owned name itself is a worker-resolved secret
     # slot the hosted path does not re-resolve from the worker env). A
-    # pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH`) is
-    # worker-resolved, not profile-owned — the local Compose container received
-    # the worker shell value for that name — so it is NOT a distinct
-    # profile-owned token and does not trigger the group-suppression branch (PR
-    # #751 thread PRRT_kwDOSJAM6s6PZkRH).
+    # pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH`) is not
+    # profile-owned; it is either worker-resolved for that same name or absent
+    # from the local container. An absent pass-through slot does not suppress
+    # other explicit aliases, but it is not surfaced as its own hosted
+    # pass-through name.
     for token_name in _GITHUB_TOKEN_SOURCE_PRECEDENCE:
         raw = compose_env.get(token_name)
+        if raw == _COMPOSE_PASSTHROUGH and not source_env.get(token_name):
+            continue
         if token_name in compose_env and not _github_token_slot_matches_worker(
             token_name,
             raw,
@@ -697,11 +684,12 @@ def hosted_github_token_passthrough_names(
             return ()
     # Surface every alias whose value matches the worker token placeholder
     # (AWF-injected, or a GitHub lease rendering to the same source), plus
-    # pass-through slots (worker-resolved — the local Compose container received
-    # the worker shell value for that name, so the hosted executor resolves the
-    # same worker value out-of-band). These are exactly the aliases the local
-    # Compose container receives the worker token in, so the hosted executor
-    # resolving them out-of-band reproduces the same credential.
+    # pass-through slots when the same name exists in the worker env
+    # (worker-resolved — the local Compose container received the worker shell
+    # value for that name, so the hosted executor resolves the same worker value
+    # out-of-band). These are exactly the aliases the local Compose container
+    # receives the worker token in, so the hosted executor resolving them
+    # out-of-band reproduces the same credential.
     aliases = tuple(
         alias
         for alias in _GITHUB_TOKEN_ALIAS_PRECEDENCE
@@ -712,17 +700,47 @@ def hosted_github_token_passthrough_names(
             worker_env=source_env,
         )
     )
+    if not aliases:
+        return aliases
     # Surface the chosen source name first so a hosted executor can resolve the
-    # credential from the source name when the worker only carries the AWF
-    # source (local Compose substitutes the placeholder into the aliases at
-    # stack launch; the hosted path has no equivalent substitution). De-duplicate
-    # against the surfaced aliases so a source that is itself a gh-visible alias
-    # (e.g. ``GH_TOKEN``) appears exactly once. Source first preserves the scan
-    # order's precedence intent (``AWF_GITHUB_TOKEN`` before the aliases).
+    # credential from the source name when Compose rendered that source into at
+    # least one gh-visible alias at stack launch (the hosted path has no
+    # equivalent substitution). Do not prepend a higher-precedence source merely
+    # because a lower-precedence same-name pass-through alias matched; local
+    # Compose did not render the higher source into that alias.
+    # De-duplicate against the surfaced aliases so a source that is itself a
+    # gh-visible alias (e.g. ``GH_TOKEN``) appears exactly once. Source first
+    # preserves the scan order's precedence intent (``AWF_GITHUB_TOKEN`` before
+    # the aliases).
     source_name = _github_token_source_name(source_env)
-    if source_name is not None and source_name not in aliases:
+    if (
+        source_name is not None
+        and source_name not in aliases
+        and any(
+            _github_token_alias_selects_source(
+                compose_env.get(alias),
+                source_name,
+                worker_env=source_env,
+            )
+            for alias in aliases
+        )
+    ):
         return (source_name, *aliases)
     return aliases
+
+
+def _github_token_alias_selects_source(
+    raw: str | None,
+    source_name: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> bool:
+    """Return whether a rendered alias selected the chosen worker source."""
+    return (
+        raw is not None
+        and raw != _COMPOSE_PASSTHROUGH
+        and _compose_selected_worker_reference_name(raw, worker_env=worker_env) == source_name
+    )
 
 
 def _github_token_slot_matches_worker(
@@ -733,9 +751,23 @@ def _github_token_slot_matches_worker(
     worker_env: Mapping[str, str],
 ) -> bool:
     """Return whether a compose GitHub token slot resolves to the worker token."""
-    return raw in (worker_placeholder, _COMPOSE_PASSTHROUGH) or (
+    if (
         raw is not None
-        and _compose_defaulted_reference_name(raw, worker_env=worker_env) == token_name
+        and _compose_empty_setness_reference_name(raw, worker_env=worker_env) is not None
+    ):
+        return False
+    return (
+        raw == worker_placeholder
+        or (raw == _COMPOSE_PASSTHROUGH and bool(worker_env.get(token_name)))
+        or (
+            raw is not None
+            and _compose_defaulted_reference_name(raw, worker_env=worker_env) == token_name
+        )
+        or (
+            raw is not None
+            and _compose_selected_worker_reference_name(raw, worker_env=worker_env)
+            == _github_token_source_name(worker_env)
+        )
     )
 
 
@@ -808,6 +840,98 @@ def _try_agent_environment_from_compose_file(
     if not isinstance(agent, Mapping):
         return None
     return _compose_environment_mapping(agent.get("environment"))
+
+
+def hosted_file_auth_mount_targets(
+    compose_file: Path,
+    *,
+    compose_env: Mapping[str, str] | None = None,
+    worker_env: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return secret-free provider auth mount targets for hosted agent runs.
+
+    The rendered Compose file includes host source paths for local auth mounts;
+    hosted requests must not carry those host paths or credential contents.
+    Recognized container targets are returned so a hosted executor can resolve
+    equivalent file-backed credentials out-of-band. ADC files are mounted at
+    the same path named by ``GOOGLE_APPLICATION_CREDENTIALS`` rather than a
+    fixed provider directory, so accept that dynamic target only when the
+    Compose agent environment resolves the matching credential path.
+    """
+
+    try:
+        payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return ()
+    if not isinstance(payload, Mapping):
+        return ()
+    services = payload.get("services")
+    if not isinstance(services, Mapping):
+        return ()
+    agent = services.get("agent")
+    if not isinstance(agent, Mapping):
+        return ()
+    volumes = agent.get("volumes")
+    if not isinstance(volumes, list):
+        return ()
+
+    if compose_env is None:
+        compose_env = _try_agent_environment_from_compose_file(compose_file)
+    adc_targets = _hosted_google_application_credentials_mount_targets(
+        compose_env,
+        worker_env=os.environ if worker_env is None else worker_env,
+    )
+    targets: list[str] = []
+    seen: set[str] = set()
+    for volume in volumes:
+        target = _compose_volume_target(volume)
+        if (
+            target not in _HOSTED_FILE_AUTH_MOUNT_TARGETS and target not in adc_targets
+        ) or target in seen:
+            continue
+        targets.append(target)
+        seen.add(target)
+    return tuple(targets)
+
+
+def _hosted_google_application_credentials_mount_targets(
+    compose_env: Mapping[str, str] | None,
+    *,
+    worker_env: Mapping[str, str],
+) -> frozenset[str]:
+    if compose_env is None:
+        return frozenset()
+    raw = compose_env.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if raw is None:
+        return frozenset()
+    if raw == _COMPOSE_PASSTHROUGH:
+        target = worker_env.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    else:
+        target, resolution = _compose_resolve_value(raw, worker_env=worker_env)
+        if resolution in (
+            _ComposeEnvResolution.WORKER_RESOLVED_SLOT,
+            _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED,
+        ):
+            source_name = _compose_selected_worker_reference_name(raw, worker_env=worker_env)
+            target = worker_env.get(source_name, "") if source_name is not None else ""
+        elif resolution is not _ComposeEnvResolution.LITERAL:
+            return frozenset()
+    if not target or not Path(target).is_absolute():
+        return frozenset()
+    return frozenset({target})
+
+
+def _compose_volume_target(volume: object) -> str | None:
+    if isinstance(volume, str):
+        parts = volume.split(":")
+        if len(parts) < 2:
+            return None
+        return parts[1]
+    if isinstance(volume, Mapping):
+        target = volume.get("target") or volume.get("dst") or volume.get("destination")
+        if isinstance(target, str):
+            return target
+    return None
 
 
 def _try_agent_environment_keys_from_compose_file(
@@ -912,9 +1036,8 @@ def filter_hosted_env_passthrough_names(
     broader exclusion or a profile-owned backend credential/endpoint declared in
     the compose env block would be re-resolved from the worker by the hosted
     executor, diverging from the local run. When the compose file is unreadable
-    the broader set is unknown, so only the ``AGENT_AUTH_ENV_VARS``-territory /
-    Ollama-shadowing exclusions apply (fail-closed the same way
-    ``_compose_env_passthrough_exclusions`` does).
+    the broader set is unknown, so hosted passthrough names are suppressed
+    entirely rather than risking ambient worker credential injection.
 
     The profile-owned *names* stay filtered out of ``env_passthrough_names`` so
     the hosted executor does not re-resolve them from the worker; their literal
@@ -981,10 +1104,13 @@ def hosted_profile_env_passthrough_names(
     if compose_env is None:
         return ()
     env = os.environ if worker_env is None else worker_env
-    return _filter_hosted_env_passthrough_names_from_compose_env(
+    names = _filter_hosted_env_passthrough_names_from_compose_env(
         tuple(compose_env),
         compose_env,
         worker_env=env,
+    )
+    return tuple(
+        name for name in names if compose_env.get(name) != _COMPOSE_PASSTHROUGH or name in env
     )
 
 
@@ -1021,6 +1147,8 @@ def hosted_profile_env_passthrough_aliases(
         ):
             source_name = _compose_selected_worker_reference_name(raw, worker_env=env)
         else:
+            continue
+        if _compose_empty_setness_reference_name(raw, worker_env=env) is not None:
             continue
         if source_name is None or source_name == name or source_name not in env:
             continue
@@ -1063,13 +1191,13 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     out-of-band rather than drop the name (which would leave the hosted job with
     neither the worker override nor the profile default). A name whose value is
     a pass-through slot (``environment: [NAME]`` with no ``=``, ``NAME:`` /
-    ``NAME: null``) is likewise NOT excluded when the same name exists in
-    ``worker_env``: Docker Compose took its value from the worker shell at stack
-    launch, so the hosted executor must resolve the same worker value
-    out-of-band. An unset pass-through slot IS excluded because Compose had no
-    local worker value to mirror. A name whose value resolves to ``LITERAL`` (a
-    pure literal, an *explicit* empty value ``NAME: ""`` / ``NAME=``, a defaulted
-    form with the variable unset, or an ``:+`` / ``+`` alternate form) IS excluded —
+    ``NAME: null``) whose name exists in the worker environment is likewise NOT
+    excluded: the hosted executor must keep the name available for out-of-band
+    resolution instead of replacing it with an empty literal. An unset
+    pass-through slot is excluded because there is no local value for hosted
+    execution to mirror. A name whose value resolves to ``LITERAL`` (a pure
+    literal, an *explicit* empty value ``NAME: ""`` / ``NAME=``, a defaulted form
+    with the variable unset, or an ``:+`` / ``+`` alternate form) IS excluded —
     its concrete value reaches the hosted job via ``profile_env`` instead. A
     bare ``${NAME}`` / ``$NAME`` single reference whose variable is worker-set
     is NOT excluded either: the local Compose container received the worker
@@ -1077,33 +1205,35 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     rather than drop the name (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN). Cross-name
     worker-resolved aliases stay excluded because target-name-only passthrough
     cannot recover the source-name value. A bare slot whose variable is unset IS
-    excluded (Compose substitutes ``""``; out of scope), as are nested/mixed
-    worker-resolved forms (e.g. ``${X:-${SECRET}}`` / ``prefix-${NAME}``) — the
-    hosted executor cannot reconstruct a profile-owned literal interpolating a
-    worker value from the name alone. See ``filter_hosted_env_passthrough_names``
-    and PR #751 threads PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm /
+    excluded because Compose substitutes ``""`` and the empty value reaches
+    hosted through ``profile_env``, as are nested/mixed worker-resolved forms
+    (e.g. ``${X:-${SECRET}}`` / ``prefix-${NAME}``) — the hosted executor cannot
+    reconstruct a profile-owned literal interpolating a worker value from the
+    name alone. See ``filter_hosted_env_passthrough_names`` and PR #751 threads
+    PRRT_kwDOSJAM6s6PVH0t / PRRT_kwDOSJAM6s6PVhhm /
     PRRT_kwDOSJAM6s6PYnJJ / PRRT_kwDOSJAM6s6PY6Rn / PRRT_kwDOSJAM6s6PY8zB /
-    PRRT_kwDOSJAM6s6Pi7sN. A
-    worker-present pass-through slot is removed from the baseline
+    PRRT_kwDOSJAM6s6Pi7sN. A pass-through slot is removed from the baseline
     ``_compose_env_passthrough_exclusions`` set even when its name is in
     ``AGENT_AUTH_ENV_VARS`` (``_profile_owned_auth_keys`` treats any auth key
     declared on the agent service as profile-owned regardless of value); the
-    local Compose container received the worker shell value, so the hosted
-    executor must resolve it out-of-band (PRRT_kwDOSJAM6s6PY6Rn). An explicit
-    empty value is NOT a pass-through slot (compose-go models it as a non-nil
+    hosted executor keeps the name in the out-of-band passthrough contract
+    (PRRT_kwDOSJAM6s6PY6Rn). An explicit empty value is NOT a pass-through slot
+    (compose-go models it as a non-nil
     pointer to ``""`` that overrides the worker value), so it stays excluded
     and its literal ``""`` reaches the hosted job via ``profile_env``
     (PRRT_kwDOSJAM6s6PY8zB).
     """
+    if compose_env is None:
+        return ()
     excluded = _compose_env_passthrough_exclusions(compose_env)
     if compose_env is not None:
         # Exclude compose-declared names UNLESS their value is worker-resolved
         # and the local container received the worker value at stack launch:
-        # ``WORKER_RESOLVED_DEFAULTED`` (``:-`` / ``-`` / ``:?`` / ``?`` with the
-        # variable set) and a worker-present pass-through slot (raw value ==
-        # :data:`_COMPOSE_PASSTHROUGH` — ``environment: [NAME]`` with no ``=``,
-        # ``NAME:`` / ``NAME: null``; Docker Compose took the value from the
-        # worker shell) stay in passthrough for hosted out-of-band resolution.
+        # ``WORKER_RESOLVED_DEFAULTED`` (``:-`` / ``-`` / ``:?`` / ``?`` with a
+        # selected non-empty worker value) and a worker-present, non-empty
+        # pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH` —
+        # ``environment: [NAME]`` with no ``=``, ``NAME:`` / ``NAME: null``) stay
+        # in passthrough for hosted out-of-band resolution.
         # Carrying the worker value in ``profile_env`` would embed a secret
         # (defaulted) or override the real worker value with an empty literal
         # (pass-through), and excluding the name would drop it entirely. Literal
@@ -1121,10 +1251,9 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # profile-owned (``_profile_owned_auth_keys``) regardless of value, so
         # an auth pass-through slot would be excluded before the worker-resolved
         # exception below (which only prevents *adding* a name) could keep it.
-        # The local Compose container received the worker shell value for such a
-        # slot, so the hosted executor must resolve it out-of-band too (PR #751
-        # thread PRRT_kwDOSJAM6s6PY6Rn). An unset pass-through slot stays
-        # excluded because the local Compose run had no worker value to mirror.
+        # The hosted executor must keep the name available for out-of-band
+        # resolution rather than carry an empty literal (PR #751 thread
+        # PRRT_kwDOSJAM6s6PY6Rn).
         #
         # An *explicit* empty value (``NAME: ""`` / ``NAME=``) is normalized to
         # the plain string ``""`` (NOT the sentinel): Docker Compose sets a
@@ -1137,14 +1266,16 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         passthrough_slots = frozenset(
             name
             for name, raw in compose_env.items()
-            if raw == _COMPOSE_PASSTHROUGH and name in worker_env
+            if raw == _COMPOSE_PASSTHROUGH and bool(worker_env.get(name))
         )
         # Worker-resolved same-name defaulted/required forms resolve to a worker
         # value at stack launch, exactly like pass-through slots. Keep those
         # target names in hosted passthrough only when the outer selected
-        # variable matches the target key; cross-name aliases and unused nested
-        # default words cannot be reconstructed by the hosted executor's
-        # target-name-only resolution.
+        # variable matches the target key and the selected worker value is
+        # non-empty; an explicitly empty set-ness override is carried in
+        # ``profile_env``. Cross-name aliases and unused nested default words
+        # cannot be reconstructed by the hosted executor's target-name-only
+        # resolution.
         worker_resolved_defaulted = frozenset(
             name
             for name, raw in compose_env.items()
@@ -1152,9 +1283,10 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
             and _compose_defaulted_reference_name(raw, worker_env=worker_env) == name
+            and _compose_empty_setness_reference_name(raw, worker_env=worker_env) != name
         )
         # A bare ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose
-        # variable IS set in the worker env resolves to the worker value at
+        # variable has a non-empty worker value resolves to the worker value at
         # stack launch, exactly like a pass-through slot and a worker-resolved
         # defaulted form. Core injects this exact form via
         # ``agent_environment_with_legacy_host_auth`` (it appends
@@ -1182,7 +1314,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # (e.g. a declared env secret lease rendering
         # ``ANTHROPIC_API_KEY: ${MY_ANTHROPIC_TOKEN}`` or
         # ``AWS_REGION: ${AWS_DEFAULT_REGION}``) classifies
-        # ``WORKER_RESOLVED_SLOT`` and the source name exists in ``worker_env``,
+        # ``WORKER_RESOLVED_SLOT`` and the source name has a non-empty worker value,
         # but the hosted executor resolves by the *target* name (absent from the
         # worker env), so keeping it in ``env_passthrough_names`` surfaces a
         # name that resolves to nothing — the hosted request carries neither the
@@ -1196,13 +1328,15 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # is safe to keep because the hosted executor resolves the same target
         # name local Compose selected. Mixed forms (e.g. ``prefix-${NAME}``)
         # still cannot be reconstructed from the name alone. A bare slot whose
-        # variable is UNSET stays excluded too: Compose substitutes "" for an
-        # unset bare reference, Core only injects the bare form when the worker
-        # value is present (``source_env.get(name)`` is truthy), and the unset
+        # variable is UNSET or present-but-empty stays excluded too: Compose
+        # substitutes "" for a bare reference without a non-empty worker value,
+        # and ``literal_profile_env_from_compose`` carries that empty literal into
+        # ``profile_env``. Core only injects the bare form when the worker value is
+        # present (``source_env.get(name)`` is truthy), and the unset
         # ``${NAME:?err}`` / ``${NAME?err}`` form would fail Compose at stack
-        # launch (unreachable for a running container). The ``in worker_env``
-        # test gates on the local container actually receiving a worker value
-        # (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN).
+        # launch (unreachable for a running container). The
+        # ``worker_env.get(source_name)`` test gates on the local container
+        # actually receiving a worker value (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN).
         worker_resolved_slots = frozenset(
             name
             for name, raw in compose_env.items()
@@ -1212,7 +1346,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             and (source_name := _compose_selected_worker_reference_name(raw, worker_env=worker_env))
             is not None
             and source_name == name
-            and source_name in worker_env
+            and bool(worker_env.get(source_name))
         )
         name_only_credential_identifiers = _hosted_name_only_credential_identifier_keys(
             compose_env,
@@ -1238,7 +1372,7 @@ def _hosted_name_only_credential_identifier_keys(
     *,
     worker_env: Mapping[str, str],
 ) -> frozenset[str]:
-    """Return literal credential identifiers that hosted should resolve by name."""
+    """Return credential identifiers that hosted should resolve by name."""
     keys: set[str] = set()
     for name, raw in compose_env.items():
         if name not in _HOSTED_NAME_ONLY_CREDENTIAL_IDENTIFIER_ENV_VARS:
@@ -1248,152 +1382,19 @@ def _hosted_name_only_credential_identifier_keys(
         expanded, resolution = _compose_resolve_value(raw, worker_env=worker_env)
         if (
             resolution is _ComposeEnvResolution.LITERAL
-            and expanded
+            and expanded != ""
             and worker_env.get(name) == expanded
+        ) or (
+            resolution
+            in (
+                _ComposeEnvResolution.WORKER_RESOLVED_SLOT,
+                _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED,
+            )
+            and _compose_selected_worker_reference_name(raw, worker_env=worker_env) == name
+            and _compose_empty_setness_reference_name(raw, worker_env=worker_env) != name
         ):
             keys.add(name)
     return frozenset(keys)
-
-
-def _has_mount_backed_bitbucket_askpass(
-    compose_env: Mapping[str, str],
-    *,
-    worker_env: Mapping[str, str],
-) -> bool:
-    raw = compose_env.get(_GIT_ASKPASS_KEY)
-    if raw is None or raw == _COMPOSE_PASSTHROUGH:
-        return False
-    expanded, resolution = _compose_resolve_value(raw, worker_env=worker_env)
-    return resolution is _ComposeEnvResolution.LITERAL and expanded == _BITBUCKET_ASKPASS_TARGET
-
-
-def _hosted_git_config_profile_env(
-    compose_env: Mapping[str, str],
-    *,
-    worker_env: Mapping[str, str],
-    skip_bitbucket_agent_rewrites: bool,
-) -> tuple[tuple[str, str], ...]:
-    profile_env, _aliases = _hosted_git_config_env(
-        compose_env,
-        worker_env=worker_env,
-        skip_bitbucket_agent_rewrites=skip_bitbucket_agent_rewrites,
-    )
-    return profile_env
-
-
-def _hosted_git_config_passthrough_aliases(
-    compose_env: Mapping[str, str],
-    *,
-    worker_env: Mapping[str, str],
-    skip_bitbucket_agent_rewrites: bool,
-) -> tuple[tuple[str, str], ...]:
-    _profile_env, aliases = _hosted_git_config_env(
-        compose_env,
-        worker_env=worker_env,
-        skip_bitbucket_agent_rewrites=skip_bitbucket_agent_rewrites,
-    )
-    return aliases
-
-
-def _hosted_git_config_env(
-    compose_env: Mapping[str, str],
-    *,
-    worker_env: Mapping[str, str],
-    skip_bitbucket_agent_rewrites: bool,
-) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
-    count_raw = compose_env.get(_GIT_CONFIG_COUNT_KEY)
-    if count_raw is None or count_raw == _COMPOSE_PASSTHROUGH:
-        return (), ()
-    count_value, count_resolution = _compose_resolve_value(count_raw, worker_env=worker_env)
-    if count_resolution is not _ComposeEnvResolution.LITERAL:
-        return (), ()
-    try:
-        count = int(count_value)
-    except ValueError:
-        return (), ()
-
-    carried_entries: list[tuple[str, str | None, str | None]] = []
-    for index in range(count):
-        config_key_raw = compose_env.get(f"{_GIT_CONFIG_KEY_PREFIX}{index}")
-        config_value_raw = compose_env.get(f"{_GIT_CONFIG_VALUE_PREFIX}{index}")
-        if (
-            config_key_raw is None
-            or config_value_raw is None
-            or config_key_raw == _COMPOSE_PASSTHROUGH
-            or config_value_raw == _COMPOSE_PASSTHROUGH
-        ):
-            continue
-        config_key, key_resolution = _compose_resolve_value(
-            config_key_raw,
-            worker_env=worker_env,
-        )
-        config_value, value_resolution = _compose_resolve_value(
-            config_value_raw,
-            worker_env=worker_env,
-        )
-        if key_resolution is not _ComposeEnvResolution.LITERAL:
-            continue
-        if (
-            config_key != _BITBUCKET_AGENT_INSTEADOF_KEY
-            and _value_has_url_userinfo(config_key)
-            and not _is_safe_ssh_git_config_insteadof_key(config_key)
-        ):
-            continue
-        if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
-            continue
-        if value_resolution is _ComposeEnvResolution.LITERAL:
-            if not _is_safe_bitbucket_agent_insteadof_value(
-                config_key,
-                config_value,
-            ) and (
-                _value_has_url_userinfo(config_value)
-                or _is_auth_credential_like_profile_env_value(config_value)
-            ):
-                continue
-            carried_entries.append((config_key, config_value, None))
-            continue
-        value_source = _hosted_git_config_value_alias_source(
-            config_value_raw,
-            value_resolution=value_resolution,
-            worker_env=worker_env,
-        )
-        if value_source is None:
-            continue
-        carried_entries.append((config_key, None, value_source))
-
-    if not carried_entries:
-        return (), ()
-
-    pairs: list[tuple[str, str]] = []
-    aliases: list[tuple[str, str]] = []
-    for index, (config_key, entry_config_value, entry_value_source) in enumerate(carried_entries):
-        pairs.append((f"{_GIT_CONFIG_KEY_PREFIX}{index}", config_key))
-        value_key = f"{_GIT_CONFIG_VALUE_PREFIX}{index}"
-        if entry_value_source is None:
-            assert entry_config_value is not None
-            pairs.append((value_key, entry_config_value))
-        else:
-            aliases.append((value_key, entry_value_source))
-    pairs.append((_GIT_CONFIG_COUNT_KEY, str(len(carried_entries))))
-    return tuple(pairs), tuple(aliases)
-
-
-def _hosted_git_config_value_alias_source(
-    raw: str,
-    *,
-    value_resolution: _ComposeEnvResolution,
-    worker_env: Mapping[str, str],
-) -> str | None:
-    if value_resolution in (
-        _ComposeEnvResolution.WORKER_RESOLVED_SLOT,
-        _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED,
-    ):
-        source_name = _compose_selected_worker_reference_name(raw, worker_env=worker_env)
-    else:
-        return None
-    if source_name is None or source_name not in worker_env:
-        return None
-    return source_name
 
 
 # Compose env-value interpolation / resolution machinery lives in
@@ -1416,10 +1417,12 @@ from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
     _compose_concrete_worker_password_braced,
     _compose_default_word_is_worker_resolved,
     _compose_defaulted_reference_name,
+    _compose_empty_setness_reference_name,
     _compose_environment_mapping,
     _compose_resolve_braced,
     _compose_resolve_value,
     _compose_selected_worker_reference_name,
+    _compose_unselected_alternate_worker_reference_name,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
 )

@@ -210,6 +210,44 @@ def test_hosted_github_token_passthrough_names_surfaces_source_when_worker_only_
 
 
 @pytest.mark.unit
+def test_hosted_github_token_passthrough_names_skips_source_without_rendered_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source name is surfaced only when Compose rendered a gh-visible alias.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6QDUFb: if a persisted Compose
+    environment has no ``GH_TOKEN`` / ``GITHUB_TOKEN`` entry, the local Compose
+    agent did not receive any GitHub CLI-visible worker token alias. A hosted
+    resume must therefore not surface ``AWF_GITHUB_TOKEN`` by itself, or the
+    repair agent could receive GitHub credentials the local run did not expose.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {"OPENAI_API_KEY": "${OPENAI_API_KEY}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_worker_secret")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    names = hosted_github_token_passthrough_names(compose_file)
+
+    assert names == ()
+
+
+@pytest.mark.unit
 def test_hosted_github_token_passthrough_names_surfaces_source_once_when_source_is_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -321,6 +359,102 @@ def test_hosted_github_token_passthrough_names_accepts_same_name_defaulted_worke
         assert expected_name in names
     for unexpected_value in unexpected_values:
         assert unexpected_value not in names
+
+
+@pytest.mark.unit
+def test_hosted_github_token_passthrough_names_skips_empty_setness_aliases(
+    tmp_path: Path,
+) -> None:
+    """Empty set-ness GitHub aliases stay explicit empty values, not passthrough."""
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GH_TOKEN": "${GH_TOKEN-default}",
+                            "GITHUB_TOKEN": "${GITHUB_TOKEN?required}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_env = {
+        "AWF_GITHUB_TOKEN": "ghp_awf_worker_secret",
+        "GH_TOKEN": "",
+        "GITHUB_TOKEN": "",
+    }
+
+    names = hosted_github_token_passthrough_names(compose_file, worker_env=worker_env)
+
+    assert names == ()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("worker_env", "expected_names"),
+    [
+        (
+            {"AWF_GITHUB_TOKEN": "ghp_awf_worker_secret"},
+            ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
+        ),
+        (
+            {"GH_TOKEN": "ghp_gh_worker_secret"},
+            ("GH_TOKEN", "GITHUB_TOKEN"),
+        ),
+        (
+            {"GITHUB_TOKEN": "ghp_github_worker_secret"},
+            ("GH_TOKEN", "GITHUB_TOKEN"),
+        ),
+    ],
+)
+def test_hosted_github_token_passthrough_names_accepts_github_fallback_chains(
+    tmp_path: Path,
+    worker_env: dict[str, str],
+    expected_names: tuple[str, ...],
+) -> None:
+    """Defaulted GitHub fallback chains preserve the selected worker token source.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6QA0Q6: hosted GitHub matching
+    must use the selected worker source name for common fallback chains such as
+    ``${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}``, not require the
+    selected name to equal the target alias. Local Compose injects whichever
+    worker source the chain selects into the gh-visible aliases; hosted must
+    surface the same names for out-of-band resolution.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    fallback_chain = "${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GH_TOKEN": fallback_chain,
+                            "GITHUB_TOKEN": fallback_chain,
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = hosted_github_token_passthrough_names(compose_file, worker_env=worker_env)
+
+    assert names == expected_names
+    for value in worker_env.values():
+        assert value not in names
+    assert fallback_chain not in names
 
 
 @pytest.mark.unit
@@ -468,28 +602,21 @@ def test_hosted_github_token_passthrough_names_unreadable_compose_is_empty(
         "list",  # ``environment: [GH_TOKEN]`` — bare-name pass-through slot
     ],
 )
-def test_hosted_github_token_passthrough_names_pass_through_alias_matches_worker_source(
+def test_hosted_github_token_passthrough_names_skips_absent_pass_through_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     compose_alias_value: object,
 ) -> None:
-    """A pass-through GitHub alias is treated as the worker source, not suppressed.
+    """A pass-through GitHub alias is surfaced only when that worker name exists.
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PZkRH: when a compose-declared
     GitHub alias is a true pass-through slot (``environment: [GH_TOKEN]`` with
     no ``=``, ``GH_TOKEN:`` / ``GH_TOKEN: null``), ``_compose_environment_mapping``
-    normalizes it to the :data:`_COMPOSE_PASSTHROUGH` sentinel. The local Compose
-    agent still receives the worker token at stack launch (Docker Compose takes
-    the pass-through slot's value from the worker shell), so the hosted path must
-    treat the pass-through alias as matching the corresponding worker source
-    rather than suppressing the whole group. Without this, hosted monitor-repair
-    loses ``gh`` auth in that pass-through configuration.
-
-    The pass-through alias itself is a worker-resolved slot the hosted executor
-    resolves out-of-band (its name is surfaced so the hosted executor mirrors
-    the worker shell value, the same way local Compose took it from the worker
-    shell); it is NOT a profile-owned distinct token, so it does not trigger the
-    group-suppression branch.
+    normalizes it to the :data:`_COMPOSE_PASSTHROUGH` sentinel. Docker Compose
+    only gives the local agent a value for that exact name when it exists in the
+    worker shell. Regression for PR #754 thread PRRT_kwDOSJAM6s6P6an-: a bare
+    ``GH_TOKEN`` slot must not be surfaced as a hosted pass-through when the
+    worker has only ``AWF_GITHUB_TOKEN``.
     """
     from awf.profiles.compose import _COMPOSE_PASSTHROUGH, hosted_github_token_passthrough_names
 
@@ -511,16 +638,89 @@ def test_hosted_github_token_passthrough_names_pass_through_alias_matches_worker
 
     names = hosted_github_token_passthrough_names(compose_file)
 
-    # The pass-through GH_TOKEN is worker-resolved (the local container received
-    # the worker shell value), so it does NOT suppress the group. The matching
-    # GITHUB_TOKEN alias and the AWF source name are surfaced so the hosted
-    # executor can resolve the credential out-of-band. The pass-through sentinel
-    # value itself is never returned (names only).
+    # The bare GH_TOKEN slot has no same-name worker value, so local Compose did
+    # not give the agent GH_TOKEN and the hosted path must not invent it. The
+    # explicit GITHUB_TOKEN alias and AWF source remain surfaced.
     assert "AWF_GITHUB_TOKEN" in names
     assert "GITHUB_TOKEN" in names
-    assert "GH_TOKEN" in names
+    assert "GH_TOKEN" not in names
     assert _COMPOSE_PASSTHROUGH not in names
     assert "ghp_worker_secret" not in names
+
+
+@pytest.mark.unit
+def test_hosted_github_token_passthrough_names_accepts_same_name_pass_through_alias(
+    tmp_path: Path,
+) -> None:
+    """A bare GitHub alias is surfaced when the same worker name is set."""
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": ["GH_TOKEN", "GITHUB_TOKEN=${GH_TOKEN}"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = hosted_github_token_passthrough_names(
+        compose_file,
+        worker_env={"GH_TOKEN": "ghp_worker_secret"},
+    )
+
+    assert names.count("GH_TOKEN") == 1
+    assert "GITHUB_TOKEN" in names
+    assert "AWF_GITHUB_TOKEN" not in names
+    assert "ghp_worker_secret" not in names
+
+
+@pytest.mark.unit
+def test_hosted_github_token_passthrough_names_keeps_pass_through_alias_precedence(
+    tmp_path: Path,
+) -> None:
+    """A lower same-name pass-through alias must not surface a higher source.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6QDx0T: when local Compose
+    receives only ``GITHUB_TOKEN`` from a pass-through slot, but the worker also
+    has a different higher-precedence ``GH_TOKEN``, hosted passthrough must not
+    prepend ``GH_TOKEN``. Otherwise hosted ``gh`` would prefer a credential the
+    local Compose workspace never exposed.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": ["GITHUB_TOKEN"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    names = hosted_github_token_passthrough_names(
+        compose_file,
+        worker_env={
+            "GH_TOKEN": "ghp_higher_precedence_worker_secret",
+            "GITHUB_TOKEN": "ghp_lower_precedence_worker_secret",
+        },
+    )
+
+    assert names == ("GITHUB_TOKEN",)
+    assert "ghp_higher_precedence_worker_secret" not in names
+    assert "ghp_lower_precedence_worker_secret" not in names
 
 
 @pytest.mark.unit
@@ -1021,6 +1221,122 @@ def test_literal_profile_env_from_compose_skips_standard_auth_credential_literal
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_neutral_docker_identitytoken_literals(
+    tmp_path: Path,
+) -> None:
+    """Neutral Docker config blobs with identitytoken fields are NOT carried."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "REGISTRY_CONFIG": (
+                                '{"auths":{"registry.example":'
+                                '{"identitytoken":"registry-identity-secret"}}}'
+                            ),
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "REGISTRY_CONFIG" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "registry-identity-secret" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_neutral_encryption_key_literals(
+    tmp_path: Path,
+) -> None:
+    """Neutral config env values carrying encryption-key fields are NOT carried."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_CONFIG": '{"encryption_key":"profile-encryption-secret"}',
+                            "ALT_CONFIG": "encryptionKey=profile-camel-encryption-secret",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "APP_CONFIG" not in carried
+    assert "ALT_CONFIG" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "profile-encryption-secret" not in blob
+    assert "profile-camel-encryption-secret" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_neutral_npmrc_auth_literals(
+    tmp_path: Path,
+) -> None:
+    """Neutral env values carrying npmrc auth assignments are NOT carried.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6P77x4: a neutral env name such
+    as ``NPMRC`` can carry legacy npmrc ``_auth`` / ``auth`` fields without
+    matching secret-name redaction, URL userinfo redaction, or libpq redaction.
+    """
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "NPMRC": "//registry.npmjs.org/:_auth=base64-registry-secret",
+                            "LEGACY_NPMRC": "registry=https://registry.example\n_auth=legacy-secret",
+                            "COMPAT_NPMRC": "//registry.example/:auth=compat-secret",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "NPMRC" not in carried
+    assert "LEGACY_NPMRC" not in carried
+    assert "COMPAT_NPMRC" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "base64-registry-secret" not in blob
+    assert "legacy-secret" not in blob
+    assert "compat-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_concatenated_password_token_literals(
     tmp_path: Path,
 ) -> None:
@@ -1251,241 +1567,3 @@ def test_literal_profile_env_from_compose_skips_signed_url_query_credentials(
     blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
     assert "s3-signed-secret" not in blob
     assert "azure-sas-secret" not in blob
-
-
-@pytest.mark.unit
-def test_literal_profile_env_from_compose_carries_values_without_postgres_service(
-    tmp_path: Path,
-) -> None:
-    """When no postgres service declares a password, nothing is redacted.
-
-    A profile without a postgres sidecar (e.g. a pure-Ollama profile) has no
-    generated DB password to redact; its agent env literals are carried as
-    before. This guards against over-redacting when the postgres password is
-    absent.
-    """
-
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text(
-        yaml.safe_dump(
-            {
-                "services": {
-                    "agent": {
-                        "image": "agent:latest",
-                        "environment": {
-                            "OLLAMA_HOST": "http://ollama.profile:11434",
-                            # A literal that merely contains a colon-separated
-                            # token must NOT be mistaken for a secret when no
-                            # postgres password is declared to redact.
-                            "APP_BASE_URL": "http://app:8080",
-                        },
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
-    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
-    assert ("APP_BASE_URL", "http://app:8080") in profile_env
-
-
-@pytest.mark.unit
-def test_literal_profile_env_from_compose_redacts_postgres_password_under_nonstandard_service_name(
-    tmp_path: Path,
-) -> None:
-    """A custom profile may name its database service ``db`` / ``database``
-    (or anything else) while still setting ``POSTGRES_PASSWORD`` and expanding
-    that same password into the agent env ``DATABASE_URL`` /
-    ``AWF_DATABASE_URL``. The redaction source must collect
-    ``POSTGRES_PASSWORD`` from every compose service, not only from a service
-    literally named ``postgres``; otherwise ``file_postgres_password`` stays
-    ``None`` for a valid custom profile and ``literal_profile_env_from_compose``
-    carries the rendered DB URL in ``AgentRuntimeExecRequest.profile_env``,
-    leaking the workspace credential to the hosted executor despite the
-    secret-free contract.
-
-    Regression for PR #751 thread PRRT_kwDOSJAM6s6PWUIl.
-    """
-
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text(
-        yaml.safe_dump(
-            {
-                "services": {
-                    # A custom-profile DB sidecar named ``db`` (not ``postgres``)
-                    # still declares ``POSTGRES_PASSWORD`` and shares it with
-                    # the agent env DB URLs below.
-                    "db": {
-                        "image": "postgres:16-alpine",
-                        "environment": {
-                            "POSTGRES_USER": "awf",
-                            "POSTGRES_PASSWORD": "workspace-secret",
-                            "POSTGRES_DB": "awf",
-                        },
-                    },
-                    "agent": {
-                        "image": "agent:latest",
-                        "environment": {
-                            # Non-secret profile literal -> carried (must survive).
-                            "OLLAMA_HOST": "http://ollama.profile:11434",
-                            # AWF-expanded DB URLs embed the shared postgres
-                            # password -> must be skipped (secret-bearing).
-                            "DATABASE_URL": ("postgresql://awf:workspace-secret@db:5432/awf"),
-                            "AWF_DATABASE_URL": (
-                                "postgresql+asyncpg://awf:workspace-secret@db:5432/awf"
-                            ),
-                            "AWF_TEST_DATABASE_URL": (
-                                "postgresql+asyncpg://awf:workspace-secret@db:5432/awf"
-                            ),
-                        },
-                    },
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
-
-    # Non-secret profile literal is still carried to the hosted executor.
-    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
-    # Secret-bearing expanded values are NOT carried to the hosted executor.
-    carried = dict(profile_env)
-    assert "DATABASE_URL" not in carried
-    assert "AWF_DATABASE_URL" not in carried
-    assert "AWF_TEST_DATABASE_URL" not in carried
-    # The workspace DB password never reaches the hosted request object.
-    assert "workspace-secret" not in "".join(v for _k, v in profile_env)
-
-
-@pytest.mark.unit
-def test_literal_profile_env_from_compose_redacts_all_distinct_postgres_passwords(
-    tmp_path: Path,
-) -> None:
-    """A profile may run several DB sidecars each declaring a *different*
-    ``POSTGRES_PASSWORD``. The redaction source must collect every declared
-    value, not only the first; otherwise a rendered agent env value (e.g. a
-    second service's ``WAREHOUSE_URL``) embedding a later service's password
-    slips past a redaction that only compares against the first service's
-    password, leaking the workspace credential to the hosted executor.
-
-    Regression for PR #751 thread PRRT_kwDOSJAM6s6PWsKk.
-    """
-
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text(
-        yaml.safe_dump(
-            {
-                "services": {
-                    "postgres": {
-                        "image": "postgres:16-alpine",
-                        "environment": {
-                            "POSTGRES_USER": "awf",
-                            "POSTGRES_PASSWORD": "workspace-secret",
-                            "POSTGRES_DB": "awf",
-                        },
-                    },
-                    "warehouse": {
-                        "image": "postgres:16-alpine",
-                        "environment": {
-                            "POSTGRES_USER": "awf",
-                            "POSTGRES_PASSWORD": "warehouse-secret",
-                            "POSTGRES_DB": "warehouse",
-                        },
-                    },
-                    "agent": {
-                        "image": "agent:latest",
-                        "environment": {
-                            # Non-secret profile literal -> carried (must survive).
-                            "OLLAMA_HOST": "http://ollama.profile:11434",
-                            # First DB URL embeds the first service's password.
-                            "DATABASE_URL": ("postgresql://awf:workspace-secret@postgres:5432/awf"),
-                            # Second DB URL embeds the *other* service's password
-                            # -> must also be skipped (not only the first one).
-                            "WAREHOUSE_URL": (
-                                "postgresql://awf:warehouse-secret@warehouse:5432/warehouse"
-                            ),
-                        },
-                    },
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
-
-    # Non-secret profile literal is still carried to the hosted executor.
-    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
-    # Secret-bearing expanded values are NOT carried, regardless of which
-    # service's password they embed.
-    carried = dict(profile_env)
-    assert "DATABASE_URL" not in carried
-    assert "WAREHOUSE_URL" not in carried
-    # Neither workspace DB password reaches the hosted request object.
-    assert "workspace-secret" not in "".join(v for _k, v in profile_env)
-    assert "warehouse-secret" not in "".join(v for _k, v in profile_env)
-
-
-@pytest.mark.unit
-def test_literal_profile_env_from_compose_redacts_postgres_password_interpolation_default(
-    tmp_path: Path,
-) -> None:
-    """A service may express ``POSTGRES_PASSWORD`` via Compose
-    interpolation/defaults (e.g. ``${POSTGRES_PASSWORD:-fallback}``), which
-    ComposeManager does not expand (it only expands bare
-    ``${AWF_POSTGRES_PASSWORD}``). The rendered service env therefore retains the
-    ``${...}`` form, and Docker Compose resolves it against the worker env at
-    stack launch. The redaction source must resolve each declared password
-    against the worker env (mirroring Compose) so a rendered agent env DB URL
-    that embeds the *resolved* worker value is redacted; comparing only against
-    the raw ``${...}`` placeholder string would miss the expanded secret.
-
-    Regression for PR #751 thread PRRT_kwDOSJAM6s6PWsKk.
-    """
-
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text(
-        yaml.safe_dump(
-            {
-                "services": {
-                    "postgres": {
-                        "image": "postgres:16-alpine",
-                        "environment": {
-                            "POSTGRES_USER": "awf",
-                            # Interpolation with a default: Compose resolves this
-                            # against the worker env at stack launch.
-                            "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:-fallback-pw}",
-                            "POSTGRES_DB": "awf",
-                        },
-                    },
-                    "agent": {
-                        "image": "agent:latest",
-                        "environment": {
-                            # Non-secret profile literal -> carried (must survive).
-                            "OLLAMA_HOST": "http://ollama.profile:11434",
-                            # A rendered DB URL embedding the *resolved* worker
-                            # value -> must be skipped (secret-bearing).
-                            "DATABASE_URL": ("postgresql://awf:resolved-pw@postgres:5432/awf"),
-                        },
-                    },
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    # Worker env supplies the resolved password that Compose would inject.
-    profile_env = literal_profile_env_from_compose(
-        compose_file, worker_env={"POSTGRES_PASSWORD": "resolved-pw"}
-    )
-
-    # Non-secret profile literal is still carried to the hosted executor.
-    assert ("OLLAMA_HOST", "http://ollama.profile:11434") in profile_env
-    # The resolved-password-bearing DB URL is NOT carried.
-    carried = dict(profile_env)
-    assert "DATABASE_URL" not in carried
-    # The resolved worker password never reaches the hosted request object.
-    assert "resolved-pw" not in "".join(v for _k, v in profile_env)

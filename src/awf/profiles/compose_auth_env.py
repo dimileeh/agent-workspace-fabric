@@ -151,6 +151,7 @@ _SECRET_LIKE_PROFILE_ENV_EXACT_NAMES = frozenset(
         "AUTHORIZATION",
         "DOCKER_AUTH_CONFIG",
         "HTTP_AUTHORIZATION",
+        "JWT",
         "MYSQL_PWD",
         "NPM_CONFIG__AUTH",
         "PGPASSWORD",
@@ -163,12 +164,12 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
     {
         "CREDENTIAL",
         "CREDENTIALS",
-        "JWT",
+        "PASSPHRASE",
         "PASSWD",
         "PASSWORD",
+        "PAT",
         "SECRET",
         "TOKEN",
-        "WEBHOOK",
     }
 )
 _SECRET_LIKE_PROFILE_ENV_NAME_CONCATENATED_TOKENS = frozenset(
@@ -204,14 +205,64 @@ _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKEN_SEQUENCES = (("REACT", "APP"),)
 _NON_SECRET_PROFILE_ENV_NAME_ENDPOINT_SUFFIX_TOKENS = frozenset({"ENDPOINT", "URI", "URL"})
 
 _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
-    r"(?:^\s*(?:basic|bearer)\s+\S+|(?<![A-Za-z0-9_-])[\"']?_?(?:(?:proxy[-_]?)?authorization|cookie|(?:x[-_]?)?api[-_]?key|(?:access|private)[-_]?key|secret[-_]?access[-_]?key|client[-_]?secret|password|passwd|pwd|secret|(?:x[-_]?)?(?:(?:access|auth|csrf|id|job|private|refresh|session)[-_]?)?token|(?:x[-_]?)?(?:amz[-_]?)?security[-_]?token)[\"']?\s*[:=]\s*[\"']?\S+|[\"']private[_-]key[\"']\s*:\s*[\"'][^\"']+|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)",
+    r"(?:^\s*(?:basic|bearer)\s+\S+|(?<![A-Za-z0-9_-])[\"']?_?(?:(?:proxy[-_]?)?authorization|set[-_]?cookie|cookie|credentials?|jwt|(?:[A-Za-z0-9]+[-_])*pat|(?:(?:x[-_]?)|(?:[A-Za-z0-9]+[-_])+)?api[-_]?key|(?:[A-Za-z0-9]+[-_])*subscription[-_]?key|shared[-_]?access[-_]?(?:key|signature)|(?:[A-Za-z0-9]+[-_])*encryption[-_]?key|(?:account|access|private|secret)[-_]?key|(?:client[-_]?)?key[-_]?data|private[-_]?key[-_]?data|(?:aws[-_]?)?secret[-_]?access[-_]?key|client[-_]?secret|(?:[A-Za-z0-9]+[-_])*(?:client[-_]?|signing[-_]?)?secret|(?-i:[A-Za-z0-9]+SigningSecret)|(?:[A-Za-z0-9]+[-_]?)*(?:passphrase|password|passwd|pwd)|(?:x[-_]?)?(?:(?:[A-Za-z0-9]+[-_])*(?:access|api|auth|bearer|csrf|id|identity|job|oauth|private|refresh|session)[-_]?)?token|(?:x[-_]?)?(?:amz[-_]?)?security[-_]?token)[\"']?\s*[:=]\s*[\"']?\S+|[\"']auth[\"']\s*:\s*[\"'][^\"']+|[\"']private[_-]key[\"']\s*:\s*[\"'][^\"']+|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)",
+    re.IGNORECASE,
+)
+_CAMELCASE_API_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+ApiKey[\"']?\s*[:=]\s*[\"']?\S+"
+)
+_CAMELCASE_ENCRYPTION_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+EncryptionKey[\"']?\s*[:=]\s*[\"']?\S+"
+)
+_PREFIXED_SECRET_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?"
+    r"(?:[A-Za-z0-9]+[-_])+secret[-_]?key"
+    r"[\"']?\s*[:=]\s*[\"']?\S+",
+    re.IGNORECASE,
+)
+_CAMELCASE_SECRET_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+SecretKey[\"']?\s*[:=]\s*[\"']?\S+"
+)
+_PREFIXED_COOKIE_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?"
+    r"(?:[A-Za-z0-9]+[-_])+(?:set[-_]?)?cookie"
+    r"[\"']?\s*[:=]\s*[\"']?\S+",
+    re.IGNORECASE,
+)
+_CAMELCASE_COOKIE_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+(?:Set)?Cookie[\"']?\s*[:=]\s*[\"']?\S+"
+)
+_PREFIXED_PRIVATE_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?"
+    r"(?:(?:[A-Za-z0-9]+[-_])+private[-_]?key(?:[-_]?data)?|[A-Za-z0-9]+PrivateKey(?:Data)?)"
+    r"[\"']?\s*[:=]\s*[\"']?\S+"
+)
+_NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?:^|[\r\n])\s*(?://[^\s=]+:\s*)?_?auth\s*=\s*\S+",
+    re.IGNORECASE,
+)
+_NETRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?:^|[\r\n])\s*(?:machine[^\S\r\n]+\S+|default)(?:[^\S\r\n]+\S+)*"
+    r"[^\S\r\n]+password[^\S\r\n]+\S+",
     re.IGNORECASE,
 )
 _URL_SECRET_CREDENTIAL_FIELD_NAMES = frozenset(
     {"JWT", "PASSWORD", "PASSWD", "SECRET", "SIGNATURE", "TOKEN"}
 )
 _URL_SECRET_CREDENTIAL_FIELD_EXACT_NAMES = frozenset(
-    {"APIKEY", "CLIENTSECRET", "KEY", "SESSION", "SESSIONID", "SIG", "SSLPASSWORD"}
+    {
+        "ACCESSKEY",
+        "APIKEY",
+        "AUTH",
+        "CLIENTSECRET",
+        "KEY",
+        "PRIVATEKEY",
+        "SECRETKEY",
+        "SESSION",
+        "SESSIONID",
+        "SIG",
+        "SSLPASSWORD",
+    }
 )
 _URL_SECRET_CREDENTIAL_FIELD_NAME_TOKEN_PAIRS = frozenset(
     {
@@ -219,6 +270,7 @@ _URL_SECRET_CREDENTIAL_FIELD_NAME_TOKEN_PAIRS = frozenset(
         ("API", "KEY"),
         ("CLIENT", "SECRET"),
         ("PRIVATE", "KEY"),
+        ("SUBSCRIPTION", "KEY"),
     }
 )
 

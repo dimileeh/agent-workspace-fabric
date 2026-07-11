@@ -283,6 +283,51 @@ def test_literal_profile_env_applies_compose_alternate_and_unset_required_semant
 
 
 @pytest.mark.unit
+def test_literal_profile_env_preserves_unselected_alternate_empty_literal(
+    tmp_path: Path,
+) -> None:
+    """Unselected alternate words are not evaluated before carrying ``""``."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "ALT_COLON_UNSET": "${FLAG:+${WORKER_VALUE}}",
+                        "ALT_COLON_EMPTY": "${EMPTY_FLAG:+${WORKER_VALUE}}",
+                        "ALT_PLUS_UNSET": "${FLAG+${WORKER_VALUE}}",
+                        "OPENAI_API_KEY": "${ENABLE_OPENAI:+${OPENAI_API_KEY}}",
+                    },
+                }
+            }
+        },
+    )
+    worker_env = {
+        "EMPTY_FLAG": "",
+        "OPENAI_API_KEY": "sk-worker-secret",
+        "WORKER_VALUE": "worker-resolved-value",
+    }
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    filtered = filter_hosted_env_passthrough_names(
+        tuple(carried),
+        compose_file=compose_file,
+        worker_env=worker_env,
+    )
+
+    assert carried == {
+        "ALT_COLON_UNSET": "",
+        "ALT_COLON_EMPTY": "",
+        "ALT_PLUS_UNSET": "",
+        "OPENAI_API_KEY": "",
+    }
+    assert filtered == ()
+    assert "worker-resolved-value" not in "\x00".join(carried.values())
+    assert "sk-worker-secret" not in "\x00".join(carried.values())
+
+
+@pytest.mark.unit
 def test_literal_profile_env_skips_default_word_referencing_worker_secret(
     tmp_path: Path,
 ) -> None:
@@ -607,6 +652,36 @@ def test_collect_postgres_password_tolerates_empty_concrete_value(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_preserves_env_file_only_custom_image_postgres_url(
+    tmp_path: Path,
+) -> None:
+    """A custom-image Postgres sidecar may declare its Postgres env only in env_file."""
+    env_file = tmp_path / "db.env"
+    env_file.write_text("POSTGRES_PASSWORD=env-file-secret\n", encoding="utf-8")
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "db": {
+                    "image": "registry.example.com/postgres-compatible:latest",
+                    "env_file": str(env_file),
+                },
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "DATABASE_URL": "postgresql://awf@db:5432/app",
+                    },
+                },
+            }
+        },
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
+    assert carried["DATABASE_URL"] == "postgresql://awf@db:5432/app"
+
+
+@pytest.mark.unit
 def test_literal_profile_env_redacts_postgres_password_from_string_env_file(
     tmp_path: Path,
 ) -> None:
@@ -721,6 +796,35 @@ def test_literal_profile_env_tolerates_unreadable_env_file(tmp_path: Path) -> No
         },
     )
     carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+    assert carried.get("OLLAMA_HOST") == "http://ollama.profile:11434"
+
+
+@pytest.mark.unit
+def test_literal_profile_env_tolerates_env_file_required_interpolation(
+    tmp_path: Path,
+) -> None:
+    """A companion ``env_file`` with missing required interpolation is skipped."""
+
+    env_file = tmp_path / "redis.env"
+    env_file.write_text("REDIS_PASSWORD=${REDIS_PASSWORD:?required}\n", encoding="utf-8")
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "redis": {
+                    "image": "redis:7-alpine",
+                    "env_file": [str(env_file)],
+                },
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {"OLLAMA_HOST": "http://ollama.profile:11434"},
+                },
+            }
+        },
+    )
+
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+
     assert carried.get("OLLAMA_HOST") == "http://ollama.profile:11434"
 
 
@@ -934,7 +1038,7 @@ def test_hosted_git_config_preserves_worker_resolved_value_block(
 def test_hosted_git_config_preserves_empty_worker_resolved_value_alias(
     tmp_path: Path,
 ) -> None:
-    """A worker-resolved empty git-config value keeps its alias."""
+    """An empty set-ness git-config value stays an explicit empty literal."""
     compose_file = _write(
         tmp_path,
         {
@@ -957,9 +1061,75 @@ def test_hosted_git_config_preserves_empty_worker_resolved_value_alias(
 
     assert profile_env == {
         "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "",
         "GIT_CONFIG_COUNT": "1",
     }
-    assert aliases == (("GIT_CONFIG_VALUE_0", "EMPTY_GIT_HELPER"),)
+    assert aliases == ()
+
+
+@pytest.mark.unit
+def test_hosted_git_config_preserves_empty_bare_worker_resolved_value(
+    tmp_path: Path,
+) -> None:
+    """An empty bare git-config value stays an explicit empty literal."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "credential.helper",
+                        "GIT_CONFIG_VALUE_0": "${GIT_HELPER}",
+                    },
+                }
+            }
+        },
+    )
+    worker_env = {"GIT_HELPER": ""}
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    aliases = hosted_profile_env_passthrough_aliases(compose_file, worker_env=worker_env)
+
+    assert profile_env == {
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "",
+        "GIT_CONFIG_COUNT": "1",
+    }
+    assert aliases == ()
+
+
+@pytest.mark.unit
+def test_hosted_git_config_preserves_unset_bare_value_as_empty_literal(
+    tmp_path: Path,
+) -> None:
+    """An unset bare git-config value matches Compose's explicit empty injection."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "credential.helper",
+                        "GIT_CONFIG_VALUE_0": "${GIT_HELPER}",
+                    },
+                }
+            }
+        },
+    )
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+    aliases = hosted_profile_env_passthrough_aliases(compose_file, worker_env={})
+
+    assert profile_env == {
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "",
+        "GIT_CONFIG_COUNT": "1",
+    }
+    assert aliases == ()
 
 
 @pytest.mark.unit
@@ -976,7 +1146,7 @@ def test_hosted_git_config_reindexes_worker_resolved_value_aliases(
                     "environment": {
                         "GIT_CONFIG_COUNT": "2",
                         "GIT_CONFIG_KEY_0": "credential.helper",
-                        "GIT_CONFIG_VALUE_0": "${MISSING_HELPER}",
+                        "GIT_CONFIG_VALUE_0": "Authorization: Bearer token",
                         "GIT_CONFIG_KEY_1": "user.name",
                         "GIT_CONFIG_VALUE_1": "${GIT_AUTHOR_NAME}",
                     },
