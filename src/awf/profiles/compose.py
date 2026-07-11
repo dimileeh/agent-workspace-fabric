@@ -1263,7 +1263,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             and _compose_defaulted_reference_name(raw, worker_env=worker_env) == name
         )
         # A bare ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose
-        # variable IS set in the worker env resolves to the worker value at
+        # variable has a non-empty worker value resolves to the worker value at
         # stack launch, exactly like a pass-through slot and a worker-resolved
         # defaulted form. Core injects this exact form via
         # ``agent_environment_with_legacy_host_auth`` (it appends
@@ -1291,7 +1291,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # (e.g. a declared env secret lease rendering
         # ``ANTHROPIC_API_KEY: ${MY_ANTHROPIC_TOKEN}`` or
         # ``AWS_REGION: ${AWS_DEFAULT_REGION}``) classifies
-        # ``WORKER_RESOLVED_SLOT`` and the source name exists in ``worker_env``,
+        # ``WORKER_RESOLVED_SLOT`` and the source name has a non-empty worker value,
         # but the hosted executor resolves by the *target* name (absent from the
         # worker env), so keeping it in ``env_passthrough_names`` surfaces a
         # name that resolves to nothing — the hosted request carries neither the
@@ -1305,14 +1305,15 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # is safe to keep because the hosted executor resolves the same target
         # name local Compose selected. Mixed forms (e.g. ``prefix-${NAME}``)
         # still cannot be reconstructed from the name alone. A bare slot whose
-        # variable is UNSET stays excluded too: Compose substitutes "" for an
-        # unset bare reference, and ``literal_profile_env_from_compose`` carries
-        # that empty literal into ``profile_env``. Core only injects the bare form
-        # when the worker value is present (``source_env.get(name)`` is truthy),
-        # and the unset ``${NAME:?err}`` / ``${NAME?err}`` form would fail Compose
-        # at stack launch (unreachable for a running container). The
-        # ``in worker_env`` test gates on the local container actually receiving a
-        # worker value (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN).
+        # variable is UNSET or present-but-empty stays excluded too: Compose
+        # substitutes "" for a bare reference without a non-empty worker value,
+        # and ``literal_profile_env_from_compose`` carries that empty literal into
+        # ``profile_env``. Core only injects the bare form when the worker value is
+        # present (``source_env.get(name)`` is truthy), and the unset
+        # ``${NAME:?err}`` / ``${NAME?err}`` form would fail Compose at stack
+        # launch (unreachable for a running container). The
+        # ``worker_env.get(source_name)`` test gates on the local container
+        # actually receiving a worker value (PR #751 thread PRRT_kwDOSJAM6s6Pi7sN).
         worker_resolved_slots = frozenset(
             name
             for name, raw in compose_env.items()
@@ -1322,7 +1323,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             and (source_name := _compose_selected_worker_reference_name(raw, worker_env=worker_env))
             is not None
             and source_name == name
-            and source_name in worker_env
+            and bool(worker_env.get(source_name))
         )
         name_only_credential_identifiers = _hosted_name_only_credential_identifier_keys(
             compose_env,
