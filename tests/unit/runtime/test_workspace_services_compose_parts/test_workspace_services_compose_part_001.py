@@ -25,6 +25,7 @@ from awf.profiles.compose import (
     filter_hosted_env_passthrough_names,
     hosted_profile_env_passthrough_aliases,
     hosted_profile_env_passthrough_names,
+    literal_profile_env_from_compose,
     profile_agent_environment,
     profile_app_endpoint_environment,
     profile_services,
@@ -1232,7 +1233,7 @@ def test_filter_hosted_env_passthrough_names_excludes_cross_name_defaulted_refer
 def test_hosted_profile_env_passthrough_aliases_preserves_empty_worker_source(
     tmp_path: Path,
 ) -> None:
-    """Defaulted cross-name aliases preserve explicitly empty worker source values."""
+    """Empty set-ness cross-name aliases preserve the empty target literal."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         yaml.safe_dump(
@@ -1243,6 +1244,7 @@ def test_hosted_profile_env_passthrough_aliases_preserves_empty_worker_source(
                         "environment": {
                             "EMPTY_BARE_TARGET": "${EMPTY_SOURCE}",
                             "EMPTY_DEFAULT_TARGET": "${EMPTY_SOURCE-default}",
+                            "EMPTY_REQUIRED_TARGET": "${EMPTY_SOURCE?required}",
                             "MISSING_BARE_TARGET": "${MISSING_SOURCE}",
                             "MISSING_DEFAULT_TARGET": "${MISSING_SOURCE-default}",
                         },
@@ -1253,12 +1255,23 @@ def test_hosted_profile_env_passthrough_aliases_preserves_empty_worker_source(
         encoding="utf-8",
     )
 
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            worker_env={"EMPTY_SOURCE": ""},
+        )
+    )
     aliases = hosted_profile_env_passthrough_aliases(
         compose_file,
         worker_env={"EMPTY_SOURCE": ""},
     )
 
-    assert aliases == (("EMPTY_DEFAULT_TARGET", "EMPTY_SOURCE"),)
+    assert profile_env["EMPTY_BARE_TARGET"] == ""
+    assert profile_env["EMPTY_DEFAULT_TARGET"] == ""
+    assert profile_env["EMPTY_REQUIRED_TARGET"] == ""
+    assert profile_env["MISSING_BARE_TARGET"] == ""
+    assert profile_env["MISSING_DEFAULT_TARGET"] == "default"
+    assert aliases == ()
 
 
 @pytest.mark.unit

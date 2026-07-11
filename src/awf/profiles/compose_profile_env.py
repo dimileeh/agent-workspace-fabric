@@ -101,7 +101,7 @@ def literal_profile_env_from_compose(
     for key, raw in compose_env.items():
         if raw == _COMPOSE_PASSTHROUGH:
             continue
-        if _compose_empty_setness_reference_name(raw, worker_env=env) == key:
+        if _compose_empty_setness_reference_name(raw, worker_env=env) is not None:
             carried.append((key, ""))
             continue
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)

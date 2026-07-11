@@ -1135,6 +1135,8 @@ def hosted_profile_env_passthrough_aliases(
             source_name = _compose_selected_worker_reference_name(raw, worker_env=env)
         else:
             continue
+        if _compose_empty_setness_reference_name(raw, worker_env=env) is not None:
+            continue
         if source_name is None or source_name == name or source_name not in env:
             continue
         if (

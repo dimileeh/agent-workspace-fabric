@@ -639,7 +639,8 @@ def test_literal_profile_env_from_compose_dash_dash_tests_non_empty(
     previous code used a presence check for both ``:-`` and ``-``, so an empty
     worker value was treated as worker-resolved and the default was dropped,
     leaving hosted runs without ``AWS_REGION``. ``-`` tests set-ness, so an
-    empty-but-present value resolves to the empty value (worker-resolved, skip).
+    empty-but-present value resolves to the empty value, which hosted carries as
+    an explicit empty target value.
     """
     from awf.profiles.compose import literal_profile_env_from_compose
 
@@ -653,7 +654,7 @@ def test_literal_profile_env_from_compose_dash_dash_tests_non_empty(
                         "environment": {
                             # :- with empty worker value -> default carried.
                             "AWS_REGION": "${AWS_REGION:-us-west-2}",
-                            # - with empty worker value -> worker-resolved, skip.
+                            # - with empty worker value -> empty override carried.
                             "AWS_REGION_DASH": "${AWS_REGION-us-west-2}",
                             # :- with non-empty worker value -> worker-resolved, skip.
                             "AWS_REGION_SET": "${AWS_REGION_SET:-us-west-2}",
@@ -673,8 +674,8 @@ def test_literal_profile_env_from_compose_dash_dash_tests_non_empty(
 
     # :-) empty worker value -> default carried (local container gets us-west-2).
     assert carried.get("AWS_REGION") == "us-west-2"
-    # - : empty-but-present -> worker-resolved empty value, skip (no carry).
-    assert "AWS_REGION_DASH" not in carried
+    # - : empty-but-present -> empty target value carried.
+    assert carried.get("AWS_REGION_DASH") == ""
     # :-) non-empty worker value -> worker-resolved, skip.
     assert "AWS_REGION_SET" not in carried
     # - : non-empty worker value -> worker-resolved, skip.
