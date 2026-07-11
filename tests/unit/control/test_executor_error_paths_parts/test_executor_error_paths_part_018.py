@@ -227,6 +227,74 @@ services:
     )
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("oneshot_status", "expected"),
+    [
+        ("Exited (0) 2 minutes ago", True),
+        ("Exited (1) 2 minutes ago", False),
+    ],
+)
+async def test_compose_runtime_usable_after_restart_failure_handles_completed_oneshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    oneshot_status: str,
+    expected: bool,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  migrate:
+    image: awf-migrate
+  agent:
+    image: awf-agent
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  postgres:
+    image: postgres
+""",
+        encoding="utf-8",
+    )
+
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        return monitor_handoff_module.RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="migrate",
+                    container_id="migrate-id",
+                    image="awf-migrate",
+                    state="exited",
+                    status=oneshot_status,
+                ),
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-id",
+                    image="awf-agent",
+                    state="running",
+                ),
+                RuntimeService(
+                    name="postgres",
+                    container_id="postgres-id",
+                    image="postgres",
+                    state="running",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert (
+        await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+            "awf_x",
+            compose_file,
+        )
+        is expected
+    )
+
+
 class TestExecutorMonitorHandoffSetupSplit:
     @pytest.mark.unit
     async def test_handoff_setup_marks_profile_command_failure_with_redacted_command(

@@ -106,6 +106,12 @@ class ResumeHandoff:
     run_kwargs: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _ComposeRuntimeRequirements:
+    service_names: set[str]
+    successful_completion_services: set[str]
+
+
 class MonitorResumePreStartError(Exception):
     """Raised when resumed monitor setup fails before entering the monitor loop."""
 
@@ -521,14 +527,15 @@ async def _compose_runtime_usable_after_restart_failure(
         return False
     if snapshot.stack_state != "running":
         return False
-    expected_services = _compose_service_names_from_file(compose_file)
-    if expected_services is None:
+    requirements = _compose_runtime_requirements_from_file(compose_file)
+    if requirements is None:
         _log.warning(
             "executor.resume_compose_runtime_expected_services_unavailable_continuing",
             compose_project_name=compose_project,
             compose_file=str(compose_file),
         )
         return True
+    expected_services = requirements.service_names
     if not expected_services:
         _log.warning(
             "executor.resume_compose_runtime_missing_expected_services",
@@ -537,7 +544,12 @@ async def _compose_runtime_usable_after_restart_failure(
         )
         return False
     ready_services = {
-        service.name for service in snapshot.services if _compose_runtime_service_ready(service)
+        service.name
+        for service in snapshot.services
+        if _compose_runtime_service_satisfied_after_restart_failure(
+            service,
+            successful_completion_services=requirements.successful_completion_services,
+        )
     }
     missing_services = expected_services - ready_services
     if missing_services:
@@ -551,7 +563,9 @@ async def _compose_runtime_usable_after_restart_failure(
     return True
 
 
-def _compose_service_names_from_file(compose_file: Path) -> set[str] | None:
+def _compose_runtime_requirements_from_file(
+    compose_file: Path,
+) -> _ComposeRuntimeRequirements | None:
     try:
         payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
     except Exception:
@@ -561,11 +575,60 @@ def _compose_service_names_from_file(compose_file: Path) -> set[str] | None:
         )
         return None
     if not isinstance(payload, dict):
-        return set()
+        return _ComposeRuntimeRequirements(
+            service_names=set(), successful_completion_services=set()
+        )
     services = payload.get("services")
     if not isinstance(services, dict):
-        return set()
-    return {name for name in services if isinstance(name, str) and name}
+        return _ComposeRuntimeRequirements(
+            service_names=set(), successful_completion_services=set()
+        )
+    service_names = {name for name in services if isinstance(name, str) and name}
+    return _ComposeRuntimeRequirements(
+        service_names=service_names,
+        successful_completion_services=_compose_successful_completion_service_names(
+            services,
+            service_names=service_names,
+        ),
+    )
+
+
+def _compose_successful_completion_service_names(
+    services: Mapping[object, object],
+    *,
+    service_names: set[str],
+) -> set[str]:
+    names: set[str] = set()
+    for service in services.values():
+        if not isinstance(service, dict):
+            continue
+        depends_on = service.get("depends_on")
+        if not isinstance(depends_on, dict):
+            continue
+        for dependency_name, dependency_config in depends_on.items():
+            if not isinstance(dependency_name, str) or dependency_name not in service_names:
+                continue
+            if not isinstance(dependency_config, dict):
+                continue
+            condition = dependency_config.get("condition")
+            if (
+                isinstance(condition, str)
+                and condition.strip().lower() == "service_completed_successfully"
+            ):
+                names.add(dependency_name)
+    return names
+
+
+def _compose_runtime_service_satisfied_after_restart_failure(
+    service: RuntimeService,
+    *,
+    successful_completion_services: set[str],
+) -> bool:
+    if _compose_runtime_service_ready(service):
+        return True
+    if service.name not in successful_completion_services:
+        return False
+    return _compose_runtime_service_completed_successfully(service)
 
 
 def _compose_runtime_service_ready(service: RuntimeService) -> bool:
@@ -573,6 +636,13 @@ def _compose_runtime_service_ready(service: RuntimeService) -> bool:
         return False
     health = (service.health or "").strip().lower()
     return health not in {"starting", "unhealthy"}
+
+
+def _compose_runtime_service_completed_successfully(service: RuntimeService) -> bool:
+    if service.state.strip().lower() != "exited":
+        return False
+    status = (service.status or "").strip().lower()
+    return re.match(r"^exited\s*\(\s*0\s*\)(?:\s|$)", status) is not None
 
 
 def _precheck_required_companion_env_secrets_for_resume(
