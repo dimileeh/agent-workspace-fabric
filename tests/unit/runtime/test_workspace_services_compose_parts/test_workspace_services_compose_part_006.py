@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from awf.profiles.compose import literal_profile_env_from_compose
+from awf.profiles.compose import (
+    hosted_profile_env_passthrough_aliases,
+    literal_profile_env_from_compose,
+)
 
 
 @pytest.mark.unit
@@ -163,6 +166,46 @@ def test_literal_profile_env_from_compose_reindexes_remaining_git_config(
     assert carried["GIT_CONFIG_VALUE_0"] == "agent@example.com"
     assert "GIT_CONFIG_KEY_1" not in carried
     assert "GIT_CONFIG_VALUE_1" not in carried
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_preserves_passthrough_git_config_value(
+    tmp_path: Path,
+) -> None:
+    """Hosted jobs keep git-config entries whose values are worker pass-through slots."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                            "GIT_CONFIG_VALUE_0": None,
+                            "GIT_CONFIG_KEY_1": "user.name",
+                            "GIT_CONFIG_VALUE_1": None,
+                            "GIT_CONFIG_COUNT": "2",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    worker_env = {"GIT_CONFIG_VALUE_0": "Authorization: basic worker-secret"}
+    carried = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    aliases = hosted_profile_env_passthrough_aliases(compose_file, worker_env=worker_env)
+
+    assert carried["GIT_CONFIG_COUNT"] == "1"
+    assert carried["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
+    assert "GIT_CONFIG_VALUE_0" not in carried
+    assert "GIT_CONFIG_KEY_1" not in carried
+    assert "GIT_CONFIG_VALUE_1" not in carried
+    assert aliases == (("GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_0"),)
+    blob = "\x00".join(f"{key}={value}" for key, value in carried.items())
+    assert "worker-secret" not in blob
 
 
 @pytest.mark.unit
