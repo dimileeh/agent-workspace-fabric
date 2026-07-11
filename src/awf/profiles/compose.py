@@ -1212,11 +1212,11 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     if compose_env is not None:
         # Exclude compose-declared names UNLESS their value is worker-resolved
         # and the local container received the worker value at stack launch:
-        # ``WORKER_RESOLVED_DEFAULTED`` (``:-`` / ``-`` / ``:?`` / ``?`` with the
-        # variable set) and a worker-present, non-empty pass-through slot (raw
-        # value == :data:`_COMPOSE_PASSTHROUGH` — ``environment: [NAME]`` with no
-        # ``=``, ``NAME:`` / ``NAME: null``) stay in passthrough for hosted
-        # out-of-band resolution.
+        # ``WORKER_RESOLVED_DEFAULTED`` (``:-`` / ``-`` / ``:?`` / ``?`` with a
+        # selected non-empty worker value) and a worker-present, non-empty
+        # pass-through slot (raw value == :data:`_COMPOSE_PASSTHROUGH` —
+        # ``environment: [NAME]`` with no ``=``, ``NAME:`` / ``NAME: null``) stay
+        # in passthrough for hosted out-of-band resolution.
         # Carrying the worker value in ``profile_env`` would embed a secret
         # (defaulted) or override the real worker value with an empty literal
         # (pass-through), and excluding the name would drop it entirely. Literal
@@ -1254,9 +1254,11 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # Worker-resolved same-name defaulted/required forms resolve to a worker
         # value at stack launch, exactly like pass-through slots. Keep those
         # target names in hosted passthrough only when the outer selected
-        # variable matches the target key; cross-name aliases and unused nested
-        # default words cannot be reconstructed by the hosted executor's
-        # target-name-only resolution.
+        # variable matches the target key and the selected worker value is
+        # non-empty; an explicitly empty set-ness override is carried in
+        # ``profile_env``. Cross-name aliases and unused nested default words
+        # cannot be reconstructed by the hosted executor's target-name-only
+        # resolution.
         worker_resolved_defaulted = frozenset(
             name
             for name, raw in compose_env.items()
@@ -1264,6 +1266,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
             and _compose_resolve_value(raw, worker_env=worker_env)[1]
             is _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED
             and _compose_defaulted_reference_name(raw, worker_env=worker_env) == name
+            and _compose_empty_setness_reference_name(raw, worker_env=worker_env) != name
         )
         # A bare ``${NAME}`` / ``$NAME`` slot (``WORKER_RESOLVED_SLOT``) whose
         # variable has a non-empty worker value resolves to the worker value at
@@ -1371,6 +1374,7 @@ def _hosted_name_only_credential_identifier_keys(
                 _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED,
             )
             and _compose_selected_worker_reference_name(raw, worker_env=worker_env) == name
+            and _compose_empty_setness_reference_name(raw, worker_env=worker_env) != name
         ):
             keys.add(name)
     return frozenset(keys)
@@ -1396,6 +1400,7 @@ from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
     _compose_concrete_worker_password_braced,
     _compose_default_word_is_worker_resolved,
     _compose_defaulted_reference_name,
+    _compose_empty_setness_reference_name,
     _compose_environment_mapping,
     _compose_resolve_braced,
     _compose_resolve_value,

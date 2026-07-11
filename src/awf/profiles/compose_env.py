@@ -305,6 +305,30 @@ def _compose_defaulted_reference_name(
     return None
 
 
+def _compose_empty_setness_reference_name(
+    value: str,
+    *,
+    worker_env: Mapping[str, str],
+) -> str | None:
+    """Return the variable name for a single ``-`` / ``?`` reference selecting ``""``."""
+    escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
+    if not escaped.startswith("${"):
+        return None
+    end = _compose_braced_expression_end(escaped, 1)
+    if end is None or end != len(escaped) - 1:
+        return None
+    inner = escaped[2:end]
+    name_match = _COMPOSE_ENV_NAME_PATTERN.match(inner)
+    if name_match is None:
+        return None
+    name = name_match.group(0)
+    remainder = inner[name_match.end() :]
+    for operator in ("-", "?"):
+        if remainder.startswith(operator) and name in worker_env and worker_env.get(name) == "":
+            return name
+    return None
+
+
 def _compose_selected_worker_reference_name(
     value: str,
     *,

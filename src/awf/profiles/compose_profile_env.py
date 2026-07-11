@@ -10,6 +10,7 @@ from urllib.parse import unquote, urlsplit
 
 from awf.profiles.compose_env import (
     _COMPOSE_PASSTHROUGH,
+    _compose_empty_setness_reference_name,
     _compose_resolve_value,
     _compose_unselected_alternate_worker_reference_name,
     _ComposeEnvResolution,
@@ -99,6 +100,9 @@ def literal_profile_env_from_compose(
     carried: list[tuple[str, str]] = []
     for key, raw in compose_env.items():
         if raw == _COMPOSE_PASSTHROUGH:
+            continue
+        if _compose_empty_setness_reference_name(raw, worker_env=env) == key:
+            carried.append((key, ""))
             continue
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)
         if resolution is not _ComposeEnvResolution.LITERAL:

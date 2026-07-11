@@ -103,6 +103,54 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
 
 
 @pytest.mark.unit
+def test_empty_defaulted_or_required_setness_reference_carried_not_passthrough(
+    tmp_path: Path,
+) -> None:
+    """Set-but-empty ``-`` / ``?`` references preserve Compose's empty override."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "OPENAI_API_KEY": "${OPENAI_API_KEY-default}",
+                            "CODEX_API_KEY": "${CODEX_API_KEY?required}",
+                            "NON_EMPTY_DEFAULT": "${NON_EMPTY_DEFAULT-default}",
+                            "NON_EMPTY_REQUIRED": "${NON_EMPTY_REQUIRED?required}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_env = {
+        "OPENAI_API_KEY": "",
+        "CODEX_API_KEY": "",
+        "NON_EMPTY_DEFAULT": "worker-default",
+        "NON_EMPTY_REQUIRED": "worker-required",
+    }
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env=worker_env))
+    filtered = filter_hosted_env_passthrough_names(
+        ("OPENAI_API_KEY", "CODEX_API_KEY", "NON_EMPTY_DEFAULT", "NON_EMPTY_REQUIRED"),
+        compose_file=compose_file,
+        worker_env=worker_env,
+    )
+
+    assert profile_env["OPENAI_API_KEY"] == ""
+    assert profile_env["CODEX_API_KEY"] == ""
+    assert "NON_EMPTY_DEFAULT" not in profile_env
+    assert "NON_EMPTY_REQUIRED" not in profile_env
+    assert "OPENAI_API_KEY" not in filtered
+    assert "CODEX_API_KEY" not in filtered
+    assert "NON_EMPTY_DEFAULT" in filtered
+    assert "NON_EMPTY_REQUIRED" in filtered
+
+
+@pytest.mark.unit
 def test_filter_hosted_env_passthrough_names_excludes_cross_name_bare_reference(
     tmp_path: Path,
 ) -> None:
