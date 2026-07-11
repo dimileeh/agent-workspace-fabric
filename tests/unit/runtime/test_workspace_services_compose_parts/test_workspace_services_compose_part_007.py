@@ -103,10 +103,10 @@ def test_compose_passthrough_env_slot_not_carried_kept_in_passthrough(
 
 
 @pytest.mark.unit
-def test_empty_defaulted_or_required_setness_reference_carried_not_passthrough(
+def test_empty_defaulted_setness_carried_required_setness_passthrough(
     tmp_path: Path,
 ) -> None:
-    """Set-but-empty ``-`` / ``?`` references preserve Compose's empty override."""
+    """Set-but-empty ``-`` stays explicit; set-but-empty ``?`` stays passthrough."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         yaml.safe_dump(
@@ -141,11 +141,11 @@ def test_empty_defaulted_or_required_setness_reference_carried_not_passthrough(
     )
 
     assert profile_env["OPENAI_API_KEY"] == ""
-    assert profile_env["CODEX_API_KEY"] == ""
+    assert "CODEX_API_KEY" not in profile_env
     assert "NON_EMPTY_DEFAULT" not in profile_env
     assert "NON_EMPTY_REQUIRED" not in profile_env
     assert "OPENAI_API_KEY" not in filtered
-    assert "CODEX_API_KEY" not in filtered
+    assert "CODEX_API_KEY" in filtered
     assert "NON_EMPTY_DEFAULT" in filtered
     assert "NON_EMPTY_REQUIRED" in filtered
 

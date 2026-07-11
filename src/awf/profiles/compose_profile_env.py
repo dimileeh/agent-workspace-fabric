@@ -12,6 +12,7 @@ from awf.profiles.compose_env import (
     _COMPOSE_PASSTHROUGH,
     _compose_empty_setness_reference_name,
     _compose_resolve_value,
+    _compose_unselected_alternate_worker_reference_name,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
 )
@@ -102,7 +103,9 @@ def literal_profile_env_from_compose(
             continue
         if compose_module._is_git_config_protocol_key(key):
             continue
-        if _compose_empty_setness_reference_name(raw, worker_env=env) is not None:
+        if _compose_unselected_alternate_worker_reference_name(raw, worker_env=env) is not None:
+            continue
+        if _compose_empty_setness_reference_name(raw, worker_env=env, operators=("-",)) is not None:
             carried.append((key, ""))
             continue
         expanded, resolution = _compose_resolve_value(raw, worker_env=env)

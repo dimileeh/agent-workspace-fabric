@@ -309,6 +309,7 @@ def _compose_empty_setness_reference_name(
     value: str,
     *,
     worker_env: Mapping[str, str],
+    operators: tuple[str, ...] = ("-", "?"),
 ) -> str | None:
     """Return the variable name for a single ``-`` / ``?`` reference selecting ``""``."""
     escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
@@ -323,7 +324,7 @@ def _compose_empty_setness_reference_name(
         return None
     name = name_match.group(0)
     remainder = inner[name_match.end() :]
-    for operator in ("-", "?"):
+    for operator in operators:
         if remainder.startswith(operator) and name in worker_env and worker_env.get(name) == "":
             return name
     return None

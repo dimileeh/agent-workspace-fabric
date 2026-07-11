@@ -290,3 +290,98 @@ def test_literal_profile_env_from_compose_redacts_postgres_password_interpolatio
     assert "DATABASE_URL" not in carried
     # The resolved worker password never reaches the hosted request object.
     assert "resolved-pw" not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_jdbc_url_userinfo(
+    tmp_path: Path,
+) -> None:
+    """JDBC-style URL literals with userinfo are NOT carried to hosted profile env.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6PvGqq: ``urlsplit`` treats the
+    outer ``jdbc:`` prefix as the URL scheme and leaves ``netloc`` empty for
+    values like ``jdbc:postgresql://user:secret@db.example/app``. The generic
+    URL-userinfo guard therefore missed embedded credentials when the env name
+    was not itself secret-like, and ``literal_profile_env_from_compose`` carried
+    the raw JDBC URL into ``AgentRuntimeExecRequest.profile_env``.
+    """
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            # Non-secret literal still carried.
+                            "APP_BASE_URL": "http://app:8080",
+                            # JDBC URL embeds credentials but the key is not
+                            # secret-like -> must still be skipped.
+                            "JDBC_DATABASE_URL": (
+                                "jdbc:postgresql://app_user:db-secret@db.example/app"
+                            ),
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "JDBC_DATABASE_URL" not in carried
+    assert "db-secret" not in "".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_signed_url_query_credentials(
+    tmp_path: Path,
+) -> None:
+    """Signed URL literals are NOT carried to hosted profile env.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6Pxulk: non-secret-looking env
+    names can carry bearer-equivalent signed URLs, and query fields such as
+    ``X-Amz-Signature`` or Azure SAS ``sig`` must be treated as credentials even
+    though they do not include broader secret-name tokens.
+    """
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_BASE_URL": "http://app:8080",
+                            "ARTIFACT_URL": (
+                                "https://bucket.s3.amazonaws.com/key"
+                                "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+                                "&X-Amz-Credential=AKIA/20260710/us-east-1/s3/aws4_request"
+                                "&X-Amz-Signature=s3-signed-secret"
+                            ),
+                            "EXPORT_URL": (
+                                "https://account.blob.core.windows.net/container/blob"
+                                "?sp=r&st=2026-07-10T00:00:00Z&sig=azure-sas-secret"
+                            ),
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "ARTIFACT_URL" not in carried
+    assert "EXPORT_URL" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "s3-signed-secret" not in blob
+    assert "azure-sas-secret" not in blob
