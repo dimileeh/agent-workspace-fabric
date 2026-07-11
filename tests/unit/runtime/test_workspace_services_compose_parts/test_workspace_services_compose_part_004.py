@@ -1101,6 +1101,38 @@ def test_hosted_git_config_preserves_empty_bare_worker_resolved_value(
 
 
 @pytest.mark.unit
+def test_hosted_git_config_preserves_unset_bare_value_as_empty_literal(
+    tmp_path: Path,
+) -> None:
+    """An unset bare git-config value matches Compose's explicit empty injection."""
+    compose_file = _write(
+        tmp_path,
+        {
+            "services": {
+                "agent": {
+                    "image": "agent:latest",
+                    "environment": {
+                        "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "credential.helper",
+                        "GIT_CONFIG_VALUE_0": "${GIT_HELPER}",
+                    },
+                }
+            }
+        },
+    )
+
+    profile_env = dict(literal_profile_env_from_compose(compose_file, worker_env={}))
+    aliases = hosted_profile_env_passthrough_aliases(compose_file, worker_env={})
+
+    assert profile_env == {
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "",
+        "GIT_CONFIG_COUNT": "1",
+    }
+    assert aliases == ()
+
+
+@pytest.mark.unit
 def test_hosted_git_config_reindexes_worker_resolved_value_aliases(
     tmp_path: Path,
 ) -> None:
@@ -1114,7 +1146,7 @@ def test_hosted_git_config_reindexes_worker_resolved_value_aliases(
                     "environment": {
                         "GIT_CONFIG_COUNT": "2",
                         "GIT_CONFIG_KEY_0": "credential.helper",
-                        "GIT_CONFIG_VALUE_0": "${MISSING_HELPER}",
+                        "GIT_CONFIG_VALUE_0": "Authorization: Bearer token",
                         "GIT_CONFIG_KEY_1": "user.name",
                         "GIT_CONFIG_VALUE_1": "${GIT_AUTHOR_NAME}",
                     },

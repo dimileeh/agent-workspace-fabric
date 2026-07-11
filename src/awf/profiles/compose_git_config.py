@@ -7,7 +7,6 @@ from urllib.parse import urlsplit
 
 from awf.profiles.compose_env import (
     _COMPOSE_PASSTHROUGH,
-    _compose_bare_reference_name,
     _compose_empty_setness_reference_name,
     _compose_resolve_value,
     _compose_selected_worker_reference_name,
@@ -205,13 +204,6 @@ def _hosted_git_config_env(
         if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
             continue
         if value_resolution is _ComposeEnvResolution.LITERAL:
-            bare_value_source = _compose_bare_reference_name(config_value_raw)
-            if (
-                config_value == ""
-                and bare_value_source is not None
-                and bare_value_source not in worker_env
-            ):
-                continue
             if not _is_safe_bitbucket_agent_insteadof_value(
                 config_key,
                 config_value,
