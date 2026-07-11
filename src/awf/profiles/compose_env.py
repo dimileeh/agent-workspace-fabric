@@ -382,44 +382,6 @@ def _compose_selected_worker_reference_name(
     return None
 
 
-def _compose_unselected_alternate_worker_reference_name(
-    value: str,
-    *,
-    worker_env: Mapping[str, str],
-) -> str | None:
-    """Return the source name for an unselected alternate worker reference."""
-    escaped = value.replace("$$", _COMPOSE_ESCAPED_DOLLAR)
-    if not escaped.startswith("${"):
-        return None
-    end = _compose_braced_expression_end(escaped, 1)
-    if end is None or end != len(escaped) - 1:
-        return None
-    inner = escaped[2:end]
-    name_match = _COMPOSE_ENV_NAME_PATTERN.match(inner)
-    if name_match is None:
-        return None
-    name = name_match.group(0)
-    remainder = inner[name_match.end() :]
-    operator = ""
-    word = ""
-    for candidate in _COMPOSE_ALTERNATE_OPERATORS:
-        if remainder.startswith(candidate):
-            operator = candidate
-            word = remainder[len(candidate) :]
-            break
-    if not operator:
-        return None
-    worker_value = worker_env.get(name)
-    is_set = name in worker_env
-    is_non_empty = bool(worker_value)
-    if (operator == ":+" and is_non_empty) or (operator == "+" and is_set):
-        return None
-    source_name = _compose_selected_worker_reference_name(word, worker_env=worker_env)
-    if source_name is None or source_name not in worker_env:
-        return None
-    return source_name
-
-
 def _compose_default_word_is_worker_resolved(
     value: str,
     *,
