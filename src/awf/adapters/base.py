@@ -507,19 +507,12 @@ class AgentAdapter(ABC):
             compose_file,
             worker_env=os.environ,
         )
-        if compose_env is None:
-            # No profile-owned env block was available to filter against. Keep
-            # the adapter's hosted contract intact; profile-derived names and
-            # aliases still fail closed below because they require compose env
-            # metadata.
-            env_passthrough_names = self.hosted_env_passthrough_names
-        else:
-            env_passthrough_names = await asyncio.to_thread(
-                filter_hosted_env_passthrough_names,
-                self.hosted_env_passthrough_names,
-                compose_file=compose_file,
-                compose_env=compose_env,
-            )
+        env_passthrough_names = await asyncio.to_thread(
+            filter_hosted_env_passthrough_names,
+            self.hosted_env_passthrough_names,
+            compose_file=compose_file,
+            compose_env=compose_env,
+        )
         profile_env_passthrough_names = await asyncio.to_thread(
             hosted_profile_env_passthrough_names,
             compose_file,

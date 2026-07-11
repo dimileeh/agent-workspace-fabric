@@ -170,9 +170,10 @@ def _write_compose(
 
 class TestNonCodexHostedCredentials:
     @pytest.mark.unit
-    async def test_claude_code_surfaces_anthropic_env_names(self) -> None:
+    async def test_claude_code_surfaces_anthropic_env_names(self, tmp_path: Path) -> None:
+        compose_file = _write_compose(tmp_path)
         adapter = _build(ClaudeCodeAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert request.agent_runtime is AgentRuntime.claude_code
         for name in _CLAUDE_NAMES:
             assert name in request.env_passthrough_names, name
@@ -187,23 +188,25 @@ class TestNonCodexHostedCredentials:
         assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
 
     @pytest.mark.unit
-    async def test_cursor_surfaces_cursor_api_key_name(self) -> None:
+    async def test_cursor_surfaces_cursor_api_key_name(self, tmp_path: Path) -> None:
+        compose_file = _write_compose(tmp_path)
         adapter = _build(CursorAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert request.agent_runtime is AgentRuntime.cursor
         assert "CURSOR_API_KEY" in request.env_passthrough_names
 
     @pytest.mark.unit
-    async def test_gemini_surfaces_google_env_names(self) -> None:
+    async def test_gemini_surfaces_google_env_names(self, tmp_path: Path) -> None:
+        compose_file = _write_compose(tmp_path)
         adapter = _build(GeminiAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert request.agent_runtime is AgentRuntime.gemini
         for name in _GEMINI_NAMES:
             assert name in request.env_passthrough_names, name
 
     @pytest.mark.unit
     async def test_gemini_does_not_advertise_file_backed_google_application_credentials(
-        self,
+        self, tmp_path: Path
     ) -> None:
         """``GOOGLE_APPLICATION_CREDENTIALS`` is file-backed and must not be env-only passthrough.
 
@@ -223,17 +226,19 @@ class TestNonCodexHostedCredentials:
         project/location, access token) are still surfaced because they are not
         file paths.
         """
+        compose_file = _write_compose(tmp_path)
         adapter = _build(GeminiAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
         # The value/config names that ARE env-safe remain surfaced.
         for name in _GEMINI_NAMES:
             assert name in request.env_passthrough_names, name
 
     @pytest.mark.unit
-    async def test_grok_surfaces_xai_api_key_name(self) -> None:
+    async def test_grok_surfaces_xai_api_key_name(self, tmp_path: Path) -> None:
+        compose_file = _write_compose(tmp_path)
         adapter = _build(GrokAdapter)
-        request = await _run(adapter)
+        request = await _run(adapter, compose_file=compose_file)
         assert request.agent_runtime is AgentRuntime.grok
         assert "XAI_API_KEY" in request.env_passthrough_names
 
@@ -252,6 +257,26 @@ class TestNonCodexHostedCredentials:
         for name in _OPENCODE_NAMES:
             assert name in request.env_passthrough_names, name
         # No profile-owned env declared on the agent service -> empty profile_env.
+        assert request.profile_env == ()
+
+    @pytest.mark.unit
+    async def test_hosted_request_fails_closed_when_compose_env_unreadable(
+        self, tmp_path: Path
+    ) -> None:
+        """Hosted request filtering must not bypass unreadable compose metadata.
+
+        Regression for PR #754 thread PRRT_kwDOSJAM6s6QDySj: if the hosted path
+        cannot parse the rendered compose agent env, it must apply the same
+        fail-closed filter as local exec passthrough instead of forwarding the
+        adapter's full ambient hosted passthrough list.
+        """
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text("services:\n  agent: [\n", encoding="utf-8")
+
+        adapter = _build(OpenCodeAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert request.env_passthrough_names == ()
         assert request.profile_env == ()
 
     @pytest.mark.unit
