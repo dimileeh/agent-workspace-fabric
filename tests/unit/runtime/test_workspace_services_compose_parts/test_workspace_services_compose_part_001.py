@@ -773,6 +773,36 @@ def test_filter_hosted_env_passthrough_names_excludes_unset_auth_pass_through_sl
 
 
 @pytest.mark.unit
+def test_filter_hosted_env_passthrough_names_excludes_empty_auth_pass_through_slot(
+    tmp_path: Path,
+) -> None:
+    """An empty auth pass-through slot must not introduce a hosted-only value."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {"OPENAI_API_KEY": None},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    filtered = filter_hosted_env_passthrough_names(
+        ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
+        compose_file=compose_file,
+        worker_env={"OPENAI_API_KEY": ""},
+    )
+
+    assert "OPENAI_API_KEY" not in filtered
+    assert "ANTHROPIC_API_KEY" in filtered
+
+
+@pytest.mark.unit
 def test_filter_hosted_env_passthrough_names_keeps_auth_worker_resolved_defaulted(
     tmp_path: Path,
 ) -> None:

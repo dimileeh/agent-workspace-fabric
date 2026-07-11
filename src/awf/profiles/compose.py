@@ -1140,10 +1140,10 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         # Exclude compose-declared names UNLESS their value is worker-resolved
         # and the local container received the worker value at stack launch:
         # ``WORKER_RESOLVED_DEFAULTED`` (``:-`` / ``-`` / ``:?`` / ``?`` with the
-        # variable set) and a worker-present pass-through slot (raw value ==
-        # :data:`_COMPOSE_PASSTHROUGH` — ``environment: [NAME]`` with no ``=``,
-        # ``NAME:`` / ``NAME: null``) stay in passthrough for hosted out-of-band
-        # resolution.
+        # variable set) and a worker-present, non-empty pass-through slot (raw
+        # value == :data:`_COMPOSE_PASSTHROUGH` — ``environment: [NAME]`` with no
+        # ``=``, ``NAME:`` / ``NAME: null``) stay in passthrough for hosted
+        # out-of-band resolution.
         # Carrying the worker value in ``profile_env`` would embed a secret
         # (defaulted) or override the real worker value with an empty literal
         # (pass-through), and excluding the name would drop it entirely. Literal
@@ -1176,7 +1176,7 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
         passthrough_slots = frozenset(
             name
             for name, raw in compose_env.items()
-            if raw == _COMPOSE_PASSTHROUGH and name in worker_env
+            if raw == _COMPOSE_PASSTHROUGH and bool(worker_env.get(name))
         )
         # Worker-resolved same-name defaulted/required forms resolve to a worker
         # value at stack launch, exactly like pass-through slots. Keep those
