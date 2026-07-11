@@ -481,6 +481,39 @@ def test_literal_profile_env_from_compose_redacts_camelcase_vendor_api_key_field
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_protocol_relative_url_userinfo_in_query(
+    tmp_path: Path,
+) -> None:
+    """Query values containing protocol-relative URLs with userinfo are secret."""
+    from awf.profiles.compose import literal_profile_env_from_compose
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_URL": "https://app/callback?next=//user:pass@example.com",
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert "APP_URL" not in carried
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "user:pass@example.com" not in "".join(v for _key, v in profile_env)
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_preserves_public_frontend_api_keys(
     tmp_path: Path,
 ) -> None:

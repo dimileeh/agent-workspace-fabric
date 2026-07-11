@@ -191,7 +191,10 @@ def _url_component_has_secret_credential_field(component: str) -> bool:
         query_pairs = []
     if any(_url_field_name_has_secret_credential(key) for key, _value in query_pairs):
         return True
-    if any("://" in value and _value_has_url_userinfo(value) for _key, value in query_pairs):
+    if any(
+        ("://" in value or value.startswith("//")) and _value_has_url_userinfo(value)
+        for _key, value in query_pairs
+    ):
         return True
     if any(_relative_url_value_has_secret_credential_field(value) for _key, value in query_pairs):
         return True
