@@ -357,6 +357,52 @@ def test_literal_profile_env_from_compose_redacts_azure_storage_account_key(
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_azure_shared_access_connection_strings(
+    tmp_path: Path,
+) -> None:
+    """Azure Service Bus/Event Hubs connection strings carry shared-access secrets."""
+
+    compose_file = tmp_path / "compose.yml"
+    shared_access_key = "azure-shared-access-key-secret"
+    shared_access_signature = "azure-shared-access-signature-secret"
+    service_bus_connection_string = (
+        "Endpoint=bus.servicebus.windows.net;"
+        "SharedAccessKeyName=RootManageSharedAccessKey;"
+        f"SharedAccessKey={shared_access_key}"
+    )
+    event_hubs_connection_string = (
+        f"Endpoint=events.servicebus.windows.net;SharedAccessSignature={shared_access_signature}"
+    )
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "AZURE_SERVICE_BUS_CONNECTION_STRING": service_bus_connection_string,
+                            "AZURE_EVENT_HUBS_CONNECTION_STRING": event_hubs_connection_string,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "AZURE_SERVICE_BUS_CONNECTION_STRING" not in carried
+    assert "AZURE_EVENT_HUBS_CONNECTION_STRING" not in carried
+    blob = "\x00".join(v for _k, v in profile_env)
+    assert shared_access_key not in blob
+    assert shared_access_signature not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_libpq_keyword_password(
     tmp_path: Path,
 ) -> None:
