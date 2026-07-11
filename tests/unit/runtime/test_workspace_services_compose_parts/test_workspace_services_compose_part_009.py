@@ -682,7 +682,7 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
             compose_file,
             compose_env={
                 "OAUTH_CONFIG": '{"client_secret":"profile-oauth-client-secret"}',
-                "APP_CONFIG": "{'password':'profile-app-password'}",
+                "DATABASE_CONFIG": "{'password':'profile-app-password'}",
                 "CLI_CONFIG": "oauth_token=profile-oauth-token-secret",
                 "BLOB_CONFIG": '{"oauth_token":"profile-json-oauth-token-secret"}',
                 "SDK_CONFIG": '{"apiKey":"profile-sdk-api-key"}',
@@ -694,6 +694,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
                 "LEGACY_APP_CONFIG": "credential=profile-legacy-credential",
                 "JSON_CONFIG": '{"jwt":"profile-json-jwt"}',
                 "DOTENV_CONFIG": "jwt=profile-dotenv-jwt",
+                "APP_CONFIG": "github_pat=ghp_profile_app_pat_secret",
+                "FEATURE_FLAGS": '{"pat":"profile-json-pat-secret"}',
                 "SAFE_CONFIG": '{"issuer":"https://issuer.example","timeout":30}',
                 "OLLAMA_HOST": "http://ollama.profile:11434",
             },
@@ -702,7 +704,7 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
     )
 
     assert "OAUTH_CONFIG" not in profile_env
-    assert "APP_CONFIG" not in profile_env
+    assert "DATABASE_CONFIG" not in profile_env
     assert "CLI_CONFIG" not in profile_env
     assert "BLOB_CONFIG" not in profile_env
     assert "SDK_CONFIG" not in profile_env
@@ -714,6 +716,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
     assert "LEGACY_APP_CONFIG" not in profile_env
     assert "JSON_CONFIG" not in profile_env
     assert "DOTENV_CONFIG" not in profile_env
+    assert "APP_CONFIG" not in profile_env
+    assert "FEATURE_FLAGS" not in profile_env
     assert profile_env["SAFE_CONFIG"] == '{"issuer":"https://issuer.example","timeout":30}'
     assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
     blob = "\x00".join(profile_env.values())
@@ -730,6 +734,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
     assert "profile-legacy-credential" not in blob
     assert "profile-json-jwt" not in blob
     assert "profile-dotenv-jwt" not in blob
+    assert "ghp_profile_app_pat_secret" not in blob
+    assert "profile-json-pat-secret" not in blob
 
 
 @pytest.mark.unit
