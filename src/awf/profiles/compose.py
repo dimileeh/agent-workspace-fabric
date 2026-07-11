@@ -951,9 +951,8 @@ def filter_hosted_env_passthrough_names(
     broader exclusion or a profile-owned backend credential/endpoint declared in
     the compose env block would be re-resolved from the worker by the hosted
     executor, diverging from the local run. When the compose file is unreadable
-    the broader set is unknown, so only the ``AGENT_AUTH_ENV_VARS``-territory /
-    Ollama-shadowing exclusions apply (fail-closed the same way
-    ``_compose_env_passthrough_exclusions`` does).
+    the broader set is unknown, so hosted passthrough names are suppressed
+    entirely rather than risking ambient worker credential injection.
 
     The profile-owned *names* stay filtered out of ``env_passthrough_names`` so
     the hosted executor does not re-resolve them from the worker; their literal
@@ -1137,6 +1136,8 @@ def _filter_hosted_env_passthrough_names_from_compose_env(
     and its literal ``""`` reaches the hosted job via ``profile_env``
     (PRRT_kwDOSJAM6s6PY8zB).
     """
+    if compose_env is None:
+        return ()
     excluded = _compose_env_passthrough_exclusions(compose_env)
     if compose_env is not None:
         # Exclude compose-declared names UNLESS their value is worker-resolved

@@ -911,16 +911,14 @@ def test_filter_hosted_env_passthrough_names_suppresses_shadowing_worker_ollama_
 def test_filter_hosted_env_passthrough_names_fails_closed_on_unreadable_compose(
     tmp_path: Path,
 ) -> None:
-    """Unreadable compose fails closed: suppress the higher-precedence Ollama base URL key."""
+    """Unreadable compose fails closed: suppress all hosted passthrough names."""
     missing = tmp_path / "missing.yml"
     assert not missing.exists()
 
     names = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST", "OPENAI_API_KEY")
     filtered = filter_hosted_env_passthrough_names(names, compose_file=missing)
 
-    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in filtered
-    assert "OLLAMA_HOST" in filtered
-    assert "OPENAI_API_KEY" in filtered
+    assert filtered == ()
 
 
 @pytest.mark.unit
