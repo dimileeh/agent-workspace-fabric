@@ -114,26 +114,28 @@ def _capture_text_update(message, text_chunks):
 
 
 def _drain_remaining_updates(proc, text_chunks):
-    _close_stdin(proc)
     idle_deadline = time.monotonic() + _DRAIN_IDLE_TIMEOUT_SECONDS
-    while True:
-        assert proc.stdout is not None
-        remaining = idle_deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        readable, _, _ = select.select(
-            [proc.stdout],
-            [],
-            [],
-            min(_DRAIN_INTERVAL_SECONDS, remaining),
-        )
-        if not readable:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
-        _capture_text_update(json.loads(line.decode("utf-8")), text_chunks)
-        idle_deadline = time.monotonic() + _DRAIN_IDLE_TIMEOUT_SECONDS
+    try:
+        while True:
+            assert proc.stdout is not None
+            remaining = idle_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            readable, _, _ = select.select(
+                [proc.stdout],
+                [],
+                [],
+                min(_DRAIN_INTERVAL_SECONDS, remaining),
+            )
+            if not readable:
+                continue
+            line = proc.stdout.readline()
+            if not line:
+                break
+            _capture_text_update(json.loads(line.decode("utf-8")), text_chunks)
+            idle_deadline = time.monotonic() + _DRAIN_IDLE_TIMEOUT_SECONDS
+    finally:
+        _close_stdin(proc)
 
 
 def _auth_method_ids(auth_methods):

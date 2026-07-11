@@ -282,6 +282,65 @@ class TestGrokAdapter:
         assert stdout == b"delayed\n"
 
     @pytest.mark.unit
+    async def test_launcher_keeps_acp_stdin_open_while_draining_delayed_updates(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake_grok = bin_dir / "grok"
+        fake_grok.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, select, sys\n"
+            "for line in sys.stdin:\n"
+            "    request = json.loads(line)\n"
+            "    method = request['method']\n"
+            "    if method == 'initialize':\n"
+            "        result = {'authMethods': [{'id': 'cached_token'}]}\n"
+            "    elif method == 'authenticate':\n"
+            "        result = {}\n"
+            "    elif method == 'session/new':\n"
+            "        result = {'sessionId': 'session-1'}\n"
+            "    elif method == 'session/prompt':\n"
+            "        response = {'jsonrpc': '2.0', 'id': request['id'], 'result': {'stopReason': 'end_turn'}}\n"
+            "        print(json.dumps(response), flush=True)\n"
+            "        readable, _, _ = select.select([sys.stdin], [], [], 0.45)\n"
+            "        if readable and sys.stdin.readline() == '':\n"
+            "            sys.exit(0)\n"
+            "        update = {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'text': 'kept-open'}}}}\n"
+            "        print(json.dumps(update), flush=True)\n"
+            "        continue\n"
+            "    else:\n"
+            "        result = {}\n"
+            "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)\n"
+        )
+        fake_grok.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            _grok_launcher_script(),
+            "awf-grok",
+            "--always-approve",
+            "--no-auto-update",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdin is not None
+        proc.stdin.write(b"workspace prompt\n")
+        await proc.stdin.drain()
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+
+        stdout, stderr = await proc.communicate()
+
+        assert proc.returncode == 0, stderr.decode()
+        assert stdout == b"kept-open\n"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("auth_methods", "expected_method"),
         [
