@@ -20,6 +20,7 @@ from awf.profiles.compose_auth_env import (
 from awf.profiles.compose_auth_env import (
     _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN,
     _CAMELCASE_API_KEY_CREDENTIAL_LIKE_VALUE_PATTERN,
+    _CAMELCASE_ENCRYPTION_KEY_CREDENTIAL_LIKE_VALUE_PATTERN,
     _GITHUB_TOKEN_ALIAS_PRECEDENCE,
     _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES,
     _NETRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN,
@@ -158,6 +159,7 @@ def _is_auth_credential_like_profile_env_value(value: str) -> bool:
     return bool(
         _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
         or _CAMELCASE_API_KEY_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
+        or _CAMELCASE_ENCRYPTION_KEY_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
         or _PREFIXED_PRIVATE_KEY_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
         or _NETRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)
         or _NPMRC_AUTH_CREDENTIAL_LIKE_VALUE_PATTERN.search(value)

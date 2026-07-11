@@ -1222,6 +1222,42 @@ def test_literal_profile_env_from_compose_skips_neutral_docker_identitytoken_lit
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_neutral_encryption_key_literals(
+    tmp_path: Path,
+) -> None:
+    """Neutral config env values carrying encryption-key fields are NOT carried."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_CONFIG": '{"encryption_key":"profile-encryption-secret"}',
+                            "ALT_CONFIG": "encryptionKey=profile-camel-encryption-secret",
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "APP_CONFIG" not in carried
+    assert "ALT_CONFIG" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "profile-encryption-secret" not in blob
+    assert "profile-camel-encryption-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_neutral_npmrc_auth_literals(
     tmp_path: Path,
 ) -> None:

@@ -205,11 +205,14 @@ _PUBLIC_PROFILE_ENV_NAME_PREFIX_TOKEN_SEQUENCES = (("REACT", "APP"),)
 _NON_SECRET_PROFILE_ENV_NAME_ENDPOINT_SUFFIX_TOKENS = frozenset({"ENDPOINT", "URI", "URL"})
 
 _AUTH_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
-    r"(?:^\s*(?:basic|bearer)\s+\S+|(?<![A-Za-z0-9_-])[\"']?_?(?:(?:proxy[-_]?)?authorization|set[-_]?cookie|cookie|credentials?|jwt|(?:[A-Za-z0-9]+[-_])*pat|(?:(?:x[-_]?)|(?:[A-Za-z0-9]+[-_])+)?api[-_]?key|(?:[A-Za-z0-9]+[-_])*subscription[-_]?key|shared[-_]?access[-_]?(?:key|signature)|(?:account|access|private|secret)[-_]?key|(?:client[-_]?)?key[-_]?data|private[-_]?key[-_]?data|(?:aws[-_]?)?secret[-_]?access[-_]?key|client[-_]?secret|(?:[A-Za-z0-9]+[-_])*(?:client[-_]?|signing[-_]?)?secret|(?-i:[A-Za-z0-9]+SigningSecret)|(?:[A-Za-z0-9]+[-_]?)*(?:passphrase|password|passwd|pwd)|(?:x[-_]?)?(?:(?:[A-Za-z0-9]+[-_])*(?:access|api|auth|bearer|csrf|id|identity|job|oauth|private|refresh|session)[-_]?)?token|(?:x[-_]?)?(?:amz[-_]?)?security[-_]?token)[\"']?\s*[:=]\s*[\"']?\S+|[\"']auth[\"']\s*:\s*[\"'][^\"']+|[\"']private[_-]key[\"']\s*:\s*[\"'][^\"']+|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)",
+    r"(?:^\s*(?:basic|bearer)\s+\S+|(?<![A-Za-z0-9_-])[\"']?_?(?:(?:proxy[-_]?)?authorization|set[-_]?cookie|cookie|credentials?|jwt|(?:[A-Za-z0-9]+[-_])*pat|(?:(?:x[-_]?)|(?:[A-Za-z0-9]+[-_])+)?api[-_]?key|(?:[A-Za-z0-9]+[-_])*subscription[-_]?key|shared[-_]?access[-_]?(?:key|signature)|(?:[A-Za-z0-9]+[-_])*encryption[-_]?key|(?:account|access|private|secret)[-_]?key|(?:client[-_]?)?key[-_]?data|private[-_]?key[-_]?data|(?:aws[-_]?)?secret[-_]?access[-_]?key|client[-_]?secret|(?:[A-Za-z0-9]+[-_])*(?:client[-_]?|signing[-_]?)?secret|(?-i:[A-Za-z0-9]+SigningSecret)|(?:[A-Za-z0-9]+[-_]?)*(?:passphrase|password|passwd|pwd)|(?:x[-_]?)?(?:(?:[A-Za-z0-9]+[-_])*(?:access|api|auth|bearer|csrf|id|identity|job|oauth|private|refresh|session)[-_]?)?token|(?:x[-_]?)?(?:amz[-_]?)?security[-_]?token)[\"']?\s*[:=]\s*[\"']?\S+|[\"']auth[\"']\s*:\s*[\"'][^\"']+|[\"']private[_-]key[\"']\s*:\s*[\"'][^\"']+|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)",
     re.IGNORECASE,
 )
 _CAMELCASE_API_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+ApiKey[\"']?\s*[:=]\s*[\"']?\S+"
+)
+_CAMELCASE_ENCRYPTION_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])[\"']?[A-Za-z0-9]+EncryptionKey[\"']?\s*[:=]\s*[\"']?\S+"
 )
 _PREFIXED_PRIVATE_KEY_CREDENTIAL_LIKE_VALUE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])[\"']?"
