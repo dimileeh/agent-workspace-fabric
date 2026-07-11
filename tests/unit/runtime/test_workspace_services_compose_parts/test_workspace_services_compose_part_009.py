@@ -336,6 +336,37 @@ def test_literal_profile_env_from_compose_redacts_equals_delimited_credential_bl
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_secret_key_config_blobs(
+    tmp_path: Path,
+) -> None:
+    """Neutral env names do not carry common secret-key config fields."""
+
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "APP_CONFIG": "secret_key=raw-dotenv-secret-key",
+                "APP_JSON": '{"secret_key":"raw-json-secret-key"}',
+                "SDK_CONFIG": '{"secretKey":"raw-camel-secret-key"}',
+                "APP_SETTINGS": "mode=hosted retries=3",
+            },
+            worker_env={},
+        )
+    )
+
+    assert "APP_CONFIG" not in profile_env
+    assert "APP_JSON" not in profile_env
+    assert "SDK_CONFIG" not in profile_env
+    assert profile_env["APP_SETTINGS"] == "mode=hosted retries=3"
+    blob = "\x00".join(profile_env.values())
+    assert "raw-dotenv-secret-key" not in blob
+    assert "raw-json-secret-key" not in blob
+    assert "raw-camel-secret-key" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_preserves_local_postgres_dsn_aliases(
     tmp_path: Path,
 ) -> None:
