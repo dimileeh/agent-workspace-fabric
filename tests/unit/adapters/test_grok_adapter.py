@@ -168,3 +168,64 @@ class TestGrokAdapter:
             "stdio",
         ]
         assert json.loads(prompt_copy.read_text()) == "workspace prompt\n\n"
+
+    @pytest.mark.unit
+    async def test_launcher_prefers_xai_api_key_even_when_method_not_advertised(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake_grok = bin_dir / "grok"
+        auth_method_copy = tmp_path / "auth_method.json"
+        fake_grok.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "for line in sys.stdin:\n"
+            "    request = json.loads(line)\n"
+            "    method = request['method']\n"
+            "    if method == 'initialize':\n"
+            "        result = {'authMethods': [{'id': 'cached_token'}]}\n"
+            "    elif method == 'authenticate':\n"
+            "        with open(os.environ['AWF_FAKE_GROK_AUTH_METHOD'], 'w', encoding='utf-8') as fh:\n"
+            "            json.dump(request['params']['methodId'], fh)\n"
+            "        result = {}\n"
+            "    elif method == 'session/new':\n"
+            "        result = {'sessionId': 'session-1'}\n"
+            "    elif method == 'session/prompt':\n"
+            "        result = {'stopReason': 'end_turn'}\n"
+            "    else:\n"
+            "        result = {}\n"
+            "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)\n"
+        )
+        fake_grok.chmod(0o755)
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "AWF_FAKE_GROK_AUTH_METHOD": str(auth_method_copy),
+                "XAI_API_KEY": "xai-test-key",
+            }
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            _grok_launcher_script(),
+            "awf-grok",
+            "--always-approve",
+            "--no-auto-update",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdin is not None
+        proc.stdin.write(b"workspace prompt\n")
+        await proc.stdin.drain()
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+
+        _, stderr = await proc.communicate()
+
+        assert proc.returncode == 0, stderr.decode()
+        assert json.loads(auth_method_copy.read_text()) == "xai.api_key"
