@@ -884,17 +884,20 @@ def _hosted_google_application_credentials_mount_targets(
     if compose_env is None:
         return frozenset()
     raw = compose_env.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if raw is None or raw == _COMPOSE_PASSTHROUGH:
+    if raw is None:
         return frozenset()
-    target, resolution = _compose_resolve_value(raw, worker_env=worker_env)
-    if resolution in (
-        _ComposeEnvResolution.WORKER_RESOLVED_SLOT,
-        _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED,
-    ):
-        source_name = _compose_selected_worker_reference_name(raw, worker_env=worker_env)
-        target = worker_env.get(source_name, "") if source_name is not None else ""
-    elif resolution is not _ComposeEnvResolution.LITERAL:
-        return frozenset()
+    if raw == _COMPOSE_PASSTHROUGH:
+        target = worker_env.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    else:
+        target, resolution = _compose_resolve_value(raw, worker_env=worker_env)
+        if resolution in (
+            _ComposeEnvResolution.WORKER_RESOLVED_SLOT,
+            _ComposeEnvResolution.WORKER_RESOLVED_DEFAULTED,
+        ):
+            source_name = _compose_selected_worker_reference_name(raw, worker_env=worker_env)
+            target = worker_env.get(source_name, "") if source_name is not None else ""
+        elif resolution is not _ComposeEnvResolution.LITERAL:
+            return frozenset()
     if not target or not Path(target).is_absolute():
         return frozenset()
     return frozenset({target})

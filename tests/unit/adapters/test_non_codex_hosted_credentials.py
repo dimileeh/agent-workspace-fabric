@@ -252,6 +252,39 @@ class TestNonCodexHostedCredentials:
         assert "/host/auth/adc.json" not in request.file_auth_mount_targets
 
     @pytest.mark.unit
+    async def test_gemini_carries_pass_through_google_application_credentials_file_auth_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Compose pass-through ADC slots preserve the same file-auth target."""
+        credentials_target = "/home/agent/.config/gcloud/application_default_credentials.json"
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text(
+            yaml.safe_dump(
+                {
+                    "services": {
+                        "agent": {
+                            "image": "agent:latest",
+                            "environment": ["GOOGLE_APPLICATION_CREDENTIALS"],
+                            "volumes": [
+                                "/host/worktree:/workspace",
+                                f"/host/auth/adc.json:{credentials_target}:ro",
+                            ],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials_target)
+
+        adapter = _build(GeminiAdapter)
+        request = await _run(adapter, compose_file=compose_file)
+
+        assert "GOOGLE_APPLICATION_CREDENTIALS" not in request.env_passthrough_names
+        assert credentials_target in request.file_auth_mount_targets
+        assert "/host/auth/adc.json" not in request.file_auth_mount_targets
+
+    @pytest.mark.unit
     async def test_grok_surfaces_xai_api_key_name(self, tmp_path: Path) -> None:
         compose_file = _write_compose(tmp_path)
         adapter = _build(GrokAdapter)
