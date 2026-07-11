@@ -692,6 +692,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
                 "TLS_CONFIG": '{"tlsPrivateKey":"profile-tls-private-key"}',
                 "APP_JSON_CONFIG": '{"credentials":"profile-json-credentials"}',
                 "LEGACY_APP_CONFIG": "credential=profile-legacy-credential",
+                "JSON_CONFIG": '{"jwt":"profile-json-jwt"}',
+                "DOTENV_CONFIG": "jwt=profile-dotenv-jwt",
                 "SAFE_CONFIG": '{"issuer":"https://issuer.example","timeout":30}',
                 "OLLAMA_HOST": "http://ollama.profile:11434",
             },
@@ -710,6 +712,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
     assert "TLS_CONFIG" not in profile_env
     assert "APP_JSON_CONFIG" not in profile_env
     assert "LEGACY_APP_CONFIG" not in profile_env
+    assert "JSON_CONFIG" not in profile_env
+    assert "DOTENV_CONFIG" not in profile_env
     assert profile_env["SAFE_CONFIG"] == '{"issuer":"https://issuer.example","timeout":30}'
     assert profile_env["OLLAMA_HOST"] == "http://ollama.profile:11434"
     blob = "\x00".join(profile_env.values())
@@ -724,6 +728,8 @@ def test_literal_profile_env_from_compose_redacts_neutral_config_blob_credential
     assert "profile-tls-private-key" not in blob
     assert "profile-json-credentials" not in blob
     assert "profile-legacy-credential" not in blob
+    assert "profile-json-jwt" not in blob
+    assert "profile-dotenv-jwt" not in blob
 
 
 @pytest.mark.unit
