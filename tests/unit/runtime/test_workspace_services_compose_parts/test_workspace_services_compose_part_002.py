@@ -362,6 +362,41 @@ def test_hosted_github_token_passthrough_names_accepts_same_name_defaulted_worke
 
 
 @pytest.mark.unit
+def test_hosted_github_token_passthrough_names_skips_empty_setness_aliases(
+    tmp_path: Path,
+) -> None:
+    """Empty set-ness GitHub aliases stay explicit empty values, not passthrough."""
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "GH_TOKEN": "${GH_TOKEN-default}",
+                            "GITHUB_TOKEN": "${GITHUB_TOKEN?required}",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_env = {
+        "AWF_GITHUB_TOKEN": "ghp_awf_worker_secret",
+        "GH_TOKEN": "",
+        "GITHUB_TOKEN": "",
+    }
+
+    names = hosted_github_token_passthrough_names(compose_file, worker_env=worker_env)
+
+    assert names == ()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("worker_env", "expected_names"),
     [

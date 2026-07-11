@@ -747,6 +747,11 @@ def _github_token_slot_matches_worker(
     worker_env: Mapping[str, str],
 ) -> bool:
     """Return whether a compose GitHub token slot resolves to the worker token."""
+    if (
+        raw is not None
+        and _compose_empty_setness_reference_name(raw, worker_env=worker_env) is not None
+    ):
+        return False
     return (
         raw == worker_placeholder
         or (raw == _COMPOSE_PASSTHROUGH and bool(worker_env.get(token_name)))
