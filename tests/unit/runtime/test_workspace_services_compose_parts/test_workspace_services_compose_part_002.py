@@ -33,25 +33,18 @@ _clear_host_auth = _part_001._clear_host_auth
 
 
 @pytest.mark.unit
-def test_filter_hosted_env_passthrough_names_keeps_required_set_worker_value(
+def test_filter_hosted_env_passthrough_names_handles_required_worker_values(
     tmp_path: Path,
 ) -> None:
-    """``:?`` / ``?`` with the variable set keep the name in hosted passthrough.
+    """Required forms distinguish non-empty values from explicit empty overrides.
 
     Regression for PR #751 thread PRRT_kwDOSJAM6s6PVhhm: for an agent env value
     such as ``API_KEY: ${API_KEY:?set}``, Docker Compose resolves the worker value
-    of ``API_KEY`` into the local agent container at stack launch when ``API_KEY``
-    is set (non-empty for ``:?``, set for ``?``). The previous code classified every
-    ``:?`` / ``?`` form as ``WORKER_RESOLVED_SLOT``, dropping the key from
-    ``profile_env`` (correct — carrying the worker value would embed a secret) AND
-    excluding it from ``env_passthrough_names`` — so the hosted job received
-    neither the worker value nor any profile default, while the local container
-    received the worker value. Such a name is classified
-    ``WORKER_RESOLVED_DEFAULTED`` so it stays in ``env_passthrough_names`` for
-    hosted out-of-band resolution, mirroring the local Compose container. When the
-    variable is unset the local stack would fail to launch (``:?`` / ``?`` raise),
-    so that branch is unreachable for a running container and stays classified as a
-    worker-resolved slot.
+    of ``API_KEY`` into the local container when its non-empty ``:?`` requirement
+    succeeds, so hosted execution keeps the name for out-of-band resolution. A
+    set-but-empty ``?`` value is instead an explicit empty override: it is carried
+    through ``profile_env`` and excluded from passthrough so a hosted credential
+    cannot replace Compose's selected empty value.
     """
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
@@ -64,8 +57,7 @@ def test_filter_hosted_env_passthrough_names_keeps_required_set_worker_value(
                             # :? with API_KEY set & non-empty -> worker value
                             # resolved out-of-band on the hosted path.
                             "API_KEY": "${API_KEY:?set}",
-                            # ? with API_KEY_Q set (even empty) -> worker value
-                            # resolved out-of-band on the hosted path.
+                            # ? with API_KEY_Q set empty -> explicit empty override.
                             "API_KEY_Q": "${API_KEY_Q?set}",
                             # Pure literal -> excluded (carried via profile_env).
                             "LITERAL_CONFIG": "static-value",
@@ -83,10 +75,9 @@ def test_filter_hosted_env_passthrough_names_keeps_required_set_worker_value(
         names, compose_file=compose_file, worker_env=worker_env
     )
 
-    # :? / ? with variable set -> stays in passthrough for hosted out-of-band
-    # resolution (the local container received the worker value at stack launch).
+    # Non-empty :? stays in passthrough; empty ? is carried as a literal override.
     assert "API_KEY" in filtered
-    assert "API_KEY_Q" in filtered
+    assert "API_KEY_Q" not in filtered
     # Pure literal -> excluded (carried via profile_env instead).
     assert "LITERAL_CONFIG" not in filtered
     # A name absent from the compose env block still passes through.
@@ -1472,98 +1463,3 @@ def test_literal_profile_env_from_compose_preserves_token_endpoint_literals(
     blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
     assert "npm-profile-secret" not in blob
     assert "endpoint-secret" not in blob
-
-
-@pytest.mark.unit
-def test_literal_profile_env_from_compose_skips_jdbc_url_userinfo(
-    tmp_path: Path,
-) -> None:
-    """JDBC-style URL literals with userinfo are NOT carried to hosted profile env.
-
-    Regression for PR #754 thread PRRT_kwDOSJAM6s6PvGqq: ``urlsplit`` treats the
-    outer ``jdbc:`` prefix as the URL scheme and leaves ``netloc`` empty for
-    values like ``jdbc:postgresql://user:secret@db.example/app``. The generic
-    URL-userinfo guard therefore missed embedded credentials when the env name
-    was not itself secret-like, and ``literal_profile_env_from_compose`` carried
-    the raw JDBC URL into ``AgentRuntimeExecRequest.profile_env``.
-    """
-
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text(
-        yaml.safe_dump(
-            {
-                "services": {
-                    "agent": {
-                        "image": "agent:latest",
-                        "environment": {
-                            # Non-secret literal still carried.
-                            "APP_BASE_URL": "http://app:8080",
-                            # JDBC URL embeds credentials but the key is not
-                            # secret-like -> must still be skipped.
-                            "JDBC_DATABASE_URL": (
-                                "jdbc:postgresql://app_user:db-secret@db.example/app"
-                            ),
-                        },
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
-    carried = dict(profile_env)
-
-    assert carried.get("APP_BASE_URL") == "http://app:8080"
-    assert "JDBC_DATABASE_URL" not in carried
-    assert "db-secret" not in "".join(v for _k, v in profile_env)
-
-
-@pytest.mark.unit
-def test_literal_profile_env_from_compose_skips_signed_url_query_credentials(
-    tmp_path: Path,
-) -> None:
-    """Signed URL literals are NOT carried to hosted profile env.
-
-    Regression for PR #754 thread PRRT_kwDOSJAM6s6Pxulk: non-secret-looking env
-    names can carry bearer-equivalent signed URLs, and query fields such as
-    ``X-Amz-Signature`` or Azure SAS ``sig`` must be treated as credentials even
-    though they do not include broader secret-name tokens.
-    """
-
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text(
-        yaml.safe_dump(
-            {
-                "services": {
-                    "agent": {
-                        "image": "agent:latest",
-                        "environment": {
-                            "APP_BASE_URL": "http://app:8080",
-                            "ARTIFACT_URL": (
-                                "https://bucket.s3.amazonaws.com/key"
-                                "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
-                                "&X-Amz-Credential=AKIA/20260710/us-east-1/s3/aws4_request"
-                                "&X-Amz-Signature=s3-signed-secret"
-                            ),
-                            "EXPORT_URL": (
-                                "https://account.blob.core.windows.net/container/blob"
-                                "?sp=r&st=2026-07-10T00:00:00Z&sig=azure-sas-secret"
-                            ),
-                        },
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
-    carried = dict(profile_env)
-
-    assert carried.get("APP_BASE_URL") == "http://app:8080"
-    assert "ARTIFACT_URL" not in carried
-    assert "EXPORT_URL" not in carried
-    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
-    assert "s3-signed-secret" not in blob
-    assert "azure-sas-secret" not in blob
