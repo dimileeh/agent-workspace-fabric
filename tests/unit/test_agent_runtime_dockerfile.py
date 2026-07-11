@@ -143,6 +143,29 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
+    """Verify pinned CLIs still parse the arguments used by AWF adapters."""
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "codex --version || true" not in dockerfile
+    assert (
+        "codex exec --dangerously-bypass-approvals-and-sandbox "
+        "--model gpt-5.4 -c 'model_reasoning_effort=\"high\"' --help >/dev/null"
+    ) in dockerfile
+
+    assert "gemini --version || true" not in dockerfile
+    assert (
+        'gemini --skip-trust --yolo -p "" --model gemini-3.1-pro-preview --help >/dev/null'
+    ) in dockerfile
+
+    assert "grok --version || true" not in dockerfile
+    assert (
+        'grok -p "" --always-approve --no-alt-screen --no-auto-update '
+        "--output-format plain --model grok-build --help >/dev/null"
+    ) in dockerfile
+
+
+@pytest.mark.unit
 def test_agent_runtime_prepares_writable_cursor_config_home() -> None:
     """Verify agent runtime prepares writable cursor config home."""
     dockerfile = _agent_runtime_dockerfile()
