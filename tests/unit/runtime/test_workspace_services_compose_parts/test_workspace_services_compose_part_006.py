@@ -912,3 +912,38 @@ def test_literal_profile_env_from_compose_skips_aws_secret_access_key_config_blo
     blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
     assert "profile-secret" not in blob
     assert "json-profile-secret" not in blob
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_passphrase_config_blobs(
+    tmp_path: Path,
+) -> None:
+    """Neutral env names must not carry passphrase fields from config blobs."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "APP_CONFIG": "ssh_passphrase=profile-passphrase",
+                            "JSON_CONFIG": '{"passphrase":"json-profile-passphrase"}',
+                            "APP_BASE_URL": "https://app.example",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried["APP_BASE_URL"] == "https://app.example"
+    assert "APP_CONFIG" not in carried
+    assert "JSON_CONFIG" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "profile-passphrase" not in blob
+    assert "json-profile-passphrase" not in blob
