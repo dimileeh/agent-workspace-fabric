@@ -170,9 +170,18 @@ class TestGrokAdapter:
         assert json.loads(prompt_copy.read_text()) == "workspace prompt\n\n"
 
     @pytest.mark.unit
-    async def test_launcher_prefers_xai_api_key_even_when_method_not_advertised(
+    @pytest.mark.parametrize(
+        ("auth_methods", "expected_method"),
+        [
+            ([{"id": "cached_token"}], "cached_token"),
+            ([{"id": "cached_token"}, {"id": "xai.api_key"}], "xai.api_key"),
+        ],
+    )
+    async def test_launcher_respects_advertised_auth_methods_with_xai_api_key(
         self,
         tmp_path: Path,
+        auth_methods: list[dict[str, str]],
+        expected_method: str,
     ) -> None:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
@@ -185,7 +194,7 @@ class TestGrokAdapter:
             "    request = json.loads(line)\n"
             "    method = request['method']\n"
             "    if method == 'initialize':\n"
-            "        result = {'authMethods': [{'id': 'cached_token'}]}\n"
+            "        result = {'authMethods': json.loads(os.environ['AWF_FAKE_GROK_AUTH_METHODS'])}\n"
             "    elif method == 'authenticate':\n"
             "        with open(os.environ['AWF_FAKE_GROK_AUTH_METHOD'], 'w', encoding='utf-8') as fh:\n"
             "            json.dump(request['params']['methodId'], fh)\n"
@@ -203,6 +212,7 @@ class TestGrokAdapter:
         env.update(
             {
                 "PATH": f"{bin_dir}:{env['PATH']}",
+                "AWF_FAKE_GROK_AUTH_METHODS": json.dumps(auth_methods),
                 "AWF_FAKE_GROK_AUTH_METHOD": str(auth_method_copy),
                 "XAI_API_KEY": "xai-test-key",
             }
@@ -228,4 +238,4 @@ class TestGrokAdapter:
         _, stderr = await proc.communicate()
 
         assert proc.returncode == 0, stderr.decode()
-        assert json.loads(auth_method_copy.read_text()) == "xai.api_key"
+        assert json.loads(auth_method_copy.read_text()) == expected_method
