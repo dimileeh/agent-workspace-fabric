@@ -348,8 +348,10 @@ def test_literal_profile_env_from_compose_redacts_secret_key_config_blobs(
             compose_file,
             compose_env={
                 "APP_CONFIG": "secret_key=raw-dotenv-secret-key",
+                "STRIPE_CONFIG": "stripe_secret_key=raw-prefixed-dotenv-secret-key",
                 "APP_JSON": '{"secret_key":"raw-json-secret-key"}',
                 "SDK_CONFIG": '{"secretKey":"raw-camel-secret-key"}',
+                "PAYMENTS_JSON": '{"stripeSecretKey":"raw-prefixed-camel-secret-key"}',
                 "APP_SETTINGS": "mode=hosted retries=3",
             },
             worker_env={},
@@ -357,13 +359,17 @@ def test_literal_profile_env_from_compose_redacts_secret_key_config_blobs(
     )
 
     assert "APP_CONFIG" not in profile_env
+    assert "STRIPE_CONFIG" not in profile_env
     assert "APP_JSON" not in profile_env
     assert "SDK_CONFIG" not in profile_env
+    assert "PAYMENTS_JSON" not in profile_env
     assert profile_env["APP_SETTINGS"] == "mode=hosted retries=3"
     blob = "\x00".join(profile_env.values())
     assert "raw-dotenv-secret-key" not in blob
+    assert "raw-prefixed-dotenv-secret-key" not in blob
     assert "raw-json-secret-key" not in blob
     assert "raw-camel-secret-key" not in blob
+    assert "raw-prefixed-camel-secret-key" not in blob
 
 
 @pytest.mark.unit
