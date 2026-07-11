@@ -583,18 +583,52 @@ def _compose_runtime_requirements_from_file(
         return _ComposeRuntimeRequirements(
             service_names=set(), successful_completion_services=set()
         )
-    service_names = {name for name in services if isinstance(name, str) and name}
+    active_profiles = {
+        profile.strip()
+        for profile in os.environ.get("COMPOSE_PROFILES", "").split(",")
+        if profile.strip()
+    }
+    active_services = {
+        name: service
+        for name, service in services.items()
+        if isinstance(name, str)
+        and name
+        and _compose_service_enabled_for_active_profiles(
+            service,
+            active_profiles=active_profiles,
+        )
+    }
+    service_names = set(active_services)
     return _ComposeRuntimeRequirements(
         service_names=service_names,
         successful_completion_services=_compose_successful_completion_service_names(
-            services,
+            active_services,
             service_names=service_names,
         ),
     )
 
 
+def _compose_service_enabled_for_active_profiles(
+    service: object,
+    *,
+    active_profiles: set[str],
+) -> bool:
+    """Mirror Compose's default service selection for ``COMPOSE_PROFILES``."""
+    if not isinstance(service, dict):
+        return True
+    profiles = service.get("profiles")
+    if not isinstance(profiles, list) or not profiles:
+        return True
+    declared_profiles = {profile for profile in profiles if isinstance(profile, str) and profile}
+    if len(declared_profiles) != len(profiles):
+        # Keep malformed service definitions conservative. Compose itself rejects
+        # them, but an already-running service must not be silently waived here.
+        return True
+    return "*" in active_profiles or not declared_profiles.isdisjoint(active_profiles)
+
+
 def _compose_successful_completion_service_names(
-    services: Mapping[object, object],
+    services: Mapping[str, object],
     *,
     service_names: set[str],
 ) -> set[str]:

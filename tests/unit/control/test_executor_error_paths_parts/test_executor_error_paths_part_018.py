@@ -229,6 +229,92 @@ services:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("service", "active_profiles", "expected"),
+    [
+        (None, set(), True),
+        ({}, set(), True),
+        ({"profiles": []}, set(), True),
+        ({"profiles": "debug"}, set(), True),
+        ({"profiles": [""]}, set(), True),
+        ({"profiles": ["debug"]}, set(), False),
+        ({"profiles": ["debug"]}, {"debug"}, True),
+        ({"profiles": ["debug"]}, {"*"}, True),
+    ],
+)
+def test_compose_service_enabled_for_active_profiles(
+    service: object,
+    active_profiles: set[str],
+    expected: bool,
+) -> None:
+    assert (
+        monitor_handoff_module._compose_service_enabled_for_active_profiles(
+            service,
+            active_profiles=active_profiles,
+        )
+        is expected
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("active_profiles", "expected"),
+    [
+        (None, True),
+        ("metrics", True),
+        ("debug", False),
+        ("*", False),
+    ],
+)
+async def test_compose_runtime_usable_after_restart_failure_honors_active_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_profiles: str | None,
+    expected: bool,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  agent:
+    image: awf-agent
+  debug:
+    image: awf-debug
+    profiles:
+      - debug
+""",
+        encoding="utf-8",
+    )
+    if active_profiles is None:
+        monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    else:
+        monkeypatch.setenv("COMPOSE_PROFILES", active_profiles)
+
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        return monitor_handoff_module.RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-id",
+                    image="awf-agent",
+                    state="running",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert (
+        await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+            "awf_x",
+            compose_file,
+        )
+        is expected
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("oneshot_status", "expected"),
     [
         ("Exited (0) 2 minutes ago", True),
