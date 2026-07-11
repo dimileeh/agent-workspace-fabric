@@ -668,14 +668,17 @@ def hosted_github_token_passthrough_names(
     so the local agent container can run ``gh``; the hosted path has no
     equivalent substitution — it resolves ``env_passthrough_names`` by name
     out-of-band, so resolving ``GH_TOKEN`` / ``GITHUB_TOKEN`` finds nothing in
-    that common setup. The helper therefore also surfaces the chosen source
+    that common setup. When at least one gh-visible alias was rendered in the
+    Compose environment, the helper therefore also surfaces the chosen source
     *name* so the hosted executor can resolve the credential from the source
     name and mirror it into the gh-visible aliases (the same
     ``AWF_GITHUB_TOKEN`` -> ``GH_TOKEN`` / ``GITHUB_TOKEN`` mirroring
     ``_service_git_environment`` / ``_check_github`` / ``_gh_probe_environ``
     already apply). The source name is de-duplicated against the surfaced
     aliases (when the source is itself a gh-visible alias, e.g. ``GH_TOKEN``, it
-    appears once).
+    appears once). If no gh-visible alias was rendered, no source name is
+    surfaced because the local Compose agent did not receive a GitHub CLI token
+    alias to mirror.
 
     Names only — secret values are NEVER transported; the hosted executor
     resolves them out-of-band, mirroring ``env_passthrough_names``. The
@@ -760,13 +763,16 @@ def hosted_github_token_passthrough_names(
             worker_env=source_env,
         )
     )
+    if not aliases:
+        return aliases
     # Surface the chosen source name first so a hosted executor can resolve the
     # credential from the source name when the worker only carries the AWF
-    # source (local Compose substitutes the placeholder into the aliases at
-    # stack launch; the hosted path has no equivalent substitution). De-duplicate
-    # against the surfaced aliases so a source that is itself a gh-visible alias
-    # (e.g. ``GH_TOKEN``) appears exactly once. Source first preserves the scan
-    # order's precedence intent (``AWF_GITHUB_TOKEN`` before the aliases).
+    # source and Compose rendered that source into at least one gh-visible alias
+    # at stack launch (the hosted path has no equivalent substitution).
+    # De-duplicate against the surfaced aliases so a source that is itself a
+    # gh-visible alias (e.g. ``GH_TOKEN``) appears exactly once. Source first
+    # preserves the scan order's precedence intent (``AWF_GITHUB_TOKEN`` before
+    # the aliases).
     source_name = _github_token_source_name(source_env)
     if source_name is not None and source_name not in aliases:
         return (source_name, *aliases)

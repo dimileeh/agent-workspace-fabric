@@ -210,6 +210,44 @@ def test_hosted_github_token_passthrough_names_surfaces_source_when_worker_only_
 
 
 @pytest.mark.unit
+def test_hosted_github_token_passthrough_names_skips_source_without_rendered_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source name is surfaced only when Compose rendered a gh-visible alias.
+
+    Regression for PR #754 thread PRRT_kwDOSJAM6s6QDUFb: if a persisted Compose
+    environment has no ``GH_TOKEN`` / ``GITHUB_TOKEN`` entry, the local Compose
+    agent did not receive any GitHub CLI-visible worker token alias. A hosted
+    resume must therefore not surface ``AWF_GITHUB_TOKEN`` by itself, or the
+    repair agent could receive GitHub credentials the local run did not expose.
+    """
+    from awf.profiles.compose import hosted_github_token_passthrough_names
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {"OPENAI_API_KEY": "${OPENAI_API_KEY}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_worker_secret")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    names = hosted_github_token_passthrough_names(compose_file)
+
+    assert names == ()
+
+
+@pytest.mark.unit
 def test_hosted_github_token_passthrough_names_surfaces_source_once_when_source_is_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
