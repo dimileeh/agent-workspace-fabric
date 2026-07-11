@@ -65,8 +65,40 @@ def test_url_and_secret_like_profile_env_detection_covers_query_credentials() ->
     assert (
         compose_module._value_has_url_userinfo("https://example.test/callback#token=secret") is True
     )
+    assert (
+        compose_module._value_has_url_userinfo(
+            "https://sp.example/acs?SAMLResponse=base64-assertion"
+        )
+        is True
+    )
+    assert (
+        compose_module._value_has_url_userinfo(
+            "https://sp.example/acs?SAMLAssertion=base64-assertion"
+        )
+        is True
+    )
     assert compose_module._value_has_url_userinfo("https://[::1") is False
     assert compose_module._value_has_url_userinfo("https://example.test/repo") is False
+
+
+@pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_saml_response_urls(tmp_path: Path) -> None:
+    """Neutral URL env names must not carry SAML assertions into hosted requests."""
+    compose_file = tmp_path / "missing-compose.yml"
+
+    profile_env = dict(
+        literal_profile_env_from_compose(
+            compose_file,
+            compose_env={
+                "APP_URL": "https://sp.example/acs?SAMLResponse=base64-response",
+                "CALLBACK_URL": "https://sp.example/acs?SAMLAssertion=base64-assertion",
+                "PUBLIC_URL": "https://sp.example/landing",
+            },
+            worker_env={},
+        )
+    )
+
+    assert profile_env == {"PUBLIC_URL": "https://sp.example/landing"}
 
 
 @pytest.mark.unit
@@ -947,12 +979,70 @@ def test_hosted_git_config_preserves_safe_git_ssh_rewrite_key() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "count_raw",
+    [compose_module._COMPOSE_PASSTHROUGH, "${GIT_CONFIG_COUNT}"],
+)
+def test_hosted_git_config_resolves_worker_selected_count(count_raw: str) -> None:
+    """Pass-through and interpolated counts preserve the local Git config block."""
+    profile_env, aliases = compose_module._hosted_git_config_env(
+        {
+            "GIT_CONFIG_COUNT": count_raw,
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "!/workspace/bin/git-helper",
+        },
+        worker_env={"GIT_CONFIG_COUNT": "1"},
+        skip_bitbucket_agent_rewrites=False,
+    )
+
+    assert profile_env == (
+        ("GIT_CONFIG_KEY_0", "credential.helper"),
+        ("GIT_CONFIG_VALUE_0", "!/workspace/bin/git-helper"),
+        ("GIT_CONFIG_COUNT", "1"),
+    )
+    assert aliases == ()
+
+
+@pytest.mark.unit
+def test_hosted_git_config_resolves_and_filters_passthrough_keys() -> None:
+    """Worker-selected keys retain safe entries without carrying credential URLs."""
+    profile_env, aliases = compose_module._hosted_git_config_env(
+        {
+            "GIT_CONFIG_COUNT": "3",
+            "GIT_CONFIG_KEY_0": compose_module._COMPOSE_PASSTHROUGH,
+            "GIT_CONFIG_VALUE_0": "!/workspace/bin/git-helper",
+            "GIT_CONFIG_KEY_1": compose_module._COMPOSE_PASSTHROUGH,
+            "GIT_CONFIG_VALUE_1": "https://example.test/",
+            "GIT_CONFIG_KEY_2": compose_module._COMPOSE_PASSTHROUGH,
+            "GIT_CONFIG_VALUE_2": "ignored",
+        },
+        worker_env={
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_KEY_1": "url.https://user:secret@example.test/.insteadOf",
+        },
+        skip_bitbucket_agent_rewrites=False,
+    )
+
+    assert profile_env == (
+        ("GIT_CONFIG_KEY_0", "credential.helper"),
+        ("GIT_CONFIG_VALUE_0", "!/workspace/bin/git-helper"),
+        ("GIT_CONFIG_COUNT", "1"),
+    )
+    assert aliases == ()
+
+
+@pytest.mark.unit
 def test_hosted_git_config_ignores_unusable_count_values() -> None:
     """Nonliteral and noninteger git-config counts produce no hosted block."""
 
     assert compose_module._hosted_git_config_env(
+        {"GIT_CONFIG_COUNT": compose_module._COMPOSE_PASSTHROUGH},
+        worker_env={},
+        skip_bitbucket_agent_rewrites=False,
+    ) == ((), ())
+    assert compose_module._hosted_git_config_env(
         {"GIT_CONFIG_COUNT": "${GIT_CONFIG_COUNT}"},
-        worker_env={"GIT_CONFIG_COUNT": "1"},
+        worker_env={},
         skip_bitbucket_agent_rewrites=False,
     ) == ((), ())
     assert compose_module._hosted_git_config_env(

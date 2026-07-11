@@ -261,6 +261,8 @@ _URL_SECRET_CREDENTIAL_FIELD_EXACT_NAMES = frozenset(
         "JSESSIONID",
         "KEY",
         "PRIVATEKEY",
+        "SAMLASSERTION",
+        "SAMLRESPONSE",
         "SECRETKEY",
         "SESSION",
         "SESSIONID",

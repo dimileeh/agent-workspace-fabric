@@ -162,10 +162,19 @@ def _hosted_git_config_env(
     skip_bitbucket_agent_rewrites: bool,
 ) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
     count_raw = compose_env.get(_GIT_CONFIG_COUNT_KEY)
-    if count_raw is None or count_raw == _COMPOSE_PASSTHROUGH:
+    if count_raw is None:
         return (), ()
-    count_value, count_resolution = _compose_resolve_value(count_raw, worker_env=worker_env)
-    if count_resolution is not _ComposeEnvResolution.LITERAL:
+    if count_raw == _COMPOSE_PASSTHROUGH:
+        count_value = worker_env.get(_GIT_CONFIG_COUNT_KEY)
+    else:
+        count_value, count_resolution = _compose_resolve_value(count_raw, worker_env=worker_env)
+        if count_resolution is not _ComposeEnvResolution.LITERAL:
+            count_source = _compose_selected_worker_reference_name(
+                count_raw,
+                worker_env=worker_env,
+            )
+            count_value = worker_env.get(count_source) if count_source is not None else None
+    if count_value is None:
         return (), ()
     try:
         count = int(count_value)
@@ -178,18 +187,19 @@ def _hosted_git_config_env(
     for index in range(count):
         config_key_raw = compose_env.get(f"{_GIT_CONFIG_KEY_PREFIX}{index}")
         config_value_raw = compose_env.get(f"{_GIT_CONFIG_VALUE_PREFIX}{index}")
-        if (
-            config_key_raw is None
-            or config_value_raw is None
-            or config_key_raw == _COMPOSE_PASSTHROUGH
-        ):
+        if config_key_raw is None or config_value_raw is None:
             continue
-        config_key, key_resolution = _compose_resolve_value(
-            config_key_raw,
-            worker_env=worker_env,
-        )
-        if key_resolution is not _ComposeEnvResolution.LITERAL:
-            continue
+        if config_key_raw == _COMPOSE_PASSTHROUGH:
+            config_key = worker_env.get(f"{_GIT_CONFIG_KEY_PREFIX}{index}")
+            if config_key is None:
+                continue
+        else:
+            config_key, key_resolution = _compose_resolve_value(
+                config_key_raw,
+                worker_env=worker_env,
+            )
+            if key_resolution is not _ComposeEnvResolution.LITERAL:
+                continue
         if (
             config_key != _BITBUCKET_AGENT_INSTEADOF_KEY
             and compose_module._value_has_url_userinfo(config_key)
