@@ -167,6 +167,7 @@ _SECRET_LIKE_PROFILE_ENV_NAME_TOKENS = frozenset(
         "PASSPHRASE",
         "PASSWD",
         "PASSWORD",
+        "PAT",
         "SECRET",
         "TOKEN",
     }

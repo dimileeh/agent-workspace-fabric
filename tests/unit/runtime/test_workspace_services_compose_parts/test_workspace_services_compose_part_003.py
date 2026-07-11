@@ -361,6 +361,8 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
                         "environment": {
                             "NPM_TOKEN": "",
                             "CUSTOM_API_TOKEN": "custom_profile_token",
+                            "GITHUB_PAT": "ghp_profile_pat",
+                            "BITBUCKET_PAT": "bitbucket_profile_pat",
                             "SENDGRID_APIKEY": "sendgrid_profile_apikey",
                             "NPM_CONFIG_REGISTRY_AUTHTOKEN": "npm_profile_authtoken",
                             "STRIPE_KEY": "sk_live_profile",
@@ -407,6 +409,8 @@ def test_literal_profile_env_from_compose_redacts_non_auth_literal_secret_names(
 
     assert carried["NPM_TOKEN"] == ""
     assert "CUSTOM_API_TOKEN" not in carried
+    assert "GITHUB_PAT" not in carried
+    assert "BITBUCKET_PAT" not in carried
     assert "SENDGRID_APIKEY" not in carried
     assert "NPM_CONFIG_REGISTRY_AUTHTOKEN" not in carried
     assert "STRIPE_KEY" not in carried
