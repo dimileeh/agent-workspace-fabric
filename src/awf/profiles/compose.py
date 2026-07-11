@@ -237,11 +237,6 @@ def _value_has_url_userinfo(value: str) -> bool:
         parsed = urlsplit(value)
     except ValueError:
         return False
-    if not parsed.scheme:
-        return any(
-            _value_has_url_userinfo(match.group(0))
-            for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(value)
-        )
     if parsed.netloc:
         if "@" in parsed.netloc:
             userinfo = parsed.netloc.rsplit("@", maxsplit=1)[0]
@@ -261,6 +256,11 @@ def _value_has_url_userinfo(value: str) -> bool:
             for raw_component in (parsed.path, parsed.query, parsed.fragment)
             for component in _url_component_variants(raw_component)
             for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(component)
+        )
+    if not parsed.scheme:
+        return any(
+            _value_has_url_userinfo(match.group(0))
+            for match in _URL_LIKE_SUBSTRING_PATTERN.finditer(value)
         )
     if any(
         _url_component_has_secret_credential_field(component)

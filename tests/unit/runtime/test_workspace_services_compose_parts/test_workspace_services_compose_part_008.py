@@ -665,6 +665,39 @@ def test_literal_profile_env_from_compose_redacts_encoded_nested_url_path_creden
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_redacts_protocol_relative_url_userinfo(
+    tmp_path: Path,
+) -> None:
+    """Protocol-relative URLs can still carry credential-bearing hosts."""
+
+    callback_url = "//user:callback-secret@example.com/path"
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "CALLBACK_URL": callback_url,
+                            "OLLAMA_HOST": "http://ollama.profile:11434",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+
+    carried = dict(profile_env)
+    assert carried["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert "CALLBACK_URL" not in carried
+    assert "callback-secret" not in "\x00".join(v for _k, v in profile_env)
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_redacts_postgres_password_from_service_env_file(
     tmp_path: Path,
 ) -> None:
