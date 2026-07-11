@@ -205,7 +205,12 @@ def _hosted_git_config_env(
         if skip_bitbucket_agent_rewrites and config_key == _BITBUCKET_AGENT_INSTEADOF_KEY:
             continue
         if value_resolution is _ComposeEnvResolution.LITERAL:
-            if config_value == "" and _compose_bare_reference_name(config_value_raw) is not None:
+            bare_value_source = _compose_bare_reference_name(config_value_raw)
+            if (
+                config_value == ""
+                and bare_value_source is not None
+                and bare_value_source not in worker_env
+            ):
                 continue
             if not _is_safe_bitbucket_agent_insteadof_value(
                 config_key,
