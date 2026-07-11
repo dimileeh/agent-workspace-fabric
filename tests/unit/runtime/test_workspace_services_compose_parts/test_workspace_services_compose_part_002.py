@@ -1106,6 +1106,42 @@ def test_literal_profile_env_from_compose_skips_standard_auth_credential_literal
 
 
 @pytest.mark.unit
+def test_literal_profile_env_from_compose_skips_neutral_docker_identitytoken_literals(
+    tmp_path: Path,
+) -> None:
+    """Neutral Docker config blobs with identitytoken fields are NOT carried."""
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "agent": {
+                        "image": "agent:latest",
+                        "environment": {
+                            "REGISTRY_CONFIG": (
+                                '{"auths":{"registry.example":'
+                                '{"identitytoken":"registry-identity-secret"}}}'
+                            ),
+                            "APP_BASE_URL": "http://app:8080",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile_env = literal_profile_env_from_compose(compose_file, worker_env={})
+    carried = dict(profile_env)
+
+    assert carried.get("APP_BASE_URL") == "http://app:8080"
+    assert "REGISTRY_CONFIG" not in carried
+    blob = "\x00".join(f"{key}={value}" for key, value in profile_env)
+    assert "registry-identity-secret" not in blob
+
+
+@pytest.mark.unit
 def test_literal_profile_env_from_compose_skips_neutral_npmrc_auth_literals(
     tmp_path: Path,
 ) -> None:
