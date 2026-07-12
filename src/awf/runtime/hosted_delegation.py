@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import re
 import time
@@ -65,6 +66,7 @@ HOSTED_DELEGATION_MISSING_TOKEN = (
     "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"
 )
 _ARTIFACT_LABEL_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+_HOSTED_RESPONSE_JSON_OVERHEAD_BYTES = 64 * 1024
 
 
 class HostedDelegationConfigError(ValueError):
@@ -185,7 +187,10 @@ class HostedAgentRuntimeExecutor(AgentRuntimeExecutor):
         finally:
             if owns_client:
                 await client.aclose()
-        return _agent_result_from_terminal(terminal)
+        return _agent_result_from_terminal(
+            terminal,
+            max_output_bytes=self._config.max_output_bytes,
+        )
 
     async def _start(
         self,
@@ -217,13 +222,11 @@ class HostedAgentRuntimeExecutor(AgentRuntimeExecutor):
         while True:
             if time.monotonic() >= deadline:
                 raise TimeoutError
-            response = await client.get(
+            payload = await _poll_response_json(
+                client,
                 operation.url,
-                headers=_auth_headers(self._config),
-                timeout=self._config.request_timeout_seconds,
+                config=self._config,
             )
-            response.raise_for_status()
-            payload = _response_json(response)
             _validate_operation_identity(payload, operation)
             state = _operation_state(payload)
             if state in {"queued", "running"}:
@@ -295,6 +298,7 @@ class HostedValidationDelegate:
         return _validation_result_from_terminal(
             terminal,
             artifacts_dir=self._artifacts_dir / workspace_id,
+            max_output_bytes=self._config.max_output_bytes,
         )
 
     async def run_profile_coverage(
@@ -334,6 +338,7 @@ class HostedValidationDelegate:
         return _coverage_result_from_payload(
             coverage,
             artifacts_dir=self._artifacts_dir / workspace_id,
+            max_output_bytes=self._config.max_output_bytes,
         )
 
     async def _run_operation(
@@ -396,13 +401,11 @@ class HostedValidationDelegate:
         while True:
             if time.monotonic() >= deadline:
                 raise TimeoutError
-            response = await client.get(
+            payload = await _poll_response_json(
+                client,
                 operation.url,
-                headers=_auth_headers(self._config),
-                timeout=self._config.request_timeout_seconds,
+                config=self._config,
             )
-            response.raise_for_status()
-            payload = _response_json(response)
             _validate_operation_identity(payload, operation)
             state = _operation_state(payload)
             if state in {"queued", "running"}:
@@ -471,11 +474,37 @@ def _agent_pr_identity_payload(request: AgentRuntimeExecRequest) -> dict[str, An
     return identity
 
 
-def _agent_result_from_terminal(payload: Mapping[str, Any]) -> AgentRuntimeExecResult:
+async def _poll_response_json(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    config: HostedDelegationConfig,
+) -> Mapping[str, Any]:
+    async with client.stream(
+        "GET",
+        url,
+        headers=_auth_headers(config),
+        timeout=config.request_timeout_seconds,
+    ) as response:
+        response.raise_for_status()
+        return await _response_json_bounded(
+            response,
+            max_bytes=_response_json_max_bytes(config.max_output_bytes),
+        )
+
+
+def _agent_result_from_terminal(
+    payload: Mapping[str, Any],
+    *,
+    max_output_bytes: int,
+) -> AgentRuntimeExecResult:
+    stdout = _text_field(payload, "stdout")
+    stderr = _text_field(payload, "stderr")
+    _ensure_output_within_limit(stdout, stderr, max_output_bytes=max_output_bytes)
     return AgentRuntimeExecResult(
         returncode=_int_field(payload, "returncode"),
-        stdout=_text_field(payload, "stdout"),
-        stderr=_text_field(payload, "stderr"),
+        stdout=stdout,
+        stderr=stderr,
         timeout_reason=_optional_str(payload.get("timeout_reason")) or "",
         terminal_head_sha=_optional_str(payload.get("terminal_head_sha")),
     )
@@ -485,6 +514,7 @@ def _validation_result_from_terminal(
     payload: Mapping[str, Any],
     *,
     artifacts_dir: Path,
+    max_output_bytes: int,
 ) -> ValidationResult:
     commands_payload = payload.get("commands", [])
     if not isinstance(commands_payload, list):
@@ -495,12 +525,17 @@ def _validation_result_from_terminal(
             item,
             artifacts_dir=artifacts_dir,
             index=index,
+            max_output_bytes=max_output_bytes,
         )
         for index, item in enumerate(commands_payload, start=1)
     ]
     coverage_payload = payload.get("coverage")
     coverage = (
-        _coverage_result_from_payload(coverage_payload, artifacts_dir=artifacts_dir)
+        _coverage_result_from_payload(
+            coverage_payload,
+            artifacts_dir=artifacts_dir,
+            max_output_bytes=max_output_bytes,
+        )
         if isinstance(coverage_payload, Mapping)
         else None
     )
@@ -512,6 +547,7 @@ def _validation_command_result_from_payload(
     *,
     artifacts_dir: Path,
     index: int,
+    max_output_bytes: int,
 ) -> ValidationCommandResult:
     if not isinstance(payload, Mapping):
         raise HostedDelegationProtocolError("hosted validation command result is malformed")
@@ -519,6 +555,7 @@ def _validation_command_result_from_payload(
     label = f"{index:02d}_{_artifact_label_component(phase)}"
     stdout = _text_payload_field(payload, "stdout")
     stderr = _text_payload_field(payload, "stderr")
+    _ensure_output_within_limit(stdout, stderr, max_output_bytes=max_output_bytes)
     stdout_path = artifacts_dir / f"{label}.stdout"
     stderr_path = artifacts_dir / f"{label}.stderr"
     stdout_path.write_text(stdout, encoding="utf-8")
@@ -555,6 +592,7 @@ def _coverage_result_from_payload(
     payload: Mapping[str, Any],
     *,
     artifacts_dir: Path,
+    max_output_bytes: int,
 ) -> ValidationCoverageResult:
     command_result_payload = payload.get("command_result")
     command_result = (
@@ -562,6 +600,7 @@ def _coverage_result_from_payload(
             command_result_payload,
             artifacts_dir=artifacts_dir,
             index=999,
+            max_output_bytes=max_output_bytes,
         )
         if isinstance(command_result_payload, Mapping)
         else None
@@ -625,6 +664,57 @@ def _response_json(response: httpx.Response) -> Mapping[str, Any]:
     if not isinstance(payload, Mapping):
         raise HostedDelegationProtocolError("hosted delegation returned non-object response")
     return payload
+
+
+async def _response_json_bounded(
+    response: httpx.Response,
+    *,
+    max_bytes: int,
+) -> Mapping[str, Any]:
+    content_length = _content_length(response)
+    if content_length is not None and content_length > max_bytes:
+        raise HostedDelegationProtocolError("hosted delegation response exceeds max_output_bytes")
+    chunks: list[bytes] = []
+    total_bytes = 0
+    async for chunk in response.aiter_bytes():
+        total_bytes += len(chunk)
+        if total_bytes > max_bytes:
+            raise HostedDelegationProtocolError(
+                "hosted delegation response exceeds max_output_bytes"
+            )
+        chunks.append(chunk)
+    return _json_payload_from_content(b"".join(chunks))
+
+
+def _json_payload_from_content(content: bytes) -> Mapping[str, Any]:
+    try:
+        payload = json.loads(content)
+    except ValueError as exc:
+        raise HostedDelegationProtocolError("hosted delegation returned non-json response") from exc
+    if not isinstance(payload, Mapping):
+        raise HostedDelegationProtocolError("hosted delegation returned non-object response")
+    return payload
+
+
+def _content_length(response: httpx.Response) -> int | None:
+    value = response.headers.get("Content-Length")
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _response_json_max_bytes(max_output_bytes: int) -> int:
+    return max_output_bytes + _HOSTED_RESPONSE_JSON_OVERHEAD_BYTES
+
+
+def _ensure_output_within_limit(*values: str, max_output_bytes: int) -> None:
+    output_bytes = sum(len(value.encode("utf-8")) for value in values)
+    if output_bytes > max_output_bytes:
+        raise HostedDelegationProtocolError("hosted delegation output exceeds max_output_bytes")
 
 
 def _str_field(payload: Mapping[str, Any], key: str) -> str:

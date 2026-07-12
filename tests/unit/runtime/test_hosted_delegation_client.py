@@ -171,6 +171,93 @@ async def test_agent_delegation_maps_unsuccessful_terminal_without_head_sha(
 
 
 @pytest.mark.unit
+async def test_agent_delegation_rejects_oversized_poll_response_before_json_parse() -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/agent-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/op_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/op_1":
+            return httpx.Response(
+                200,
+                headers={"Content-Length": "70000"},
+                content=b"{",
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        with pytest.raises(HostedDelegationProtocolError, match="response exceeds"):
+            await HostedAgentRuntimeExecutor(_config(max_output_bytes=16), client=client).execute(
+                _agent_request()
+            )
+
+
+@pytest.mark.unit
+async def test_agent_delegation_rejects_oversized_poll_response_without_valid_length() -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/agent-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/op_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/op_1":
+            return httpx.Response(
+                200,
+                headers={"Content-Length": "not-an-int"},
+                content=b"{" + (b"x" * 70000),
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        with pytest.raises(HostedDelegationProtocolError, match="response exceeds"):
+            await HostedAgentRuntimeExecutor(_config(max_output_bytes=16), client=client).execute(
+                _agent_request()
+            )
+
+
+@pytest.mark.unit
+async def test_agent_delegation_rejects_terminal_output_over_max_output_bytes() -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/agent-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/op_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/op_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "failed",
+                    "returncode": 1,
+                    "stdout": "12345",
+                    "stderr": "",
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        with pytest.raises(HostedDelegationProtocolError, match="output exceeds"):
+            await HostedAgentRuntimeExecutor(_config(max_output_bytes=4), client=client).execute(
+                _agent_request()
+            )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "terminal_payload",
     [

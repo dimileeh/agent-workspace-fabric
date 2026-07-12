@@ -10,7 +10,11 @@ import httpx
 import pytest
 
 from awf.profiles.models import WorkspaceProfile
-from awf.runtime.hosted_delegation import HostedDelegationConfig, HostedValidationDelegate
+from awf.runtime.hosted_delegation import (
+    HostedDelegationConfig,
+    HostedDelegationProtocolError,
+    HostedValidationDelegate,
+)
 
 
 def _config(**overrides: object) -> HostedDelegationConfig:
@@ -238,3 +242,57 @@ async def test_hosted_validation_sanitizes_remote_phase_before_artifact_write(
     assert command.stderr_path.read_text(encoding="utf-8") == "err\n"
     assert not (tmp_path / "owned.stdout").exists()
     assert not (tmp_path / "owned.stderr").exists()
+
+
+@pytest.mark.unit
+async def test_hosted_validation_rejects_command_output_over_max_output_bytes(
+    tmp_path: Path,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "failed",
+                    "commands": [
+                        {
+                            "command": "pytest -q",
+                            "returncode": 1,
+                            "duration_seconds": 0.2,
+                            "stdout": "12345",
+                            "stderr": "",
+                            "phase": "validate",
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(max_output_bytes=4),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        with pytest.raises(HostedDelegationProtocolError, match="output exceeds"):
+            await delegate.run_profile_phases(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=WorkspaceProfile(name="hosted-test"),
+                phase_names=("validate",),
+            )
+
+    assert not (tmp_path / "ws_hosted" / "01_validate.stdout").exists()
+    assert not (tmp_path / "ws_hosted" / "01_validate.stderr").exists()
