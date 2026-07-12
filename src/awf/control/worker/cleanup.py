@@ -985,7 +985,19 @@ async def _release_terminal_runtime_for_candidate(
             "remove_worktree": False,
         }
         if pr_adoption_is_hosted(candidate.task_policy):
-            cleanup_kwargs["skip_compose"] = True
+            has_compose_artifacts = (
+                candidate.compose_project_name is not None
+                or candidate.compose_file_path is not None
+            )
+            if has_compose_artifacts:
+                _log.warning(
+                    "worker.hosted_candidate_has_compose_artifacts",
+                    workspace_id=candidate.workspace_id,
+                    compose_project_name=candidate.compose_project_name,
+                    compose_file_path=candidate.compose_file_path,
+                )
+            else:
+                cleanup_kwargs["skip_compose"] = True
         cleanup = await self._runtime_cleaner.cleanup(**cleanup_kwargs)
     except asyncio.CancelledError:
         raise
