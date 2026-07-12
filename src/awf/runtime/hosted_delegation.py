@@ -54,6 +54,7 @@ from awf.adapters.runtime_executor import (
 )
 from awf.common.commands import COMMAND_TIMEOUT_REASON
 from awf.common.config import Settings
+from awf.common.token_patterns import TOKEN_ASSIGNMENT_KEY_PATTERN, compile_known_token_re
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation_types import (
     ValidationCommandResult,
@@ -66,6 +67,16 @@ HOSTED_DELEGATION_MISSING_TOKEN = (
     "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"
 )
 _ARTIFACT_LABEL_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+_ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_REFERENCE_PATTERN = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+_SECRET_ENV_NAME_PATTERN = re.compile(
+    rf"^(?:{TOKEN_ASSIGNMENT_KEY_PATTERN})$|"
+    r"(?:^|[_-])(?:TOKEN|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|"
+    r"PASSWORD|PASSWD|SECRET|CREDENTIALS?)(?:[_-]|$)",
+    re.IGNORECASE,
+)
+_SECRET_VALUE_PATTERN = compile_known_token_re(match_truncated_provider_tokens=False)
+_URL_WITH_CREDENTIALS_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@")
 _HOSTED_RESPONSE_JSON_OVERHEAD_BYTES = 64 * 1024
 _HOSTED_VALIDATION_TERMINAL_FAILURES = {
     "failed": (1, "HOSTED_VALIDATION_FAILED"),
@@ -292,7 +303,7 @@ class HostedValidationDelegate:
             start_path="/v1/validation-runs",
             payload={
                 "workspace_id": workspace_id,
-                "profile": profile.model_dump(mode="json", by_alias=True),
+                "profile": _hosted_validation_profile_payload(profile),
                 "phase_names": list(phase_names),
                 "run_healthchecks": run_healthchecks,
                 "worktree_path": str(worktree_path) if worktree_path is not None else None,
@@ -325,7 +336,7 @@ class HostedValidationDelegate:
             start_path="/v1/validation-runs",
             payload={
                 "workspace_id": workspace_id,
-                "profile": profile.model_dump(mode="json", by_alias=True),
+                "profile": _hosted_validation_profile_payload(profile),
                 "phase_names": [phase],
                 "run_healthchecks": False,
                 "include_coverage": True,
@@ -484,6 +495,39 @@ def _agent_pr_identity_payload(request: AgentRuntimeExecRequest) -> dict[str, An
     if request.owned_paths:
         identity["owned_paths"] = list(request.owned_paths)
     return identity
+
+
+def _hosted_validation_profile_payload(profile: WorkspaceProfile) -> dict[str, Any]:
+    payload = profile.model_dump(mode="json", by_alias=True)
+    runtime = payload.get("runtime")
+    if isinstance(runtime, dict):
+        environment = runtime.get("environment")
+        if isinstance(environment, dict):
+            runtime["environment"] = {
+                str(name): _hosted_validation_env_value(str(name), value)
+                for name, value in environment.items()
+            }
+    return payload
+
+
+def _hosted_validation_env_value(name: str, value: object) -> str:
+    text = str(value)
+    if _hosted_validation_env_value_is_secret(name, text):
+        return f"${{{name}}}" if _ENV_NAME_PATTERN.fullmatch(name) else "<redacted>"
+    return text
+
+
+def _hosted_validation_env_value_is_secret(name: str, value: str) -> bool:
+    stripped = value.strip()
+    if not stripped or _ENV_REFERENCE_PATTERN.fullmatch(stripped):
+        return False
+    return (
+        bool(_SECRET_ENV_NAME_PATTERN.search(name))
+        or bool(_SECRET_VALUE_PATTERN.search(stripped))
+        or bool(_URL_WITH_CREDENTIALS_PATTERN.search(stripped))
+        or "-----BEGIN " in stripped
+        or "\n" in stripped
+    )
 
 
 async def _poll_response_json(

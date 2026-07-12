@@ -31,6 +31,20 @@ def _config(**overrides: object) -> HostedDelegationConfig:
     return HostedDelegationConfig(**values)  # type: ignore[arg-type]
 
 
+def _profile_with_runtime_secret() -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-secret-test",
+            "runtime": {
+                "environment": {
+                    "NPM_TOKEN": "npm-profile-secret",
+                    "OLLAMA_HOST": "http://ollama.profile:11434",
+                }
+            },
+        }
+    )
+
+
 @pytest.mark.unit
 async def test_hosted_validation_posts_operation_and_maps_validation_result(
     tmp_path: Path,
@@ -119,6 +133,57 @@ async def test_hosted_validation_posts_operation_and_maps_validation_result(
 
 
 @pytest.mark.unit
+async def test_hosted_validation_sanitizes_literal_runtime_environment_secrets(
+    tmp_path: Path,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=_profile_with_runtime_secret(),
+            phase_names=("validate",),
+        )
+
+    body_blob = json.dumps(seen["body"], sort_keys=True)
+    assert "npm-profile-secret" not in body_blob
+    assert seen["body"]["profile"]["runtime"]["environment"] == {
+        "NPM_TOKEN": "${NPM_TOKEN}",
+        "OLLAMA_HOST": "http://ollama.profile:11434",
+    }
+
+
+@pytest.mark.unit
 async def test_hosted_coverage_posts_pr_identity(tmp_path: Path) -> None:
     """Coverage-only hosted validation must preserve adopted PR identity."""
     seen: dict[str, Any] = {}
@@ -177,6 +242,63 @@ async def test_hosted_coverage_posts_pr_identity(tmp_path: Path) -> None:
     assert seen["body"]["phase_names"] == ["coverage"]
     assert seen["body"]["include_coverage"] is True
     assert seen["body"]["pr_identity"]["pr_number"] == 277
+
+
+@pytest.mark.unit
+async def test_hosted_coverage_sanitizes_literal_runtime_environment_secrets(
+    tmp_path: Path,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/coverage_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/coverage_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "coverage": {
+                        "provider": "python",
+                        "percent": 99.5,
+                        "minimum_percent": 99.0,
+                        "enforce": True,
+                        "status": "passed",
+                        "reason_code": "COVERAGE_OK",
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        await delegate.run_profile_coverage(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=_profile_with_runtime_secret(),
+        )
+
+    body_blob = json.dumps(seen["body"], sort_keys=True)
+    assert "npm-profile-secret" not in body_blob
+    assert seen["body"]["profile"]["runtime"]["environment"] == {
+        "NPM_TOKEN": "${NPM_TOKEN}",
+        "OLLAMA_HOST": "http://ollama.profile:11434",
+    }
 
 
 @pytest.mark.unit
