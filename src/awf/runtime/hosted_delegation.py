@@ -670,10 +670,17 @@ def _strip_url_userinfo(value: str) -> str:
     parsed = urlsplit(value)
     if not parsed.scheme or "@" not in parsed.netloc:
         return value
+    userinfo, _, authority = parsed.netloc.rpartition("@")
+    if parsed.scheme.lower() == "ssh":
+        username, password_separator, _ = userinfo.partition(":")
+        if not password_separator:
+            return value
+        if username:
+            authority = f"{username}@{authority}"
     return urlunsplit(
         (
             parsed.scheme,
-            parsed.netloc.rsplit("@", 1)[1],
+            authority,
             parsed.path,
             parsed.query,
             parsed.fragment,

@@ -288,16 +288,59 @@ async def test_agent_delegation_strips_credentials_from_pr_identity_urls() -> No
         await HostedAgentRuntimeExecutor(_config(), client=client).execute(
             _agent_request(
                 repo_url="https://base-secret-123@github.com/base/repo.git",
-                head_repo_url="https://user:fork-secret-456@github.com/fork/repo.git",
+                head_repo_url="ssh://git:fork-secret-456@github.com/fork/repo.git",
             )
         )
 
     pr_identity = seen["body"]["pr_identity"]
     assert pr_identity["repo_url"] == "https://github.com/base/repo.git"
-    assert pr_identity["head_repo_url"] == "https://github.com/fork/repo.git"
+    assert pr_identity["head_repo_url"] == "ssh://git@github.com/fork/repo.git"
     body_blob = json.dumps(seen["body"], sort_keys=True)
     assert "base-secret-123" not in body_blob
     assert "fork-secret-456" not in body_blob
+
+
+@pytest.mark.unit
+async def test_agent_delegation_preserves_passwordless_ssh_pr_identity_userinfo() -> None:
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/agent-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/op_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/op_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "returncode": 0,
+                    "stdout": "ok",
+                    "stderr": "",
+                    "terminal_head_sha": "a" * 40,
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        await HostedAgentRuntimeExecutor(_config(), client=client).execute(
+            _agent_request(
+                repo_url="ssh://git@github.com/base/repo.git",
+                head_repo_url="ssh://git@github.com/fork/repo.git",
+            )
+        )
+
+    pr_identity = seen["body"]["pr_identity"]
+    assert pr_identity["repo_url"] == "ssh://git@github.com/base/repo.git"
+    assert pr_identity["head_repo_url"] == "ssh://git@github.com/fork/repo.git"
 
 
 @pytest.mark.unit
