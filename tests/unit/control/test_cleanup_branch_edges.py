@@ -417,13 +417,14 @@ async def test_list_terminal_released_pending_skips_rows_without_repo_url(
 ) -> None:
     """Rows with a NULL/empty repo_url are not turned into release candidates."""
     rows = [
-        ("ws_no_repo", WorkspaceStatus.failed.value, None, "awf_ws_no_repo", None),
+        ("ws_no_repo", WorkspaceStatus.failed.value, None, "awf_ws_no_repo", None, {}),
         (
             "ws_ok",
             WorkspaceStatus.failed.value,
             "https://example.test/r.git",
             "awf_ws_ok",
             "/tmp/ws_ok/compose.yml",
+            {},
         ),
     ]
 
@@ -456,13 +457,14 @@ async def test_list_terminal_runtime_candidates_skips_rows_without_repo_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rows = [
-        ("ws_no_repo", WorkspaceStatus.cancelled.value, "", "awf_ws_no_repo", None),
+        ("ws_no_repo", WorkspaceStatus.cancelled.value, "", "awf_ws_no_repo", None, {}),
         (
             "ws_ok",
             WorkspaceStatus.failed.value,
             "https://example.test/r.git",
             "awf_ws_ok",
             None,
+            {},
         ),
     ]
 
@@ -486,6 +488,57 @@ async def test_list_terminal_runtime_candidates_skips_rows_without_repo_url(
         limit=10,
     )
     assert [c.workspace_id for c in candidates] == ["ws_ok"]
+
+
+@pytest.mark.unit
+async def test_release_for_hosted_candidate_skips_compose_cleanup() -> None:
+    candidate = _candidate("ws_hosted")
+    candidate = _TerminalRuntimeCandidate(
+        workspace_id=candidate.workspace_id,
+        status=candidate.status,
+        repo_url=candidate.repo_url,
+        compose_project_name="stale-compose-project",
+        compose_file_path="/tmp/stale-compose.yml",
+        task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+    )
+    cleanup_calls: list[dict[str, Any]] = []
+
+    class _Cleaner:
+        async def cleanup(self, **kwargs: Any) -> WorkspaceCleanupResult:
+            cleanup_calls.append(kwargs)
+            return WorkspaceCleanupResult.skipped()
+
+    recorded: list[WorkspaceCleanupResult] = []
+
+    async def _record(
+        _candidate: _TerminalRuntimeCandidate,
+        cleanup: WorkspaceCleanupResult,
+        *,
+        auth_overlay_unmounted: bool,
+    ) -> None:
+        del auth_overlay_unmounted
+        recorded.append(cleanup)
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=_Cleaner(),
+        _auth_overlay_work_dir=None,
+        _record_terminal_runtime_released=_record,
+    )
+
+    await worker_cleanup._release_terminal_runtime_for_candidate(worker, candidate)  # noqa: SLF001
+
+    assert cleanup_calls == [
+        {
+            "workspace_id": "ws_hosted",
+            "repo_url": "https://example.test/repo.git",
+            "compose_project_name": "stale-compose-project",
+            "compose_file_path": Path("/tmp/stale-compose.yml"),
+            "remove_volumes": False,
+            "remove_worktree": False,
+            "skip_compose": True,
+        }
+    ]
+    assert len(recorded) == 1
 
 
 @pytest.mark.unit

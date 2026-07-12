@@ -9,6 +9,8 @@ from typing import Any, cast
 # control, service, and node layers so the release-sync default cannot drift
 # between task admission, provisioning, and execution.
 DEFAULT_RELEASE_SYNC_SOURCE_BRANCH = "development"
+PR_ADOPTION_EXECUTION_MODE_LOCAL = "local"
+PR_ADOPTION_EXECUTION_MODE_HOSTED = "hosted"
 
 
 def release_sync_source_branch(task_policy: object) -> str:
@@ -39,3 +41,29 @@ def agent_model_from_task_policy(task_policy: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def pr_adoption_execution_policy(task_policy: object) -> dict[str, str]:
+    """Return the persisted PR-adoption execution policy, defaulting to local.
+
+    Older adoption rows predate the explicit execution policy. They must remain
+    local so hosted behavior is never inferred from environment, missing Docker,
+    or absent Compose metadata.
+    """
+
+    mode = PR_ADOPTION_EXECUTION_MODE_LOCAL
+    if isinstance(task_policy, Mapping):
+        adoption = task_policy.get("pr_adoption")
+        if isinstance(adoption, Mapping):
+            execution = adoption.get("execution")
+            if isinstance(execution, Mapping):
+                value = execution.get("mode")
+                if value == PR_ADOPTION_EXECUTION_MODE_HOSTED:
+                    mode = PR_ADOPTION_EXECUTION_MODE_HOSTED
+    return {"mode": mode}
+
+
+def pr_adoption_is_hosted(task_policy: object) -> bool:
+    """Return true only for explicit hosted PR-adoption execution policy."""
+
+    return pr_adoption_execution_policy(task_policy)["mode"] == PR_ADOPTION_EXECUTION_MODE_HOSTED

@@ -22,6 +22,7 @@ from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge import ForgeNotSupportedError
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor import monitor_handoff_companion_env as _companion_env
 from awf.control.executor.constants import (
@@ -185,6 +186,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         if recovered_remote_push_branch:
             ws.remote_push_branch = recovered_remote_push_branch
 
+    workspace_is_hosted = pr_adoption_is_hosted(ws.task_policy)
     missing = _missing_monitor_recovery_metadata(ws)
     if missing:
         await self._mark_failed(
@@ -198,10 +200,16 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         )
         return None
 
-    compose_project = ws.compose_project_name
+    compose_project = ws.compose_project_name or f"awf_{workspace_id}"
     compose_file_path = ws.compose_file_path
-    assert compose_project is not None
-    assert compose_file_path is not None
+    compose_file = (
+        Path(compose_file_path)
+        if compose_file_path
+        else self._config.compose_projects_root / workspace_id / "compose.yml"
+    )
+    if not workspace_is_hosted:
+        assert ws.compose_project_name is not None
+        assert compose_file_path is not None
     profile = None
     companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
     companion_specs_resolved = False
@@ -250,82 +258,72 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     ):
         return None
 
-    # The agent runtime executor seam only hostifies agent CLI runs (wired
-    # through the adapter below); it does NOT hostify validation. The resumed
-    # monitor's ValidationRunner still builds ``docker compose exec`` commands
-    # for pre-push validation, and companion services (e.g. postgres) still run
-    # in the compose stack. So even when an agent runtime executor is injected,
-    # keep the compose stack available for validation — otherwise a worker that
-    # resumes a monitor after the compose project was stopped would see a
-    # hosted agent repair succeed and then validation fail as infrastructure
-    # because the validation/companion stack was never brought back up. A future
-    # hosted validation runner seam would allow skipping this; until then the
-    # restart + companion env precheck runs unconditionally.
-    try:
-        _precheck_required_companion_env_secrets_for_resume(
-            companion_specs=companion_specs,
-            environ=os.environ,
-        )
-        _refresh_optional_companion_env_secrets_for_resume(
-            workspace_id=workspace_id,
-            compose_file=Path(compose_file_path),
-            companion_specs=companion_specs,
-            environ=os.environ,
-        )
-        await self._compose.ensure_project_up(
-            project_name=compose_project,
-            compose_file=Path(compose_file_path),
-            workspace_id=workspace_id,
-            wait=True,
-            compose_up_timeout_seconds=compose_up_timeout_seconds,
-            force_recreate=True,
-        )
-    except CompanionEnvSecretPrecheckError as exc:
-        _log.error(
-            "executor.resume_companion_env_secret_precheck_failed",
-            workspace_id=workspace_id,
-            reason_code=exc.reason_code,
-            stderr=exc.stderr[:1000],
-        )
-        await self._record_monitor_runtime_restart_failed(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file_path=compose_file_path,
-            error=exc,
-            event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
-        )
-        return None
-    except ComposeOperationError as exc:
-        _log.error(
-            "executor.resume_compose_up_failed",
-            workspace_id=workspace_id,
-            reason_code=exc.reason_code,
-            stderr=exc.stderr[:1000],
-        )
-        await self._record_monitor_runtime_restart_failed(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file_path=compose_file_path,
-            error=exc,
-        )
-        runtime_usable = await _compose_runtime_usable_after_restart_failure(
-            compose_project,
-            Path(compose_file_path),
-        )
-        if not runtime_usable:
+    if not workspace_is_hosted:
+        try:
+            _precheck_required_companion_env_secrets_for_resume(
+                companion_specs=companion_specs,
+                environ=os.environ,
+            )
+            _refresh_optional_companion_env_secrets_for_resume(
+                workspace_id=workspace_id,
+                compose_file=compose_file,
+                companion_specs=companion_specs,
+                environ=os.environ,
+            )
+            await self._compose.ensure_project_up(
+                project_name=compose_project,
+                compose_file=compose_file,
+                workspace_id=workspace_id,
+                wait=True,
+                compose_up_timeout_seconds=compose_up_timeout_seconds,
+                force_recreate=True,
+            )
+        except CompanionEnvSecretPrecheckError as exc:
+            _log.error(
+                "executor.resume_companion_env_secret_precheck_failed",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:1000],
+            )
+            await self._record_monitor_runtime_restart_failed(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file_path=str(compose_file),
+                error=exc,
+                event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
+            )
+            return None
+        except ComposeOperationError as exc:
+            _log.error(
+                "executor.resume_compose_up_failed",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:1000],
+            )
+            await self._record_monitor_runtime_restart_failed(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file_path=str(compose_file),
+                error=exc,
+            )
+            runtime_usable = await _compose_runtime_usable_after_restart_failure(
+                compose_project,
+                compose_file,
+            )
+            if not runtime_usable:
+                _log.warning(
+                    "executor.resume_compose_up_failed_runtime_unusable",
+                    workspace_id=workspace_id,
+                    compose_project_name=compose_project,
+                    reason_code=exc.reason_code,
+                )
+                return None
             _log.warning(
-                "executor.resume_compose_up_failed_runtime_unusable",
+                "executor.resume_compose_up_failed_runtime_still_usable",
                 workspace_id=workspace_id,
                 compose_project_name=compose_project,
                 reason_code=exc.reason_code,
             )
-            return None
-        _log.warning(
-            "executor.resume_compose_up_failed_runtime_still_usable",
-            workspace_id=workspace_id,
-            compose_project_name=compose_project,
-            reason_code=exc.reason_code,
-        )
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
@@ -341,7 +339,9 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
-                runtime_executor=self._agent_runtime_executor,
+                runtime_executor=(
+                    self._agent_runtime_executor if pr_adoption_is_hosted(ws.task_policy) else None
+                ),
             )
             if profile is None:
                 profile = _profile_for_workspace(
@@ -453,7 +453,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     return ResumeHandoff(
         monitor=monitor,
         compose_project=compose_project,
-        compose_file=Path(compose_file_path),
+        compose_file=compose_file,
         run_kwargs=run_kwargs,
     )
 
@@ -909,6 +909,8 @@ async def _prepare_handoff_pr_monitor_profile(
             profile=profile,
             planning_max_iterations_default=(self._config.planning_max_iterations_default),
         )
+        if pr_adoption_is_hosted(workspace.task_policy):
+            return profile
         if not await self._run_monitor_handoff_profile_setup(
             workspace_id=workspace_id,
             profile=profile,
@@ -1156,12 +1158,16 @@ async def _build_handoff_pr_monitor(
                 profile=profile,
                 planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
-        if run_profile_setup and not await self._run_monitor_handoff_profile_setup(
-            workspace_id=workspace_id,
-            profile=profile,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            worktree_path=worktree_path,
+        if (
+            run_profile_setup
+            and not pr_adoption_is_hosted(workspace.task_policy)
+            and not await self._run_monitor_handoff_profile_setup(
+                workspace_id=workspace_id,
+                profile=profile,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                worktree_path=worktree_path,
+            )
         ):
             return None
         if not await self._recheck_status(
@@ -1182,7 +1188,11 @@ async def _build_handoff_pr_monitor(
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
-                runtime_executor=self._agent_runtime_executor,
+                runtime_executor=(
+                    self._agent_runtime_executor
+                    if pr_adoption_is_hosted(workspace.task_policy)
+                    else None
+                ),
             )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
@@ -1266,7 +1276,9 @@ async def _build_handoff_pr_monitor(
     # CLI, so ensure/pull the model now — while still ``running`` — instead of
     # letting OpenCode fail later as an opaque ``AGENT_CLI_FAILED``. No-op for
     # non-OpenCode runtimes and for a sidecar daemon unreachable from the worker.
-    if not await self._ensure_ollama_model_or_mark_failed(
+    if not pr_adoption_is_hosted(
+        workspace.task_policy
+    ) and not await self._ensure_ollama_model_or_mark_failed(
         workspace_id=workspace_id,
         ws=workspace,
     ):

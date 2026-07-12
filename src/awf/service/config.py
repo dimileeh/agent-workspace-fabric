@@ -107,6 +107,13 @@ class ServiceSettings:
     workspace_peak_memory_gb: float = 16.0
     agent_wall_timeout_seconds: float = 7200
     agent_idle_timeout_seconds: float = 3600
+    hosted_delegation_base_url: str | None = None
+    hosted_delegation_bearer_token: str | None = None
+    hosted_delegation_poll_interval_seconds: float = 2.0
+    hosted_delegation_operation_timeout_seconds: float = 7200.0
+    hosted_delegation_request_timeout_seconds: float = 30.0
+    hosted_delegation_cancel_timeout_seconds: float = 10.0
+    hosted_delegation_max_output_bytes: int = 1_000_000
     planning_max_iterations_default: int = 3
     host_home: str = "~"
     claude_base_gc_enabled: bool = True
@@ -258,6 +265,22 @@ def resolve_service_settings(
         workspace_peak_memory_gb=settings.workspace_peak_memory_gb,
         agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
         agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
+        hosted_delegation_base_url=settings.hosted_delegation_base_url,
+        hosted_delegation_bearer_token=_resolve_hosted_delegation_bearer_token(
+            settings,
+            service_env,
+        ),
+        hosted_delegation_poll_interval_seconds=(settings.hosted_delegation_poll_interval_seconds),
+        hosted_delegation_operation_timeout_seconds=(
+            settings.hosted_delegation_operation_timeout_seconds
+        ),
+        hosted_delegation_request_timeout_seconds=(
+            settings.hosted_delegation_request_timeout_seconds
+        ),
+        hosted_delegation_cancel_timeout_seconds=(
+            settings.hosted_delegation_cancel_timeout_seconds
+        ),
+        hosted_delegation_max_output_bytes=settings.hosted_delegation_max_output_bytes,
         planning_max_iterations_default=settings.planning_max_iterations_default,
         node_id=_empty_to_none(settings.worker_node_id) or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
         branch_prefix=settings.worker_branch_prefix,
@@ -304,10 +327,25 @@ def service_config_payload(settings: ServiceSettings) -> dict[str, object]:
         payload["network_posture_open_legacy_cutoff"] = (
             settings.network_posture_open_legacy_cutoff.isoformat()
         )
-    for key in ("api_token", "github_token"):
+    for key in ("api_token", "github_token", "hosted_delegation_bearer_token"):
         if payload.get(key):
             payload[key] = "<redacted>"
     return payload
+
+
+def _resolve_hosted_delegation_bearer_token(
+    settings: Settings,
+    service_environ: Mapping[str, str],
+) -> str | None:
+    """Resolve hosted delegation token from direct value or configured env name."""
+
+    direct = _empty_to_none(settings.hosted_delegation_bearer_token)
+    if direct is not None:
+        return direct
+    token_env = _empty_to_none(settings.hosted_delegation_bearer_token_env)
+    if token_env is None:
+        return None
+    return _empty_to_none(_env_value(service_environ, token_env))
 
 
 def local_service_environ(

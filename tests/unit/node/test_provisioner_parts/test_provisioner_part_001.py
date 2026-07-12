@@ -258,6 +258,66 @@ class TestSuccess:
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
 
     @pytest.mark.unit
+    async def test_hosted_pr_adoption_provisions_git_metadata_without_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _FailingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                raise AssertionError("hosted adoption must not launch compose")
+
+        launcher = _FailingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        _git(["update-ref", "refs/pull/277/head", "HEAD"], origin_repo)
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="adopt hosted",
+                task_prompt="p",
+                agent="codex",
+                task_kind="sync_feature_pr",
+                test_commands=[],
+                task_policy={
+                    "pr_adoption": {
+                        "repo_slug": "dimileeh/aira-web",
+                        "pr_number": 277,
+                        "head_ref": "feature/ready",
+                        "execution": {"mode": "hosted"},
+                    }
+                },
+                remote_push_branch="feature/ready",
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.node_id == "test-node-01"
+            assert reloaded.branch_name == f"feature-sync/{ws_id}"
+            assert reloaded.base_commit is not None
+            assert reloaded.remote_push_branch == "feature/ready"
+            assert reloaded.resolved_profile is not None
+            assert reloaded.compose_project_name is None
+            assert reloaded.compose_file_path is None
+
+    @pytest.mark.unit
     async def test_materializes_companion_worktrees_before_stack_launch(
         self,
         session_factory: async_sessionmaker[AsyncSession],

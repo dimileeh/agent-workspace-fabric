@@ -1,0 +1,138 @@
+"""Hosted PR monitor terminal-head synchronization tests."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from awf.adapters.base import AgentRunError, AgentRunResult
+from awf.common.commands import CommandResult
+from awf.db.enums import AgentRuntime
+from awf.runtime.pr_monitor_runner.agent_service_recovery import (
+    _run_monitor_agent_with_service_recovery,
+    _sync_hosted_worktree_to_terminal_head,
+)
+
+
+class _Runner:
+    def __init__(self, *, fetched_sha: str) -> None:
+        self.fetched_sha = fetched_sha
+        self.calls: list[list[str]] = []
+
+    async def run(self, args: list[str]) -> CommandResult:
+        self.calls.append(args)
+        if args[-1] == "feature/ready":
+            return CommandResult(returncode=0, stdout="", stderr="")
+        if args[-1] == "FETCH_HEAD":
+            return CommandResult(returncode=0, stdout=self.fetched_sha + "\n", stderr="")
+        if args[-2:] == ["--hard", self.fetched_sha]:
+            return CommandResult(returncode=0, stdout="reset\n", stderr="")
+        return CommandResult(returncode=1, stdout="", stderr="unexpected command")
+
+
+class _HostedAdapterWithoutTerminalHead:
+    name = AgentRuntime.codex
+    is_hosted = True
+
+    async def run(self, **_kwargs: object) -> AgentRunResult:
+        return AgentRunResult(returncode=0, stdout="done", stderr="", terminal_head_sha=None)
+
+
+def _runner_context(tmp_path: Path, runner: _Runner) -> SimpleNamespace:
+    return SimpleNamespace(
+        _worktrees_root=tmp_path,
+        _deps=SimpleNamespace(
+            runner=runner,
+            adapter=SimpleNamespace(name=AgentRuntime.codex),
+        ),
+    )
+
+
+def _monitor_context_with_adapter(adapter: object) -> SimpleNamespace:
+    async def _load_workspace(_workspace_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            pr_url="https://github.com/dimileeh/aira-web/pull/751",
+            pr_number=751,
+            branch_base="main",
+            remote_push_branch="feature/ready",
+            owned_paths=[],
+            monitor_last_commit_sha="a" * 40,
+            task_policy={
+                "pr_adoption": {
+                    "base_ref": "main",
+                    "head_ref": "feature/ready",
+                    "head_sha": "a" * 40,
+                }
+            },
+        )
+
+    return SimpleNamespace(
+        _load_workspace=_load_workspace,
+        _deps=SimpleNamespace(adapter=adapter),
+    )
+
+
+@pytest.mark.unit
+async def test_sync_hosted_worktree_fetches_and_resets_terminal_head(tmp_path: Path) -> None:
+    sha = "b" * 40
+    runner = _Runner(fetched_sha=sha)
+
+    await _sync_hosted_worktree_to_terminal_head(
+        _runner_context(tmp_path, runner),
+        workspace_id="ws_hosted",
+        hosted_pr_identity={
+            "head_repo_url": "git@github.com:dimileeh/aira-web.git",
+            "head_ref": "feature/ready",
+        },
+        terminal_head_sha=sha,
+    )
+
+    assert runner.calls == [
+        [
+            "git",
+            "-C",
+            str(tmp_path / "ws_hosted"),
+            "fetch",
+            "--no-tags",
+            "git@github.com:dimileeh/aira-web.git",
+            "feature/ready",
+        ],
+        ["git", "-C", str(tmp_path / "ws_hosted"), "rev-parse", "FETCH_HEAD"],
+        ["git", "-C", str(tmp_path / "ws_hosted"), "reset", "--hard", sha],
+    ]
+
+
+@pytest.mark.unit
+async def test_sync_hosted_worktree_rejects_remote_head_mismatch(tmp_path: Path) -> None:
+    runner = _Runner(fetched_sha="c" * 40)
+
+    with pytest.raises(AgentRunError) as excinfo:
+        await _sync_hosted_worktree_to_terminal_head(
+            _runner_context(tmp_path, runner),
+            workspace_id="ws_hosted",
+            hosted_pr_identity={
+                "head_repo_url": "git@github.com:dimileeh/aira-web.git",
+                "head_ref": "feature/ready",
+            },
+            terminal_head_sha="b" * 40,
+        )
+
+    assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_MISMATCH"
+
+
+@pytest.mark.unit
+async def test_hosted_agent_success_without_terminal_head_fails_closed() -> None:
+    with pytest.raises(AgentRunError) as excinfo:
+        await _run_monitor_agent_with_service_recovery(
+            _monitor_context_with_adapter(_HostedAdapterWithoutTerminalHead()),
+            workspace_id="ws_hosted",
+            compose_project="awf_ws_hosted",
+            compose_file=Path("/tmp/missing-compose.yml"),
+            prompt="fix review",
+            log_source="monitor",
+        )
+
+    assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_MISSING"

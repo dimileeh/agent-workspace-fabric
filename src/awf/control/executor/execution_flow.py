@@ -29,6 +29,7 @@ from awf.common.task_tag import (
     commit_message_with_task_tag,
     strip_leading_task_tag,
 )
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor import pr_open_step as _pr_open_step
@@ -313,7 +314,9 @@ async def execute(
             agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
             agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
             usage_sampler=self._usage_sampler,
-            runtime_executor=self._agent_runtime_executor,
+            runtime_executor=(
+                self._agent_runtime_executor if pr_adoption_is_hosted(ws.task_policy) else None
+            ),
         )
         # Ignore checkout-local agent scratch dirs before validation cleanliness
         # can treat them as dirty worktree state.

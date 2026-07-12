@@ -194,9 +194,35 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     assert created["worker_kwargs"]["open_pr_resolver"] is created["open_pr_resolver"]
     assert created["executor_kwargs"]["compose"] is created["compose"]
     assert created["executor_kwargs"]["validation"] is created["validation"]
+    assert created["executor_kwargs"]["agent_runtime_executor"] is None
     assert created["provisioner_kwargs"]["service_diagnostics"] is created["compose"]
     assert created["cleaner_git"] is created["git"]
     assert created["cleaner_compose"] is created["compose"]
+
+
+@pytest.mark.unit
+def test_worker_hosted_delegation_config_is_bounded_and_fails_closed(tmp_path: Path) -> None:
+    settings = dataclasses.replace(
+        _settings(tmp_path),
+        hosted_delegation_base_url="https://hosted.example.test/",
+        hosted_delegation_bearer_token="secret-token",
+        hosted_delegation_poll_interval_seconds=3.0,
+    )
+
+    config = worker_mod._hosted_delegation_config_for_worker(settings)
+
+    assert config is not None
+    assert config.base_url == "https://hosted.example.test"
+    assert config.bearer_token == "secret-token"
+    assert config.poll_interval_seconds == 3.0
+
+    partial = dataclasses.replace(settings, hosted_delegation_bearer_token=None)
+    with pytest.raises(ValueError, match="HOSTED_DELEGATION_BEARER_TOKEN"):
+        worker_mod._hosted_delegation_config_for_worker(partial)
+
+    invalid = dataclasses.replace(settings, hosted_delegation_base_url="not-a-url")
+    with pytest.raises(ValueError, match="HOSTED_DELEGATION_BASE_URL"):
+        worker_mod._hosted_delegation_config_for_worker(invalid)
 
 
 @pytest.mark.unit

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm.attributes import flag_modified
 
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor.planning_ops import (
     _PLANNING_SCOPE_AUTO_RETRY_PENDING_TERMINAL_RELEASE_EVENT_TYPES,
     _PLANNING_SCOPE_AUTO_RETRY_RESUME_FAILED_REASON_CODE,
@@ -192,6 +193,7 @@ async def _load_terminal_runtime_candidate(
             Workspace.repo_url,
             Workspace.compose_project_name,
             Workspace.compose_file_path,
+            Workspace.task_policy,
             Workspace.node_id,
         )
         .where(Workspace.id == workspace_id)
@@ -209,7 +211,14 @@ async def _load_terminal_runtime_candidate(
     )
     if row is None:
         return None
-    status_val, repo_url, compose_project_name, compose_file_path, node_id = row
+    (
+        status_val,
+        repo_url,
+        compose_project_name,
+        compose_file_path,
+        task_policy,
+        node_id,
+    ) = row
     if status_val not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
         return None
     if not repo_url:
@@ -222,6 +231,7 @@ async def _load_terminal_runtime_candidate(
         repo_url=repo_url,
         compose_project_name=compose_project_name,
         compose_file_path=compose_file_path,
+        task_policy=task_policy,
     )
 
 
@@ -797,6 +807,7 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
             Workspace.repo_url,
             Workspace.compose_project_name,
             Workspace.compose_file_path,
+            Workspace.task_policy,
         )
         .join(latest_planning_event, latest_planning_event.c.workspace_id == Workspace.id)
         .where(latest_planning_event.c.event_rank == 1)
@@ -835,7 +846,14 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
     )
 
     candidates: list[_TerminalRuntimeCandidate] = []
-    for workspace_id, status_val, repo_url, compose_project_name, compose_file_path in rows:
+    for (
+        workspace_id,
+        status_val,
+        repo_url,
+        compose_project_name,
+        compose_file_path,
+        task_policy,
+    ) in rows:
         if not repo_url:
             continue
         candidates.append(
@@ -845,6 +863,7 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
                 repo_url=repo_url,
                 compose_project_name=compose_project_name,
                 compose_file_path=compose_file_path,
+                task_policy=task_policy,
             )
         )
     return candidates
@@ -870,6 +889,7 @@ async def _list_terminal_runtime_candidates(
             Workspace.repo_url,
             Workspace.compose_project_name,
             Workspace.compose_file_path,
+            Workspace.task_policy,
         )
         .where(Workspace.status.in_(terminal_status_values))
         # Include every terminal row on this node — even those where both
@@ -929,6 +949,7 @@ async def _list_terminal_runtime_candidates(
             repo_url,
             compose_project_name,
             compose_file_path,
+            task_policy,
         ) = row
         if not repo_url:
             continue
@@ -939,6 +960,7 @@ async def _list_terminal_runtime_candidates(
                 repo_url=repo_url,
                 compose_project_name=compose_project_name,
                 compose_file_path=compose_file_path,
+                task_policy=task_policy,
             )
         )
     return candidates
@@ -952,16 +974,19 @@ async def _release_terminal_runtime_for_candidate(
     if self._runtime_cleaner is None:
         return
     try:
-        cleanup = await self._runtime_cleaner.cleanup(
-            workspace_id=candidate.workspace_id,
-            repo_url=candidate.repo_url,
-            compose_project_name=candidate.compose_project_name,
-            compose_file_path=(
+        cleanup_kwargs: dict[str, Any] = {
+            "workspace_id": candidate.workspace_id,
+            "repo_url": candidate.repo_url,
+            "compose_project_name": candidate.compose_project_name,
+            "compose_file_path": (
                 Path(candidate.compose_file_path) if candidate.compose_file_path else None
             ),
-            remove_volumes=False,
-            remove_worktree=False,
-        )
+            "remove_volumes": False,
+            "remove_worktree": False,
+        }
+        if pr_adoption_is_hosted(candidate.task_policy):
+            cleanup_kwargs["skip_compose"] = True
+        cleanup = await self._runtime_cleaner.cleanup(**cleanup_kwargs)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

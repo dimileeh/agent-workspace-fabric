@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
+from awf.common.config import Settings
 from awf.common.github_client import (
     PullRequestAdoptionMetadata,
     RepoRef,
@@ -235,6 +236,7 @@ class TestPullRequestMonitorAdoptionServicePart001:
                 "title": "feature: ready",
                 "operator_reason": "recover external PR",
                 "source": "existing_github_pr",
+                "execution": {"mode": "local"},
             }
             assert any(
                 event.event_type == "workspace.pr_monitor_adoption_requested"
@@ -257,6 +259,123 @@ class TestPullRequestMonitorAdoptionServicePart001:
                 ".github/workflows/publish.yml",
                 "pyproject.toml",
             ]
+
+    @pytest.mark.unit
+    async def test_hosted_execution_policy_is_persisted_and_replay_attaches(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        settings = Settings(
+            _env_file=None,
+            hosted_delegation_base_url="https://hosted.example.test",
+            hosted_delegation_bearer_token="hosted-token",
+        )
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+                settings=settings,
+            )
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    execution={"mode": "hosted"},
+                )
+            )
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    execution={"mode": "hosted"},
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is True
+        assert second.workspace_id == first.workspace_id
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert workspace is not None
+            assert workspace.task_policy["pr_adoption"]["execution"] == {"mode": "hosted"}
+            operation = (await session.execute(select(Operation))).scalar_one()
+            assert operation.payload["execution"] == {"mode": "hosted"}
+            event = next(
+                event
+                for event in workspace.events
+                if event.event_type == "workspace.pr_monitor_adoption_requested"
+            )
+            assert event.payload["execution"] == {"mode": "hosted"}
+
+    @pytest.mark.unit
+    async def test_hosted_execution_policy_conflicts_with_existing_local_adoption(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        settings = Settings(
+            _env_file=None,
+            hosted_delegation_base_url="https://hosted.example.test",
+            hosted_delegation_bearer_token="hosted-token",
+        )
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+                settings=settings,
+            )
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        execution={"mode": "hosted"},
+                    )
+                )
+
+        assert first.workspace_id.startswith("ws_")
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": first.workspace_id,
+            "existing_execution": {"mode": "local"},
+            "requested_execution": {"mode": "hosted"},
+        }
+
+    @pytest.mark.unit
+    async def test_hosted_execution_policy_requires_configured_delegation(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+                settings=Settings(_env_file=None),
+            )
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        execution={"mode": "hosted"},
+                    )
+                )
+
+        assert excinfo.value.error_code == "HOSTED_DELEGATION_NOT_CONFIGURED"
+        assert excinfo.value.detail == {
+            "missing": [
+                "AWF_HOSTED_DELEGATION_BASE_URL",
+                "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
+            ],
+        }
 
     @pytest.mark.unit
     async def test_attaching_live_adoption_rejects_different_owned_paths(

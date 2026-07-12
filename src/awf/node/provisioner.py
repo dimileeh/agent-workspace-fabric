@@ -29,6 +29,7 @@ from awf.common.audit import redact_audit_value
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
@@ -304,10 +305,11 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             egress_plan = local_egress_plan(profile.security.egress)
             egress_decision = _egress_plan_decision(egress_plan.mode)
             destination_category = _egress_plan_destination_category(egress_plan.mode)
+            hosted_pr_adoption = pr_adoption_is_hosted(ws.task_policy)
             stack_paths: ComposeProjectPaths | None = None
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
-            if self._stack_launcher is not None:
+            if self._stack_launcher is not None and not hosted_pr_adoption:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
                 validate_companion_service_graph(
                     profile_services=profile_services(
@@ -797,7 +799,8 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             persisted.node_id = self._config.node_id
             persisted.branch_name = layout.branch_name
             persisted.base_commit = base_commit
-            persisted.compose_project_name = f"awf_{workspace_id}"
+            if not pr_adoption_is_hosted(persisted.task_policy):
+                persisted.compose_project_name = f"awf_{workspace_id}"
             remote_push_branch = _provision_remote_push_branch(persisted)
             if remote_push_branch is not None:
                 persisted.remote_push_branch = remote_push_branch

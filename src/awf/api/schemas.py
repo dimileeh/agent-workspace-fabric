@@ -379,6 +379,21 @@ class WorkspaceCreateRequest(BaseModel):
         return self.workspace.profile_ref == _LEGACY_DATABASE_PROFILE_REF
 
 
+class PullRequestMonitorExecutionPolicy(BaseModel):
+    """Execution placement policy for adopted PR monitor repair/validation."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    mode: Literal["local", "hosted"] = Field(
+        default="local",
+        description=(
+            "Where Core should run PR-monitor repair and post-repair validation. "
+            "'local' preserves Docker Compose execution; 'hosted' requires "
+            "configured hosted delegation and never starts local Compose."
+        ),
+    )
+
+
 class PullRequestMonitorAdoptionRequest(BaseModel):
     """Input for adopting an already-open GitHub PR into AWF monitoring."""
 
@@ -396,6 +411,13 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
     profile: WorkspaceProfile | None = None
     owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
     auto_merge: bool = True
+    execution: PullRequestMonitorExecutionPolicy = Field(
+        default_factory=PullRequestMonitorExecutionPolicy,
+        description=(
+            "Explicit PR monitor execution policy. Hosted mode is never inferred "
+            "from environment or Docker availability."
+        ),
+    )
     initial_review_grace_period_seconds: float | None = Field(
         default=None,
         ge=0,

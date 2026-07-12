@@ -17,6 +17,7 @@ from awf.adapters.provider_failures import (
     classify_provider_failure,
 )
 from awf.common.command_evidence import append_command_evidence
+from awf.common.commands import CommandResult
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
@@ -70,6 +71,11 @@ async def _run_monitor_agent_with_service_recovery(
     command_evidence: list[str] | None = None,
     operation_start_head: str | None = None,
 ) -> AgentRunResult:
+    hosted_pr_identity = (
+        await _hosted_pr_identity_for_workspace(self, workspace_id)
+        if self._deps.adapter.is_hosted
+        else None
+    )
     restart_attempts = 0
     while True:
         try:
@@ -79,6 +85,7 @@ async def _run_monitor_agent_with_service_recovery(
                 prompt=prompt,
                 workspace_id=workspace_id,
                 log_source=log_source,
+                hosted_pr_identity=hosted_pr_identity,
             )
         except AgentRunError as exc:
             recovered = await _recover_monitor_agent_service_after_error(
@@ -123,8 +130,113 @@ async def _run_monitor_agent_with_service_recovery(
                 restart_attempts=restart_attempts,
             )
             continue
+        if self._deps.adapter.is_hosted:
+            if not result.terminal_head_sha:
+                raise AgentRunError(
+                    agent=self._deps.adapter.name,
+                    result=CommandResult(
+                        returncode=1,
+                        stdout=result.stdout,
+                        stderr="hosted repair completed without terminal_head_sha",
+                    ),
+                    reason_code="HOSTED_REMOTE_HEAD_MISSING",
+                )
+            await _sync_hosted_worktree_to_terminal_head(
+                self,
+                workspace_id=workspace_id,
+                hosted_pr_identity=hosted_pr_identity,
+                terminal_head_sha=result.terminal_head_sha,
+            )
         append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
         return cast(AgentRunResult, result)
+
+
+async def _hosted_pr_identity_for_workspace(
+    self: Any,
+    workspace_id: str,
+) -> dict[str, object]:
+    ws = await self._load_workspace(workspace_id)
+    policy = ws.task_policy if isinstance(ws.task_policy, Mapping) else {}
+    adoption = policy.get("pr_adoption") if isinstance(policy, Mapping) else None
+    adoption_map = adoption if isinstance(adoption, Mapping) else {}
+    head_ref = _nonblank_str(ws.remote_push_branch) or _nonblank_str(adoption_map.get("head_ref"))
+    return {
+        "repo_url": ws.repo_url,
+        "pr_url": _nonblank_str(ws.pr_url) or _nonblank_str(adoption_map.get("pr_url")),
+        "pr_number": ws.pr_number,
+        "base_ref": _nonblank_str(adoption_map.get("base_ref")) or ws.branch_base,
+        "head_ref": head_ref,
+        "head_repo_url": _nonblank_str(adoption_map.get("head_repo_url")) or ws.repo_url,
+        "head_repo_slug": _nonblank_str(adoption_map.get("head_repo_slug")),
+        "owned_paths": list(ws.owned_paths or []),
+        "expected_head_sha": (
+            _nonblank_str(ws.monitor_last_commit_sha) or _nonblank_str(adoption_map.get("head_sha"))
+        ),
+    }
+
+
+def _nonblank_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+async def _sync_hosted_worktree_to_terminal_head(
+    self: Any,
+    *,
+    workspace_id: str,
+    hosted_pr_identity: dict[str, object] | None,
+    terminal_head_sha: str,
+) -> None:
+    identity = hosted_pr_identity or {}
+    repo_url = _nonblank_str(identity.get("head_repo_url")) or _nonblank_str(
+        identity.get("repo_url")
+    )
+    head_ref = _nonblank_str(identity.get("head_ref"))
+    worktree_path = self._worktrees_root / workspace_id
+    if repo_url is None or head_ref is None:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="hosted repair missing remote PR head identity",
+            ),
+            reason_code="HOSTED_REMOTE_HEAD_IDENTITY_MISSING",
+        )
+    fetch = await self._deps.runner.run(
+        ["git", "-C", str(worktree_path), "fetch", "--no-tags", repo_url, head_ref]
+    )
+    if not fetch.ok:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=fetch,
+            reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
+        )
+    rev_parse = await self._deps.runner.run(
+        ["git", "-C", str(worktree_path), "rev-parse", "FETCH_HEAD"]
+    )
+    fetched_sha = rev_parse.stdout.strip()
+    if not rev_parse.ok or fetched_sha != terminal_head_sha:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=CommandResult(
+                returncode=1,
+                stdout=rev_parse.stdout,
+                stderr=(
+                    "hosted repair terminal head mismatch: "
+                    f"reported {terminal_head_sha}, fetched {fetched_sha or '<unknown>'}"
+                ),
+            ),
+            reason_code="HOSTED_REMOTE_HEAD_MISMATCH",
+        )
+    reset = await self._deps.runner.run(
+        ["git", "-C", str(worktree_path), "reset", "--hard", terminal_head_sha]
+    )
+    if not reset.ok:
+        raise AgentRunError(
+            agent=self._deps.adapter.name,
+            result=reset,
+            reason_code="HOSTED_REMOTE_HEAD_SYNC_FAILED",
+        )
 
 
 async def _rerun_monitor_agent_pre_launch_guards(

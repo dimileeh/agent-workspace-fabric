@@ -924,6 +924,49 @@ class TestExecutorMonitorHandoffSetupSplit:
 
 class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
     @pytest.mark.unit
+    async def test_hosted_sync_feature_pr_handoff_skips_local_profile_setup(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Hosted adopted PR handoff must not run docker-backed local setup."""
+        monitor_runs: list[str] = []
+        validation = _ExplodingSetupValidation()
+        hosted_policy = {
+            "pr_adoption": {
+                **_PR_ADOPTION_POLICY["pr_adoption"],
+                "execution": {"mode": "hosted"},
+            }
+        }
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy=hosted_policy,
+        )
+
+        class _Monitor:
+            async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == []
+        assert monitor_runs == [ws_id]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+
+    @pytest.mark.unit
     async def test_feature_handoff_stale_status_after_monitor_built_skips(
         self,
         fake: FakeCommandRunner,

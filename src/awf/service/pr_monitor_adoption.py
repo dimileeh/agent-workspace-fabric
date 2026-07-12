@@ -26,6 +26,7 @@ from awf.common.github_client import (
     parse_github_pull_request_url,
 )
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import pr_adoption_execution_policy
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
@@ -41,6 +42,10 @@ from awf.db.repositories import (
 )
 from awf.db.utils import escape_like_pattern as _escape_like_pattern
 from awf.profiles.models import normalize_inline_profile_snapshot
+from awf.runtime.hosted_delegation import (
+    HostedDelegationConfigError,
+    hosted_delegation_config_from_settings,
+)
 from awf.service.node_identity import effective_worker_node_id
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary
@@ -82,6 +87,7 @@ _PR_ADOPTION_ERROR_CODE_CONTRACT = (
     {"error_code": "PR_METADATA_FETCH_FAILED"},
     {"error_code": "PR_METADATA_INVALID"},
     {"error_code": "PR_ADOPTION_POLICY_CONFLICT"},
+    {"error_code": "HOSTED_DELEGATION_NOT_CONFIGURED"},
 )
 _NON_RESUMABLE_ADOPTION_STATUSES = frozenset(
     {
@@ -137,6 +143,7 @@ class PullRequestMonitorAdoptionService:
         request: PullRequestMonitorAdoptionRequest,
     ) -> PullRequestMonitorAdoptionResponse:
         repo, pr_number = _normalize_request_identity(request)
+        _raise_if_hosted_delegation_unconfigured(request, self._settings)
         idempotency_key = pr_adoption_idempotency_key(
             repo_slug=repo.slug(),
             pr_number=pr_number,
@@ -449,6 +456,7 @@ class PullRequestMonitorAdoptionService:
             "pr_number": metadata.number,
             "pr_url": metadata.url,
             "auto_merge": request.auto_merge,
+            "execution": _requested_execution_policy(request),
             "reason": operator_reason,
             "logical_idempotency_key": logical_idempotency_key,
             "workspace_idempotency_key": idempotency_key,
@@ -475,6 +483,7 @@ class PullRequestMonitorAdoptionService:
             "head_sha": metadata.head_sha,
             "base_sha": metadata.base_sha,
             "auto_merge": request.auto_merge,
+            "execution": _requested_execution_policy(request),
             "reason": operator_reason,
             "logical_idempotency_key": logical_idempotency_key,
             "workspace_idempotency_key": idempotency_key,
@@ -540,6 +549,7 @@ class PullRequestMonitorAdoptionService:
                 "initial_review_grace_period_seconds": (
                     workspace.initial_review_grace_period_seconds
                 ),
+                "execution": pr_adoption_execution_policy(workspace.task_policy),
             },
             attached_existing=attached_existing,
             validation_provenance=validation_freshness_summary(
@@ -935,6 +945,7 @@ def _adoption_task_policy(
             "title": metadata.title,
             "operator_reason": _redacted_optional_text(request.reason),
             "source": "existing_github_pr",
+            "execution": _requested_execution_policy(request),
         },
     }
     if lineage is not None:
@@ -955,6 +966,26 @@ def _requested_agent_policy(request: PullRequestMonitorAdoptionRequest) -> dict[
         if agent_defaults is not None and agent_defaults.effort is not None:
             policy["agent_effort"] = agent_defaults.effort
     return policy
+
+
+def _requested_execution_policy(request: PullRequestMonitorAdoptionRequest) -> dict[str, str]:
+    return {"mode": request.execution.mode}
+
+
+def _raise_if_hosted_delegation_unconfigured(
+    request: PullRequestMonitorAdoptionRequest,
+    settings: Settings,
+) -> None:
+    if request.execution.mode != "hosted":
+        return
+    try:
+        hosted_delegation_config_from_settings(settings)
+    except HostedDelegationConfigError as exc:
+        raise PRMonitorAdoptionError(
+            error_code="HOSTED_DELEGATION_NOT_CONFIGURED",
+            message=("Hosted PR monitor adoption requires configured hosted delegation settings."),
+            detail=exc.detail(),
+        ) from exc
 
 
 def _adoption_task_prompt(
@@ -1142,6 +1173,18 @@ def _raise_if_policy_conflicts(
                 "workspace_id": workspace.id,
                 "existing_agent": workspace.agent,
                 "requested_agent": requested_agent,
+            },
+        )
+    existing_execution = pr_adoption_execution_policy(workspace.task_policy)
+    requested_execution = _requested_execution_policy(request)
+    if existing_execution != requested_execution:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different execution policy.",
+            detail={
+                "workspace_id": workspace.id,
+                "existing_execution": existing_execution,
+                "requested_execution": requested_execution,
             },
         )
     _raise_if_agent_policy_conflicts(workspace, request)

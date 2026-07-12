@@ -132,6 +132,29 @@ def test_adoption_request_schema_accepts_model_effort_owned_paths_and_openapi_ex
 
 
 @pytest.mark.unit
+def test_adoption_request_schema_defaults_execution_policy_to_local_and_exposes_hosted() -> None:
+    payload = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+    )
+    hosted = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+        execution={"mode": "hosted"},
+    )
+
+    assert payload.execution.mode == "local"
+    assert hosted.execution.mode == "hosted"
+
+    schema = create_app(use_lifespan=False).openapi()
+    props = schema["components"]["schemas"]["PullRequestMonitorAdoptionRequest"]["properties"]
+    assert "execution" in props
+    execution_ref = props["execution"]["$ref"].rsplit("/", 1)[-1]
+    execution_schema = schema["components"]["schemas"][execution_ref]
+    assert execution_schema["properties"]["mode"]["enum"] == ["local", "hosted"]
+
+
+@pytest.mark.unit
 async def test_adopt_pr_requires_api_token(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
 ) -> None:
@@ -210,6 +233,33 @@ async def test_adopt_pr_persists_requested_model_and_effort(
         workspace = (await session.execute(select(Workspace))).scalar_one()
     assert workspace.task_policy["agent_model"] == "gpt-5.3-codex"
     assert workspace.task_policy["agent_effort"] == "high"
+
+
+@pytest.mark.unit
+async def test_adopt_pr_rejects_hosted_execution_when_delegation_unconfigured(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+) -> None:
+    client, _fetcher = adoption_client
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers={"Authorization": "Bearer secret"},
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "execution": {"mode": "hosted"},
+        },
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "HOSTED_DELEGATION_NOT_CONFIGURED"
+    assert body["detail"] == {
+        "missing": [
+            "AWF_HOSTED_DELEGATION_BASE_URL",
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
+        ],
+    }
 
 
 @pytest.mark.unit

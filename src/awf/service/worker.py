@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -23,6 +24,7 @@ from awf.common.git_auth import add_git_config_entries as _add_git_config_entrie
 from awf.common.git_auth import apply_bitbucket_git_auth
 from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.enums import TaskKind
@@ -38,6 +40,11 @@ from awf.node.secret_mounts import LocalSecretLeaseMountResolver
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.driver import LocalRuntimeDriver, WorkspaceRuntimeDriver
+from awf.runtime.hosted_delegation import (
+    HostedAgentRuntimeExecutor,
+    HostedDelegationConfig,
+    HostedValidationDelegate,
+)
 from awf.runtime.inspection import RuntimeInspector
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import (
@@ -95,6 +102,38 @@ class WorkerRuntime:
 _PENDING_FORGE_CLIENT_CLOSERS: set[asyncio.Task[None]] = set()
 
 
+def _hosted_delegation_config_for_worker(
+    settings: ServiceSettings,
+) -> HostedDelegationConfig | None:
+    """Return hosted delegation config for the worker, or fail on partial config."""
+
+    base_url = (settings.hosted_delegation_base_url or "").strip().rstrip("/")
+    token = (settings.hosted_delegation_bearer_token or "").strip()
+    if not base_url and not token:
+        return None
+    missing: list[str] = []
+    if not base_url:
+        missing.append("AWF_HOSTED_DELEGATION_BASE_URL")
+    if not token:
+        missing.append(
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"
+        )
+    if missing:
+        raise ValueError("hosted delegation config incomplete: " + ", ".join(missing))
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("hosted delegation config invalid: AWF_HOSTED_DELEGATION_BASE_URL")
+    return HostedDelegationConfig(
+        base_url=base_url,
+        bearer_token=token,
+        poll_interval_seconds=settings.hosted_delegation_poll_interval_seconds,
+        operation_timeout_seconds=settings.hosted_delegation_operation_timeout_seconds,
+        request_timeout_seconds=settings.hosted_delegation_request_timeout_seconds,
+        cancel_timeout_seconds=settings.hosted_delegation_cancel_timeout_seconds,
+        max_output_bytes=settings.hosted_delegation_max_output_bytes,
+    )
+
+
 def _release_forge_client_after_build_error(gh: ForgeClient) -> None:
     """Close a forge client whose PR-monitor build failed before handoff.
 
@@ -146,6 +185,20 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         runner=runner,
         artifacts_dir=work_dir / "artifacts",
         log_store=log_store,
+    )
+    hosted_delegation_config = _hosted_delegation_config_for_worker(settings)
+    hosted_agent_runtime_executor = (
+        HostedAgentRuntimeExecutor(hosted_delegation_config)
+        if hosted_delegation_config is not None
+        else None
+    )
+    hosted_validation_delegate = (
+        HostedValidationDelegate(
+            hosted_delegation_config,
+            artifacts_dir=work_dir / "artifacts",
+        )
+        if hosted_delegation_config is not None
+        else None
     )
     pr_creator = PullRequestCreator(runner)
     open_pr_resolver = BranchOpenPullRequestResolver(runner)
@@ -250,12 +303,17 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             if workspace.initial_review_grace_period_seconds is not None
             else profile.monitor.initial_review_grace_period_seconds
         )
+        workspace_is_hosted = pr_adoption_is_hosted(workspace.task_policy)
+        if workspace_is_hosted and hosted_validation_delegate is None:
+            raise RuntimeError(
+                "hosted PR adoption requested but hosted validation is not configured"
+            )
         monitor_kwargs: dict[str, Any] = {
             "session_factory": session_factory,
             "runner": runner,
             "adapter": adapter,
             "gh": gh,
-            "validation": validation,
+            "validation": hosted_validation_delegate if workspace_is_hosted else validation,
             "worktrees_root": work_dir / "git" / "worktrees",
             "artifacts_root": work_dir / "artifacts",
             "initial_review_grace_period_seconds": grace_seconds,
@@ -308,7 +366,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         # deployment injects an AgentRuntimeExecutor (e.g. Kubernetes Jobs)
         # so PR monitor repair is not hard-wired to Docker Compose. The
         # worker does NOT build a Kubernetes executor here.
-        agent_runtime_executor=None,
+        agent_runtime_executor=hosted_agent_runtime_executor,
     )
     runtime_driver = LocalRuntimeDriver(
         provisioner=provisioner,

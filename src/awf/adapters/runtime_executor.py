@@ -102,6 +102,15 @@ class AgentRuntimeExecRequest:
     profile_env: tuple[tuple[str, str], ...] = ()
     wall_timeout_seconds: float | None = None
     idle_timeout_seconds: float | None = None
+    repo_url: str | None = None
+    pr_url: str | None = None
+    pr_number: int | None = None
+    base_ref: str | None = None
+    head_ref: str | None = None
+    head_repo_url: str | None = None
+    head_repo_slug: str | None = None
+    owned_paths: tuple[str, ...] = ()
+    expected_head_sha: str | None = None
     on_stdout: StreamCallback | None = None
     on_stderr: StreamCallback | None = None
 
@@ -125,6 +134,7 @@ class AgentRuntimeExecResult:
     stdout: str
     stderr: str
     timeout_reason: str = ""
+    terminal_head_sha: str | None = None
 
 
 class AgentRuntimeExecutor(Protocol):

@@ -1,16 +1,9 @@
-"""Hosted runtime execution seam — PR monitor resume handoff.
+"""Hosted PR monitor resume handoff.
 
-When an ``AgentRuntimeExecutor`` is injected into the ``WorkspaceExecutor``,
-``resume_pr_monitor_handoff`` still restarts the docker compose project and
-runs the companion env precheck: the agent runtime executor seam only
-hostifies agent CLI runs (wired through the adapter), it does NOT hostify
-validation. The resumed monitor's ValidationRunner still builds
-``docker compose exec`` commands for pre-push validation, and companion
-services still run in the compose stack, so the stack must be available even
-on the hosted path. If Compose cannot be recovered, hosted resume stops before
-``monitor.run`` because validation and companion services would fail without
-the stack. Local Core (executor is None) keeps the exact compose restart
-behavior.
+Hosted adoption is explicit workspace policy, not an inference from an injected
+``AgentRuntimeExecutor``. Local/default monitor resumes still restart Compose
+because local validation needs the workspace stack. Explicit hosted adoption
+resumes with only the worktree/profile metadata and skips Compose entirely.
 """
 
 from __future__ import annotations
@@ -59,6 +52,10 @@ def fake() -> FakeCommandRunner:
 
 async def _seed_monitoring_pr(
     factory: async_sessionmaker[AsyncSession],
+    *,
+    task_policy: dict[str, Any] | None = None,
+    compose_project_name: str | None = "awf_x",
+    compose_file_path: str | None = "/tmp/awf/x/compose.yml",
 ) -> str:
     async with factory() as s:
         repo = WorkspaceRepository(s)
@@ -71,14 +68,15 @@ async def _seed_monitoring_pr(
             test_commands=["pytest -q"],
             requires_database=False,
             auto_merge=True,
+            task_policy=task_policy,
         )
         ws.task_kind = "feature_branch_pr"
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = "awf/x"
         ws.remote_push_branch = "awf/x"
         ws.base_commit = "a" * 40
-        ws.compose_project_name = "awf_x"
-        ws.compose_file_path = "/tmp/awf/x/compose.yml"
+        ws.compose_project_name = compose_project_name
+        ws.compose_file_path = compose_file_path
         await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
         await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
         await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
@@ -200,7 +198,41 @@ def _make_executor(
 
 class TestResumeHandoffHostedSeam:
     @pytest.mark.unit
-    async def test_injected_executor_still_restarts_compose_for_validation(
+    async def test_explicit_hosted_policy_skips_compose_resume_with_null_compose_metadata(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+            compose_project_name=None,
+            compose_file_path=None,
+        )
+        compose = _RecordingCompose()
+        executor = _RecordingExecutor()
+        monitor = _RecordingMonitor()
+        real_compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        executor_obj = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            compose=real_compose,
+            pr_monitor_factory=lambda *_args, **_kwargs: monitor,
+            agent_runtime_executor=executor,
+        )
+        executor_obj._compose = compose  # type: ignore[method-assign]
+
+        await executor_obj.resume_pr_monitor(ws_id)
+
+        assert compose.ensure_project_up_calls == []
+        assert len(monitor.run_calls) == 1
+        assert monitor.run_calls[0]["workspace_id"] == ws_id
+        assert monitor.run_calls[0]["compose_project"] == f"awf_{ws_id}"
+
+    @pytest.mark.unit
+    async def test_injected_executor_without_hosted_policy_still_restarts_compose_for_validation(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -227,9 +259,7 @@ class TestResumeHandoffHostedSeam:
 
         await executor_obj.resume_pr_monitor(ws_id)
 
-        # The agent runtime executor only hostifies agent CLI runs; validation
-        # still uses docker compose exec, so the compose stack must be brought
-        # back up even when an executor is injected.
+        # Injection alone does not opt a workspace into hosted mode.
         assert compose.ensure_project_up_calls == [ws_id]
         assert len(monitor.run_calls) == 1
         assert monitor.run_calls[0]["workspace_id"] == ws_id
