@@ -527,6 +527,15 @@ async def _run_hosted_monitor_handoff_profile_setup(
             failure_stage="after successful hosted monitor handoff setup"
         ):
             return False
+        if not await _run_monitor_handoff_validate_toolchain_probe(
+            self,
+            workspace_id=workspace_id,
+            validation=validation,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+        ):
+            return False
         preflight_passed = await _run_monitor_handoff_profile_preflight(
             self,
             workspace_id=workspace_id,

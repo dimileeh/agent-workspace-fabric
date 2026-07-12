@@ -15,6 +15,7 @@ from awf.runtime.hosted_delegation import (
     HostedDelegationProtocolError,
     HostedValidationDelegate,
 )
+from awf.runtime.validation_types import ValidateCommandProbeTarget
 
 
 def _config(**overrides: object) -> HostedDelegationConfig:
@@ -183,6 +184,179 @@ async def test_hosted_validation_posts_operation_and_maps_validation_result(
     assert seen["body"]["run_healthchecks"] is True
     assert seen["body"]["include_coverage"] is False
     assert seen["body"]["pr_identity"]["pr_number"] == 277
+
+
+@pytest.mark.unit
+async def test_hosted_validation_validate_toolchain_probe_posts_operation_and_maps_result(
+    tmp_path: Path,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            seen["headers"] = dict(request.headers)
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "probe_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/probe_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/probe_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "probe_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "validate_toolchain_probe": {
+                        "missing": [
+                            {"tool": "ruff", "command": "ruff check src/awf"},
+                            {"tool": "pytest", "command": "pytest tests/unit -q"},
+                        ],
+                        "probe_errored": False,
+                        "probe_ran": True,
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.probe_validate_command_tools(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile.model_validate(
+                {
+                    "name": "hosted-probe-test",
+                    "phases": {
+                        "validate": ["ruff check src/awf", "pytest tests/unit -q"],
+                    },
+                }
+            ),
+        )
+
+    assert result.missing == (
+        ValidateCommandProbeTarget(tool="ruff", command="ruff check src/awf"),
+        ValidateCommandProbeTarget(tool="pytest", command="pytest tests/unit -q"),
+    )
+    assert result.probe_errored is False
+    assert result.probe_ran is True
+    assert seen["headers"]["authorization"] == "Bearer secret-token"
+    body_blob = json.dumps(seen["body"], sort_keys=True)
+    assert "secret-token" not in body_blob
+    assert seen["body"]["workspace_id"] == "ws_hosted"
+    assert seen["body"]["probe"] == "validate_toolchain"
+    assert seen["body"]["phase_names"] == []
+    assert seen["body"]["run_healthchecks"] is False
+    assert seen["body"]["include_coverage"] is False
+    assert seen["body"]["profile"]["phases"]["validate"] == [
+        {"command": "ruff check src/awf", "timeout_seconds": None, "required": True},
+        {"command": "pytest tests/unit -q", "timeout_seconds": None, "required": True},
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("state", ["failed", "cancelled", "timed_out"])
+async def test_hosted_validation_validate_toolchain_probe_terminal_failure_is_probe_error(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "probe_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/probe_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/probe_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "probe_1",
+                    "workspace_id": "ws_hosted",
+                    "state": state,
+                    "message": "host-side probe did not complete",
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.probe_validate_command_tools(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-probe-test"),
+        )
+
+    assert result.missing == ()
+    assert result.probe_errored is True
+    assert result.probe_ran is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("probe_payload", "match"),
+    [
+        (None, "missing validate_toolchain_probe"),
+        ({"missing": "ruff"}, "malformed missing"),
+        ({"missing": ["ruff"]}, "missing item is malformed"),
+    ],
+)
+async def test_hosted_validation_validate_toolchain_probe_rejects_malformed_payload(
+    tmp_path: Path,
+    probe_payload: object,
+    match: str,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "probe_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/probe_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/probe_1":
+            payload: dict[str, object] = {
+                "operation_id": "probe_1",
+                "workspace_id": "ws_hosted",
+                "state": "succeeded",
+            }
+            if probe_payload is not None:
+                payload["validate_toolchain_probe"] = probe_payload
+            return httpx.Response(200, json=payload)
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        with pytest.raises(HostedDelegationProtocolError, match=match):
+            await delegate.probe_validate_command_tools(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=WorkspaceProfile(name="hosted-probe-test"),
+            )
 
 
 @pytest.mark.unit

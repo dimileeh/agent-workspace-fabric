@@ -65,6 +65,8 @@ from awf.runtime.validation_setup import (
     profile_validation_tool_preflight_findings,
 )
 from awf.runtime.validation_types import (
+    ValidateCommandProbeTarget,
+    ValidateToolProbeResult,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
@@ -370,6 +372,31 @@ class HostedValidationDelegate:
             metadata=metadata,
         )
         return ValidationResult(commands=[result])
+
+    async def probe_validate_command_tools(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        profile: WorkspaceProfile,
+    ) -> ValidateToolProbeResult:
+        """Delegate the post-setup validate-command toolchain probe to the host."""
+        del compose_project, compose_file
+        terminal = await self._run_operation(
+            workspace_id=workspace_id,
+            start_path="/v1/validation-runs",
+            payload={
+                "workspace_id": workspace_id,
+                "profile": _hosted_validation_profile_payload(profile),
+                "phase_names": [],
+                "run_healthchecks": False,
+                "include_coverage": False,
+                "probe": "validate_toolchain",
+            },
+            poll_response_max_bytes=_response_json_max_bytes(self._config.max_output_bytes),
+        )
+        return _validate_tool_probe_result_from_terminal(terminal)
 
     async def run_profile_phases(
         self,
@@ -1041,6 +1068,40 @@ def _coverage_status_from_payload(payload: Mapping[str, Any], *, enforce: bool) 
     if enforce and status != "passed":
         return "failed"
     return status
+
+
+def _validate_tool_probe_result_from_terminal(
+    payload: Mapping[str, Any],
+) -> ValidateToolProbeResult:
+    state = _operation_state(payload)
+    if state != "succeeded":
+        return ValidateToolProbeResult(probe_errored=True, probe_ran=True)
+    probe_payload = payload.get("validate_toolchain_probe")
+    if not isinstance(probe_payload, Mapping):
+        raise HostedDelegationProtocolError(
+            "hosted validation response missing validate_toolchain_probe"
+        )
+    missing_payload = probe_payload.get("missing", [])
+    if not isinstance(missing_payload, list):
+        raise HostedDelegationProtocolError(
+            "hosted validate_toolchain_probe response has malformed missing"
+        )
+    return ValidateToolProbeResult(
+        missing=tuple(_validate_tool_probe_target_from_payload(item) for item in missing_payload),
+        probe_errored=bool(probe_payload.get("probe_errored", False)),
+        probe_ran=bool(probe_payload.get("probe_ran", False)),
+    )
+
+
+def _validate_tool_probe_target_from_payload(payload: object) -> ValidateCommandProbeTarget:
+    if not isinstance(payload, Mapping):
+        raise HostedDelegationProtocolError(
+            "hosted validate_toolchain_probe missing item is malformed"
+        )
+    return ValidateCommandProbeTarget(
+        tool=_str_field(payload, "tool"),
+        command=_str_field(payload, "command"),
+    )
 
 
 def _operation_ref_from_payload(

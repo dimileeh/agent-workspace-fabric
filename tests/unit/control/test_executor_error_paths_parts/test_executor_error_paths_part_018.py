@@ -16,6 +16,7 @@ from awf.control.executor.constants import (
     HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
     HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
+    PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE,
 )
 from awf.control.executor.monitor_handoff_setup import (
     _MonitorHandoffSetupFailureError,
@@ -27,6 +28,8 @@ from awf.db.repositories import WorkspaceRepository
 from awf.runtime.inspection import RuntimeService
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
+    ValidateCommandProbeTarget,
+    ValidateToolProbeResult,
     ValidationCommandResult,
     ValidationResult,
 )
@@ -112,6 +115,37 @@ class _HostedSetupPreflightValidation(_HostedSetupValidation):
         del workspace_id, profile
         self._trace.append("preflight")
         return ValidationResult()
+
+
+class _HostedSetupPreflightProbeValidation(_HostedSetupPreflightValidation):
+    def __init__(
+        self,
+        trace: list[str],
+        *,
+        probe_result: ValidateToolProbeResult,
+    ) -> None:
+        super().__init__(trace)
+        self.probe_kwargs: list[dict[str, Any]] = []
+        self._probe_result = probe_result
+
+    async def probe_validate_command_tools(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        profile: object,
+    ) -> ValidateToolProbeResult:
+        self.probe_kwargs.append(
+            {
+                "workspace_id": workspace_id,
+                "compose_project": compose_project,
+                "compose_file": compose_file,
+                "profile": profile,
+            }
+        )
+        self._trace.append("probe")
+        return self._probe_result
 
 
 @pytest.mark.unit
@@ -1043,6 +1077,92 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
             "phase_names": ["setup", "pre_agent"],
             "profile_preflight_passed": True,
         }
+
+    @pytest.mark.unit
+    async def test_hosted_monitor_handoff_profile_setup_probes_validate_tools_before_preflight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Hosted setup fails early when setup leaves a validate executable missing."""
+        trace: list[str] = []
+        validation = _HostedSetupPreflightProbeValidation(
+            trace,
+            probe_result=ValidateToolProbeResult(
+                missing=(ValidateCommandProbeTarget(tool="ruff", command="ruff check src/awf"),),
+                probe_ran=True,
+            ),
+        )
+        mirror_path = tmp_path / "mirror.git"
+        worktree_path = tmp_path / "worktree"
+        compose_file = tmp_path / "compose.yml"
+        profile = object()
+        mark_failed_calls: list[dict[str, Any]] = []
+        completion_calls: list[str] = []
+
+        class _Executor:
+            _hosted_validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                trace.append("setup_events")
+
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "mirror_path_for_worktree",
+            lambda _path: mirror_path,
+        )
+
+        async def _repair_mirror_hooks_path(path: Path) -> bool:
+            assert path == mirror_path
+            trace.append("repair_hooks")
+            return True
+
+        async def _record_completed(_executor: object, *, workspace_id: str) -> bool:
+            completion_calls.append(workspace_id)
+            trace.append("completed")
+            return True
+
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "repair_mirror_hooks_path",
+            _repair_mirror_hooks_path,
+        )
+        monkeypatch.setattr(
+            monitor_handoff_setup_module,
+            "_record_hosted_monitor_handoff_setup_completed",
+            _record_completed,
+        )
+
+        ok = await _run_hosted_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-hosted",
+            profile=profile,
+            compose_project="awf_x",
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+            pr_identity={"pr_number": 42},
+        )
+
+        assert ok is False
+        assert trace == ["hosted_setup", "setup_events", "repair_hooks", "probe"]
+        assert validation.probe_kwargs == [
+            {
+                "workspace_id": "ws-hosted",
+                "compose_project": "awf_x",
+                "compose_file": compose_file,
+                "profile": profile,
+            }
+        ]
+        assert completion_calls == []
+        assert len(mark_failed_calls) == 1
+        failure = mark_failed_calls[0]
+        assert failure["failure_reason"] == FailureReason.profile_resolution_failure
+        assert failure["reason_code"] == PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE
+        assert failure["details"] == {"missing_tools": ["ruff"]}
+        assert "`ruff check src/awf`" in failure["message"]
 
     @pytest.mark.unit
     async def test_hosted_monitor_handoff_profile_setup_mirror_repair_failure_blocks_preflight(
