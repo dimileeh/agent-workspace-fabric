@@ -384,6 +384,7 @@ class HostedValidationDelegate:
         compose_project: str,
         compose_file: Path,
         profile: WorkspaceProfile,
+        pr_identity: Mapping[str, Any] | None = None,
     ) -> ValidateToolProbeResult:
         """Delegate the post-setup validate-command toolchain probe to the host."""
         del compose_project, compose_file
@@ -397,6 +398,7 @@ class HostedValidationDelegate:
                 "run_healthchecks": False,
                 "include_coverage": False,
                 "probe": "validate_toolchain",
+                "pr_identity": _hosted_pr_identity_payload(pr_identity or {}),
             },
             poll_response_max_bytes=_response_json_max_bytes(self._config.max_output_bytes),
         )

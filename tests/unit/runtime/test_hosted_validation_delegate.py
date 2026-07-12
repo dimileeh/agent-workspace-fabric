@@ -241,6 +241,11 @@ async def test_hosted_validation_validate_toolchain_probe_posts_operation_and_ma
                     },
                 }
             ),
+            pr_identity={
+                "repo_url": "https://host-secret@github.com/base/repo.git",
+                "pr_number": 277,
+                "head_ref": "awf/ws-hosted",
+            },
         )
 
     assert result.missing == (
@@ -252,11 +257,17 @@ async def test_hosted_validation_validate_toolchain_probe_posts_operation_and_ma
     assert seen["headers"]["authorization"] == "Bearer secret-token"
     body_blob = json.dumps(seen["body"], sort_keys=True)
     assert "secret-token" not in body_blob
+    assert "host-secret" not in body_blob
     assert seen["body"]["workspace_id"] == "ws_hosted"
     assert seen["body"]["probe"] == "validate_toolchain"
     assert seen["body"]["phase_names"] == []
     assert seen["body"]["run_healthchecks"] is False
     assert seen["body"]["include_coverage"] is False
+    assert seen["body"]["pr_identity"] == {
+        "repo_url": "https://github.com/base/repo.git",
+        "pr_number": 277,
+        "head_ref": "awf/ws-hosted",
+    }
     assert seen["body"]["profile"]["phases"]["validate"] == [
         {"command": "ruff check src/awf", "timeout_seconds": None, "required": True},
         {"command": "pytest tests/unit -q", "timeout_seconds": None, "required": True},

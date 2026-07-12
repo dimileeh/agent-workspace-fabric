@@ -144,6 +144,7 @@ async def _run_monitor_handoff_validate_toolchain_probe(
     compose_project: str,
     compose_file: Path,
     profile: Any,
+    pr_identity: Mapping[str, object] | None = None,
 ) -> bool:
     """Fail the adopt-pr handoff early when a ``validate`` tool is unprovisioned.
 
@@ -164,13 +165,16 @@ async def _run_monitor_handoff_validate_toolchain_probe(
     probe = getattr(validation, "probe_validate_command_tools", None)
     if not callable(probe):
         return True
+    probe_kwargs = {
+        "workspace_id": workspace_id,
+        "compose_project": compose_project,
+        "compose_file": compose_file,
+        "profile": profile,
+    }
+    if pr_identity is not None:
+        probe_kwargs["pr_identity"] = pr_identity
     try:
-        result = await probe(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-        )
+        result = await probe(**probe_kwargs)
     except Exception as exc:
         # Non-blocking probe-infra failure: preserve the structured reason_code
         # and a redacted error, then proceed — never fail the adoption on a probe
@@ -534,6 +538,7 @@ async def _run_hosted_monitor_handoff_profile_setup(
             compose_project=compose_project,
             compose_file=compose_file,
             profile=profile,
+            pr_identity=pr_identity,
         ):
             return False
         preflight_passed = await _run_monitor_handoff_profile_preflight(
