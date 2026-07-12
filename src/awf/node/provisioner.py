@@ -309,16 +309,24 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             stack_paths: ComposeProjectPaths | None = None
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
+            companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
+            if self._stack_launcher is not None:
+                companion_specs = companion_specs_from_task_policy(ws.task_policy)
             if self._stack_launcher is not None and hosted_pr_adoption:
+                materialized_companions = await self._materialize_companions(
+                    workspace_id=workspace_id,
+                    companions=companion_specs,
+                    default_base_branch=ws.branch_base,
+                )
                 stack_paths = await self._stack_launcher.render(
                     WorkspaceStackLaunchRequest(
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        companions=materialized_companions,
                     )
                 )
             elif self._stack_launcher is not None:
-                companion_specs = companion_specs_from_task_policy(ws.task_policy)
                 validate_companion_service_graph(
                     profile_services=profile_services(
                         profile,

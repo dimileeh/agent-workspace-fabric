@@ -328,6 +328,101 @@ class TestSuccess:
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_hosted/compose.yml"
 
     @pytest.mark.unit
+    async def test_hosted_pr_adoption_render_receives_task_policy_companions(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        from awf.node.companion_services import validate_companion_service_graph
+        from awf.profiles.compose import profile_services
+
+        class _ValidatingRenderOnlyStackLauncher:
+            def __init__(self) -> None:
+                self.launch_requests: list[Any] = []
+                self.render_requests: list[Any] = []
+
+            async def render(self, request: Any) -> ComposeProjectPaths:
+                self.render_requests.append(request)
+                services = profile_services(
+                    request.profile,
+                    base_path=request.layout.worktree_path,
+                )
+                validate_companion_service_graph(
+                    profile_services=services,
+                    companions=request.companions,
+                    docker_mode=request.profile.docker.mode,
+                )
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_hosted_companion"),
+                    compose_file=Path("/tmp/awf-compose/ws_hosted_companion/compose.yml"),
+                )
+
+            async def launch(self, request: Any) -> object:
+                self.launch_requests.append(request)
+                raise AssertionError("hosted adoption must not launch compose")
+
+        launcher = _ValidatingRenderOnlyStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        _git(["update-ref", "refs/pull/278/head", "HEAD"], origin_repo)
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="adopt hosted companion",
+                task_prompt="p",
+                agent="codex",
+                task_kind="sync_feature_pr",
+                test_commands=[],
+                resolved_profile={
+                    "name": "hosted-companion-dependent",
+                    "services": [
+                        {
+                            "name": "api",
+                            "image": "python:3.12-alpine",
+                            "depends_on": ["cache"],
+                        }
+                    ],
+                },
+                task_policy={
+                    "pr_adoption": {
+                        "repo_slug": "dimileeh/aira-web",
+                        "pr_number": 278,
+                        "head_ref": "feature/with-companion",
+                        "execution": {"mode": "hosted"},
+                    },
+                    "companions": [
+                        {
+                            "name": "cache",
+                            "repo_url": str(origin_repo),
+                            "healthcheck_cmd": "test -f /tmp/healthy",
+                        }
+                    ],
+                },
+                remote_push_branch="feature/with-companion",
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.launch_requests == []
+        assert len(launcher.render_requests) == 1
+        request = launcher.render_requests[0]
+        assert [companion.spec.name for companion in request.companions] == ["cache"]
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.compose_project_name is None
+            assert reloaded.compose_file_path == "/tmp/awf-compose/ws_hosted_companion/compose.yml"
+
+    @pytest.mark.unit
     async def test_hosted_pr_adoption_dind_profile_keeps_reservation_local_demand_zero(
         self,
         session_factory: async_sessionmaker[AsyncSession],
