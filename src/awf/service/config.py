@@ -382,16 +382,23 @@ def local_service_worker_environment_keys(
     The worker's secret-lease resolver only sees variables defined on the
     local-service Compose ``environment:`` block (the worker service inherits the
     shared ``&awf-environment`` anchor via ``<<: *awf-service``), NOT every
-    caller-shell export. Returns those mapping KEYS -- the real worker env
-    allowlist -- parsed from the canonical ``docker/compose/local-service.yml``.
-    ``None`` when the compose asset cannot be located/parsed (caller falls back
-    to the unrestricted merged view, preserving legacy behavior).
+    caller-shell export. Returns the statically declared worker env allowlist
+    parsed from the canonical ``docker/compose/local-service.yml``. Dynamic
+    list-form names require a merged environment and are handled by
+    :func:`local_service_worker_environment`. ``None`` when the compose asset
+    cannot be located/parsed (caller falls back to the unrestricted merged view,
+    preserving legacy behavior).
     """
 
     pairs = _local_service_worker_environment_pairs(compose_file=compose_file)
     if pairs is None:
         return None
-    return frozenset(pairs)
+    static_keys = (
+        key
+        for key, (_value, interpolates_name) in pairs.items()
+        if not interpolates_name or "$" not in key
+    )
+    return frozenset(static_keys)
 
 
 def local_service_worker_environment(
@@ -400,10 +407,11 @@ def local_service_worker_environment(
     """Return the worker container's MATERIALIZED Compose environment.
 
     Unlike :func:`local_service_worker_environment_keys` (NAMES only), this
-    resolves each declared value on the worker's Compose ``environment:`` block by
-    interpolating it against ``merged_env`` (the merged Compose view: env file
-    overlaid with the caller shell), reproducing the values Docker Compose
-    actually injects into the worker container. This materializes aliased defaults
+    resolves each declared value and list-form name on the worker's Compose
+    ``environment:`` block by interpolating it against ``merged_env`` (the merged
+    Compose view: env file overlaid with the caller shell), reproducing the
+    values Docker Compose actually injects into the worker container. This
+    materializes aliased defaults
     such as ``AWF_GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}``
     -- a key whose NAME is absent from ``merged_env`` yet which the worker receives
     populated from ``GH_TOKEN`` -- so a ``provider: env`` lease with
@@ -422,7 +430,10 @@ def local_service_worker_environment(
     if pairs is None:
         return None
     materialized: dict[str, str] = {}
-    for key, raw_value in pairs.items():
+    for raw_key, (raw_value, interpolates_name) in pairs.items():
+        key = compose_expand_value(raw_key, environ=merged_env) if interpolates_name else raw_key
+        if not key:
+            continue
         if raw_value is None:
             # Bare ``- KEY`` list entry: Compose forwards the host value verbatim,
             # and omits the key when the host does not set it.
@@ -436,7 +447,7 @@ def local_service_worker_environment(
 
 def _local_service_worker_environment_pairs(
     *, compose_file: Path | None = None
-) -> dict[str, str | None] | None:
+) -> dict[str, tuple[str | None, bool]] | None:
     """Parse the worker service's Compose ``environment:`` key->raw-value pairs.
 
     Single source of truth for both the worker env KEY allowlist
@@ -459,7 +470,7 @@ def _local_service_worker_environment_pairs(
     if not isinstance(data, Mapping):
         return None
 
-    pairs: dict[str, str | None] = {}
+    pairs: dict[str, tuple[str | None, bool]] = {}
     services = data.get("services")
     if isinstance(services, Mapping):
         worker = services.get("worker")
@@ -486,18 +497,23 @@ def _local_service_worker_environment_pairs(
     return pairs
 
 
-def _collect_compose_environment_pairs(environment: object, pairs: dict[str, str | None]) -> None:
+def _collect_compose_environment_pairs(
+    environment: object,
+    pairs: dict[str, tuple[str | None, bool]],
+) -> None:
     """Collect Compose ``environment:`` key->raw-value pairs from mapping or list shapes.
 
     Mapping values are kept verbatim (coerced to ``str``; a YAML null stays
     ``None``). A list ``KEY=value`` entry keeps ``value``; a bare ``KEY`` entry
-    maps to ``None`` (Compose forwards the host value unchanged).
+    maps to ``None`` (Compose forwards the host value unchanged). Compose
+    interpolates list-form names but not mapping keys, so list entries are
+    marked for name interpolation during materialization.
     """
 
     if isinstance(environment, Mapping):
         for key, value in environment.items():
             if isinstance(key, str):
-                pairs[key] = None if value is None else str(value)
+                pairs[key] = (None if value is None else str(value), False)
         return
     if isinstance(environment, Sequence) and not isinstance(environment, str | bytes | bytearray):
         for item in environment:
@@ -507,7 +523,7 @@ def _collect_compose_environment_pairs(environment: object, pairs: dict[str, str
             name = name.strip()
             if not name:
                 continue
-            pairs[name] = value if separator else None
+            pairs[name] = (value if separator else None, True)
 
 
 def resolve_local_service_provider_environ(

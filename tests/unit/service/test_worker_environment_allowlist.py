@@ -319,6 +319,32 @@ def test_bare_list_entry_forwards_present_host_value_and_omits_unset(tmp_path: P
     assert "GITHUB_TOKEN" not in materialized
 
 
+def test_dynamic_bare_list_entry_forwards_referenced_hosted_token(tmp_path: Path) -> None:
+    """Hosted delegation token indirection must model Compose list interpolation."""
+    compose_file = tmp_path / "local-service.yml"
+    compose_file.write_text(
+        "services:\n"
+        "  worker:\n"
+        "    environment:\n"
+        "      - AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV="
+        "${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-}\n"
+        "      - ${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-"
+        "AWF_HOSTED_DELEGATION_BEARER_TOKEN}\n"
+    )
+
+    materialized = local_service_worker_environment(
+        {
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV": "HOSTED_TOKEN",
+            "HOSTED_TOKEN": "secret-token",
+        },
+        compose_file=compose_file,
+    )
+
+    assert materialized is not None
+    assert materialized["AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"] == "HOSTED_TOKEN"
+    assert materialized["HOSTED_TOKEN"] == "secret-token"
+
+
 def test_real_local_service_yml_contains_expected_keys() -> None:
     """Guard the parse against future edits to the canonical compose file."""
     repo_compose = Path(__file__).resolve().parents[3] / "docker/compose/local-service.yml"

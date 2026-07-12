@@ -83,6 +83,24 @@ def _compose_template_value(value: str, env: dict[str, str]) -> str:
     return "".join(rendered)
 
 
+def _compose_environment_pairs(environment: object) -> dict[str, str | None]:
+    pairs: dict[str, str | None] = {}
+    if isinstance(environment, dict):
+        for key, value in environment.items():
+            if isinstance(key, str):
+                pairs[key] = None if value is None else str(value)
+        return pairs
+    if isinstance(environment, list):
+        for item in environment:
+            if not isinstance(item, str):
+                continue
+            name, separator, value = item.partition("=")
+            name = name.strip()
+            if name:
+                pairs[name] = value if separator else None
+    return pairs
+
+
 def _compose_short_port_mapping_fields(mapping: str) -> list[str]:
     fields: list[str] = []
     current: list[str] = []
@@ -242,7 +260,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         )
         assert service_base_mounts.issubset(set(volumes))
         assert expected_auth_mounts.issubset(set(volumes))
-        environment = services[service_name]["environment"]
+        environment = _compose_environment_pairs(services[service_name]["environment"])
         assert environment["AWF_API_BASE_URL"] == "http://api:8000"
         assert environment["AWF_API_TOKEN"] == "${AWF_API_TOKEN:-local-dev-token}"
         assert environment["AWF_DATABASE_URL"] == (
@@ -270,6 +288,12 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         )
         assert environment["AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"] == (
             "${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-}"
+        )
+        assert (
+            environment[
+                "${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-AWF_HOSTED_DELEGATION_BEARER_TOKEN}"
+            ]
+            is None
         )
         assert environment["AWF_HOSTED_DELEGATION_POLL_INTERVAL_SECONDS"] == (
             "${AWF_HOSTED_DELEGATION_POLL_INTERVAL_SECONDS:-2.0}"
