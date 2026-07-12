@@ -38,6 +38,10 @@ from awf.profiles.compose import (
 )
 from awf.profiles.models import WorkspaceProfile
 
+_HOSTED_RENDER_ENV_SECRET_PROVIDERS = frozenset(("env", "github", "bitbucket"))
+_HOSTED_RENDER_MOUNT_SECRET_PROVIDERS = frozenset(("local-file", "host-file", "local-auth", "auth"))
+_HOSTED_RENDER_ENV_REF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 @dataclass(frozen=True)
 class WorkspaceStackLaunchRequest:
@@ -166,11 +170,14 @@ class ComposeStackLauncher:
 
         Hosted PR adoption uses this to preserve the same rendered agent
         environment that local Core derives from the stack while intentionally
-        skipping local Compose launch.
+        skipping local Compose launch. Profile-declared secret leases are kept
+        as secret-free names/targets for hosted runtime resolution; render does
+        not resolve Core-local lease sources.
         """
         spec, secret_lease_resolution, companion_secret_metadata = await self._compose_spec(
             request,
             build_companion_images=False,
+            use_hosted_secret_placeholders=True,
         )
         paths = self._compose.render(spec)
         secret_metadata = _stack_secret_metadata(
@@ -190,6 +197,7 @@ class ComposeStackLauncher:
         request: WorkspaceStackLaunchRequest,
         *,
         build_companion_images: bool,
+        use_hosted_secret_placeholders: bool = False,
     ) -> tuple[WorkspaceComposeSpec, LocalSecretLeaseResolution | None, dict[str, object]]:
         """Build the rendered stack spec shared by launch and render-only paths."""
         layout = request.layout
@@ -204,7 +212,9 @@ class ComposeStackLauncher:
         )
         auth_mounts = [mirror_mount]
         secret_lease_resolution: LocalSecretLeaseResolution | None = None
-        if self._secret_lease_resolver is not None:
+        if use_hosted_secret_placeholders:
+            secret_lease_resolution = _hosted_secret_lease_placeholder_resolution(profile)
+        elif self._secret_lease_resolver is not None:
             secret_lease_resolution = await asyncio.to_thread(
                 self._secret_lease_resolver.resolve,
                 profile,
@@ -452,6 +462,83 @@ def _stack_secret_metadata(
         metadata.update(dict(secret_lease_resolution.metadata))
     metadata.update(companion_secret_metadata)
     return metadata
+
+
+def _hosted_secret_lease_placeholder_resolution(
+    profile: WorkspaceProfile,
+) -> LocalSecretLeaseResolution | None:
+    """Return secret-free lease names/targets for hosted render-only stacks."""
+    if not profile.secrets:
+        return None
+
+    env: dict[str, str] = {}
+    providers: list[str] = []
+    targets: list[str] = []
+    mount_count = 0
+    skipped_unresolved_count = 0
+
+    for secret in profile.secrets:
+        provider = _hosted_secret_provider(secret.provider)
+        if provider is None:
+            skipped_unresolved_count += 1
+            continue
+        if secret.kind == "env" and provider in _HOSTED_RENDER_ENV_SECRET_PROVIDERS:
+            source_name = _hosted_env_secret_source_name(secret.ref, fallback=secret.target)
+            if source_name is None:
+                skipped_unresolved_count += 1
+                continue
+            if secret.target not in env:
+                env[secret.target] = f"${{{source_name}}}"
+            _append_unique_hosted_secret_value(providers, provider)
+            _append_unique_hosted_secret_value(targets, secret.target)
+            continue
+        if secret.kind == "mount" and provider in _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS:
+            mount_count += 1
+            _append_unique_hosted_secret_value(providers, provider)
+            _append_unique_hosted_secret_value(targets, secret.target)
+            continue
+        skipped_unresolved_count += 1
+
+    if not env and mount_count == 0 and not skipped_unresolved_count:
+        return None
+
+    metadata: dict[str, object] = {
+        "schema": "secret_lease_mount_metadata.v1",
+        "mount_plan": "profile_declared_secret_leases",
+        "env_count": len(env),
+        "total_env_count": len(env),
+        "mount_count": mount_count,
+        "providers": providers,
+        "targets": targets,
+    }
+    if skipped_unresolved_count:
+        metadata["skipped_unresolved_count"] = skipped_unresolved_count
+    return LocalSecretLeaseResolution(
+        environment=tuple(env.items()),
+        metadata=metadata,
+    )
+
+
+def _hosted_secret_provider(provider: str | None) -> str | None:
+    if provider is None:
+        return None
+    normalized = provider.strip().lower()
+    return normalized or None
+
+
+def _hosted_env_secret_source_name(ref: str | None, *, fallback: str) -> str | None:
+    raw = (ref or "").strip()
+    if raw.startswith("env/"):
+        raw = raw[len("env/") :]
+    candidate = raw or fallback
+    if not _HOSTED_RENDER_ENV_REF_RE.fullmatch(candidate):
+        return None
+    return candidate
+
+
+def _append_unique_hosted_secret_value(items: list[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
 
 
 def effective_compose_up_timeout_seconds(

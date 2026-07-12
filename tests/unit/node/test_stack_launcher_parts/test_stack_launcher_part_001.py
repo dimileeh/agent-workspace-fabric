@@ -30,6 +30,7 @@ from awf.profiles.resolver import ProfileResolutionError
 from tests.unit.node.test_stack_launcher_parts._helpers import (
     _DeclaredLeaseResolver,
     _DockerUnavailableCompose,
+    _FailingDeclaredLeaseResolver,
     _layout,
     _RecordingCompanionImageBuilder,
     _RecordingCompose,
@@ -378,6 +379,15 @@ async def test_compose_stack_launcher_render_builds_metadata_without_compose_up(
     profile = WorkspaceProfile(
         name="hosted",
         runtime=ProfileRuntime(environment={"OLLAMA_HOST": "http://ollama.profile:11434"}),
+        secrets=[
+            {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+            }
+        ],
     )
 
     paths = await launcher.render(
@@ -391,13 +401,77 @@ async def test_compose_stack_launcher_render_builds_metadata_without_compose_up(
     assert paths is not None
     assert paths.compose_file == Path("/tmp/awf-compose/ws_launcher/compose.yml")
     assert paths.secret_lease_mount_metadata["env_count"] == 1
-    assert lease_resolver.calls == [("hosted", "ws_launcher")]
+    assert lease_resolver.calls == []
     assert compose.specs == []
     assert compose.waits == []
     assert len(compose.render_specs) == 1
     env = dict(compose.render_specs[0].agent_environment)
     assert env["OLLAMA_HOST"] == "http://ollama.profile:11434"
     assert env["OPENAI_API_KEY"] == "${OPENAI_API_KEY}"
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_skips_local_secret_resolution() -> None:
+    """Hosted render preserves lease targets without resolving Core-local sources."""
+    compose = _RecordingCompose()
+    lease_resolver = _FailingDeclaredLeaseResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=lease_resolver,
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted",
+            "secrets": [
+                {
+                    "name": "npm",
+                    "kind": "env",
+                    "target": "NPM_TOKEN",
+                    "provider": "env",
+                    "ref": "env/NPM_TOKEN",
+                },
+                {
+                    "name": "anthropic",
+                    "kind": "env",
+                    "target": "ANTHROPIC_API_KEY",
+                    "provider": "env",
+                    "ref": "env/MY_ANTHROPIC_TOKEN",
+                },
+                {
+                    "name": "npmrc",
+                    "kind": "mount",
+                    "target": "/home/agent/.npmrc",
+                    "provider": "local-file",
+                    "ref": "file/.npmrc",
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    assert lease_resolver.calls == []
+    assert compose.specs == []
+    assert len(compose.render_specs) == 1
+    env = dict(compose.render_specs[0].agent_environment)
+    assert env["NPM_TOKEN"] == "${NPM_TOKEN}"
+    assert env["ANTHROPIC_API_KEY"] == "${MY_ANTHROPIC_TOKEN}"
+    assert paths.secret_lease_mount_metadata["env_count"] == 2
+    assert paths.secret_lease_mount_metadata["mount_count"] == 1
+    assert paths.secret_lease_mount_metadata["providers"] == ["env", "local-file"]
+    assert paths.secret_lease_mount_metadata["targets"] == [
+        "NPM_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "/home/agent/.npmrc",
+    ]
 
 
 @pytest.mark.unit
