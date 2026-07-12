@@ -28,6 +28,7 @@ from awf.profiles.models import (
 )
 from awf.profiles.resolver import ProfileResolutionError
 from tests.unit.node.test_stack_launcher_parts._helpers import (
+    _DeclaredLeaseResolver,
     _DockerUnavailableCompose,
     _layout,
     _RecordingCompanionImageBuilder,
@@ -362,6 +363,41 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     assert spec.auth_mounts[0].source == str(layout.mirror_path)
     assert spec.auth_mounts[0].target == str(layout.mirror_path)
     assert spec.auth_mounts[0].mode == "rw"
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_render_builds_metadata_without_compose_up() -> None:
+    """Render-only hosted adoption gets stack env metadata without launching Compose."""
+    compose = _RecordingCompose()
+    lease_resolver = _DeclaredLeaseResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=lease_resolver,
+    )
+    profile = WorkspaceProfile(
+        name="hosted",
+        runtime=ProfileRuntime(environment={"OLLAMA_HOST": "http://ollama.profile:11434"}),
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    assert paths.compose_file == Path("/tmp/awf-compose/ws_launcher/compose.yml")
+    assert paths.secret_lease_mount_metadata["env_count"] == 1
+    assert lease_resolver.calls == [("hosted", "ws_launcher")]
+    assert compose.specs == []
+    assert compose.waits == []
+    assert len(compose.render_specs) == 1
+    env = dict(compose.render_specs[0].agent_environment)
+    assert env["OLLAMA_HOST"] == "http://ollama.profile:11434"
+    assert env["OPENAI_API_KEY"] == "${OPENAI_API_KEY}"
 
 
 @pytest.mark.unit

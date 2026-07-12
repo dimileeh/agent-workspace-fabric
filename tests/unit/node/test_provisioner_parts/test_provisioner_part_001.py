@@ -264,15 +264,23 @@ class TestSuccess:
         git_manager: GitManager,
         origin_repo: Path,
     ) -> None:
-        class _FailingStackLauncher:
+        class _RenderOnlyStackLauncher:
             def __init__(self) -> None:
-                self.requests: list[Any] = []
+                self.launch_requests: list[Any] = []
+                self.render_requests: list[Any] = []
+
+            async def render(self, request: Any) -> ComposeProjectPaths:
+                self.render_requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_hosted"),
+                    compose_file=Path("/tmp/awf-compose/ws_hosted/compose.yml"),
+                )
 
             async def launch(self, request: Any) -> object:
-                self.requests.append(request)
+                self.launch_requests.append(request)
                 raise AssertionError("hosted adoption must not launch compose")
 
-        launcher = _FailingStackLauncher()
+        launcher = _RenderOnlyStackLauncher()
         provisioner = Provisioner(
             session_factory=session_factory,
             git=git_manager,
@@ -304,7 +312,9 @@ class TestSuccess:
 
         await provisioner.provision(ws_id)
 
-        assert launcher.requests == []
+        assert launcher.launch_requests == []
+        assert len(launcher.render_requests) == 1
+        assert launcher.render_requests[0].workspace_id == ws_id
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None
@@ -315,7 +325,7 @@ class TestSuccess:
             assert reloaded.remote_push_branch == "feature/ready"
             assert reloaded.resolved_profile is not None
             assert reloaded.compose_project_name is None
-            assert reloaded.compose_file_path is None
+            assert reloaded.compose_file_path == "/tmp/awf-compose/ws_hosted/compose.yml"
 
     @pytest.mark.unit
     async def test_materializes_companion_worktrees_before_stack_launch(

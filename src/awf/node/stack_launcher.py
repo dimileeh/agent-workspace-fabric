@@ -55,6 +55,10 @@ class WorkspaceStackLaunchRequest:
 class WorkspaceStackLauncher(Protocol):
     """Small seam for provisioning tests to avoid requiring Docker."""
 
+    async def render(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
+        """Render the workspace stack metadata without starting Compose."""
+        ...
+
     async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
         """Launch the workspace stack and return rendered compose paths when used."""
         ...
@@ -100,6 +104,94 @@ class ComposeStackLauncher:
 
     async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
         """Render and start the profile stack, including companions and secret metadata."""
+        spec, secret_lease_resolution, companion_secret_metadata = await self._compose_spec(
+            request,
+            build_companion_images=True,
+        )
+        try:
+            spec = await self._revalidate_prebuilt_companion_images(spec)
+        except ComposeOperationError as e:
+            _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
+            raise
+        missing_prebuilt_retry_budget = _prebuilt_companion_image_count(spec)
+        compose_up_started = False
+
+        async def _notify_compose_up_started() -> None:
+            nonlocal compose_up_started
+            if compose_up_started:
+                return
+            if request.on_compose_up_started is not None:
+                await request.on_compose_up_started()
+            compose_up_started = True
+
+        while True:
+            try:
+                paths = await self._compose.up(
+                    spec,
+                    wait=True,
+                    on_compose_up_started=_notify_compose_up_started,
+                )
+                break
+            except ComposeOperationError as e:
+                retry_spec = _missing_prebuilt_companion_image_retry_spec(spec, e)
+                if retry_spec is None or missing_prebuilt_retry_budget <= 0:
+                    _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
+                    raise
+                # Replace spec so retry-time revalidation and any retry failure
+                # handling report the compose spec used by the failing attempt.
+                spec = retry_spec
+                missing_prebuilt_retry_budget -= 1
+                try:
+                    spec = await self._revalidate_prebuilt_companion_images(spec)
+                except ComposeOperationError as retry_error:
+                    _raise_workspace_service_error_if_docker_unavailable(
+                        retry_error,
+                        spec=spec,
+                    )
+                    raise
+        secret_metadata = _stack_secret_metadata(
+            secret_lease_resolution=secret_lease_resolution,
+            companion_secret_metadata=companion_secret_metadata,
+        )
+        if not secret_metadata:
+            return paths
+        return ComposeProjectPaths(
+            project_dir=paths.project_dir,
+            compose_file=paths.compose_file,
+            secret_lease_mount_metadata=secret_metadata,
+        )
+
+    async def render(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
+        """Render stack metadata without starting Compose.
+
+        Hosted PR adoption uses this to preserve the same rendered agent
+        environment that local Core derives from the stack while intentionally
+        skipping local Compose launch.
+        """
+        spec, secret_lease_resolution, companion_secret_metadata = await self._compose_spec(
+            request,
+            build_companion_images=False,
+        )
+        paths = self._compose.render(spec)
+        secret_metadata = _stack_secret_metadata(
+            secret_lease_resolution=secret_lease_resolution,
+            companion_secret_metadata=companion_secret_metadata,
+        )
+        if not secret_metadata:
+            return paths
+        return ComposeProjectPaths(
+            project_dir=paths.project_dir,
+            compose_file=paths.compose_file,
+            secret_lease_mount_metadata=secret_metadata,
+        )
+
+    async def _compose_spec(
+        self,
+        request: WorkspaceStackLaunchRequest,
+        *,
+        build_companion_images: bool,
+    ) -> tuple[WorkspaceComposeSpec, LocalSecretLeaseResolution | None, dict[str, object]]:
+        """Build the rendered stack spec shared by launch and render-only paths."""
         layout = request.layout
         profile = request.profile
         egress_plan = local_egress_plan(profile.security.egress)
@@ -163,12 +255,22 @@ class ComposeStackLauncher:
             profile=profile,
             companions=request.companions,
         )
-        companions = await self._build_companion_services(
-            request.companions,
-            capture_timeout_seconds=compose_up_capture_timeout_seconds(
-                compose_up_timeout_seconds, wait=True
-            ),
-        )
+        if build_companion_images:
+            companions = await self._build_companion_services(
+                request.companions,
+                capture_timeout_seconds=compose_up_capture_timeout_seconds(
+                    compose_up_timeout_seconds, wait=True
+                ),
+            )
+        else:
+            companions = tuple(
+                await asyncio.gather(
+                    *(
+                        asyncio.to_thread(companion_service_from_materialized, companion)
+                        for companion in request.companions
+                    )
+                )
+            )
         companion_secret_metadata = companion_env_secret_stack_metadata(companions)
         agent_environment = profile_agent_environment(profile)
         if secret_lease_resolution is not None:
@@ -193,58 +295,7 @@ class ComposeStackLauncher:
             host_gateway_enabled=egress_plan.host_gateway_enabled,
             compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
-        try:
-            spec = await self._revalidate_prebuilt_companion_images(spec)
-        except ComposeOperationError as e:
-            _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
-            raise
-        missing_prebuilt_retry_budget = _prebuilt_companion_image_count(spec)
-        compose_up_started = False
-
-        async def _notify_compose_up_started() -> None:
-            nonlocal compose_up_started
-            if compose_up_started:
-                return
-            if request.on_compose_up_started is not None:
-                await request.on_compose_up_started()
-            compose_up_started = True
-
-        while True:
-            try:
-                paths = await self._compose.up(
-                    spec,
-                    wait=True,
-                    on_compose_up_started=_notify_compose_up_started,
-                )
-                break
-            except ComposeOperationError as e:
-                retry_spec = _missing_prebuilt_companion_image_retry_spec(spec, e)
-                if retry_spec is None or missing_prebuilt_retry_budget <= 0:
-                    _raise_workspace_service_error_if_docker_unavailable(e, spec=spec)
-                    raise
-                # Replace spec so retry-time revalidation and any retry failure
-                # handling report the compose spec used by the failing attempt.
-                spec = retry_spec
-                missing_prebuilt_retry_budget -= 1
-                try:
-                    spec = await self._revalidate_prebuilt_companion_images(spec)
-                except ComposeOperationError as retry_error:
-                    _raise_workspace_service_error_if_docker_unavailable(
-                        retry_error,
-                        spec=spec,
-                    )
-                    raise
-        secret_metadata = _stack_secret_metadata(
-            secret_lease_resolution=secret_lease_resolution,
-            companion_secret_metadata=companion_secret_metadata,
-        )
-        if not secret_metadata:
-            return paths
-        return ComposeProjectPaths(
-            project_dir=paths.project_dir,
-            compose_file=paths.compose_file,
-            secret_lease_mount_metadata=secret_metadata,
-        )
+        return spec, secret_lease_resolution, companion_secret_metadata
 
     async def _build_companion_services(
         self,

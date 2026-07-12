@@ -309,7 +309,15 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             stack_paths: ComposeProjectPaths | None = None
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             companion_graph_prevalidated = False
-            if self._stack_launcher is not None and not hosted_pr_adoption:
+            if self._stack_launcher is not None and hosted_pr_adoption:
+                stack_paths = await self._stack_launcher.render(
+                    WorkspaceStackLaunchRequest(
+                        workspace_id=workspace_id,
+                        layout=layout,
+                        profile=profile,
+                    )
+                )
+            elif self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
                 validate_companion_service_graph(
                     profile_services=profile_services(
@@ -813,24 +821,25 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             )
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
-                companion_secret_metadata = _stack_companion_env_secret_event_payload(
-                    workspace_id=workspace_id,
-                    stack_paths=stack_paths,
-                )
-                if companion_secret_metadata is not None:
-                    await repo.add_event(
-                        persisted,
-                        event_type="workspace.companion_env_secret_metadata",
-                        reason_code="COMPANION_ENV_SECRET_METADATA_RECORDED",
-                        payload=companion_secret_metadata,
-                    )
-                await SecretLeaseService(session).record_secret_lease_mounts(
-                    persisted,
-                    mount_metadata=_stack_secret_lease_mount_metadata(
+                if not pr_adoption_is_hosted(persisted.task_policy):
+                    companion_secret_metadata = _stack_companion_env_secret_event_payload(
                         workspace_id=workspace_id,
                         stack_paths=stack_paths,
-                    ),
-                )
+                    )
+                    if companion_secret_metadata is not None:
+                        await repo.add_event(
+                            persisted,
+                            event_type="workspace.companion_env_secret_metadata",
+                            reason_code="COMPANION_ENV_SECRET_METADATA_RECORDED",
+                            payload=companion_secret_metadata,
+                        )
+                    await SecretLeaseService(session).record_secret_lease_mounts(
+                        persisted,
+                        mount_metadata=_stack_secret_lease_mount_metadata(
+                            workspace_id=workspace_id,
+                            stack_paths=stack_paths,
+                        ),
+                    )
             if profile_resolution is not None:
                 persisted.resolved_profile = profile_resolution.profile.model_dump(
                     mode="json", by_alias=True
