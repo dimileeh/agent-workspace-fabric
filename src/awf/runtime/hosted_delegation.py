@@ -55,9 +55,15 @@ from awf.adapters.runtime_executor import (
 )
 from awf.common.commands import COMMAND_TIMEOUT_REASON
 from awf.common.config import Settings
+from awf.common.logging import get_logger
 from awf.common.token_patterns import TOKEN_ASSIGNMENT_KEY_PATTERN, compile_known_token_re
 from awf.profiles.models import WorkspaceProfile
-from awf.runtime.validation_setup import profile_phase_command_plan
+from awf.runtime.validation_setup import (
+    PROFILE_PREFLIGHT_PHASE,
+    PROFILE_VALIDATION_TOOL_UNAVAILABLE,
+    profile_phase_command_plan,
+    profile_validation_tool_preflight_findings,
+)
 from awf.runtime.validation_types import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -92,6 +98,7 @@ _HOSTED_AGENT_TERMINAL_FAILURES = {
 }
 _HOSTED_PR_IDENTITY_URL_FIELDS = frozenset({"repo_url", "head_repo_url"})
 _HOSTED_COVERAGE_OMITTED_RUNTIME_ENV = frozenset({"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"})
+_log = get_logger(__name__)
 
 
 class HostedDelegationConfigError(ValueError):
@@ -317,6 +324,52 @@ class HostedValidationDelegate:
         self._config = config
         self._artifacts_dir = artifacts_dir
         self._client = client
+
+    async def run_profile_tool_preflight(
+        self,
+        *,
+        workspace_id: str,
+        profile: WorkspaceProfile,
+    ) -> ValidationResult:
+        """Run local static validation-tool preflight before hosted validation."""
+        findings = profile_validation_tool_preflight_findings(profile)
+        if not findings:
+            return ValidationResult()
+
+        started = time.monotonic()
+        workspace_artifacts = self._artifacts_dir / workspace_id
+        workspace_artifacts.mkdir(parents=True, exist_ok=True)
+        label = "01_profile_preflight"
+        base_stream_id = f"validation.{label}"
+        stdout_path = workspace_artifacts / f"{label}.stdout"
+        stderr_path = workspace_artifacts / f"{label}.stderr"
+        metadata: dict[str, object] = {"findings": [finding.as_metadata() for finding in findings]}
+        stderr = json.dumps(metadata, sort_keys=True, indent=2) + "\n"
+        await asyncio.to_thread(stdout_path.write_text, "", encoding="utf-8")
+        await asyncio.to_thread(stderr_path.write_text, stderr, encoding="utf-8")
+
+        _log.info(
+            "hosted_validation.profile_tool_preflight_failed",
+            workspace_id=workspace_id,
+            reason_code=PROFILE_VALIDATION_TOOL_UNAVAILABLE,
+            finding_count=len(findings),
+        )
+        result = ValidationCommandResult(
+            command="profile validation tool preflight",
+            returncode=1,
+            duration_seconds=time.monotonic() - started,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            phase=PROFILE_PREFLIGHT_PHASE,
+            reason_code=PROFILE_VALIDATION_TOOL_UNAVAILABLE,
+            stream_ids={
+                "stdout": f"{base_stream_id}.stdout",
+                "stderr": f"{base_stream_id}.stderr",
+            },
+            policy_failed=True,
+            metadata=metadata,
+        )
+        return ValidationResult(commands=[result])
 
     async def run_profile_phases(
         self,

@@ -60,7 +60,9 @@ from awf.control.executor.monitor_handoff_setup import (
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError
-from awf.runtime.validation import ValidationResult
+from awf.profiles.models import ProfileCommand, WorkspaceProfile
+from awf.runtime.hosted_delegation import HostedDelegationConfig, HostedValidationDelegate
+from awf.runtime.validation import PROFILE_VALIDATION_TOOL_UNAVAILABLE, ValidationResult
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
     _make_executor,
     _seed_ready,
@@ -1020,6 +1022,50 @@ class TestRecordMonitorRuntimeRestartFailed:
 
 
 class TestHandoffProfilePreflightAndSetupReraise:
+    @pytest.mark.unit
+    async def test_hosted_preflight_uses_static_profile_tool_preflight(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        mark_failed_calls: list[dict[str, Any]] = []
+        delegate = HostedValidationDelegate(
+            HostedDelegationConfig(
+                base_url="https://hosted.example.test",
+                bearer_token="secret-token",
+                poll_interval_seconds=0.001,
+                operation_timeout_seconds=1.0,
+                request_timeout_seconds=1.0,
+                cancel_timeout_seconds=1.0,
+                max_output_bytes=100_000,
+            ),
+            artifacts_dir=tmp_path,
+        )
+        profile = WorkspaceProfile(
+            name="hosted-profile-preflight",
+            phases={
+                "setup": [ProfileCommand(command="uv sync --extra dev")],
+                "validate": [ProfileCommand(command="uv run ruff check src/awf")],
+            },
+        )
+
+        class _Executor:
+            async def _mark_failed(self, **kwargs: Any) -> None:
+                mark_failed_calls.append(kwargs)
+
+        result = await _run_monitor_handoff_profile_preflight(
+            _Executor(),
+            workspace_id="ws-hosted-preflight",
+            validation=delegate,
+            profile=profile,
+        )
+
+        assert result is False
+        assert len(mark_failed_calls) == 1
+        call = mark_failed_calls[0]
+        assert call["reason_code"] == PROFILE_VALIDATION_TOOL_UNAVAILABLE
+        assert call["failure_reason"] == FailureReason.profile_resolution_failure
+        assert call["message"] == "profile preflight failed: profile validation tool preflight"
+
     @pytest.mark.unit
     async def test_preflight_generic_exception_marks_setup_failed(
         self,
