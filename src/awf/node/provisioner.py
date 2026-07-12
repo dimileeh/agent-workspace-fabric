@@ -850,6 +850,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 workspace_id=workspace_id,
                 node_id=self._config.node_id,
                 profile=profile,
+                local_dind_slots=(0 if pr_adoption_is_hosted(persisted.task_policy) else None),
             )
 
             if execution_claim_epoch is not None:

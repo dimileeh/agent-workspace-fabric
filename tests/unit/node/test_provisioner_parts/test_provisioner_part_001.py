@@ -328,6 +328,105 @@ class TestSuccess:
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_hosted/compose.yml"
 
     @pytest.mark.unit
+    async def test_hosted_pr_adoption_dind_profile_keeps_reservation_local_demand_zero(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RenderOnlyStackLauncher:
+            def __init__(self) -> None:
+                self.launch_requests: list[Any] = []
+                self.render_requests: list[Any] = []
+
+            async def render(self, request: Any) -> ComposeProjectPaths:
+                self.render_requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_hosted_dind"),
+                    compose_file=Path("/tmp/awf-compose/ws_hosted_dind/compose.yml"),
+                )
+
+            async def launch(self, request: Any) -> object:
+                self.launch_requests.append(request)
+                raise AssertionError("hosted adoption must not launch compose")
+
+        (origin_repo / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        _git(["add", "docker-compose.yml"], origin_repo)
+        _git(["commit", "-q", "-m", "add compose profile"], origin_repo)
+        _git(["update-ref", "refs/pull/764/head", "HEAD"], origin_repo)
+
+        launcher = _RenderOnlyStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="adopt hosted dind",
+                task_prompt="p",
+                agent="codex",
+                task_kind="sync_feature_pr",
+                profile_ref="auto",
+                test_commands=[],
+                task_policy={
+                    "pr_adoption": {
+                        "repo_slug": "dimileeh/agent-workspace-fabric",
+                        "pr_number": 764,
+                        "head_ref": "feature/ready",
+                        "execution": {"mode": "hosted"},
+                    }
+                },
+                remote_push_branch="feature/ready",
+            )
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=f"hosted-provisioner-dind:{ws.id}",
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            attempt = await TaskAttemptRepository(s).create_for_workspace(
+                task=task,
+                workspace=ws,
+            )
+            await ResourceReservationRepository(s).create(
+                workspace_id=ws.id,
+                attempt_id=attempt.id,
+                node_id="local",
+                steady_cpu=3.0,
+                steady_memory_gb=10.0,
+                peak_cpu=6.0,
+                peak_memory_gb=16.0,
+                disk_mb=None,
+                dind_slots=0,
+                phase="workspace_lifecycle",
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.launch_requests == []
+        assert len(launcher.render_requests) == 1
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.resolved_profile is not None
+            assert reloaded.resolved_profile["docker"]["mode"] == "dind"
+            reservation = await ResourceReservationRepository(s).active_for_workspace(ws_id)
+            assert reservation is not None
+            assert reservation.node_id == "test-node-01"
+            assert reservation.dind_slots == 0
+
+    @pytest.mark.unit
     async def test_materializes_companion_worktrees_before_stack_launch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
