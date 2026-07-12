@@ -342,6 +342,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         # so PR monitor repair is not hard-wired to Docker Compose. The
         # worker does NOT build a Kubernetes executor here.
         agent_runtime_executor=hosted_agent_runtime_executor,
+        hosted_validation=hosted_validation_delegate,
     )
     runtime_driver = LocalRuntimeDriver(
         provisioner=provisioner,

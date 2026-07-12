@@ -27,6 +27,7 @@ from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationResult,
 )
+from tests.unit.control.executor_paths import _test_worktrees_root
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
     _make_executor,
     _seed_ready,
@@ -72,6 +73,30 @@ class _ExplodingSetupValidation:
         if phase_names == ("setup", "pre_agent"):
             raise RuntimeError("setup failed with ghp_FAKESECRET0000000")
         return ValidationResult()
+
+
+class _HostedSetupValidation:
+    def __init__(
+        self,
+        trace: list[str],
+        *,
+        result: ValidationResult | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.phase_kwargs: list[dict[str, Any]] = []
+        self._trace = trace
+        self._result = result or ValidationResult()
+
+    async def run_profile_phases(
+        self,
+        *,
+        phase_names: tuple[str, ...],
+        **kwargs: Any,
+    ) -> ValidationResult:
+        self.calls.append(tuple(phase_names))
+        self.phase_kwargs.append(dict(kwargs))
+        self._trace.append("hosted_setup")
+        return self._result
 
 
 @pytest.mark.unit
@@ -924,15 +949,78 @@ class TestExecutorMonitorHandoffSetupSplit:
 
 class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
     @pytest.mark.unit
-    async def test_hosted_sync_feature_pr_handoff_skips_local_profile_setup(
+    async def test_hosted_sync_feature_pr_handoff_delegates_profile_setup_before_monitor(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """Hosted adopted PR handoff must not run docker-backed local setup."""
+        """Hosted adopted PR setup runs through the hosted delegate before monitor entry."""
         monitor_runs: list[str] = []
-        validation = _ExplodingSetupValidation()
+        trace: list[str] = []
+        local_validation = _ExplodingSetupValidation()
+        hosted_validation = _HostedSetupValidation(trace)
+        hosted_policy = {
+            "pr_adoption": {
+                **_PR_ADOPTION_POLICY["pr_adoption"],
+                "execution": {"mode": "hosted"},
+            }
+        }
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy=hosted_policy,
+        )
+
+        class _Monitor:
+            async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                trace.append("monitor")
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=local_validation,
+            hosted_validation=hosted_validation,
+            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert local_validation.calls == []
+        assert hosted_validation.calls == [("setup", "pre_agent")]
+        assert trace == ["hosted_setup", "monitor"]
+        assert hosted_validation.phase_kwargs[0]["compose_project"] == "awf_x"
+        assert hosted_validation.phase_kwargs[0]["compose_file"] == (
+            tmp_path / "work" / "compose" / ws_id / "compose.yml"
+        )
+        assert hosted_validation.phase_kwargs[0]["worktree_path"] == (
+            _test_worktrees_root(factory) / ws_id
+        )
+        assert hosted_validation.phase_kwargs[0]["pr_identity"]["pr_number"] == 42
+        assert hosted_validation.phase_kwargs[0]["pr_identity"]["head_ref"] == "feature/existing"
+        assert monitor_runs == [ws_id]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+
+    @pytest.mark.unit
+    async def test_hosted_sync_feature_pr_handoff_setup_failure_blocks_monitor(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A hosted setup command failure must fail the handoff before monitor entry."""
+        monitor_runs: list[str] = []
+        trace: list[str] = []
+        local_validation = _ExplodingSetupValidation()
+        hosted_validation = _HostedSetupValidation(
+            trace,
+            result=ValidationResult(commands=[_credential_setup_command_failure(tmp_path)]),
+        )
         hosted_policy = {
             "pr_adoption": {
                 **_PR_ADOPTION_POLICY["pr_adoption"],
@@ -953,18 +1041,70 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
             fake,
             factory,
             tmp_path,
-            validation=validation,
+            validation=local_validation,
+            hosted_validation=hosted_validation,
             pr_monitor_factory=lambda *_a, **_k: _Monitor(),
         )
 
         await executor.execute(ws_id)
 
-        assert validation.calls == []
-        assert monitor_runs == [ws_id]
+        assert local_validation.calls == []
+        assert hosted_validation.calls == [("setup", "pre_agent")]
+        assert trace == ["hosted_setup"]
+        assert monitor_runs == []
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.service_startup_failure.value
+            assert "profile setup failed" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
+
+    @pytest.mark.unit
+    async def test_hosted_sync_feature_pr_handoff_missing_hosted_validation_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Hosted handoff must fail clearly if no hosted validation delegate is wired."""
+        monitor_runs: list[str] = []
+        local_validation = _ExplodingSetupValidation()
+        hosted_policy = {
+            "pr_adoption": {
+                **_PR_ADOPTION_POLICY["pr_adoption"],
+                "execution": {"mode": "hosted"},
+            }
+        }
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy=hosted_policy,
+        )
+
+        class _Monitor:
+            async def run(self, *, workspace_id: str, **_kwargs: Any) -> None:
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=local_validation,
+            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert local_validation.calls == []
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.infrastructure_failure.value
+            assert "no hosted validation runner configured" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == PR_MONITOR_SETUP_FAILED_REASON_CODE
 
     @pytest.mark.unit
     async def test_feature_handoff_stale_status_after_monitor_built_skips(

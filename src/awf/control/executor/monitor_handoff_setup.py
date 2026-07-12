@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -441,4 +442,97 @@ async def _run_monitor_handoff_profile_setup(
             setup_failure_reason_code=setup_failure.reason_code,
         )
         raise
+    return False
+
+
+async def _run_hosted_monitor_handoff_profile_setup(
+    self: Any,
+    *,
+    workspace_id: str,
+    profile: Any,
+    compose_project: str,
+    compose_file: Path,
+    worktree_path: Path,
+    pr_identity: Mapping[str, object] | None = None,
+) -> bool:
+    """Delegate hosted setup before handing an adopted PR to the monitor."""
+    validation = getattr(self, "_hosted_validation", None)
+    if validation is None:
+        await _mark_failed_or_raise_setup_failure(
+            self,
+            workspace_id=workspace_id,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=(
+                "hosted monitor handoff profile setup failed: "
+                "no hosted validation runner configured"
+            ),
+            reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
+        )
+        return False
+
+    try:
+        setup_result = await validation.run_profile_phases(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+            phase_names=("setup", "pre_agent"),
+            worktree_path=worktree_path,
+            include_coverage=False,
+            pr_identity=pr_identity,
+        )
+    except _MonitorHandoffSetupFailureError:
+        raise
+    except Exception as exc:
+        _log.exception("executor.hosted_monitor_handoff_setup_failed", workspace_id=workspace_id)
+        safe_error = redact_audit_text(repr(exc))
+        await _mark_failed_or_raise_setup_failure(
+            self,
+            workspace_id=workspace_id,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"hosted monitor handoff profile setup failed: {safe_error}"[:2000],
+            reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
+        )
+        return False
+
+    try:
+        await self._record_setup_dependency_network_events(
+            workspace_id=workspace_id,
+            result=setup_result,
+        )
+    except Exception:
+        _log.exception(
+            "executor.hosted_monitor_handoff_setup_dependency_network_event_record_failed",
+            workspace_id=workspace_id,
+            setup_all_passed=setup_result.all_passed,
+        )
+
+    if setup_result.all_passed:
+        return await _run_monitor_handoff_profile_preflight(
+            self,
+            workspace_id=workspace_id,
+            validation=validation,
+            profile=profile,
+        )
+
+    first_fail = setup_result.first_failure
+    setup_dependency_details = _setup_dependency_network_failure_details(first_fail)
+    setup_failure_reason_code = (
+        SETUP_DEPENDENCY_NETWORK_FAILURE
+        if setup_dependency_details is not None
+        else PR_MONITOR_SETUP_FAILED_REASON_CODE
+    )
+    failure_message = (
+        f"profile setup failed: {redact_audit_text(first_fail.command)}"
+        if first_fail is not None
+        else "profile setup failed"
+    )[:2000]
+    await _mark_failed_or_raise_setup_failure(
+        self,
+        workspace_id=workspace_id,
+        failure_reason=_failure_reason_for_phase(first_fail),
+        message=failure_message,
+        reason_code=setup_failure_reason_code,
+        details=setup_dependency_details,
+    )
     return False

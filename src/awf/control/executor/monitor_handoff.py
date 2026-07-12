@@ -40,7 +40,11 @@ from awf.control.executor.helpers import (
     _provider_recovery_default_model_for_monitor_handoff,
     _redacted_exception_traceback,
 )
-from awf.control.executor.monitor_handoff_setup import _MonitorHandoffSetupFailureError
+from awf.control.executor.metadata import _metadata_int
+from awf.control.executor.monitor_handoff_setup import (
+    _MonitorHandoffSetupFailureError,
+    _run_hosted_monitor_handoff_profile_setup,
+)
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _log,
@@ -89,6 +93,33 @@ _present_optional_companion_env_secret_refs = (
 _refresh_optional_companion_env_secrets_for_resume = (
     _companion_env._refresh_optional_companion_env_secrets_for_resume
 )
+
+
+def _hosted_handoff_pr_identity(workspace: Workspace) -> dict[str, object]:
+    policy = workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
+    adoption = policy.get("pr_adoption") if isinstance(policy, Mapping) else None
+    adoption_map = adoption if isinstance(adoption, Mapping) else {}
+    head_ref = _nonblank_str(adoption_map.get("head_ref")) or _nonblank_str(
+        workspace.remote_push_branch
+    )
+    return {
+        "repo_url": workspace.repo_url,
+        "pr_url": _nonblank_str(workspace.pr_url) or _nonblank_str(adoption_map.get("pr_url")),
+        "pr_number": workspace.pr_number or _metadata_int(adoption_map, "pr_number"),
+        "base_ref": _nonblank_str(adoption_map.get("base_ref")) or workspace.branch_base,
+        "head_ref": head_ref,
+        "head_repo_url": _nonblank_str(adoption_map.get("head_repo_url")) or workspace.repo_url,
+        "head_repo_slug": _nonblank_str(adoption_map.get("head_repo_slug")),
+        "owned_paths": list(workspace.owned_paths or []),
+        "expected_head_sha": _nonblank_str(workspace.monitor_last_commit_sha)
+        or _nonblank_str(adoption_map.get("head_sha")),
+    }
+
+
+def _nonblank_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
 _remove_compose_environment_targets = _companion_env._remove_compose_environment_targets
 _represent_compose_interpolation_string = _companion_env._represent_compose_interpolation_string
 _restore_compose_environment_list_refs = _companion_env._restore_compose_environment_list_refs
@@ -910,8 +941,17 @@ async def _prepare_handoff_pr_monitor_profile(
             planning_max_iterations_default=(self._config.planning_max_iterations_default),
         )
         if pr_adoption_is_hosted(workspace.task_policy):
-            return profile
-        if not await self._run_monitor_handoff_profile_setup(
+            if not await _run_hosted_monitor_handoff_profile_setup(
+                self,
+                workspace_id=workspace_id,
+                profile=profile,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                worktree_path=worktree_path,
+                pr_identity=_hosted_handoff_pr_identity(workspace),
+            ):
+                return None
+        elif not await self._run_monitor_handoff_profile_setup(
             workspace_id=workspace_id,
             profile=profile,
             compose_project=compose_project,
@@ -1158,18 +1198,26 @@ async def _build_handoff_pr_monitor(
                 profile=profile,
                 planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
-        if (
-            run_profile_setup
-            and not pr_adoption_is_hosted(workspace.task_policy)
-            and not await self._run_monitor_handoff_profile_setup(
+        if run_profile_setup:
+            if pr_adoption_is_hosted(workspace.task_policy):
+                if not await _run_hosted_monitor_handoff_profile_setup(
+                    self,
+                    workspace_id=workspace_id,
+                    profile=profile,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    worktree_path=worktree_path,
+                    pr_identity=_hosted_handoff_pr_identity(workspace),
+                ):
+                    return None
+            elif not await self._run_monitor_handoff_profile_setup(
                 workspace_id=workspace_id,
                 profile=profile,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 worktree_path=worktree_path,
-            )
-        ):
-            return None
+            ):
+                return None
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.running,

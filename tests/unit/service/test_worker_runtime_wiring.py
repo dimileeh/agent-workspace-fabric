@@ -196,6 +196,7 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     assert created["executor_kwargs"]["compose"] is created["compose"]
     assert created["executor_kwargs"]["validation"] is created["validation"]
     assert created["executor_kwargs"]["agent_runtime_executor"] is None
+    assert created["executor_kwargs"]["hosted_validation"] is None
     assert created["provisioner_kwargs"]["service_diagnostics"] is created["compose"]
     assert created["cleaner_git"] is created["git"]
     assert created["cleaner_compose"] is created["compose"]
@@ -1011,8 +1012,10 @@ def _stub_worker_runtime_dependencies(
             log_store: object,
             usage_sampler: object = None,
             agent_runtime_executor: object = None,
+            hosted_validation: object = None,
         ) -> None:
             """Test helper for  init  ."""
+            del hosted_validation
             created["executor_monitor_factory"] = pr_monitor_factory
 
     class _ControlWorker:

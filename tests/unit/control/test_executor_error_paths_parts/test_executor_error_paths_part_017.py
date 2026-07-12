@@ -597,6 +597,96 @@ class TestBuildHandoffPrMonitorEnsuresOllamaModel:
 
 class TestPrepareHandoffProfileGenericFailure:
     @pytest.mark.unit
+    async def test_prepare_handoff_profile_delegates_hosted_setup_before_return(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        trace: list[str] = []
+        profile = SimpleNamespace(name="hosted-profile")
+
+        class _HostedValidation:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, ...]] = []
+                self.kwargs: list[dict[str, Any]] = []
+
+            async def run_profile_phases(
+                self,
+                *,
+                phase_names: tuple[str, ...],
+                **kwargs: Any,
+            ) -> ValidationResult:
+                self.calls.append(tuple(phase_names))
+                self.kwargs.append(dict(kwargs))
+                trace.append("hosted_setup")
+                return ValidationResult()
+
+        hosted_validation = _HostedValidation()
+
+        class _Executor:
+            _config = SimpleNamespace(planning_max_iterations_default=6)
+            _hosted_validation = hosted_validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                trace.append("setup_events")
+
+            async def _mark_failed(self, **_kwargs: Any) -> None:
+                raise AssertionError("hosted setup success must not fail the workspace")
+
+        workspace = SimpleNamespace(
+            task_policy={
+                "pr_adoption": {
+                    **_PR_ADOPTION_POLICY["pr_adoption"],
+                    "execution": {"mode": "hosted"},
+                }
+            },
+            repo_url="git@github.com:x/y.git",
+            pr_url=None,
+            pr_number=None,
+            remote_push_branch="awf/x",
+            branch_base="development",
+            owned_paths=["src/awf"],
+            monitor_last_commit_sha=None,
+        )
+
+        def _profile_for_workspace(*_args: Any, **_kwargs: Any) -> object:
+            return profile
+
+        async def _sync_resolved_profile(*_args: Any, **_kwargs: Any) -> object:
+            return profile
+
+        monkeypatch.setattr(
+            monitor_handoff_module,
+            "_profile_for_workspace",
+            _profile_for_workspace,
+        )
+        monkeypatch.setattr(
+            monitor_handoff_module,
+            "_sync_resolved_profile",
+            _sync_resolved_profile,
+        )
+
+        result = await _prepare_handoff_pr_monitor_profile(
+            _Executor(),
+            workspace_id="ws-hosted-prep",
+            workspace=workspace,
+            worktree_path=tmp_path / "worktree",
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            build_failed_log_event="test.prepare_failed",
+            build_failed_message_prefix="release PR monitor handoff failed: ",
+        )
+
+        assert result is profile
+        assert trace == ["hosted_setup", "setup_events"]
+        assert hosted_validation.calls == [("setup", "pre_agent")]
+        call_kwargs = hosted_validation.kwargs[0]
+        assert call_kwargs["include_coverage"] is False
+        assert call_kwargs["worktree_path"] == tmp_path / "worktree"
+        assert call_kwargs["pr_identity"]["pr_number"] == 42
+        assert call_kwargs["pr_identity"]["head_ref"] == "feature/existing"
+
+    @pytest.mark.unit
     async def test_prepare_handoff_profile_generic_exception_marks_monitor_unavailable(
         self,
         tmp_path: Path,
