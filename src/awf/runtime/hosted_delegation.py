@@ -57,6 +57,7 @@ from awf.common.commands import COMMAND_TIMEOUT_REASON
 from awf.common.config import Settings
 from awf.common.token_patterns import TOKEN_ASSIGNMENT_KEY_PATTERN, compile_known_token_re
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.validation_setup import profile_phase_command_plan
 from awf.runtime.validation_types import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -343,6 +344,15 @@ class HostedValidationDelegate:
                 "include_coverage": include_coverage,
                 "pr_identity": dict(pr_identity or {}),
             },
+            poll_response_max_bytes=_response_json_max_bytes(
+                self._config.max_output_bytes,
+                output_slots=_hosted_validation_poll_output_slots(
+                    profile,
+                    phase_names,
+                    run_healthchecks=run_healthchecks,
+                    include_coverage=include_coverage,
+                ),
+            ),
         )
         return _validation_result_from_terminal(
             terminal,
@@ -376,6 +386,10 @@ class HostedValidationDelegate:
                 "parallel_worker_cpu_limit": parallel_worker_cpu_limit,
                 "pr_identity": dict(pr_identity or {}),
             },
+            poll_response_max_bytes=_response_json_max_bytes(
+                self._config.max_output_bytes,
+                output_slots=1,
+            ),
         )
         state = _operation_state(terminal)
         if state in _HOSTED_VALIDATION_TERMINAL_FAILURES:
@@ -405,6 +419,7 @@ class HostedValidationDelegate:
         workspace_id: str,
         start_path: str,
         payload: Mapping[str, Any],
+        poll_response_max_bytes: int,
     ) -> Mapping[str, Any]:
         operation: _HostedOperationRef | None = None
         owns_client = self._client is None
@@ -416,7 +431,11 @@ class HostedValidationDelegate:
                 start_path=start_path,
                 payload=payload,
             )
-            return await self._poll_operation(client, operation)
+            return await self._poll_operation(
+                client,
+                operation,
+                poll_response_max_bytes=poll_response_max_bytes,
+            )
         except asyncio.CancelledError:
             if operation is not None:
                 await _cancel_operation(client, self._config, operation)
@@ -454,6 +473,8 @@ class HostedValidationDelegate:
         self,
         client: httpx.AsyncClient,
         operation: _HostedOperationRef,
+        *,
+        poll_response_max_bytes: int,
     ) -> Mapping[str, Any]:
         deadline = time.monotonic() + self._config.operation_timeout_seconds
         while True:
@@ -463,6 +484,7 @@ class HostedValidationDelegate:
                 client,
                 operation.url,
                 config=self._config,
+                max_bytes=poll_response_max_bytes,
             )
             _validate_operation_identity(payload, operation)
             state = _operation_state(payload)
@@ -583,11 +605,35 @@ def _hosted_validation_env_value_is_secret(name: str, value: str) -> bool:
     )
 
 
+def _hosted_validation_poll_output_slots(
+    profile: WorkspaceProfile,
+    phase_names: list[str] | tuple[str, ...],
+    *,
+    run_healthchecks: bool,
+    include_coverage: bool,
+) -> int:
+    requested_phases = set(phase_names)
+    output_slots = len(profile_phase_command_plan(profile, phase_names))
+    if run_healthchecks:
+        output_slots += len(profile.validation.healthchecks)
+    if "validate" in requested_phases and profile.validation.alembic.enabled:
+        output_slots += 1
+    if (
+        include_coverage
+        and "validate" in requested_phases
+        and profile.validation.coverage.command is not None
+    ):
+        output_slots += 1
+    # Failed operations may carry top-level stdout/stderr that becomes a synthetic result.
+    return max(1, output_slots + 1)
+
+
 async def _poll_response_json(
     client: httpx.AsyncClient,
     url: str,
     *,
     config: HostedDelegationConfig,
+    max_bytes: int | None = None,
 ) -> Mapping[str, Any]:
     async with client.stream(
         "GET",
@@ -598,7 +644,9 @@ async def _poll_response_json(
         response.raise_for_status()
         return await _response_json_bounded(
             response,
-            max_bytes=_response_json_max_bytes(config.max_output_bytes),
+            max_bytes=max_bytes
+            if max_bytes is not None
+            else _response_json_max_bytes(config.max_output_bytes),
         )
 
 
@@ -915,8 +963,8 @@ def _content_length(response: httpx.Response) -> int | None:
     return parsed if parsed >= 0 else None
 
 
-def _response_json_max_bytes(max_output_bytes: int) -> int:
-    return max_output_bytes + _HOSTED_RESPONSE_JSON_OVERHEAD_BYTES
+def _response_json_max_bytes(max_output_bytes: int, *, output_slots: int = 1) -> int:
+    return (max_output_bytes * max(1, output_slots)) + _HOSTED_RESPONSE_JSON_OVERHEAD_BYTES
 
 
 def _ensure_output_within_limit(*values: str, max_output_bytes: int) -> None:

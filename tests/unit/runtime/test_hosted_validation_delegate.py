@@ -1144,6 +1144,82 @@ async def test_hosted_validation_rejects_command_output_over_max_output_bytes(
 
 
 @pytest.mark.unit
+async def test_hosted_validation_poll_allows_per_command_output_budget(
+    tmp_path: Path,
+) -> None:
+    output = "x" * 24_000
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-test",
+            "phases": {
+                "validate": [
+                    "test command 1",
+                    "test command 2",
+                    "test command 3",
+                    "test command 4",
+                ]
+            },
+        }
+    )
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": f"test command {index}",
+                            "returncode": 0,
+                            "duration_seconds": 0.2,
+                            "stdout": output,
+                            "stderr": "",
+                            "phase": "validate",
+                        }
+                        for index in range(1, 5)
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(max_output_bytes=25_000),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=profile,
+            phase_names=("validate",),
+            include_coverage=False,
+        )
+
+    assert result.all_passed
+    assert [command.command for command in result.commands] == [
+        "test command 1",
+        "test command 2",
+        "test command 3",
+        "test command 4",
+    ]
+    assert (tmp_path / "ws_hosted" / "04_validate.stdout").read_text(encoding="utf-8") == output
+
+
+@pytest.mark.unit
 async def test_hosted_validation_terminal_failure_preserves_host_stderr(
     tmp_path: Path,
 ) -> None:
