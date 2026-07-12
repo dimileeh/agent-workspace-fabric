@@ -37,6 +37,7 @@ from awf.profiles.compose import (
     profile_agent_environment,
     profile_services,
 )
+from awf.profiles.compose_env import hosted_env_secret_alias_placeholder
 from awf.profiles.models import WorkspaceProfile
 
 _HOSTED_RENDER_ENV_SECRET_PROVIDERS = frozenset(("env", "github", "bitbucket"))
@@ -520,7 +521,7 @@ def _hosted_secret_lease_placeholder_resolution(
                 skipped_unresolved_count += 1
                 continue
             if secret.target not in env:
-                env[secret.target] = f"${{{source_name}}}"
+                env[secret.target] = hosted_env_secret_alias_placeholder(source_name)
             _append_unique_hosted_secret_value(providers, provider)
             _append_unique_hosted_secret_value(targets, secret.target)
             if provider == "github":

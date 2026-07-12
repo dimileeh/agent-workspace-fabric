@@ -1146,6 +1146,14 @@ def hosted_profile_env_passthrough_aliases(
     for name, raw in compose_env.items():
         if _is_git_config_protocol_key(name):
             continue
+        hosted_secret_source = _hosted_env_secret_alias_source_name(raw)
+        if hosted_secret_source is not None:
+            if (
+                name not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+                and hosted_secret_source not in _HOSTED_FILE_BACKED_ENV_ONLY_UNSUPPORTED_NAMES
+            ):
+                aliases.append((name, hosted_secret_source))
+            continue
         if raw == _COMPOSE_PASSTHROUGH:
             continue
         resolution = _compose_resolve_value(raw, worker_env=env)[1]
@@ -1432,6 +1440,7 @@ from awf.profiles.compose_env import (  # noqa: E402, F401  (re-export)
     _compose_selected_worker_reference_name,
     _ComposeEnvResolution,
     _expanded_value_bears_postgres_password,
+    _hosted_env_secret_alias_source_name,
 )
 
 # Re-exported for the long-standing ``awf.profiles.compose`` public surface.

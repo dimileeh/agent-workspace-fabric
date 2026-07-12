@@ -19,6 +19,10 @@ from awf.node.stack_launcher import (
     WorkspaceServiceExecutionError,
     WorkspaceStackLaunchRequest,
 )
+from awf.profiles.compose import (
+    hosted_profile_env_passthrough_aliases,
+    literal_profile_env_from_compose,
+)
 from awf.profiles.models import (
     DockerMode,
     ProfileDocker,
@@ -407,7 +411,11 @@ async def test_compose_stack_launcher_render_builds_metadata_without_compose_up(
     assert len(compose.render_specs) == 1
     env = dict(compose.render_specs[0].agent_environment)
     assert env["OLLAMA_HOST"] == "http://ollama.profile:11434"
-    assert env["OPENAI_API_KEY"] == "${OPENAI_API_KEY}"
+    assert hosted_profile_env_passthrough_aliases(
+        Path("unused-compose.yml"),
+        compose_env=env,
+        worker_env={},
+    ) == (("OPENAI_API_KEY", "OPENAI_API_KEY"),)
 
 
 @pytest.mark.unit
@@ -462,8 +470,30 @@ async def test_compose_stack_launcher_render_skips_local_secret_resolution() -> 
     assert compose.specs == []
     assert len(compose.render_specs) == 1
     env = dict(compose.render_specs[0].agent_environment)
-    assert env["NPM_TOKEN"] == "${NPM_TOKEN}"
-    assert env["ANTHROPIC_API_KEY"] == "${MY_ANTHROPIC_TOKEN}"
+    assert env["NPM_TOKEN"] != "${NPM_TOKEN}"
+    assert env["ANTHROPIC_API_KEY"] != "${MY_ANTHROPIC_TOKEN}"
+    assert hosted_profile_env_passthrough_aliases(
+        Path("unused-compose.yml"),
+        compose_env=env,
+        worker_env={},
+    ) == (
+        ("NPM_TOKEN", "NPM_TOKEN"),
+        ("ANTHROPIC_API_KEY", "MY_ANTHROPIC_TOKEN"),
+    )
+    assert "NPM_TOKEN" not in dict(
+        literal_profile_env_from_compose(
+            Path("unused-compose.yml"),
+            compose_env=env,
+            worker_env={},
+        )
+    )
+    assert "ANTHROPIC_API_KEY" not in dict(
+        literal_profile_env_from_compose(
+            Path("unused-compose.yml"),
+            compose_env=env,
+            worker_env={},
+        )
+    )
     assert paths.secret_lease_mount_metadata["env_count"] == 2
     assert "total_env_count" not in paths.secret_lease_mount_metadata
     assert paths.secret_lease_mount_metadata["mount_count"] == 1
