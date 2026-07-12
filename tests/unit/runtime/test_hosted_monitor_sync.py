@@ -106,6 +106,33 @@ async def test_sync_hosted_worktree_fetches_and_resets_terminal_head(tmp_path: P
 
 
 @pytest.mark.unit
+async def test_sync_hosted_worktree_accepts_uppercase_terminal_head_sha(
+    tmp_path: Path,
+) -> None:
+    sha = "abcdef0123456789abcdef0123456789abcdef01"
+    runner = _Runner(fetched_sha=sha)
+
+    await _sync_hosted_worktree_to_terminal_head(
+        _runner_context(tmp_path, runner),
+        workspace_id="ws_hosted",
+        hosted_pr_identity={
+            "head_repo_url": "git@github.com:dimileeh/aira-web.git",
+            "head_ref": "feature/ready",
+        },
+        terminal_head_sha=sha.upper(),
+    )
+
+    assert runner.calls[-1] == [
+        "git",
+        "-C",
+        str(tmp_path / "ws_hosted"),
+        "reset",
+        "--hard",
+        sha,
+    ]
+
+
+@pytest.mark.unit
 async def test_sync_hosted_worktree_rejects_remote_head_mismatch(tmp_path: Path) -> None:
     runner = _Runner(fetched_sha="c" * 40)
 

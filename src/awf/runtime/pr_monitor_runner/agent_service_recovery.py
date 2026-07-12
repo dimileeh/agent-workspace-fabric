@@ -215,7 +215,7 @@ async def _sync_hosted_worktree_to_terminal_head(
         ["git", "-C", str(worktree_path), "rev-parse", "FETCH_HEAD"]
     )
     fetched_sha = rev_parse.stdout.strip()
-    if not rev_parse.ok or fetched_sha != terminal_head_sha:
+    if not rev_parse.ok or fetched_sha.lower() != terminal_head_sha.lower():
         raise AgentRunError(
             agent=self._deps.adapter.name,
             result=CommandResult(
@@ -229,7 +229,7 @@ async def _sync_hosted_worktree_to_terminal_head(
             reason_code="HOSTED_REMOTE_HEAD_MISMATCH",
         )
     reset = await self._deps.runner.run(
-        ["git", "-C", str(worktree_path), "reset", "--hard", terminal_head_sha]
+        ["git", "-C", str(worktree_path), "reset", "--hard", fetched_sha]
     )
     if not reset.ok:
         raise AgentRunError(
