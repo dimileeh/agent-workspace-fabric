@@ -506,7 +506,6 @@ def _hosted_secret_lease_placeholder_resolution(
         "schema": "secret_lease_mount_metadata.v1",
         "mount_plan": "profile_declared_secret_leases",
         "env_count": len(env),
-        "total_env_count": len(env),
         "mount_count": mount_count,
         "providers": providers,
         "targets": targets,

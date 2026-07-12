@@ -465,6 +465,7 @@ async def test_compose_stack_launcher_render_skips_local_secret_resolution() -> 
     assert env["NPM_TOKEN"] == "${NPM_TOKEN}"
     assert env["ANTHROPIC_API_KEY"] == "${MY_ANTHROPIC_TOKEN}"
     assert paths.secret_lease_mount_metadata["env_count"] == 2
+    assert "total_env_count" not in paths.secret_lease_mount_metadata
     assert paths.secret_lease_mount_metadata["mount_count"] == 1
     assert paths.secret_lease_mount_metadata["providers"] == ["env", "local-file"]
     assert paths.secret_lease_mount_metadata["targets"] == [
