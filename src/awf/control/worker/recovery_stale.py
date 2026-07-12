@@ -433,13 +433,13 @@ async def _recover_hosted_pr_adoption_active_execution(
         return False
 
     if not candidate.pr_url:
-        _log.info(
-            "worker.hosted_pr_adoption_stale_active_waiting_for_pr",
+        _log.warning(
+            "worker.hosted_pr_adoption_stale_active_pr_missing",
             workspace_id=candidate.workspace_id,
             status=candidate.status.value,
-            reason_code="HOSTED_PR_ADOPTION_WAITING_FOR_PR",
+            reason_code="HOSTED_PR_ADOPTION_PR_URL_MISSING",
         )
-        return True
+        return False
 
     snapshot = RuntimeSnapshot(
         stack_state="hosted",
@@ -469,7 +469,13 @@ async def _recover_hosted_pr_adoption_active_execution(
         if not _execution_claim_is_stale(ws, claim_cutoff):
             return True
         if not ws.pr_url:
-            return True
+            _log.warning(
+                "worker.hosted_pr_adoption_stale_active_pr_missing",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                reason_code="HOSTED_PR_ADOPTION_PR_URL_MISSING",
+            )
+            return False
         if ws.pr_number is None:
             ws.pr_number = _extract_pr_number(ws.pr_url)
         if ws.pr_number is None:
@@ -480,7 +486,7 @@ async def _recover_hosted_pr_adoption_active_execution(
                 pr_url=ws.pr_url,
                 reason_code="HOSTED_PR_ADOPTION_PR_NUMBER_MISSING",
             )
-            return True
+            return False
 
         previous_claim = _workspace_claim_snapshot(ws)
         claims_will_clear = any(
