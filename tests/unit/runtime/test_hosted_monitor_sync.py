@@ -9,6 +9,7 @@ import pytest
 
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
+from awf.control.executor.monitor_handoff import _hosted_handoff_pr_identity
 from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.agent_service_recovery import (
@@ -218,6 +219,49 @@ async def test_sync_hosted_worktree_rejects_remote_head_mismatch(tmp_path: Path)
         )
 
     assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_MISMATCH"
+
+
+@pytest.mark.unit
+async def test_hosted_pr_identity_matches_handoff_and_recovery_precedence() -> None:
+    workspace = SimpleNamespace(
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        pr_url=None,
+        pr_number=None,
+        branch_base="main",
+        remote_push_branch="awf/ws_hosted",
+        owned_paths=["src/awf"],
+        monitor_last_commit_sha="b" * 40,
+        task_policy={
+            "pr_adoption": {
+                "pr_url": "https://github.com/dimileeh/aira-web/pull/751",
+                "pr_number": 751,
+                "base_ref": "development",
+                "head_ref": "feature/stale-policy",
+                "head_repo_url": "git@github.com:dimileeh/aira-web-fork.git",
+                "head_repo_slug": "dimileeh/aira-web-fork",
+                "head_sha": "a" * 40,
+            }
+        },
+    )
+
+    async def _load_workspace(_workspace_id: str) -> SimpleNamespace:
+        return workspace
+
+    context = SimpleNamespace(_load_workspace=_load_workspace)
+    expected = {
+        "repo_url": "git@github.com:dimileeh/aira-web.git",
+        "pr_url": "https://github.com/dimileeh/aira-web/pull/751",
+        "pr_number": 751,
+        "base_ref": "development",
+        "head_ref": "awf/ws_hosted",
+        "head_repo_url": "git@github.com:dimileeh/aira-web-fork.git",
+        "head_repo_slug": "dimileeh/aira-web-fork",
+        "owned_paths": ["src/awf"],
+        "expected_head_sha": "b" * 40,
+    }
+
+    assert _hosted_handoff_pr_identity(workspace) == expected
+    assert await _hosted_pr_identity_for_workspace(context, "ws_hosted") == expected
 
 
 @pytest.mark.unit

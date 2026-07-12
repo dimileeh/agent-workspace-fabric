@@ -40,7 +40,6 @@ from awf.control.executor.helpers import (
     _provider_recovery_default_model_for_monitor_handoff,
     _redacted_exception_traceback,
 )
-from awf.control.executor.metadata import _metadata_int
 from awf.control.executor.monitor_handoff_setup import (
     _MonitorHandoffSetupFailureError,
     _run_hosted_monitor_handoff_profile_setup,
@@ -68,6 +67,7 @@ from awf.node.companion_services import (
 )
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
+from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
 
 _add_executor_pr_audit_event = _monitor_handoff_audit._add_executor_pr_audit_event
@@ -96,28 +96,7 @@ _refresh_optional_companion_env_secrets_for_resume = (
 
 
 def _hosted_handoff_pr_identity(workspace: Workspace) -> dict[str, object]:
-    policy = workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
-    adoption = policy.get("pr_adoption") if isinstance(policy, Mapping) else None
-    adoption_map = adoption if isinstance(adoption, Mapping) else {}
-    head_ref = _nonblank_str(adoption_map.get("head_ref")) or _nonblank_str(
-        workspace.remote_push_branch
-    )
-    return {
-        "repo_url": workspace.repo_url,
-        "pr_url": _nonblank_str(workspace.pr_url) or _nonblank_str(adoption_map.get("pr_url")),
-        "pr_number": workspace.pr_number or _metadata_int(adoption_map, "pr_number"),
-        "base_ref": _nonblank_str(adoption_map.get("base_ref")) or workspace.branch_base,
-        "head_ref": head_ref,
-        "head_repo_url": _nonblank_str(adoption_map.get("head_repo_url")) or workspace.repo_url,
-        "head_repo_slug": _nonblank_str(adoption_map.get("head_repo_slug")),
-        "owned_paths": list(workspace.owned_paths or []),
-        "expected_head_sha": _nonblank_str(workspace.monitor_last_commit_sha)
-        or _nonblank_str(adoption_map.get("head_sha")),
-    }
-
-
-def _nonblank_str(value: object) -> str | None:
-    return value if isinstance(value, str) and value.strip() else None
+    return hosted_pr_identity_for_workspace(workspace)
 
 
 _remove_compose_environment_targets = _companion_env._remove_compose_environment_targets

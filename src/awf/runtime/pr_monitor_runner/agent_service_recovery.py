@@ -32,6 +32,10 @@ from awf.node.git_manager import (
 )
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.hosted_pr_identity import (
+    _nonblank_str,
+    hosted_pr_identity_for_workspace,
+)
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -171,30 +175,7 @@ async def _hosted_pr_identity_for_workspace(
     state: Any | None = None,
 ) -> dict[str, object]:
     ws = await self._load_workspace(workspace_id)
-    policy = ws.task_policy if isinstance(ws.task_policy, Mapping) else {}
-    adoption = policy.get("pr_adoption") if isinstance(policy, Mapping) else None
-    adoption_map = adoption if isinstance(adoption, Mapping) else {}
-    head_ref = _nonblank_str(ws.remote_push_branch) or _nonblank_str(adoption_map.get("head_ref"))
-    state_head_sha = _nonblank_str(getattr(state, "last_push_sha", None))
-    return {
-        "repo_url": ws.repo_url,
-        "pr_url": _nonblank_str(ws.pr_url) or _nonblank_str(adoption_map.get("pr_url")),
-        "pr_number": ws.pr_number,
-        "base_ref": _nonblank_str(adoption_map.get("base_ref")) or ws.branch_base,
-        "head_ref": head_ref,
-        "head_repo_url": _nonblank_str(adoption_map.get("head_repo_url")) or ws.repo_url,
-        "head_repo_slug": _nonblank_str(adoption_map.get("head_repo_slug")),
-        "owned_paths": list(ws.owned_paths or []),
-        "expected_head_sha": (
-            state_head_sha
-            or _nonblank_str(ws.monitor_last_commit_sha)
-            or _nonblank_str(adoption_map.get("head_sha"))
-        ),
-    }
-
-
-def _nonblank_str(value: object) -> str | None:
-    return value if isinstance(value, str) and value.strip() else None
+    return hosted_pr_identity_for_workspace(ws, state=state)
 
 
 async def _sync_hosted_worktree_to_terminal_head(

@@ -160,7 +160,7 @@ class TestPrepareHandoffProfileGenericFailure:
         assert call_kwargs["include_coverage"] is False
         assert call_kwargs["worktree_path"] == tmp_path / "worktree"
         assert call_kwargs["pr_identity"]["pr_number"] == 42
-        assert call_kwargs["pr_identity"]["head_ref"] == "feature/existing"
+        assert call_kwargs["pr_identity"]["head_ref"] == "awf/x"
 
     @pytest.mark.unit
     async def test_prepare_handoff_profile_generic_exception_marks_monitor_unavailable(

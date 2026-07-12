@@ -1271,7 +1271,7 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
             _test_worktrees_root(factory) / ws_id
         )
         assert hosted_validation.phase_kwargs[0]["pr_identity"]["pr_number"] == 42
-        assert hosted_validation.phase_kwargs[0]["pr_identity"]["head_ref"] == "feature/existing"
+        assert hosted_validation.phase_kwargs[0]["pr_identity"]["head_ref"] == "awf/x"
         assert monitor_runs == [ws_id]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
