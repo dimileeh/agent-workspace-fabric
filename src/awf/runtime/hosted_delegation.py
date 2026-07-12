@@ -708,6 +708,8 @@ def _validation_result_from_terminal(
         commands_payload = payload["commands"]
     if not isinstance(commands_payload, list):
         raise HostedDelegationProtocolError("hosted validation response has malformed commands")
+    if state == "succeeded" and not commands_payload:
+        raise HostedDelegationProtocolError("hosted validation succeeded without command results")
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     commands = [
         _validation_command_result_from_payload(
