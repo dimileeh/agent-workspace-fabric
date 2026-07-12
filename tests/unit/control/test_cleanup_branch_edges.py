@@ -543,6 +543,58 @@ async def test_release_for_hosted_candidate_without_compose_artifacts_skips_comp
 
 
 @pytest.mark.unit
+async def test_release_for_hosted_candidate_with_rendered_compose_file_skips_compose_cleanup() -> (
+    None
+):
+    candidate = _TerminalRuntimeCandidate(
+        workspace_id="ws_hosted",
+        status=WorkspaceStatus.failed,
+        repo_url="https://example.test/repo.git",
+        compose_project_name=None,
+        compose_file_path="/tmp/rendered-compose.yml",
+        task_policy={"pr_adoption": {"execution": {"mode": "hosted"}}},
+    )
+    cleanup_calls: list[dict[str, Any]] = []
+
+    class _Cleaner:
+        async def cleanup(self, **kwargs: Any) -> WorkspaceCleanupResult:
+            cleanup_calls.append(kwargs)
+            return WorkspaceCleanupResult.skipped()
+
+    recorded: list[WorkspaceCleanupResult] = []
+
+    async def _record(
+        _candidate: _TerminalRuntimeCandidate,
+        cleanup: WorkspaceCleanupResult,
+        *,
+        auth_overlay_unmounted: bool,
+    ) -> None:
+        del auth_overlay_unmounted
+        recorded.append(cleanup)
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=_Cleaner(),
+        _auth_overlay_work_dir=None,
+        _record_terminal_runtime_released=_record,
+    )
+
+    await worker_cleanup._release_terminal_runtime_for_candidate(worker, candidate)  # noqa: SLF001
+
+    assert cleanup_calls == [
+        {
+            "workspace_id": "ws_hosted",
+            "repo_url": "https://example.test/repo.git",
+            "compose_project_name": None,
+            "compose_file_path": Path("/tmp/rendered-compose.yml"),
+            "remove_volumes": False,
+            "remove_worktree": False,
+            "skip_compose": True,
+        }
+    ]
+    assert len(recorded) == 1
+
+
+@pytest.mark.unit
 async def test_release_for_hosted_candidate_with_compose_artifacts_warns_and_tears_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
