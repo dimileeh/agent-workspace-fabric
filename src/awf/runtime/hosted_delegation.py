@@ -509,6 +509,7 @@ class HostedValidationDelegate:
             coverage,
             artifacts_dir=self._artifacts_dir / workspace_id,
             max_output_bytes=self._config.max_output_bytes,
+            command_result_required=profile.validation.coverage.command is not None,
         )
 
     async def _run_operation(
@@ -1094,9 +1095,14 @@ def _coverage_result_from_payload(
     *,
     artifacts_dir: Path,
     max_output_bytes: int,
+    command_result_required: bool = False,
 ) -> ValidationCoverageResult:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     command_result_payload = payload.get("command_result")
+    if command_result_required and not isinstance(command_result_payload, Mapping):
+        raise HostedDelegationProtocolError(
+            "hosted validation terminal response missing command evidence"
+        )
     command_result = (
         _validation_command_result_from_payload(
             command_result_payload,
