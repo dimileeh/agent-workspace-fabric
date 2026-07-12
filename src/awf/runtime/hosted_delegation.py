@@ -602,8 +602,30 @@ def _hosted_validation_sanitize_secret_refs(secrets: object) -> None:
     if not isinstance(secrets, list):
         return
     for secret in secrets:
-        if isinstance(secret, dict):
+        if isinstance(secret, dict) and not _hosted_validation_preserves_secret_ref(secret):
             secret.pop("ref", None)
+
+
+def _hosted_validation_preserves_secret_ref(secret: Mapping[str, object]) -> bool:
+    kind = secret.get("kind")
+    provider = secret.get("provider")
+    ref = secret.get("ref")
+    if kind != "env" or not isinstance(provider, str):
+        return False
+    if provider.strip().lower() != "env":
+        return False
+    return _hosted_validation_env_secret_ref_name(ref) is not None
+
+
+def _hosted_validation_env_secret_ref_name(ref: object) -> str | None:
+    if not isinstance(ref, str):
+        return None
+    stripped = ref.strip()
+    if stripped.startswith("env/"):
+        stripped = stripped[len("env/") :]
+    if not _ENV_NAME_PATTERN.fullmatch(stripped):
+        return None
+    return stripped
 
 
 def _hosted_validation_sanitize_environment_container(container: object) -> None:

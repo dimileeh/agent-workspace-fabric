@@ -471,6 +471,63 @@ def test_hosted_validation_sanitizers_ignore_malformed_optional_containers() -> 
 
 
 @pytest.mark.unit
+def test_hosted_validation_sanitizer_preserves_only_env_source_name_refs() -> None:
+    secrets: list[object] = [
+        {"name": "prefixed", "kind": "env", "provider": "env", "ref": "env/AWF_NPM_TOKEN"},
+        {"name": "bare", "kind": "env", "provider": "env", "ref": "AWF_PIP_TOKEN"},
+        {"name": "path", "kind": "env", "provider": "env", "ref": "/home/user/.npm-token"},
+        {"name": "nested", "kind": "env", "provider": "env", "ref": "env/team/NPM_TOKEN"},
+        {"name": "nonstr", "kind": "env", "provider": "env", "ref": 7},
+        {"name": "github", "kind": "env", "provider": "github", "ref": "token"},
+        {"name": "mount", "kind": "mount", "provider": "env", "ref": "env/AWF_MOUNT_TOKEN"},
+    ]
+
+    _hosted_validation_sanitize_secret_refs(secrets)
+
+    assert secrets == [
+        {"name": "prefixed", "kind": "env", "provider": "env", "ref": "env/AWF_NPM_TOKEN"},
+        {"name": "bare", "kind": "env", "provider": "env", "ref": "AWF_PIP_TOKEN"},
+        {"name": "path", "kind": "env", "provider": "env"},
+        {"name": "nested", "kind": "env", "provider": "env"},
+        {"name": "nonstr", "kind": "env", "provider": "env"},
+        {"name": "github", "kind": "env", "provider": "github"},
+        {"name": "mount", "kind": "mount", "provider": "env"},
+    ]
+
+
+@pytest.mark.unit
+def test_hosted_validation_profile_payload_preserves_env_secret_source_alias() -> None:
+    payload = _hosted_validation_profile_payload(
+        WorkspaceProfile.model_validate(
+            {
+                "name": "env-secret-alias",
+                "secrets": [
+                    {
+                        "name": "npm-token",
+                        "target": "NPM_TOKEN",
+                        "kind": "env",
+                        "provider": "env",
+                        "ref": "env/AWF_NPM_TOKEN",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert payload["secrets"] == [
+        {
+            "name": "npm-token",
+            "target": "NPM_TOKEN",
+            "kind": "env",
+            "mode": "ro",
+            "required": True,
+            "provider": "env",
+            "ref": "env/AWF_NPM_TOKEN",
+        }
+    ]
+
+
+@pytest.mark.unit
 def test_hosted_validation_profile_payload_preserves_empty_services() -> None:
     payload = _hosted_validation_profile_payload(
         WorkspaceProfile.model_validate({"name": "empty-services", "services": []})
