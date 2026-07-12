@@ -1007,7 +1007,7 @@ def _normalized_url(value: str | None) -> str | None:
     if not normalized:
         return None
     parsed = urlsplit(normalized)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if parsed.scheme != "https" or not parsed.netloc:
         return None
     return normalized
 

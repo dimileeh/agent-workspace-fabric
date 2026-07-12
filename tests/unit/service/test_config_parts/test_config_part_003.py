@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from awf.common.config import (
     DEFAULT_MIN_FREE_DISK_BYTES,
@@ -99,6 +100,44 @@ def test_hosted_delegation_service_settings_match_worker_visible_config() -> Non
             "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
         ],
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://hosted.example.test", "ftp://hosted.example.test"],
+)
+def test_hosted_delegation_settings_reject_non_https_base_url(base_url: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            hosted_delegation_base_url=base_url,
+            hosted_delegation_bearer_token="secret-token",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://hosted.example.test", "ftp://hosted.example.test"],
+)
+def test_hosted_delegation_service_settings_reject_non_https_before_auth_config(
+    base_url: str,
+) -> None:
+    base = Settings(
+        _env_file=None,
+        hosted_delegation_base_url="https://hosted.example.test/",
+        hosted_delegation_bearer_token="secret-token",
+    )
+    settings = replace(
+        resolve_service_settings(base, environ={}),
+        hosted_delegation_base_url=base_url,
+    )
+
+    with pytest.raises(HostedDelegationConfigError) as excinfo:
+        hosted_delegation_config_from_service_settings(settings, required=True)
+
+    assert excinfo.value.detail() == {"missing": ["AWF_HOSTED_DELEGATION_BASE_URL"]}
 
 
 @pytest.mark.unit

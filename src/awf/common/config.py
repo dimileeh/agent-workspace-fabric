@@ -610,8 +610,23 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("hosted_delegation_base_url", mode="before")
+    @classmethod
+    def _normalize_hosted_delegation_base_url(cls, value: Any) -> Any:
+        """Treat blank hosted delegation URLs as unset and require HTTPS."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().rstrip("/")
+        if not normalized:
+            return None
+        parsed = urlsplit(normalized)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("hosted_delegation_base_url must be an HTTPS URL")
+        return normalized
+
     @field_validator(
-        "hosted_delegation_base_url",
         "hosted_delegation_bearer_token",
         "hosted_delegation_bearer_token_env",
         mode="before",
