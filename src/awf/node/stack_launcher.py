@@ -233,7 +233,7 @@ class ComposeStackLauncher:
             else frozenset()
         )
         suppressed_legacy_targets = satisfied_targets | legacy_provider_targets(satisfied_providers)
-        if self._auth_mount_resolver is not None:
+        if self._auth_mount_resolver is not None and not use_hosted_secret_placeholders:
             legacy_mounts = await asyncio.to_thread(
                 self._auth_mount_resolver.resolve,
                 workspace_id=request.workspace_id,

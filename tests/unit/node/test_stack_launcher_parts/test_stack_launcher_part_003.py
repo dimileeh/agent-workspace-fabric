@@ -471,6 +471,50 @@ async def test_compose_stack_launcher_propagates_auth_resolution_errors() -> Non
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_render_skips_legacy_auth_mount_resolution() -> None:
+    """Hosted render-only stacks do not depend on Core-local auth directories."""
+    compose = _RecordingCompose()
+    auth_mount_resolver = _FailingAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        auth_mount_resolver=auth_mount_resolver,
+    )
+    layout = _layout()
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted",
+            "secrets": [
+                {
+                    "name": "openai",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "provider": "env",
+                    "ref": "env/OPENAI_API_KEY",
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    assert auth_mount_resolver.workspace_ids == []
+    assert compose.specs == []
+    assert len(compose.render_specs) == 1
+    assert compose.render_specs[0].auth_mounts == (
+        AuthMount(source=str(layout.mirror_path), target=str(layout.mirror_path), mode="rw"),
+    )
+    assert paths.secret_lease_mount_metadata["targets"] == ["OPENAI_API_KEY"]
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
