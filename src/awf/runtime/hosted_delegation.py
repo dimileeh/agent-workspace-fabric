@@ -534,15 +534,24 @@ def _agent_pr_identity_payload(request: AgentRuntimeExecRequest) -> dict[str, An
 
 def _hosted_validation_profile_payload(profile: WorkspaceProfile) -> dict[str, Any]:
     payload = profile.model_dump(mode="json", by_alias=True)
-    runtime = payload.get("runtime")
-    if isinstance(runtime, dict):
-        environment = runtime.get("environment")
-        if isinstance(environment, dict):
-            runtime["environment"] = {
-                str(name): _hosted_validation_env_value(str(name), value)
-                for name, value in environment.items()
-            }
+    _hosted_validation_sanitize_environment_container(payload.get("runtime"))
+    services = payload.get("services")
+    if isinstance(services, list):
+        for service in services:
+            _hosted_validation_sanitize_environment_container(service)
     return payload
+
+
+def _hosted_validation_sanitize_environment_container(container: object) -> None:
+    if not isinstance(container, dict):
+        return
+    environment = container.get("environment")
+    if not isinstance(environment, dict):
+        return
+    container["environment"] = {
+        str(name): _hosted_validation_env_value(str(name), value)
+        for name, value in environment.items()
+    }
 
 
 def _hosted_validation_env_value(name: str, value: object) -> str:
