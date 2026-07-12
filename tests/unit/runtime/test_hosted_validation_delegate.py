@@ -64,6 +64,25 @@ def _profile_with_service_secret() -> WorkspaceProfile:
     )
 
 
+def _profile_with_secret_ref() -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-secret-ref-test",
+            "secrets": [
+                {
+                    "name": "codex-default",
+                    "target": "/run/awf/secrets/codex-default",
+                    "kind": "mount",
+                    "mode": "ro",
+                    "required": True,
+                    "provider": "local-file",
+                    "ref": "local-file:///home/user/.awf/secrets/codex.default",
+                }
+            ],
+        }
+    )
+
+
 @pytest.mark.unit
 async def test_hosted_validation_posts_operation_and_maps_validation_result(
     tmp_path: Path,
@@ -252,6 +271,61 @@ async def test_hosted_validation_sanitizes_literal_service_environment_secrets(
         "POSTGRES_USER": "awf",
         "EXTERNAL_API_KEY": "${SERVICE_API_KEY}",
     }
+
+
+@pytest.mark.unit
+async def test_hosted_validation_strips_profile_secret_refs(tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=_profile_with_secret_ref(),
+            phase_names=("validate",),
+        )
+
+    body_blob = json.dumps(seen["body"], sort_keys=True)
+    assert "local-file:///home/user/.awf/secrets/codex.default" not in body_blob
+    assert seen["body"]["profile"]["secrets"] == [
+        {
+            "name": "codex-default",
+            "target": "/run/awf/secrets/codex-default",
+            "kind": "mount",
+            "mode": "ro",
+            "required": True,
+            "provider": "local-file",
+        }
+    ]
 
 
 @pytest.mark.unit

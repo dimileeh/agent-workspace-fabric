@@ -534,12 +534,21 @@ def _agent_pr_identity_payload(request: AgentRuntimeExecRequest) -> dict[str, An
 
 def _hosted_validation_profile_payload(profile: WorkspaceProfile) -> dict[str, Any]:
     payload = profile.model_dump(mode="json", by_alias=True)
+    _hosted_validation_sanitize_secret_refs(payload.get("secrets"))
     _hosted_validation_sanitize_environment_container(payload.get("runtime"))
     services = payload.get("services")
     if isinstance(services, list):
         for service in services:
             _hosted_validation_sanitize_environment_container(service)
     return payload
+
+
+def _hosted_validation_sanitize_secret_refs(secrets: object) -> None:
+    if not isinstance(secrets, list):
+        return
+    for secret in secrets:
+        if isinstance(secret, dict):
+            secret.pop("ref", None)
 
 
 def _hosted_validation_sanitize_environment_container(container: object) -> None:
