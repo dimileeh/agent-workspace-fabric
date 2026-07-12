@@ -333,6 +333,11 @@ class HostedValidationDelegate:
         """Delegate selected profile phases to the hosting control plane."""
 
         del compose_project, compose_file
+        expected_command_count = _hosted_validation_expected_command_count(
+            profile,
+            phase_names,
+            run_healthchecks=run_healthchecks,
+        )
         terminal = await self._run_operation(
             workspace_id=workspace_id,
             start_path="/v1/validation-runs",
@@ -350,8 +355,8 @@ class HostedValidationDelegate:
                 output_slots=_hosted_validation_poll_output_slots(
                     profile,
                     phase_names,
-                    run_healthchecks=run_healthchecks,
                     include_coverage=include_coverage,
+                    expected_command_count=expected_command_count,
                 ),
             ),
         )
@@ -359,6 +364,7 @@ class HostedValidationDelegate:
             terminal,
             artifacts_dir=self._artifacts_dir / workspace_id,
             max_output_bytes=self._config.max_output_bytes,
+            expected_command_count=expected_command_count,
         )
 
     async def run_profile_coverage(
@@ -636,15 +642,11 @@ def _hosted_validation_poll_output_slots(
     profile: WorkspaceProfile,
     phase_names: list[str] | tuple[str, ...],
     *,
-    run_healthchecks: bool,
     include_coverage: bool,
+    expected_command_count: int,
 ) -> int:
     requested_phases = set(phase_names)
-    output_slots = len(profile_phase_command_plan(profile, phase_names))
-    if run_healthchecks:
-        output_slots += len(profile.validation.healthchecks)
-    if "validate" in requested_phases and profile.validation.alembic.enabled:
-        output_slots += 1
+    output_slots = expected_command_count
     if (
         include_coverage
         and "validate" in requested_phases
@@ -653,6 +655,20 @@ def _hosted_validation_poll_output_slots(
         output_slots += 1
     # Failed operations may carry top-level stdout/stderr that becomes a synthetic result.
     return max(1, output_slots + 1)
+
+
+def _hosted_validation_expected_command_count(
+    profile: WorkspaceProfile,
+    phase_names: list[str] | tuple[str, ...],
+    *,
+    run_healthchecks: bool,
+) -> int:
+    requested_phases = set(phase_names)
+    return (
+        len(profile_phase_command_plan(profile, phase_names))
+        + int(run_healthchecks) * len(profile.validation.healthchecks)
+        + int("validate" in requested_phases) * int(profile.validation.alembic.enabled)
+    )
 
 
 async def _poll_response_json(
@@ -724,6 +740,7 @@ def _validation_result_from_terminal(
     *,
     artifacts_dir: Path,
     max_output_bytes: int,
+    expected_command_count: int,
 ) -> ValidationResult:
     state = _operation_state(payload)
     if "commands" not in payload:
@@ -745,6 +762,10 @@ def _validation_result_from_terminal(
         )
         for index, item in enumerate(commands_payload, start=1)
     ]
+    if state == "succeeded" and expected_command_count > 0 and not commands:
+        raise HostedDelegationProtocolError(
+            "hosted validation terminal response missing command evidence"
+        )
     if state in _HOSTED_VALIDATION_TERMINAL_FAILURES and not any(
         command.blocks_validation for command in commands
     ):

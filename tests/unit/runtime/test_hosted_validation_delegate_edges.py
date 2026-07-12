@@ -127,7 +127,7 @@ async def test_hosted_validation_rejects_non_object_poll_response(
 
 
 @pytest.mark.unit
-async def test_hosted_validation_accepts_empty_successful_commands(
+async def test_hosted_validation_accepts_empty_successful_commands_for_no_op_profile(
     tmp_path: Path,
 ) -> None:
     async def _handler(request: httpx.Request) -> httpx.Response:
@@ -168,6 +168,54 @@ async def test_hosted_validation_accepts_empty_successful_commands(
 
     assert result.all_passed
     assert result.commands == []
+
+
+@pytest.mark.unit
+async def test_hosted_validation_rejects_empty_successful_commands_when_commands_expected(
+    tmp_path: Path,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-test",
+            "phases": {"validate": ["pytest -q"]},
+        }
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        with pytest.raises(HostedDelegationProtocolError, match="missing command evidence"):
+            await delegate.run_profile_phases(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=profile,
+                phase_names=("validate",),
+            )
 
 
 @pytest.mark.unit
