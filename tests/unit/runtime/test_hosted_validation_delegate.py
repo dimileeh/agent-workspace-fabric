@@ -245,6 +245,72 @@ async def test_hosted_coverage_posts_pr_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_hosted_coverage_creates_artifacts_dir_for_command_result(
+    tmp_path: Path,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/coverage_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/coverage_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "coverage": {
+                        "provider": "python",
+                        "percent": 99.5,
+                        "minimum_percent": 99.0,
+                        "enforce": True,
+                        "status": "passed",
+                        "reason_code": "COVERAGE_OK",
+                        "command_result": {
+                            "command": "uv run pytest --cov=awf",
+                            "returncode": 0,
+                            "duration_seconds": 4.2,
+                            "stdout": "coverage passed\n",
+                            "stderr": "",
+                            "phase": "coverage",
+                            "reason_code": "COMMAND_SUCCEEDED",
+                        },
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    workspace_artifacts = tmp_path / "ws_hosted"
+    assert not workspace_artifacts.exists()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.run_profile_coverage(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+        )
+
+    assert result is not None
+    assert result.command_result is not None
+    assert result.command_result.stdout_path == workspace_artifacts / "999_coverage.stdout"
+    assert result.command_result.stdout_path.read_text(encoding="utf-8") == "coverage passed\n"
+    assert result.command_result.stderr_path == workspace_artifacts / "999_coverage.stderr"
+    assert result.command_result.stderr_path.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.unit
 async def test_hosted_coverage_sanitizes_literal_runtime_environment_secrets(
     tmp_path: Path,
 ) -> None:

@@ -781,6 +781,7 @@ def _coverage_result_from_payload(
     artifacts_dir: Path,
     max_output_bytes: int,
 ) -> ValidationCoverageResult:
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
     command_result_payload = payload.get("command_result")
     command_result = (
         _validation_command_result_from_payload(
