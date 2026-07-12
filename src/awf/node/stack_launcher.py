@@ -38,11 +38,17 @@ from awf.profiles.compose import (
     profile_services,
 )
 from awf.profiles.compose_env import hosted_env_secret_alias_placeholder
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import ProfileSecret, WorkspaceProfile
 
 _HOSTED_RENDER_ENV_SECRET_PROVIDERS = frozenset(("env", "github", "bitbucket"))
 _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS = frozenset(("local-file", "host-file", "local-auth", "auth"))
 _HOSTED_RENDER_ENV_REF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_HOSTED_GITHUB_ENV_SOURCE_NAME = "AWF_GITHUB_TOKEN"
+_HOSTED_GITHUB_ENV_TARGET_NAMES = ("GH_TOKEN", "GITHUB_TOKEN")
+_HOSTED_BITBUCKET_ENV_TARGET_SOURCE_NAMES = {
+    "BITBUCKET_API_TOKEN": "BITBUCKET_API_TOKEN",
+    "BITBUCKET_EMAIL": "BITBUCKET_EMAIL",
+}
 _HOSTED_AUTH_PLACEHOLDER_SOURCE_ROOT = "/run/awf/hosted-auth-placeholders"
 _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
     "/home/agent/.claude",
@@ -516,14 +522,15 @@ def _hosted_secret_lease_placeholder_resolution(
             skipped_unresolved_count += 1
             continue
         if secret.kind == "env" and provider in _HOSTED_RENDER_ENV_SECRET_PROVIDERS:
-            source_name = _hosted_env_secret_source_name(secret.ref, fallback=secret.target)
-            if source_name is None:
+            pairs = _hosted_env_secret_alias_pairs(secret, provider=provider)
+            if pairs is None:
                 skipped_unresolved_count += 1
                 continue
-            if secret.target not in env:
-                env[secret.target] = hosted_env_secret_alias_placeholder(source_name)
+            for target, source_name in pairs:
+                if target not in env:
+                    env[target] = hosted_env_secret_alias_placeholder(source_name)
+                _append_unique_hosted_secret_value(targets, target)
             _append_unique_hosted_secret_value(providers, provider)
-            _append_unique_hosted_secret_value(targets, secret.target)
             if provider == "github":
                 satisfied_legacy_providers.add(provider)
             continue
@@ -563,6 +570,31 @@ def _hosted_secret_provider(provider: str | None) -> str | None:
         return None
     normalized = provider.strip().lower()
     return normalized or None
+
+
+def _hosted_env_secret_alias_pairs(
+    secret: ProfileSecret,
+    *,
+    provider: str,
+) -> tuple[tuple[str, str], ...] | None:
+    """Return hosted target/source aliases matching local provider lease rules."""
+    if provider == "env":
+        source_name = _hosted_env_secret_source_name(secret.ref, fallback=secret.target)
+        if source_name is None:
+            return None
+        return ((secret.target, source_name),)
+    if provider == "github":
+        if secret.target not in _HOSTED_GITHUB_ENV_TARGET_NAMES:
+            return None
+        return tuple(
+            (target, _HOSTED_GITHUB_ENV_SOURCE_NAME) for target in _HOSTED_GITHUB_ENV_TARGET_NAMES
+        )
+    if provider == "bitbucket":
+        source_name = _HOSTED_BITBUCKET_ENV_TARGET_SOURCE_NAMES.get(secret.target)
+        if source_name is None:
+            return None
+        return ((secret.target, source_name),)
+    return None
 
 
 def _hosted_env_secret_source_name(ref: str | None, *, fallback: str) -> str | None:

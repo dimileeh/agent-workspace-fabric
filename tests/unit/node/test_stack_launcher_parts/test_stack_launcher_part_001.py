@@ -506,6 +506,82 @@ async def test_compose_stack_launcher_render_skips_local_secret_resolution() -> 
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_render_maps_provider_env_leases_to_hosted_sources() -> None:
+    """Hosted provider leases use real provider source names, not profile refs."""
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=_FailingDeclaredLeaseResolver(),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted",
+            "secrets": [
+                {
+                    "name": "github",
+                    "kind": "env",
+                    "target": "GH_TOKEN",
+                    "provider": "github",
+                    "ref": "token",
+                },
+                {
+                    "name": "bitbucket-token",
+                    "kind": "env",
+                    "target": "BITBUCKET_API_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                },
+                {
+                    "name": "bitbucket-email",
+                    "kind": "env",
+                    "target": "BITBUCKET_EMAIL",
+                    "provider": "bitbucket",
+                    "ref": "email",
+                },
+                {
+                    "name": "bitbucket-unsupported",
+                    "kind": "env",
+                    "target": "BB_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.render(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert paths is not None
+    env = dict(compose.render_specs[0].agent_environment)
+    assert hosted_profile_env_passthrough_aliases(
+        Path("unused-compose.yml"),
+        compose_env=env,
+        worker_env={},
+    ) == (
+        ("GH_TOKEN", "AWF_GITHUB_TOKEN"),
+        ("GITHUB_TOKEN", "AWF_GITHUB_TOKEN"),
+        ("BITBUCKET_API_TOKEN", "BITBUCKET_API_TOKEN"),
+        ("BITBUCKET_EMAIL", "BITBUCKET_EMAIL"),
+    )
+    assert paths.secret_lease_mount_metadata["env_count"] == 4
+    assert paths.secret_lease_mount_metadata["providers"] == ["github", "bitbucket"]
+    assert paths.secret_lease_mount_metadata["targets"] == [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "BITBUCKET_API_TOKEN",
+        "BITBUCKET_EMAIL",
+    ]
+    assert paths.secret_lease_mount_metadata["skipped_unresolved_count"] == 1
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_passes_profile_dind_image_to_spec() -> None:
     """The launcher passes the profile DinD image into the compose spec."""
     compose = _RecordingCompose()
