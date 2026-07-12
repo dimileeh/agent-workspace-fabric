@@ -14,6 +14,7 @@ from awf.node.companion_services import (
 )
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.git_manager import WorktreeLayout
+from awf.node.secret_mounts import SecretLeaseResolutionError
 from awf.node.stack_launcher import (
     ComposeStackLauncher,
     WorkspaceServiceExecutionError,
@@ -545,6 +546,7 @@ async def test_compose_stack_launcher_render_maps_provider_env_leases_to_hosted_
                     "target": "BB_TOKEN",
                     "provider": "bitbucket",
                     "ref": "token",
+                    "required": False,
                 },
             ],
         }
@@ -579,6 +581,106 @@ async def test_compose_stack_launcher_render_maps_provider_env_leases_to_hosted_
         "BITBUCKET_EMAIL",
     ]
     assert paths.secret_lease_mount_metadata["skipped_unresolved_count"] == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("secret", "reason_code"),
+    [
+        (
+            {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/1_OPENAI_API_KEY",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
+                "name": "bitbucket-unsupported",
+                "kind": "env",
+                "target": "BB_TOKEN",
+                "provider": "bitbucket",
+                "ref": "token",
+            },
+            "SECRET_LEASE_TARGET_MISMATCH",
+        ),
+        (
+            {
+                "name": "vault",
+                "kind": "env",
+                "target": "VAULT_TOKEN",
+                "provider": "vault",
+                "ref": "token",
+            },
+            "SECRET_LEASE_PROVIDER_UNSUPPORTED",
+        ),
+        (
+            {
+                "name": "github-mount",
+                "kind": "mount",
+                "target": "/home/agent/.config/gh",
+                "provider": "github",
+                "ref": "token",
+            },
+            "SECRET_LEASE_TARGET_KIND_MISMATCH",
+        ),
+        (
+            {
+                "name": "local-file-env",
+                "kind": "env",
+                "target": "NPMRC",
+                "provider": "local-file",
+                "ref": "file/.npmrc",
+            },
+            "SECRET_LEASE_TARGET_KIND_MISMATCH",
+        ),
+        (
+            {
+                "name": "relative-npmrc",
+                "kind": "mount",
+                "target": "relative-npmrc",
+                "provider": "local-file",
+                "ref": "file/.npmrc",
+            },
+            "SECRET_LEASE_TARGET_MISMATCH",
+        ),
+    ],
+)
+async def test_compose_stack_launcher_render_fails_required_unrenderable_hosted_secret(
+    secret: dict[str, object],
+    reason_code: str,
+) -> None:
+    """Required hosted secret declarations fail before rendering incomplete env."""
+    compose = _RecordingCompose()
+    lease_resolver = _FailingDeclaredLeaseResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=lease_resolver,
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted",
+            "secrets": [secret],
+        }
+    )
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        await launcher.render(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=profile,
+            )
+        )
+
+    assert raised.value.reason_code == reason_code
+    assert raised.value.secret_name == secret["name"]
+    assert lease_resolver.calls == []
+    assert compose.render_specs == []
 
 
 @pytest.mark.unit

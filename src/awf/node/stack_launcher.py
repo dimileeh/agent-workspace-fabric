@@ -30,7 +30,14 @@ from awf.node.compose_manager import (
 )
 from awf.node.egress_policy import local_egress_plan
 from awf.node.git_manager import WorktreeLayout
-from awf.node.secret_mounts import LocalSecretLeaseResolution
+from awf.node.secret_mounts import (
+    SECRET_LEASE_PROVIDER_UNSUPPORTED,
+    SECRET_LEASE_SOURCE_INVALID,
+    SECRET_LEASE_TARGET_KIND_MISMATCH,
+    SECRET_LEASE_TARGET_MISMATCH,
+    LocalSecretLeaseResolution,
+    SecretLeaseResolutionError,
+)
 from awf.profiles.compose import (
     agent_environment_with_declared_secret_leases,
     agent_environment_with_host_auth,
@@ -42,6 +49,9 @@ from awf.profiles.models import ProfileSecret, WorkspaceProfile
 
 _HOSTED_RENDER_ENV_SECRET_PROVIDERS = frozenset(("env", "github", "bitbucket"))
 _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS = frozenset(("local-file", "host-file", "local-auth", "auth"))
+_HOSTED_RENDER_SECRET_PROVIDERS = (
+    _HOSTED_RENDER_ENV_SECRET_PROVIDERS | _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS
+)
 _HOSTED_RENDER_ENV_REF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HOSTED_GITHUB_ENV_SOURCE_NAME = "AWF_GITHUB_TOKEN"
 _HOSTED_GITHUB_ENV_TARGET_NAMES = ("GH_TOKEN", "GITHUB_TOKEN")
@@ -521,10 +531,28 @@ def _hosted_secret_lease_placeholder_resolution(
         if provider is None:
             skipped_unresolved_count += 1
             continue
-        if secret.kind == "env" and provider in _HOSTED_RENDER_ENV_SECRET_PROVIDERS:
+        if provider not in _HOSTED_RENDER_SECRET_PROVIDERS:
+            skipped_unresolved_count += _skip_or_raise_unrenderable_hosted_secret(
+                secret,
+                provider=provider,
+                reason_code=SECRET_LEASE_PROVIDER_UNSUPPORTED,
+            )
+            continue
+        if provider in _HOSTED_RENDER_ENV_SECRET_PROVIDERS:
+            if secret.kind != "env":
+                skipped_unresolved_count += _skip_or_raise_unrenderable_hosted_secret(
+                    secret,
+                    provider=provider,
+                    reason_code=SECRET_LEASE_TARGET_KIND_MISMATCH,
+                )
+                continue
             pairs = _hosted_env_secret_alias_pairs(secret, provider=provider)
             if pairs is None:
-                skipped_unresolved_count += 1
+                skipped_unresolved_count += _skip_or_raise_unrenderable_hosted_secret(
+                    secret,
+                    provider=provider,
+                    reason_code=_hosted_env_secret_unrenderable_reason(provider),
+                )
                 continue
             for target, source_name in pairs:
                 if target not in env:
@@ -534,14 +562,27 @@ def _hosted_secret_lease_placeholder_resolution(
             if provider == "github":
                 satisfied_legacy_providers.add(provider)
             continue
-        if secret.kind == "mount" and provider in _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS:
+        if secret.kind != "mount":
+            skipped_unresolved_count += _skip_or_raise_unrenderable_hosted_secret(
+                secret,
+                provider=provider,
+                reason_code=SECRET_LEASE_TARGET_KIND_MISMATCH,
+            )
+            continue
+        if not secret.target.startswith("/"):
+            skipped_unresolved_count += _skip_or_raise_unrenderable_hosted_secret(
+                secret,
+                provider=provider,
+                reason_code=SECRET_LEASE_TARGET_MISMATCH,
+            )
+            continue
+        if provider in _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS:
             mount_count += 1
             _append_unique_hosted_secret_value(providers, provider)
             _append_unique_hosted_secret_value(targets, secret.target)
             _append_hosted_auth_placeholder_mounts(mounts, (secret.target,))
             satisfied_legacy_targets.add(secret.target)
             continue
-        skipped_unresolved_count += 1
 
     if not env and mount_count == 0 and not skipped_unresolved_count:
         return None
@@ -563,6 +604,29 @@ def _hosted_secret_lease_placeholder_resolution(
         satisfied_legacy_targets=frozenset(satisfied_legacy_targets),
         satisfied_legacy_providers=frozenset(satisfied_legacy_providers),
     )
+
+
+def _skip_or_raise_unrenderable_hosted_secret(
+    secret: ProfileSecret,
+    *,
+    provider: str,
+    reason_code: str,
+) -> int:
+    if secret.required:
+        raise SecretLeaseResolutionError(
+            reason_code=reason_code,
+            secret_name=secret.name,
+            provider=provider,
+            target=secret.target,
+            kind=secret.kind,
+        )
+    return 1
+
+
+def _hosted_env_secret_unrenderable_reason(provider: str) -> str:
+    if provider == "env":
+        return SECRET_LEASE_SOURCE_INVALID
+    return SECRET_LEASE_TARGET_MISMATCH
 
 
 def _hosted_secret_provider(provider: str | None) -> str | None:
