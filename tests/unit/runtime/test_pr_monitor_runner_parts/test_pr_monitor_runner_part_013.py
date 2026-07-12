@@ -308,6 +308,11 @@ async def test_monitor_agent_hosted_timeout_skips_compose_recovery(
     assert command_evidence == []
     probe.assert_not_awaited()
     ensure_project_up.assert_not_awaited()
+    assert adapter.hosted_pr_identities
+    timeout_identity = adapter.hosted_pr_identities[0]
+    assert timeout_identity is not None
+    assert timeout_identity["repo_url"] == "git@github.com:dimileeh/aira-web.git"
+    assert timeout_identity["pr_url"] == "https://github.com/dimileeh/aira-web/pull/42"
     assert {
         "event": "monitor.agent_service_recovery_skipped_hosted",
         "workspace_id": workspace_id,
@@ -381,6 +386,11 @@ async def test_monitor_agent_hosted_cleanup_failure_skips_compose_recovery(
     assert command_evidence == []
     probe.assert_not_awaited()
     ensure_project_up.assert_not_awaited()
+    assert adapter.hosted_pr_identities
+    cleanup_identity = adapter.hosted_pr_identities[0]
+    assert cleanup_identity is not None
+    assert cleanup_identity["repo_url"] == "git@github.com:dimileeh/aira-web.git"
+    assert cleanup_identity["pr_url"] == "https://github.com/dimileeh/aira-web/pull/42"
     assert {
         "event": "monitor.agent_service_recovery_skipped_hosted",
         "workspace_id": workspace_id,

@@ -57,6 +57,7 @@ class FakeAdapter(AgentAdapter):
     _queued: list[AgentRunResult] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     workspace_ids: list[str | None] = field(default_factory=list)
+    hosted_pr_identities: list[dict[str, Any] | None] = field(default_factory=list)
 
     def __init__(  # type: ignore[override]
         self,
@@ -73,6 +74,7 @@ class FakeAdapter(AgentAdapter):
         self._queued = []
         self.calls = []
         self.workspace_ids = []
+        self.hosted_pr_identities = []
 
     def get_provider(self, model: str | None) -> str:
         """Return the fixed fake provider identifier."""
@@ -102,7 +104,7 @@ class FakeAdapter(AgentAdapter):
             else AgentRunResult(returncode=returncode, stdout=stdout, stderr=stderr)
         )
 
-    async def run(  # type: ignore[override]
+    async def run(
         self,
         *,
         compose_project: str,
@@ -111,10 +113,12 @@ class FakeAdapter(AgentAdapter):
         model: str | None = None,
         workspace_id: str | None = None,
         log_source: str = "agent",
+        hosted_pr_identity: dict[str, Any] | None = None,
     ) -> AgentRunResult:
         """Consume one queued result and log the dispatched prompt."""
         self.calls.append(prompt)
         self.workspace_ids.append(workspace_id)
+        self.hosted_pr_identities.append(hosted_pr_identity)
         if self._log_store and workspace_id:
             sinks = await self._log_store.open_command_streams(
                 workspace_id=workspace_id,
