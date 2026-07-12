@@ -929,6 +929,7 @@ async def _repair_protected_scope_changes_before_commit(
             prompt=prompt,
             log_source="recovery",
             operation_start_head=pre_repair_head,
+            state=state,
         )
     except AgentRunError as exc:
         agent_run_err = exc

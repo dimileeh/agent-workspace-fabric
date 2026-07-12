@@ -10,7 +10,9 @@ import pytest
 from awf.adapters.base import AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult
 from awf.db.enums import AgentRuntime
+from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.agent_service_recovery import (
+    _hosted_pr_identity_for_workspace,
     _run_monitor_agent_with_service_recovery,
     _sync_hosted_worktree_to_terminal_head,
 )
@@ -40,6 +42,26 @@ class _HostedAdapterWithoutTerminalHead:
         return AgentRunResult(returncode=0, stdout="done", stderr="", terminal_head_sha=None)
 
 
+class _HostedAdapterWithTerminalHead:
+    name = AgentRuntime.codex
+    is_hosted = True
+
+    def __init__(self, terminal_head_sha: str) -> None:
+        self.terminal_head_sha = terminal_head_sha
+        self.hosted_pr_identities: list[dict[str, object] | None] = []
+
+    async def run(self, **kwargs: object) -> AgentRunResult:
+        hosted_pr_identity = kwargs.get("hosted_pr_identity")
+        identity = hosted_pr_identity if isinstance(hosted_pr_identity, dict) else None
+        self.hosted_pr_identities.append(identity)
+        return AgentRunResult(
+            returncode=0,
+            stdout="AWF-VERDICT: FIXED: remote repair",
+            stderr="",
+            terminal_head_sha=self.terminal_head_sha,
+        )
+
+
 def _runner_context(tmp_path: Path, runner: _Runner) -> SimpleNamespace:
     return SimpleNamespace(
         _worktrees_root=tmp_path,
@@ -48,6 +70,18 @@ def _runner_context(tmp_path: Path, runner: _Runner) -> SimpleNamespace:
             adapter=SimpleNamespace(name=AgentRuntime.codex),
         ),
     )
+
+
+def _monitor_context_with_runner(
+    tmp_path: Path,
+    *,
+    runner: _Runner,
+    adapter: object,
+) -> SimpleNamespace:
+    context = _monitor_context_with_adapter(adapter)
+    context._worktrees_root = tmp_path
+    context._deps.runner = runner
+    return context
 
 
 def _monitor_context_with_adapter(adapter: object) -> SimpleNamespace:
@@ -163,3 +197,34 @@ async def test_hosted_agent_success_without_terminal_head_fails_closed() -> None
         )
 
     assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_MISSING"
+
+
+@pytest.mark.unit
+async def test_hosted_agent_sync_advances_monitor_state_after_terminal_head(
+    tmp_path: Path,
+) -> None:
+    sha = "abcdef0123456789abcdef0123456789abcdef01"
+    runner = _Runner(fetched_sha=sha)
+    adapter = _HostedAdapterWithTerminalHead(sha.upper())
+    state = MonitorState(last_push_sha="a" * 40)
+    context = _monitor_context_with_runner(tmp_path, runner=runner, adapter=adapter)
+
+    result = await _run_monitor_agent_with_service_recovery(
+        context,
+        workspace_id="ws_hosted",
+        compose_project="awf_ws_hosted",
+        compose_file=Path("/tmp/missing-compose.yml"),
+        prompt="fix review",
+        log_source="monitor",
+        state=state,
+    )
+
+    assert result.terminal_head_sha == sha.upper()
+    assert state.last_push_sha == sha
+    assert adapter.hosted_pr_identities[0]["expected_head_sha"] == "a" * 40
+    refreshed_identity = await _hosted_pr_identity_for_workspace(
+        context,
+        "ws_hosted",
+        state=state,
+    )
+    assert refreshed_identity["expected_head_sha"] == sha

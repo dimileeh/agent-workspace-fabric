@@ -535,6 +535,7 @@ async def _run_pre_push_validation_fix_pass(
             log_source="monitor-pre-push-validation-fix",
             command_evidence=command_evidence,
             operation_start_head=fix_start_head,
+            state=state,
         )
     except AgentRunError as exc:
         append_command_evidence(

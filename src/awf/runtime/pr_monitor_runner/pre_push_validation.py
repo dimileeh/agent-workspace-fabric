@@ -1008,7 +1008,10 @@ async def _run_pre_push_validation(
             "include_coverage": False,
         }
         if self._deps.adapter.is_hosted:
-            hosted_pr_identity = await self._hosted_pr_identity_for_workspace(workspace_id)
+            hosted_pr_identity = await self._hosted_pr_identity_for_workspace(
+                workspace_id,
+                state=state,
+            )
             validation_kwargs["pr_identity"] = hosted_pr_identity
         result = await self._deps.validation.run_profile_phases(**validation_kwargs)
         if _should_run_local_coverage(profile) and result.all_passed:

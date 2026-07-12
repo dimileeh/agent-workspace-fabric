@@ -70,9 +70,10 @@ async def _run_monitor_agent_with_service_recovery(
     log_source: str,
     command_evidence: list[str] | None = None,
     operation_start_head: str | None = None,
+    state: Any | None = None,
 ) -> AgentRunResult:
     hosted_pr_identity = (
-        await _hosted_pr_identity_for_workspace(self, workspace_id)
+        await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
         if self._deps.adapter.is_hosted
         else None
     )
@@ -150,12 +151,14 @@ async def _run_monitor_agent_with_service_recovery(
                     ),
                     reason_code="HOSTED_REMOTE_HEAD_MISSING",
                 )
-            await _sync_hosted_worktree_to_terminal_head(
+            synced_head_sha = await _sync_hosted_worktree_to_terminal_head(
                 self,
                 workspace_id=workspace_id,
                 hosted_pr_identity=hosted_pr_identity,
                 terminal_head_sha=result.terminal_head_sha,
             )
+            if state is not None:
+                state.last_push_sha = synced_head_sha
         append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
         return cast(AgentRunResult, result)
 
@@ -163,12 +166,15 @@ async def _run_monitor_agent_with_service_recovery(
 async def _hosted_pr_identity_for_workspace(
     self: Any,
     workspace_id: str,
+    *,
+    state: Any | None = None,
 ) -> dict[str, object]:
     ws = await self._load_workspace(workspace_id)
     policy = ws.task_policy if isinstance(ws.task_policy, Mapping) else {}
     adoption = policy.get("pr_adoption") if isinstance(policy, Mapping) else None
     adoption_map = adoption if isinstance(adoption, Mapping) else {}
     head_ref = _nonblank_str(ws.remote_push_branch) or _nonblank_str(adoption_map.get("head_ref"))
+    state_head_sha = _nonblank_str(getattr(state, "last_push_sha", None))
     return {
         "repo_url": ws.repo_url,
         "pr_url": _nonblank_str(ws.pr_url) or _nonblank_str(adoption_map.get("pr_url")),
@@ -179,7 +185,9 @@ async def _hosted_pr_identity_for_workspace(
         "head_repo_slug": _nonblank_str(adoption_map.get("head_repo_slug")),
         "owned_paths": list(ws.owned_paths or []),
         "expected_head_sha": (
-            _nonblank_str(ws.monitor_last_commit_sha) or _nonblank_str(adoption_map.get("head_sha"))
+            state_head_sha
+            or _nonblank_str(ws.monitor_last_commit_sha)
+            or _nonblank_str(adoption_map.get("head_sha"))
         ),
     }
 
@@ -194,7 +202,7 @@ async def _sync_hosted_worktree_to_terminal_head(
     workspace_id: str,
     hosted_pr_identity: dict[str, object] | None,
     terminal_head_sha: str,
-) -> None:
+) -> str:
     identity = hosted_pr_identity or {}
     repo_url = _nonblank_str(identity.get("head_repo_url")) or _nonblank_str(
         identity.get("repo_url")
@@ -223,7 +231,7 @@ async def _sync_hosted_worktree_to_terminal_head(
     rev_parse = await self._deps.runner.run(
         ["git", "-C", str(worktree_path), "rev-parse", "FETCH_HEAD"]
     )
-    fetched_sha = rev_parse.stdout.strip()
+    fetched_sha = str(rev_parse.stdout).strip()
     if not rev_parse.ok or fetched_sha.lower() != terminal_head_sha.lower():
         raise AgentRunError(
             agent=self._deps.adapter.name,
@@ -246,6 +254,7 @@ async def _sync_hosted_worktree_to_terminal_head(
             result=reset,
             reason_code="HOSTED_REMOTE_HEAD_SYNC_FAILED",
         )
+    return fetched_sha
 
 
 async def _rerun_monitor_agent_pre_launch_guards(
