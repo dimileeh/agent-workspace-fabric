@@ -60,6 +60,7 @@ def _agent_request(**overrides: object) -> AgentRuntimeExecRequest:
 @pytest.mark.unit
 async def test_agent_delegation_posts_secret_free_body_and_maps_terminal_head_sha() -> None:
     seen: dict[str, Any] = {}
+    terminal_head_sha = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 
     async def _handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/v1/agent-runs":
@@ -85,7 +86,7 @@ async def test_agent_delegation_posts_secret_free_body_and_maps_terminal_head_sh
                     "returncode": 0,
                     "stdout": "ok",
                     "stderr": "",
-                    "terminal_head_sha": "b" * 40,
+                    "terminal_head_sha": terminal_head_sha,
                 },
             )
         raise AssertionError(f"unexpected request {request.method} {request.url}")
@@ -97,7 +98,7 @@ async def test_agent_delegation_posts_secret_free_body_and_maps_terminal_head_sh
 
     assert result.returncode == 0
     assert result.stdout == "ok"
-    assert result.terminal_head_sha == "b" * 40
+    assert result.terminal_head_sha == terminal_head_sha
     assert seen["headers"]["authorization"] == "Bearer secret-token"
     assert "secret-token" not in seen["url"]
     body_blob = json.dumps(seen["body"], sort_keys=True)

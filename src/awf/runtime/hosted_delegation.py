@@ -678,7 +678,9 @@ def _optional_float(value: object) -> float | None:
 
 def _valid_sha(value: object) -> bool:
     return (
-        isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in value)
+        isinstance(value, str)
+        and len(value) == 40
+        and all(c in "0123456789abcdefABCDEF" for c in value)
     )
 
 
