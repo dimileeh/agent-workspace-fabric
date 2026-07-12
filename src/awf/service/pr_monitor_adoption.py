@@ -416,14 +416,30 @@ class PullRequestMonitorAdoptionService:
             workspace=workspace,
         )
         node_id = effective_worker_node_id(self._settings)
+        hosted_execution = request.execution.mode == "hosted"
+        steady_cpu = 0.0 if hosted_execution else self._settings.workspace_steady_cpu
+        steady_memory_gb = 0.0 if hosted_execution else self._settings.workspace_steady_memory_gb
+        peak_cpu = 0.0 if hosted_execution else self._settings.workspace_peak_cpu
+        peak_memory_gb = 0.0 if hosted_execution else self._settings.workspace_peak_memory_gb
+        resource_summary: dict[str, Any] = {
+            "node_id": node_id,
+            "steady_cpu": steady_cpu,
+            "steady_memory_gb": steady_memory_gb,
+            "peak_cpu": peak_cpu,
+            "peak_memory_gb": peak_memory_gb,
+            "disk_mb": None,
+            "dind_slots": 0,
+            "phase": "workspace_lifecycle",
+            "dind_mode": "none",
+        }
         await ResourceReservationRepository(self._session).create(
             workspace_id=workspace.id,
             attempt_id=attempt.id,
             node_id=node_id,
-            steady_cpu=self._settings.workspace_steady_cpu,
-            steady_memory_gb=self._settings.workspace_steady_memory_gb,
-            peak_cpu=self._settings.workspace_peak_cpu,
-            peak_memory_gb=self._settings.workspace_peak_memory_gb,
+            steady_cpu=steady_cpu,
+            steady_memory_gb=steady_memory_gb,
+            peak_cpu=peak_cpu,
+            peak_memory_gb=peak_memory_gb,
             disk_mb=None,
             dind_slots=0,
             phase="workspace_lifecycle",
@@ -439,17 +455,7 @@ class PullRequestMonitorAdoptionService:
             computed_priority=scheduler_score.effective_score,
             age_boost=scheduler_score.age_boost,
             retry_bonus=scheduler_score.retry_bonus,
-            resource_summary={
-                "node_id": node_id,
-                "steady_cpu": self._settings.workspace_steady_cpu,
-                "steady_memory_gb": self._settings.workspace_steady_memory_gb,
-                "peak_cpu": self._settings.workspace_peak_cpu,
-                "peak_memory_gb": self._settings.workspace_peak_memory_gb,
-                "disk_mb": None,
-                "dind_slots": 0,
-                "phase": "workspace_lifecycle",
-                "dind_mode": "none",
-            },
+            resource_summary=resource_summary,
             overlap_risk_summary={"count": 0, "overlaps": []},
             score_summary=scheduler_score.score_summary,
         )

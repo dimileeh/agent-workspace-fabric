@@ -270,6 +270,10 @@ class TestPullRequestMonitorAdoptionServicePart001:
             _env_file=None,
             hosted_delegation_base_url="https://hosted.example.test",
             hosted_delegation_bearer_token="hosted-token",
+            workspace_steady_cpu=3.0,
+            workspace_steady_memory_gb=5.0,
+            workspace_peak_cpu=7.0,
+            workspace_peak_memory_gb=11.0,
         )
         async with factory() as session:
             service = PullRequestMonitorAdoptionService(
@@ -307,6 +311,24 @@ class TestPullRequestMonitorAdoptionServicePart001:
                 if event.event_type == "workspace.pr_monitor_adoption_requested"
             )
             assert event.payload["execution"] == {"mode": "hosted"}
+            reservation = (await session.execute(select(ResourceReservation))).scalar_one()
+            assert reservation.steady_cpu == 0.0
+            assert reservation.steady_memory_gb == 0.0
+            assert reservation.peak_cpu == 0.0
+            assert reservation.peak_memory_gb == 0.0
+            assert reservation.dind_slots == 0
+            decision = (await session.execute(select(QueueDecision))).scalar_one()
+            assert decision.resource_summary == {
+                "node_id": "local",
+                "steady_cpu": 0.0,
+                "steady_memory_gb": 0.0,
+                "peak_cpu": 0.0,
+                "peak_memory_gb": 0.0,
+                "disk_mb": None,
+                "dind_slots": 0,
+                "phase": "workspace_lifecycle",
+                "dind_mode": "none",
+            }
 
     @pytest.mark.unit
     async def test_hosted_execution_policy_accepts_service_visible_token_env(
