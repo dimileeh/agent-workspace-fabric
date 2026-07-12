@@ -310,7 +310,9 @@ def test_bare_list_entry_forwards_present_host_value_and_omits_unset(tmp_path: P
     )
 
     materialized = local_service_worker_environment(
-        {"GH_TOKEN": "ghp_host"}, compose_file=compose_file
+        {},
+        host_env={"GH_TOKEN": "ghp_host"},
+        compose_file=compose_file,
     )
 
     assert materialized is not None
@@ -337,12 +339,42 @@ def test_dynamic_bare_list_entry_forwards_referenced_hosted_token(tmp_path: Path
             "AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV": "HOSTED_TOKEN",
             "HOSTED_TOKEN": "secret-token",
         },
+        host_env={"HOSTED_TOKEN": "secret-token"},
         compose_file=compose_file,
     )
 
     assert materialized is not None
     assert materialized["AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"] == "HOSTED_TOKEN"
     assert materialized["HOSTED_TOKEN"] == "secret-token"
+
+
+def test_dynamic_bare_list_entry_omits_env_file_only_referenced_hosted_token(
+    tmp_path: Path,
+) -> None:
+    """A dynamic bare entry interpolates from .env but forwards only host values."""
+    compose_file = tmp_path / "local-service.yml"
+    compose_file.write_text(
+        "services:\n"
+        "  worker:\n"
+        "    environment:\n"
+        "      - AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV="
+        "${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-}\n"
+        "      - ${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-"
+        "AWF_HOSTED_DELEGATION_BEARER_TOKEN}\n"
+    )
+
+    materialized = local_service_worker_environment(
+        {
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV": "HOSTED_TOKEN",
+            "HOSTED_TOKEN": "env-file-token",
+        },
+        host_env={},
+        compose_file=compose_file,
+    )
+
+    assert materialized is not None
+    assert materialized["AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"] == "HOSTED_TOKEN"
+    assert "HOSTED_TOKEN" not in materialized
 
 
 def test_real_local_service_yml_contains_expected_keys() -> None:

@@ -209,6 +209,9 @@ def resolve_service_settings(
     settings = base or Settings()
     env = os.environ if environ is None else environ
     service_env = local_service_environ(env) if environ is None else env
+    worker_env = local_service_worker_environment(service_env, host_env=env)
+    if worker_env is None:
+        worker_env = dict(service_env)
     database_url = settings.database_url
     project_dotenv_lookup = _ProjectDotenvLookup()
 
@@ -272,7 +275,7 @@ def resolve_service_settings(
         hosted_delegation_base_url=settings.hosted_delegation_base_url,
         hosted_delegation_bearer_token=_resolve_hosted_delegation_bearer_token(
             settings,
-            service_env,
+            worker_env,
         ),
         hosted_delegation_poll_interval_seconds=(settings.hosted_delegation_poll_interval_seconds),
         hosted_delegation_operation_timeout_seconds=(
@@ -375,9 +378,9 @@ def hosted_delegation_config_from_service_settings(
 
 def _resolve_hosted_delegation_bearer_token(
     settings: Settings,
-    service_environ: Mapping[str, str],
+    worker_environ: Mapping[str, str],
 ) -> str | None:
-    """Resolve hosted delegation token from direct value or configured env name."""
+    """Resolve hosted delegation token from direct value or worker-visible env name."""
 
     direct = _empty_to_none(settings.hosted_delegation_bearer_token)
     if direct is not None:
@@ -385,7 +388,7 @@ def _resolve_hosted_delegation_bearer_token(
     token_env = _empty_to_none(settings.hosted_delegation_bearer_token_env)
     if token_env is None:
         return None
-    return _empty_to_none(_env_value(service_environ, token_env))
+    return _empty_to_none(_env_value(worker_environ, token_env))
 
 
 def local_service_environ(
@@ -393,12 +396,15 @@ def local_service_environ(
     *,
     env_file: Path | None = LOCAL_SERVICE_COMPOSE_ENV_FILE,
 ) -> dict[str, str]:
-    """Return the environment local Compose services actually receive.
+    """Return the merged environment used to render local Compose services.
 
     Docker Compose resolves variables from its env file and then lets the host
     shell override them. The CLI uses this merged view for readiness checks so a
     token present in root ``.env`` is not incorrectly reported as missing just
-    because it is absent from the host shell.
+    because it is absent from the host shell. Bare list-form Compose environment
+    entries still forward values only from the host/container environment; use
+    :func:`local_service_worker_environment` when materialized container values
+    matter.
     """
 
     merged: dict[str, str] = {}
@@ -442,7 +448,10 @@ def local_service_worker_environment_keys(
 
 
 def local_service_worker_environment(
-    merged_env: Mapping[str, str], *, compose_file: Path | None = None
+    merged_env: Mapping[str, str],
+    *,
+    host_env: Mapping[str, str] | None = None,
+    compose_file: Path | None = None,
 ) -> dict[str, str] | None:
     """Return the worker container's MATERIALIZED Compose environment.
 
@@ -458,8 +467,11 @@ def local_service_worker_environment(
     ``ref: AWF_GITHUB_TOKEN`` is evaluated against the value the real worker has,
     rather than being falsely reported as ``SECRET_LEASE_SOURCE_MISSING`` by a
     filter of the pre-interpolation inputs. A bare list-form entry (``- KEY``)
-    forwards the host value unchanged (omitted when the host does not set it,
-    matching Compose). Keys that resolve to an empty string are kept (the worker
+    forwards the host/container value unchanged from ``host_env`` (omitted when
+    that environment does not set it, matching Compose). When ``host_env`` is
+    omitted, the current process environment is used; this matches callers that
+    built ``merged_env`` with :func:`local_service_environ` and no explicit
+    ``environ``. Keys that resolve to an empty string are kept (the worker
     receives them as ``""``); the secret-lease resolver treats an empty value as
     missing, so this does not weaken the signal. ``None`` when the compose asset
     cannot be located/parsed (caller falls back to the unrestricted merged view,
@@ -470,6 +482,7 @@ def local_service_worker_environment(
     if pairs is None:
         return None
     materialized: dict[str, str] = {}
+    bare_forward_env = os.environ if host_env is None else host_env
     for raw_key, (raw_value, interpolates_name) in pairs.items():
         key = compose_expand_value(raw_key, environ=merged_env) if interpolates_name else raw_key
         if not key:
@@ -477,7 +490,7 @@ def local_service_worker_environment(
         if raw_value is None:
             # Bare ``- KEY`` list entry: Compose forwards the host value verbatim,
             # and omits the key when the host does not set it.
-            found, value = env_lookup(merged_env, key)
+            found, value = env_lookup(bare_forward_env, key)
             if found:
                 materialized[key] = value
             continue

@@ -17,6 +17,7 @@ from awf.common.config import (
     Settings,
 )
 from awf.runtime.hosted_delegation import HostedDelegationConfigError
+from awf.service import config as config_mod
 from awf.service.config import (
     DEFAULT_LOCAL_SERVICE_API_TOKEN,
     DEFAULT_LOCAL_SERVICE_WORK_DIR,
@@ -84,7 +85,13 @@ def test_hosted_delegation_service_settings_match_worker_visible_config() -> Non
         hosted_delegation_bearer_token_env="HOSTED_TOKEN",
     )
 
-    settings = resolve_service_settings(base, environ={"HOSTED_TOKEN": "secret-token"})
+    settings = resolve_service_settings(
+        base,
+        environ={
+            "AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV": "HOSTED_TOKEN",
+            "HOSTED_TOKEN": "secret-token",
+        },
+    )
     config = hosted_delegation_config_from_service_settings(settings, required=True)
 
     assert config is not None
@@ -99,6 +106,56 @@ def test_hosted_delegation_service_settings_match_worker_visible_config() -> Non
             "AWF_HOSTED_DELEGATION_BASE_URL",
             "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV",
         ],
+    }
+
+
+@pytest.mark.unit
+def test_hosted_delegation_token_env_ignores_env_file_only_bare_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _module_file = _write_awf_source_checkout(tmp_path)
+    compose_file = checkout / config_mod.LOCAL_SERVICE_INCLUDED_COMPOSE_FILE
+    compose_file.write_text(
+        "services:\n"
+        "  worker:\n"
+        "    environment:\n"
+        "      - AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV="
+        "${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-}\n"
+        "      - ${AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV:-"
+        "AWF_HOSTED_DELEGATION_BEARER_TOKEN}\n",
+        encoding="utf-8",
+    )
+    env_file = checkout / config_mod.LOCAL_SERVICE_COMPOSE_ENV_FILE
+    env_file.write_text(
+        "AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV=HOSTED_TOKEN\nHOSTED_TOKEN=env-file-token\n",
+        encoding="utf-8",
+    )
+
+    def _asset_path(path: Path) -> Path | None:
+        if path == config_mod.LOCAL_SERVICE_INCLUDED_COMPOSE_FILE:
+            return compose_file
+        if path == config_mod.LOCAL_SERVICE_COMPOSE_ENV_FILE:
+            return env_file
+        return None
+
+    monkeypatch.chdir(checkout)
+    monkeypatch.delenv("AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV", raising=False)
+    monkeypatch.delenv("HOSTED_TOKEN", raising=False)
+    monkeypatch.setattr(config_mod, "_local_service_asset_path", _asset_path)
+    base = Settings(
+        _env_file=None,
+        hosted_delegation_base_url="https://hosted.example.test/",
+        hosted_delegation_bearer_token_env="HOSTED_TOKEN",
+    )
+
+    settings = resolve_service_settings(base)
+
+    assert settings.hosted_delegation_bearer_token is None
+    with pytest.raises(HostedDelegationConfigError) as excinfo:
+        hosted_delegation_config_from_service_settings(settings, required=True)
+    assert excinfo.value.detail() == {
+        "missing": ["AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"]
     }
 
 

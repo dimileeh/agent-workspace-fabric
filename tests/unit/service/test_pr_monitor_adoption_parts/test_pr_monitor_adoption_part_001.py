@@ -349,7 +349,10 @@ class TestPullRequestMonitorAdoptionServicePart001:
             assert base is settings
             return service_config.resolve_service_settings(
                 base,
-                environ={token_env: "service-visible-token"},
+                environ={
+                    "AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV": token_env,
+                    token_env: "service-visible-token",
+                },
             )
 
         monkeypatch.setattr(adoption_module, "resolve_service_settings", _resolve_service_settings)
