@@ -344,15 +344,15 @@ class HostedValidationDelegate:
                 "pr_identity": dict(pr_identity or {}),
             },
         )
+        state = _operation_state(terminal)
+        if state in _HOSTED_VALIDATION_TERMINAL_FAILURES:
+            return _coverage_terminal_failure_result(
+                terminal,
+                artifacts_dir=self._artifacts_dir / workspace_id,
+                max_output_bytes=self._config.max_output_bytes,
+            )
         coverage = terminal.get("coverage")
         if coverage is None:
-            state = _operation_state(terminal)
-            if state in _HOSTED_VALIDATION_TERMINAL_FAILURES:
-                return _coverage_terminal_failure_result(
-                    terminal,
-                    artifacts_dir=self._artifacts_dir / workspace_id,
-                    max_output_bytes=self._config.max_output_bytes,
-                )
             return None
         if not isinstance(coverage, Mapping):
             raise HostedDelegationProtocolError(
