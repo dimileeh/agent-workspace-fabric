@@ -420,11 +420,12 @@ class HostedValidationDelegate:
         """Delegate selected profile phases to the hosting control plane."""
 
         del compose_project, compose_file
-        expected_command_count = _hosted_validation_expected_command_count(
+        expected_required_flags = _hosted_validation_expected_required_flags(
             profile,
             phase_names,
             run_healthchecks=run_healthchecks,
         )
+        expected_command_count = len(expected_required_flags)
         terminal = await self._run_operation(
             workspace_id=workspace_id,
             start_path="/v1/validation-runs",
@@ -451,7 +452,7 @@ class HostedValidationDelegate:
             terminal,
             artifacts_dir=self._artifacts_dir / workspace_id,
             max_output_bytes=self._config.max_output_bytes,
-            expected_command_count=expected_command_count,
+            expected_required_flags=expected_required_flags,
         )
 
     async def run_profile_coverage(
@@ -807,12 +808,47 @@ def _hosted_validation_expected_command_count(
     *,
     run_healthchecks: bool,
 ) -> int:
-    requested_phases = set(phase_names)
-    return (
-        len(profile_phase_command_plan(profile, phase_names))
-        + int(run_healthchecks) * len(profile.validation.healthchecks)
-        + int("validate" in requested_phases) * int(profile.validation.alembic.enabled)
+    return len(
+        _hosted_validation_expected_required_flags(
+            profile,
+            phase_names,
+            run_healthchecks=run_healthchecks,
+        )
     )
+
+
+def _hosted_validation_expected_required_flags(
+    profile: WorkspaceProfile,
+    phase_names: list[str] | tuple[str, ...],
+    *,
+    run_healthchecks: bool,
+) -> tuple[bool, ...]:
+    requested_phases = set(phase_names)
+    flags: list[bool] = []
+    if "validate" in requested_phases and profile.validation.alembic.enabled:
+        flags.append(True)
+
+    healthcheck_required_flags = [True] * len(profile.validation.healthchecks)
+    healthchecks_pending = run_healthchecks and bool(healthcheck_required_flags)
+    healthcheck_before_phase = (
+        "validate"
+        if profile.database.pre_validation_refresh and "validate" in requested_phases
+        else None
+    )
+    if healthchecks_pending and healthcheck_before_phase is None:
+        flags.extend(healthcheck_required_flags)
+        healthchecks_pending = False
+
+    for step in profile_phase_command_plan(profile, phase_names):
+        if healthchecks_pending and step.phase == healthcheck_before_phase:
+            flags.extend(healthcheck_required_flags)
+            healthchecks_pending = False
+        flags.append(step.command.required)
+
+    if healthchecks_pending:
+        flags.extend(healthcheck_required_flags)
+
+    return tuple(flags)
 
 
 async def _poll_response_json(
@@ -884,7 +920,7 @@ def _validation_result_from_terminal(
     *,
     artifacts_dir: Path,
     max_output_bytes: int,
-    expected_command_count: int,
+    expected_required_flags: tuple[bool, ...],
 ) -> ValidationResult:
     state = _operation_state(payload)
     if "commands" not in payload:
@@ -897,15 +933,21 @@ def _validation_result_from_terminal(
     if not isinstance(commands_payload, list):
         raise HostedDelegationProtocolError("hosted validation response has malformed commands")
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    commands = [
-        _validation_command_result_from_payload(
-            item,
-            artifacts_dir=artifacts_dir,
-            index=index,
-            max_output_bytes=max_output_bytes,
+    commands: list[ValidationCommandResult] = []
+    for index, item in enumerate(commands_payload, start=1):
+        required = (
+            expected_required_flags[index - 1] if index <= len(expected_required_flags) else None
         )
-        for index, item in enumerate(commands_payload, start=1)
-    ]
+        commands.append(
+            _validation_command_result_from_payload(
+                item,
+                artifacts_dir=artifacts_dir,
+                index=index,
+                max_output_bytes=max_output_bytes,
+                required=required,
+            )
+        )
+    expected_command_count = len(expected_required_flags)
     if (
         state == "succeeded"
         and expected_command_count > 0
@@ -1006,6 +1048,7 @@ def _validation_command_result_from_payload(
     artifacts_dir: Path,
     index: int,
     max_output_bytes: int,
+    required: bool | None = None,
 ) -> ValidationCommandResult:
     if not isinstance(payload, Mapping):
         raise HostedDelegationProtocolError("hosted validation command result is malformed")
@@ -1035,7 +1078,7 @@ def _validation_command_result_from_payload(
         stream_ids={str(key): _optional_str(value) for key, value in stream_ids.items()},
         retry_count=_int_payload_field(payload.get("retry_count"), default=0),
         policy_failed=bool(payload.get("policy_failed", False)),
-        required=bool(payload.get("required", True)),
+        required=bool(payload.get("required", True)) if required is None else required,
         metadata=metadata,
         captured_stdout=stdout,
         captured_stderr=stderr,
