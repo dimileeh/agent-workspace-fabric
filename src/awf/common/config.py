@@ -624,6 +624,8 @@ class Settings(BaseSettings):
         parsed = urlsplit(normalized)
         if parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("hosted_delegation_base_url must be an HTTPS URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("hosted_delegation_base_url must not include credentials")
         return normalized
 
     @field_validator(

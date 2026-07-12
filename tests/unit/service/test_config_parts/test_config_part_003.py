@@ -146,6 +146,25 @@ def test_hosted_delegation_settings_reject_non_https_base_url(base_url: str) -> 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "base_url",
+    [
+        "https://user@gateway.example.test/awf",
+        "https://user:token@gateway.example.test/awf",
+    ],
+)
+def test_hosted_delegation_settings_rejects_credentialed_base_url(
+    base_url: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            hosted_delegation_base_url=base_url,
+            hosted_delegation_bearer_token="secret-token",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "base_url",
     ["http://hosted.example.test", "ftp://hosted.example.test"],
 )
 def test_hosted_delegation_service_settings_reject_non_https_before_auth_config(
