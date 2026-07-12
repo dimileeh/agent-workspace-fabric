@@ -13,10 +13,13 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.control.worker.types import _ActiveExecutionCandidate
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.runtime.inspection import RuntimeSnapshot
 from tests.unit.control.test_worker_parts.test_worker_part_016 import (
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+    HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
     _create_active_execution,
     _RecordingExecutor,
     _RecordingRuntimeInspector,
@@ -29,6 +32,94 @@ _IMPORTED_FIXTURES = (origin_repo, session_factory)
 
 
 class TestRunOnceStaleActiveExecutionRecoveryPart002:
+    @pytest.mark.unit
+    async def test_stale_hosted_pr_adoption_uses_locked_workspace_pr_url(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "hosted-pr-adoption-stale-candidate-missing-pr",
+            WorkspaceStatus.running,
+            persist_compose_project=False,
+            task_policy=task_policy,
+            node_id="node-a",
+        )
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/example/repo/pull/775"
+            ws.pr_number = 775
+            ws.execution_claimed_by = "hosted-worker-before-restart"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await repo.add_event(
+                ws,
+                event_type=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
+                reason_code=HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
+                payload={
+                    "source": "hosted_pr_adoption",
+                    "phase_names": ["setup", "pre_agent"],
+                },
+            )
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                None: RuntimeSnapshot(
+                    stack_state="stopped",
+                    reason="compose project has no running containers",
+                    services=[],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        await worker._recover_stale_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name=None,
+                pr_url=None,
+                task_policy=task_policy,
+            )
+        )
+
+        assert inspector.calls == []
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            runtime_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            salvage_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_monitor_attached",
+            )
+
+        assert len(runtime_events) == 1
+        assert runtime_events[0].payload is not None
+        assert runtime_events[0].payload["runtime"]["stack_state"] == "hosted"
+        assert len(salvage_events) == 1
+
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "pr_url",

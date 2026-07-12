@@ -438,15 +438,6 @@ async def _recover_hosted_pr_adoption_active_execution(
     if not pr_adoption_is_hosted(candidate.task_policy):
         return False
 
-    if not candidate.pr_url:
-        _log.warning(
-            "worker.hosted_pr_adoption_stale_active_pr_missing",
-            workspace_id=candidate.workspace_id,
-            status=candidate.status.value,
-            reason_code="HOSTED_PR_ADOPTION_PR_URL_MISSING",
-        )
-        return False
-
     snapshot = RuntimeSnapshot(
         stack_state="hosted",
         reason="hosted PR adoption does not use a local Compose runtime",
