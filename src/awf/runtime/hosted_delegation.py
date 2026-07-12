@@ -386,7 +386,9 @@ class HostedValidationDelegate:
             )
         coverage = terminal.get("coverage")
         if coverage is None:
-            return None
+            raise HostedDelegationProtocolError(
+                "hosted validation terminal response missing coverage"
+            )
         if not isinstance(coverage, Mapping):
             raise HostedDelegationProtocolError(
                 "hosted validation terminal response has malformed coverage"

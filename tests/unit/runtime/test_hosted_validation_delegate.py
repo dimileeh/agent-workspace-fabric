@@ -311,6 +311,44 @@ async def test_hosted_coverage_creates_artifacts_dir_for_command_result(
 
 
 @pytest.mark.unit
+async def test_hosted_coverage_requires_payload_on_success(tmp_path: Path) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/coverage_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/coverage_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        with pytest.raises(HostedDelegationProtocolError, match="missing coverage"):
+            await delegate.run_profile_coverage(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=WorkspaceProfile(name="hosted-test"),
+            )
+
+
+@pytest.mark.unit
 async def test_hosted_coverage_sanitizes_literal_runtime_environment_secrets(
     tmp_path: Path,
 ) -> None:
