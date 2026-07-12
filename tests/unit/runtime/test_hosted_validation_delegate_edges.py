@@ -127,7 +127,7 @@ async def test_hosted_validation_rejects_non_object_poll_response(
 
 
 @pytest.mark.unit
-async def test_hosted_validation_rejects_empty_successful_commands(
+async def test_hosted_validation_accepts_empty_successful_commands(
     tmp_path: Path,
 ) -> None:
     async def _handler(request: httpx.Request) -> httpx.Response:
@@ -158,14 +158,16 @@ async def test_hosted_validation_rejects_empty_successful_commands(
             artifacts_dir=tmp_path,
             client=client,
         )
-        with pytest.raises(HostedDelegationProtocolError, match="without command results"):
-            await delegate.run_profile_phases(
-                workspace_id="ws_hosted",
-                compose_project="unused",
-                compose_file=tmp_path / "missing-compose.yml",
-                profile=WorkspaceProfile(name="hosted-test"),
-                phase_names=("validate",),
-            )
+        result = await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+            phase_names=("validate",),
+        )
+
+    assert result.all_passed
+    assert result.commands == []
 
 
 @pytest.mark.unit
