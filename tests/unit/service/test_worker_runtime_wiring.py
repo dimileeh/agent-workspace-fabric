@@ -202,7 +202,9 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
 
 
 @pytest.mark.unit
-def test_worker_hosted_delegation_config_is_bounded_and_fails_closed(tmp_path: Path) -> None:
+def test_worker_hosted_delegation_config_is_bounded_and_optional_for_partial_settings(
+    tmp_path: Path,
+) -> None:
     settings = dataclasses.replace(
         _settings(tmp_path),
         hosted_delegation_base_url="https://hosted.example.test/",
@@ -217,12 +219,11 @@ def test_worker_hosted_delegation_config_is_bounded_and_fails_closed(tmp_path: P
     assert config.bearer_token == "secret-token"
     assert config.poll_interval_seconds == 3.0
 
-    partial = dataclasses.replace(settings, hosted_delegation_bearer_token=None)
-    with pytest.raises(HostedDelegationConfigError) as partial_excinfo:
-        worker_mod._hosted_delegation_config_for_worker(partial)
-    assert partial_excinfo.value.detail() == {
-        "missing": ["AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"],
-    }
+    base_url_only = dataclasses.replace(settings, hosted_delegation_bearer_token=None)
+    assert worker_mod._hosted_delegation_config_for_worker(base_url_only) is None
+
+    token_only = dataclasses.replace(settings, hosted_delegation_base_url=None)
+    assert worker_mod._hosted_delegation_config_for_worker(token_only) is None
 
     invalid = dataclasses.replace(settings, hosted_delegation_base_url="not-a-url")
     with pytest.raises(HostedDelegationConfigError) as invalid_excinfo:

@@ -104,6 +104,33 @@ def test_hosted_delegation_service_settings_match_worker_visible_config() -> Non
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("settings_kwargs", "missing"),
+    [
+        (
+            {"hosted_delegation_base_url": "https://hosted.example.test/"},
+            ["AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"],
+        ),
+        (
+            {"hosted_delegation_bearer_token": "secret-token"},
+            ["AWF_HOSTED_DELEGATION_BASE_URL"],
+        ),
+    ],
+)
+def test_hosted_delegation_service_settings_treat_partial_optional_config_as_unconfigured(
+    settings_kwargs: dict[str, str],
+    missing: list[str],
+) -> None:
+    settings = resolve_service_settings(Settings(_env_file=None, **settings_kwargs), environ={})
+
+    assert hosted_delegation_config_from_service_settings(settings) is None
+
+    with pytest.raises(HostedDelegationConfigError) as excinfo:
+        hosted_delegation_config_from_service_settings(settings, required=True)
+    assert excinfo.value.detail() == {"missing": missing}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "base_url",
     ["http://hosted.example.test", "ftp://hosted.example.test"],
 )

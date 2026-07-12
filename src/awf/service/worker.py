@@ -104,7 +104,7 @@ _PENDING_FORGE_CLIENT_CLOSERS: set[asyncio.Task[None]] = set()
 def _hosted_delegation_config_for_worker(
     settings: ServiceSettings,
 ) -> HostedDelegationConfig | None:
-    """Return hosted delegation config for the worker, or fail on partial config."""
+    """Return hosted delegation config for the worker when fully configured."""
 
     return hosted_delegation_config_from_service_settings(settings)
 

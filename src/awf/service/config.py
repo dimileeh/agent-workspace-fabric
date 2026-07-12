@@ -353,12 +353,15 @@ def hosted_delegation_config_from_service_settings(
 
     base_url = _empty_to_none(settings.hosted_delegation_base_url)
     token = _empty_to_none(settings.hosted_delegation_bearer_token)
-    if base_url is None and token is None:
+    if base_url is None or token is None:
         if not required:
             return None
-        raise HostedDelegationConfigError(
-            missing=(HOSTED_DELEGATION_MISSING_BASE_URL, HOSTED_DELEGATION_MISSING_TOKEN)
-        )
+        missing: list[str] = []
+        if base_url is None:
+            missing.append(HOSTED_DELEGATION_MISSING_BASE_URL)
+        if token is None:
+            missing.append(HOSTED_DELEGATION_MISSING_TOKEN)
+        raise HostedDelegationConfigError(missing=tuple(missing))
     return hosted_delegation_config_from_values(
         base_url=settings.hosted_delegation_base_url,
         bearer_token=settings.hosted_delegation_bearer_token,
