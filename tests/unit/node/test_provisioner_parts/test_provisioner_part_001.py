@@ -1403,9 +1403,7 @@ class TestSuccess:
             await s.commit()
             ws_id = ws.id
             attempt_id = attempt.id
-
         await provisioner.provision(ws_id)
-
         async with session_factory() as s:
             audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
             assert audit is not None
@@ -1429,9 +1427,7 @@ class TestSuccess:
             )
             await s.commit()
             ws_id = ws.id
-
         await provisioner.provision(ws_id)
-
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None
@@ -1450,7 +1446,6 @@ class TestSuccess:
         (origin_repo / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
         _git(["add", "docker-compose.yml"], origin_repo)
         _git(["commit", "-q", "-m", "add compose profile"], origin_repo)
-
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).create(
                 repo_url=str(origin_repo),
