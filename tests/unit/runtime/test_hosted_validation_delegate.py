@@ -712,6 +712,7 @@ async def test_hosted_validation_fails_closed_when_terminal_failure_has_no_comma
                     "workspace_id": "ws_hosted",
                     "state": state,
                     "message": "host-side job did not produce command results",
+                    "returncode": 0,
                 },
             )
         raise AssertionError(f"unexpected request {request.method} {request.url}")

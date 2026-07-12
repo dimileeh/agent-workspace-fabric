@@ -698,7 +698,7 @@ def _validation_terminal_failure_result(
     return _validation_command_result_from_payload(
         {
             "command": _optional_str(payload.get("command")) or default_command,
-            "returncode": _int_payload_field(payload.get("returncode"), default=returncode),
+            "returncode": returncode,
             "duration_seconds": _optional_float(payload.get("duration_seconds")) or 0.0,
             "stdout": stdout,
             "stderr": stderr,
