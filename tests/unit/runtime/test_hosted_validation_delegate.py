@@ -180,6 +180,71 @@ async def test_hosted_coverage_posts_pr_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("state", "expected_returncode", "expected_reason_code"),
+    [
+        ("failed", 1, "HOSTED_VALIDATION_FAILED"),
+        ("cancelled", 130, "HOSTED_VALIDATION_CANCELLED"),
+        ("timed_out", 124, "HOSTED_VALIDATION_TIMED_OUT"),
+    ],
+)
+async def test_hosted_coverage_fails_closed_when_terminal_failure_has_no_payload(
+    tmp_path: Path,
+    state: str,
+    expected_returncode: int,
+    expected_reason_code: str,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/coverage_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/coverage_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "state": state,
+                    "message": "host-side coverage job did not produce coverage",
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.run_profile_coverage(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+        )
+
+    assert result is not None
+    assert not result.ok
+    assert result.provider == "hosted"
+    assert result.status == "failed"
+    assert result.reason_code == expected_reason_code
+    assert result.command_result is not None
+    assert result.command_result.command == "hosted coverage operation"
+    assert result.command_result.phase == "coverage"
+    assert result.command_result.returncode == expected_returncode
+    assert result.command_result.reason_code == expected_reason_code
+    assert result.command_result.stderr_path.read_text(encoding="utf-8") == (
+        "host-side coverage job did not produce coverage\n"
+    )
+
+
+@pytest.mark.unit
 async def test_hosted_validation_sanitizes_remote_phase_before_artifact_write(
     tmp_path: Path,
 ) -> None:

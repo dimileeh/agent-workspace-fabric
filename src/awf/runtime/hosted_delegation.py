@@ -335,6 +335,13 @@ class HostedValidationDelegate:
         )
         coverage = terminal.get("coverage")
         if coverage is None:
+            state = _operation_state(terminal)
+            if state in _HOSTED_VALIDATION_TERMINAL_FAILURES:
+                return _coverage_terminal_failure_result(
+                    terminal,
+                    artifacts_dir=self._artifacts_dir / workspace_id,
+                    max_output_bytes=self._config.max_output_bytes,
+                )
             return None
         if not isinstance(coverage, Mapping):
             raise HostedDelegationProtocolError(
@@ -565,6 +572,8 @@ def _validation_terminal_failure_result(
     artifacts_dir: Path,
     index: int,
     max_output_bytes: int,
+    default_command: str = "hosted validation operation",
+    default_phase: str = "validate",
 ) -> ValidationCommandResult:
     state = _operation_state(payload)
     returncode, reason_code = _HOSTED_VALIDATION_TERMINAL_FAILURES[state]
@@ -572,15 +581,15 @@ def _validation_terminal_failure_result(
     stderr = _text_payload_field(payload, "stderr")
     if not stderr:
         message = _optional_str(payload.get("message"))
-        stderr = f"{message or f'hosted validation operation {state}'}\n"
+        stderr = f"{message or f'{default_command} {state}'}\n"
     return _validation_command_result_from_payload(
         {
-            "command": _optional_str(payload.get("command")) or "hosted validation operation",
+            "command": _optional_str(payload.get("command")) or default_command,
             "returncode": _int_payload_field(payload.get("returncode"), default=returncode),
             "duration_seconds": _optional_float(payload.get("duration_seconds")) or 0.0,
             "stdout": stdout,
             "stderr": stderr,
-            "phase": _optional_str(payload.get("phase")) or "validate",
+            "phase": _optional_str(payload.get("phase")) or default_phase,
             "reason_code": _optional_str(payload.get("reason_code")) or reason_code,
             "metadata": {
                 "hosted_operation_state": state,
@@ -589,6 +598,32 @@ def _validation_terminal_failure_result(
         artifacts_dir=artifacts_dir,
         index=index,
         max_output_bytes=max_output_bytes,
+    )
+
+
+def _coverage_terminal_failure_result(
+    payload: Mapping[str, Any],
+    *,
+    artifacts_dir: Path,
+    max_output_bytes: int,
+) -> ValidationCoverageResult:
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    command_result = _validation_terminal_failure_result(
+        payload,
+        artifacts_dir=artifacts_dir,
+        index=999,
+        max_output_bytes=max_output_bytes,
+        default_command="hosted coverage operation",
+        default_phase="coverage",
+    )
+    return ValidationCoverageResult(
+        provider="hosted",
+        percent=None,
+        minimum_percent=0.0,
+        enforce=True,
+        status="failed",
+        reason_code=command_result.reason_code,
+        command_result=command_result,
     )
 
 
