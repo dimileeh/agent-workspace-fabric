@@ -22,9 +22,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_RECOVERY_EVIDENCE_EVENTS,
+    _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
+    _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
     _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
     _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
     _ACTIVE_EXECUTION_SALVAGE_SOURCE,
@@ -44,6 +47,7 @@ from awf.control.worker.constants import (
 from awf.control.worker.helpers import (
     _candidate_claim_is_stale,
     _execution_claim_is_stale,
+    _extract_pr_number,
     _has_running_agent_runtime,
     _running_monitoring_pr_recovery_finding,
     _runtime_snapshot_payload,
@@ -55,6 +59,7 @@ from awf.control.worker.helpers import (
     _stale_active_execution_failure_message,
     _worker_exception_is_transient_db_connection,
     _workspace_claim_recheck_passes,
+    _workspace_claim_snapshot,
 )
 from awf.control.worker.logging import _log
 from awf.control.worker.scheduling import (
@@ -307,6 +312,8 @@ async def _recover_stale_active_execution(
             return
     if not await self._stale_active_candidate_is_current(candidate):
         return
+    if await self._recover_hosted_pr_adoption_active_execution(candidate):
+        return
     try:
         snapshot = await self._runtime_inspector.inspect(candidate.compose_project_name)
     except Exception as exc:  # pragma: no cover - defensive around Docker tooling
@@ -414,6 +421,118 @@ async def _recover_stale_active_execution(
         ):
             await self._cleanup_and_fail_stale_active_execution(candidate, snapshot)
         return
+
+
+async def _recover_hosted_pr_adoption_active_execution(
+    self: Any,
+    candidate: _ActiveExecutionCandidate,
+) -> bool:
+    if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
+        return False
+    if not pr_adoption_is_hosted(candidate.task_policy):
+        return False
+
+    if not candidate.pr_url:
+        _log.info(
+            "worker.hosted_pr_adoption_stale_active_waiting_for_pr",
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            reason_code="HOSTED_PR_ADOPTION_WAITING_FOR_PR",
+        )
+        return True
+
+    snapshot = RuntimeSnapshot(
+        stack_state="hosted",
+        reason="hosted PR adoption does not use a local Compose runtime",
+    )
+    finding = WorkspaceRuntimeFinding(
+        workspace_id=candidate.workspace_id,
+        workspace_status=candidate.status.value,
+        status="stranded",
+        reason_code="STRANDED_WORKSPACE",
+        decision="remonitor_workspace",
+        message=(
+            "Hosted PR-adoption execution has an already-open pull request and no "
+            "local Compose stack by design; the PR monitor is the recovery point."
+        ),
+        compose_project_name=candidate.compose_project_name,
+    )
+    runtime_payload = _runtime_stranding_event_payload(candidate, snapshot, finding)
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get_for_update(candidate.workspace_id)
+        if ws is None or ws.status != candidate.status.value:
+            return True
+        if not pr_adoption_is_hosted(ws.task_policy):
+            return False
+        claim_cutoff = datetime.now(UTC)
+        if not _execution_claim_is_stale(ws, claim_cutoff):
+            return True
+        if not ws.pr_url:
+            return True
+        if ws.pr_number is None:
+            ws.pr_number = _extract_pr_number(ws.pr_url)
+        if ws.pr_number is None:
+            _log.warning(
+                "worker.hosted_pr_adoption_stale_active_open_pr_unparseable",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                pr_url=ws.pr_url,
+                reason_code="HOSTED_PR_ADOPTION_PR_NUMBER_MISSING",
+            )
+            return True
+
+        previous_claim = _workspace_claim_snapshot(ws)
+        claims_will_clear = any(
+            value is not None
+            for value in (
+                ws.execution_claimed_by,
+                ws.execution_claim_expires_at,
+                ws.monitor_claimed_by,
+                ws.monitor_claim_expires_at,
+            )
+        )
+        ws.execution_claimed_by = None
+        ws.execution_claim_expires_at = None
+        ws.monitor_claimed_by = None
+        ws.monitor_claim_expires_at = None
+        if claims_will_clear:
+            ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
+
+        payload = {
+            **runtime_payload,
+            "source": "hosted_pr_adoption",
+            "previous_claim": previous_claim,
+            "pr_url": ws.pr_url,
+            "pr_number": ws.pr_number,
+        }
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+            payload=payload,
+        )
+        await repo.add_event(
+            ws,
+            event_type=RUNTIME_STRANDED_EVENT_TYPE,
+            reason_code=finding.reason_code,
+            payload=runtime_payload,
+        )
+        await repo.add_event(
+            ws,
+            event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
+            reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+            payload=payload,
+        )
+        await session.commit()
+
+    _log.warning(
+        "worker.hosted_pr_adoption_monitor_attached_after_restart",
+        workspace_id=candidate.workspace_id,
+        status=candidate.status.value,
+        reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+    )
+    return True
 
 
 async def _stale_active_candidate_is_current(

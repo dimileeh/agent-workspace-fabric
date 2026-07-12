@@ -1304,6 +1304,82 @@ class TestRunOnceStaleActiveExecutionRecoveryPart001:
         assert inspector.calls == ["awf_retry_provider_state_running"]
 
     @pytest.mark.unit
+    async def test_stale_hosted_pr_adoption_with_open_pr_attaches_monitor_without_local_runtime(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy = {"pr_adoption": {"execution": {"mode": "hosted"}}}
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "hosted-pr-adoption-stale-open-pr",
+            WorkspaceStatus.running,
+            persist_compose_project=False,
+            task_policy=task_policy,
+            node_id="node-a",
+        )
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/example/repo/pull/774"
+            ws.pr_number = 774
+            ws.execution_claimed_by = "hosted-worker-before-restart"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                None: RuntimeSnapshot(
+                    stack_state="stopped",
+                    reason="compose project has no running containers",
+                    services=[],
+                )
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                node_id="node-a",
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert inspector.calls == []
+        assert executor.resume_calls == [workspace_id]
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            runtime_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            recovery_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.monitor_recovery_started",
+            )
+
+        assert len(runtime_events) == 1
+        assert runtime_events[0].reason_code == "STRANDED_WORKSPACE"
+        assert runtime_events[0].payload is not None
+        assert runtime_events[0].payload["decision"] == "remonitor_workspace"
+        assert runtime_events[0].payload["runtime"]["stack_state"] == "hosted"
+        assert len(recovery_events) == 1
+        assert recovery_events[0].payload is not None
+        assert recovery_events[0].payload["runtime_stranding_reason"] == "STRANDED_WORKSPACE"
+
+    @pytest.mark.unit
     async def test_stale_running_with_missing_compose_project_fails(
         self,
         session_factory: async_sessionmaker[AsyncSession],
