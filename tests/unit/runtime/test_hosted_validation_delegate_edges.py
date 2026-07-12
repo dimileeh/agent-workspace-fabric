@@ -405,6 +405,76 @@ async def test_hosted_validation_uses_profile_required_flag_for_advisory_command
 
 
 @pytest.mark.unit
+async def test_hosted_validation_rejects_reordered_required_command_response(
+    tmp_path: Path,
+) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": "pytest -q",
+                            "returncode": 1,
+                            "duration_seconds": 0.2,
+                            "stdout": "",
+                            "stderr": "failed\n",
+                            "phase": "validate",
+                        },
+                        {
+                            "command": "advisory-lint",
+                            "returncode": 0,
+                            "duration_seconds": 0.2,
+                            "stdout": "lint ok\n",
+                            "stderr": "",
+                            "phase": "validate",
+                        },
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "hosted-test",
+            "phases": {
+                "validate": [
+                    {"command": "advisory-lint", "required": False},
+                    {"command": "pytest -q", "required": True},
+                ]
+            },
+        }
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        with pytest.raises(HostedDelegationProtocolError, match="command identity"):
+            await delegate.run_profile_phases(
+                workspace_id="ws_hosted",
+                compose_project="unused",
+                compose_file=tmp_path / "missing-compose.yml",
+                profile=profile,
+                phase_names=("validate",),
+            )
+
+
+@pytest.mark.unit
 async def test_hosted_validation_timeout_posts_cancel_and_raises_protocol_error(
     tmp_path: Path,
 ) -> None:

@@ -58,6 +58,10 @@ from awf.common.config import Settings
 from awf.common.logging import get_logger
 from awf.common.token_patterns import TOKEN_ASSIGNMENT_KEY_PATTERN, compile_known_token_re
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.alembic_validation import (
+    ALEMBIC_MIGRATION_POLICY_COMMAND,
+    ALEMBIC_MIGRATION_POLICY_PHASE,
+)
 from awf.runtime.validation_setup import (
     PROFILE_PREFLIGHT_PHASE,
     PROFILE_VALIDATION_TOOL_UNAVAILABLE,
@@ -118,6 +122,15 @@ class HostedDelegationConfigError(ValueError):
 
 class HostedDelegationProtocolError(RuntimeError):
     """Raised when the host returns a malformed or cross-workspace operation."""
+
+
+@dataclass(frozen=True, slots=True)
+class _HostedValidationExpectedCommand:
+    """One validation command identity expected from the hosted response."""
+
+    phase: str
+    command: str
+    required: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,12 +435,12 @@ class HostedValidationDelegate:
         """Delegate selected profile phases to the hosting control plane."""
 
         del compose_project, compose_file
-        expected_required_flags = _hosted_validation_expected_required_flags(
+        expected_commands = _hosted_validation_expected_commands(
             profile,
             phase_names,
             run_healthchecks=run_healthchecks,
         )
-        expected_command_count = len(expected_required_flags)
+        expected_command_count = len(expected_commands)
         terminal = await self._run_operation(
             workspace_id=workspace_id,
             start_path="/v1/validation-runs",
@@ -454,7 +467,7 @@ class HostedValidationDelegate:
             terminal,
             artifacts_dir=self._artifacts_dir / workspace_id,
             max_output_bytes=self._config.max_output_bytes,
-            expected_required_flags=expected_required_flags,
+            expected_commands=expected_commands,
         )
 
     async def run_profile_coverage(
@@ -822,7 +835,7 @@ def _hosted_validation_expected_command_count(
     run_healthchecks: bool,
 ) -> int:
     return len(
-        _hosted_validation_expected_required_flags(
+        _hosted_validation_expected_commands(
             profile,
             phase_names,
             run_healthchecks=run_healthchecks,
@@ -830,38 +843,57 @@ def _hosted_validation_expected_command_count(
     )
 
 
-def _hosted_validation_expected_required_flags(
+def _hosted_validation_expected_commands(
     profile: WorkspaceProfile,
     phase_names: list[str] | tuple[str, ...],
     *,
     run_healthchecks: bool,
-) -> tuple[bool, ...]:
+) -> tuple[_HostedValidationExpectedCommand, ...]:
     requested_phases = set(phase_names)
-    flags: list[bool] = []
+    commands: list[_HostedValidationExpectedCommand] = []
     if "validate" in requested_phases and profile.validation.alembic.enabled:
-        flags.append(True)
+        commands.append(
+            _HostedValidationExpectedCommand(
+                phase=ALEMBIC_MIGRATION_POLICY_PHASE,
+                command=ALEMBIC_MIGRATION_POLICY_COMMAND,
+                required=True,
+            )
+        )
 
-    healthcheck_required_flags = [True] * len(profile.validation.healthchecks)
-    healthchecks_pending = run_healthchecks and bool(healthcheck_required_flags)
+    healthcheck_commands = [
+        _HostedValidationExpectedCommand(
+            phase="healthcheck",
+            command=healthcheck.display_command(),
+            required=True,
+        )
+        for healthcheck in profile.validation.healthchecks
+    ]
+    healthchecks_pending = run_healthchecks and bool(healthcheck_commands)
     healthcheck_before_phase = (
         "validate"
         if profile.database.pre_validation_refresh and "validate" in requested_phases
         else None
     )
     if healthchecks_pending and healthcheck_before_phase is None:
-        flags.extend(healthcheck_required_flags)
+        commands.extend(healthcheck_commands)
         healthchecks_pending = False
 
     for step in profile_phase_command_plan(profile, phase_names):
         if healthchecks_pending and step.phase == healthcheck_before_phase:
-            flags.extend(healthcheck_required_flags)
+            commands.extend(healthcheck_commands)
             healthchecks_pending = False
-        flags.append(step.command.required)
+        commands.append(
+            _HostedValidationExpectedCommand(
+                phase=step.phase,
+                command=step.command.command,
+                required=step.command.required,
+            )
+        )
 
     if healthchecks_pending:
-        flags.extend(healthcheck_required_flags)
+        commands.extend(healthcheck_commands)
 
-    return tuple(flags)
+    return tuple(commands)
 
 
 async def _poll_response_json(
@@ -933,7 +965,7 @@ def _validation_result_from_terminal(
     *,
     artifacts_dir: Path,
     max_output_bytes: int,
-    expected_required_flags: tuple[bool, ...],
+    expected_commands: tuple[_HostedValidationExpectedCommand, ...],
 ) -> ValidationResult:
     state = _operation_state(payload)
     if "commands" not in payload:
@@ -948,9 +980,10 @@ def _validation_result_from_terminal(
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     commands: list[ValidationCommandResult] = []
     for index, item in enumerate(commands_payload, start=1):
-        required = (
-            expected_required_flags[index - 1] if index <= len(expected_required_flags) else None
-        )
+        expected = expected_commands[index - 1] if index <= len(expected_commands) else None
+        if expected is not None:
+            _validate_hosted_validation_command_identity(item, expected=expected)
+        required = expected.required if expected is not None else None
         commands.append(
             _validation_command_result_from_payload(
                 item,
@@ -960,7 +993,7 @@ def _validation_result_from_terminal(
                 required=required,
             )
         )
-    expected_command_count = len(expected_required_flags)
+    expected_command_count = len(expected_commands)
     if (
         state == "succeeded"
         and expected_command_count > 0
@@ -992,6 +1025,19 @@ def _validation_result_from_terminal(
         else None
     )
     return ValidationResult(commands=commands, coverage=coverage)
+
+
+def _validate_hosted_validation_command_identity(
+    payload: object,
+    *,
+    expected: _HostedValidationExpectedCommand,
+) -> None:
+    if not isinstance(payload, Mapping):
+        raise HostedDelegationProtocolError("hosted validation command result is malformed")
+    phase = _optional_str(payload.get("phase")) or "validate"
+    command = _optional_str(payload.get("command"))
+    if phase != expected.phase or command != expected.command:
+        raise HostedDelegationProtocolError("hosted validation command identity mismatch")
 
 
 def _validation_terminal_failure_result(
