@@ -111,3 +111,64 @@ async def test_hosted_validation_posts_operation_and_maps_validation_result(
     assert seen["body"]["run_healthchecks"] is True
     assert seen["body"]["include_coverage"] is False
     assert seen["body"]["pr_identity"]["pr_number"] == 277
+
+
+@pytest.mark.unit
+async def test_hosted_coverage_posts_pr_identity(tmp_path: Path) -> None:
+    """Coverage-only hosted validation must preserve adopted PR identity."""
+    seen: dict[str, Any] = {}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/coverage_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/coverage_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "coverage_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "coverage": {
+                        "provider": "python",
+                        "percent": 99.5,
+                        "minimum_percent": 99.0,
+                        "enforce": True,
+                        "status": "passed",
+                        "reason_code": "COVERAGE_OK",
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.run_profile_coverage(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+            pr_identity={
+                "repo_url": "git@github.com:dimileeh/aira-web.git",
+                "pr_number": 277,
+                "head_ref": "feature/ready",
+            },
+        )
+
+    assert result is not None
+    assert result.status == "passed"
+    assert seen["body"]["workspace_id"] == "ws_hosted"
+    assert seen["body"]["phase_names"] == ["coverage"]
+    assert seen["body"]["include_coverage"] is True
+    assert seen["body"]["pr_identity"]["pr_number"] == 277

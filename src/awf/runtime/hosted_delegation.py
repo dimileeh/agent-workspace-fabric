@@ -304,6 +304,7 @@ class HostedValidationDelegate:
         profile: WorkspaceProfile,
         phase: str = "coverage",
         parallel_worker_cpu_limit: int | None = None,
+        pr_identity: Mapping[str, Any] | None = None,
     ) -> ValidationCoverageResult | None:
         """Delegate a hosted coverage-only operation."""
 
@@ -318,6 +319,7 @@ class HostedValidationDelegate:
                 "run_healthchecks": False,
                 "include_coverage": True,
                 "parallel_worker_cpu_limit": parallel_worker_cpu_limit,
+                "pr_identity": dict(pr_identity or {}),
             },
         )
         coverage = terminal.get("coverage")
