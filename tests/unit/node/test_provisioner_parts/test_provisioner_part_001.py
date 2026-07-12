@@ -424,6 +424,10 @@ class TestSuccess:
             reservation = await ResourceReservationRepository(s).active_for_workspace(ws_id)
             assert reservation is not None
             assert reservation.node_id == "test-node-01"
+            assert reservation.steady_cpu == 0.0
+            assert reservation.steady_memory_gb == 0.0
+            assert reservation.peak_cpu == 0.0
+            assert reservation.peak_memory_gb == 0.0
             assert reservation.dind_slots == 0
 
     @pytest.mark.unit

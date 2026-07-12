@@ -804,10 +804,11 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 await session.commit()
                 return
 
+            hosted_pr_adoption = pr_adoption_is_hosted(persisted.task_policy)
             persisted.node_id = self._config.node_id
             persisted.branch_name = layout.branch_name
             persisted.base_commit = base_commit
-            if not pr_adoption_is_hosted(persisted.task_policy):
+            if not hosted_pr_adoption:
                 persisted.compose_project_name = f"awf_{workspace_id}"
             remote_push_branch = _provision_remote_push_branch(persisted)
             if remote_push_branch is not None:
@@ -821,7 +822,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             )
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
-                if not pr_adoption_is_hosted(persisted.task_policy):
+                if not hosted_pr_adoption:
                     companion_secret_metadata = _stack_companion_env_secret_event_payload(
                         workspace_id=workspace_id,
                         stack_paths=stack_paths,
@@ -850,7 +851,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                 workspace_id=workspace_id,
                 node_id=self._config.node_id,
                 profile=profile,
-                local_dind_slots=(0 if pr_adoption_is_hosted(persisted.task_policy) else None),
+                zero_local_capacity=hosted_pr_adoption,
             )
 
             if execution_claim_epoch is not None:
