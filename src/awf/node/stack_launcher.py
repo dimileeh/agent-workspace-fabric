@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -41,6 +42,21 @@ from awf.profiles.models import WorkspaceProfile
 _HOSTED_RENDER_ENV_SECRET_PROVIDERS = frozenset(("env", "github", "bitbucket"))
 _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS = frozenset(("local-file", "host-file", "local-auth", "auth"))
 _HOSTED_RENDER_ENV_REF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_HOSTED_AUTH_PLACEHOLDER_SOURCE_ROOT = "/run/awf/hosted-auth-placeholders"
+_HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS = (
+    "/home/agent/.claude",
+    "/home/agent/.claude.json",
+    "/home/agent/.codex",
+    "/home/agent/.config/gh",
+    "/home/agent/.config/gcloud",
+    "/home/agent/.config/opencode",
+    "/home/agent/.gemini",
+    "/home/agent/.gitconfig",
+    "/home/agent/.grok",
+    "/home/agent/.ollama",
+    "/home/agent/.ssh",
+)
+_GOOGLE_APPLICATION_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
 
 
 @dataclass(frozen=True)
@@ -214,6 +230,8 @@ class ComposeStackLauncher:
         secret_lease_resolution: LocalSecretLeaseResolution | None = None
         if use_hosted_secret_placeholders:
             secret_lease_resolution = _hosted_secret_lease_placeholder_resolution(profile)
+            if secret_lease_resolution is not None:
+                auth_mounts.extend(secret_lease_resolution.mounts)
         elif self._secret_lease_resolver is not None:
             secret_lease_resolution = await asyncio.to_thread(
                 self._secret_lease_resolver.resolve,
@@ -233,7 +251,13 @@ class ComposeStackLauncher:
             else frozenset()
         )
         suppressed_legacy_targets = satisfied_targets | legacy_provider_targets(satisfied_providers)
-        if self._auth_mount_resolver is not None and not use_hosted_secret_placeholders:
+        if use_hosted_secret_placeholders and self._auth_mount_resolver is not None:
+            _append_hosted_auth_placeholder_mounts(
+                auth_mounts,
+                _HOSTED_LEGACY_FILE_AUTH_MOUNT_TARGETS,
+                suppressed_targets=suppressed_legacy_targets,
+            )
+        elif self._auth_mount_resolver is not None:
             legacy_mounts = await asyncio.to_thread(
                 self._auth_mount_resolver.resolve,
                 workspace_id=request.workspace_id,
@@ -289,6 +313,11 @@ class ComposeStackLauncher:
                 secret_lease_resolution.environment,
             )
         agent_environment = agent_environment_with_host_auth(agent_environment)
+        if use_hosted_secret_placeholders and self._auth_mount_resolver is not None:
+            _append_hosted_auth_placeholder_mounts(
+                auth_mounts,
+                _hosted_dynamic_file_auth_mount_targets(agent_environment),
+            )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
             worktree_host_path=layout.worktree_path,
@@ -474,6 +503,9 @@ def _hosted_secret_lease_placeholder_resolution(
     env: dict[str, str] = {}
     providers: list[str] = []
     targets: list[str] = []
+    mounts: list[AuthMount] = []
+    satisfied_legacy_targets: set[str] = set()
+    satisfied_legacy_providers: set[str] = set()
     mount_count = 0
     skipped_unresolved_count = 0
 
@@ -491,11 +523,15 @@ def _hosted_secret_lease_placeholder_resolution(
                 env[secret.target] = f"${{{source_name}}}"
             _append_unique_hosted_secret_value(providers, provider)
             _append_unique_hosted_secret_value(targets, secret.target)
+            if provider == "github":
+                satisfied_legacy_providers.add(provider)
             continue
         if secret.kind == "mount" and provider in _HOSTED_RENDER_MOUNT_SECRET_PROVIDERS:
             mount_count += 1
             _append_unique_hosted_secret_value(providers, provider)
             _append_unique_hosted_secret_value(targets, secret.target)
+            _append_hosted_auth_placeholder_mounts(mounts, (secret.target,))
+            satisfied_legacy_targets.add(secret.target)
             continue
         skipped_unresolved_count += 1
 
@@ -514,7 +550,10 @@ def _hosted_secret_lease_placeholder_resolution(
         metadata["skipped_unresolved_count"] = skipped_unresolved_count
     return LocalSecretLeaseResolution(
         environment=tuple(env.items()),
+        mounts=tuple(mounts),
         metadata=metadata,
+        satisfied_legacy_targets=frozenset(satisfied_legacy_targets),
+        satisfied_legacy_providers=frozenset(satisfied_legacy_providers),
     )
 
 
@@ -538,6 +577,60 @@ def _hosted_env_secret_source_name(ref: str | None, *, fallback: str) -> str | N
 def _append_unique_hosted_secret_value(items: list[str], value: str) -> None:
     if value not in items:
         items.append(value)
+
+
+def _append_hosted_auth_placeholder_mounts(
+    mounts: list[AuthMount],
+    targets: Sequence[str],
+    *,
+    suppressed_targets: frozenset[str] = frozenset(),
+) -> None:
+    seen = {mount.target for mount in mounts}
+    for target in targets:
+        if target in seen or target in suppressed_targets or not target.startswith("/"):
+            continue
+        mounts.append(
+            AuthMount(
+                source=_hosted_auth_placeholder_source(target),
+                target=target,
+                mode="ro",
+            )
+        )
+        seen.add(target)
+
+
+def _hosted_auth_placeholder_source(target: str) -> str:
+    name = target.strip("/").replace("/", "__") or "root"
+    return f"{_HOSTED_AUTH_PLACEHOLDER_SOURCE_ROOT}/{name}"
+
+
+def _hosted_dynamic_file_auth_mount_targets(
+    agent_environment: tuple[tuple[str, str], ...],
+) -> tuple[str, ...]:
+    google_credentials_target = _hosted_google_application_credentials_target(agent_environment)
+    if google_credentials_target is None:
+        return ()
+    return (google_credentials_target,)
+
+
+def _hosted_google_application_credentials_target(
+    agent_environment: tuple[tuple[str, str], ...],
+) -> str | None:
+    raw = dict(agent_environment).get(_GOOGLE_APPLICATION_CREDENTIALS)
+    if raw is None:
+        return None
+    if raw in (
+        f"${{{_GOOGLE_APPLICATION_CREDENTIALS}}}",
+        f"${_GOOGLE_APPLICATION_CREDENTIALS}",
+    ):
+        target = os.environ.get(_GOOGLE_APPLICATION_CREDENTIALS, "")
+    elif "$" in raw:
+        return None
+    else:
+        target = raw
+    if not target.startswith("/"):
+        return None
+    return target
 
 
 def effective_compose_up_timeout_seconds(

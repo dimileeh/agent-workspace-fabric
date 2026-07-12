@@ -471,8 +471,12 @@ async def test_compose_stack_launcher_propagates_auth_resolution_errors() -> Non
 
 
 @pytest.mark.unit
-async def test_compose_stack_launcher_render_skips_legacy_auth_mount_resolution() -> None:
-    """Hosted render-only stacks do not depend on Core-local auth directories."""
+async def test_compose_stack_launcher_render_preserves_hosted_auth_mount_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted render-only stacks preserve file-auth targets without local sources."""
+    adc_target = "/home/agent/.config/gcloud/application_default_credentials.json"
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", adc_target)
     compose = _RecordingCompose()
     auth_mount_resolver = _FailingAuthMountResolver()
     launcher = ComposeStackLauncher(
@@ -492,6 +496,13 @@ async def test_compose_stack_launcher_render_skips_legacy_auth_mount_resolution(
                     "provider": "env",
                     "ref": "env/OPENAI_API_KEY",
                 },
+                {
+                    "name": "github-cli-config",
+                    "kind": "mount",
+                    "target": "/home/agent/.config/gh",
+                    "provider": "local-auth",
+                    "ref": ".config/gh",
+                },
             ],
         }
     )
@@ -508,10 +519,36 @@ async def test_compose_stack_launcher_render_skips_legacy_auth_mount_resolution(
     assert auth_mount_resolver.workspace_ids == []
     assert compose.specs == []
     assert len(compose.render_specs) == 1
-    assert compose.render_specs[0].auth_mounts == (
-        AuthMount(source=str(layout.mirror_path), target=str(layout.mirror_path), mode="rw"),
+    auth_mounts = compose.render_specs[0].auth_mounts
+    assert auth_mounts[0] == AuthMount(
+        source=str(layout.mirror_path), target=str(layout.mirror_path), mode="rw"
     )
-    assert paths.secret_lease_mount_metadata["targets"] == ["OPENAI_API_KEY"]
+    targets = tuple(mount.target for mount in auth_mounts)
+    assert len(targets) == len(set(targets))
+    for target in (
+        "/home/agent/.config/gh",
+        "/home/agent/.codex",
+        "/home/agent/.claude",
+        "/home/agent/.ssh",
+        adc_target,
+    ):
+        assert target in targets
+    placeholder_sources = [
+        mount.source for mount in auth_mounts if mount.target != str(layout.mirror_path)
+    ]
+    assert placeholder_sources
+    assert all(
+        source.startswith("/run/awf/hosted-auth-placeholders/") for source in placeholder_sources
+    )
+    rendered_blob = "\x00".join(
+        f"{mount.source}:{mount.target}:{mount.mode}" for mount in auth_mounts
+    )
+    assert "/host/home" not in rendered_blob
+    assert "/host/work/auth" not in rendered_blob
+    assert paths.secret_lease_mount_metadata["targets"] == [
+        "OPENAI_API_KEY",
+        "/home/agent/.config/gh",
+    ]
 
 
 @pytest.mark.unit
