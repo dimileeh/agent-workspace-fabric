@@ -433,6 +433,16 @@ async def _recover_hosted_pr_adoption_active_execution(
     self: Any,
     candidate: _ActiveExecutionCandidate,
 ) -> bool:
+    if candidate.status == WorkspaceStatus.ready:
+        if not pr_adoption_is_hosted(candidate.task_policy):
+            return False
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return True
+            return pr_adoption_is_hosted(ws.task_policy)
+
     if candidate.status not in (WorkspaceStatus.provisioning, *_ACTIVE_EXECUTION_STATUSES):
         return False
     if not pr_adoption_is_hosted(candidate.task_policy):
