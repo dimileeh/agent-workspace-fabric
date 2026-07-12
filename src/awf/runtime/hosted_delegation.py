@@ -91,6 +91,7 @@ _HOSTED_AGENT_TERMINAL_FAILURES = {
     "timed_out": (_HOSTED_TIMEOUT_RETURN_CODE, COMMAND_TIMEOUT_REASON),
 }
 _HOSTED_PR_IDENTITY_URL_FIELDS = frozenset({"repo_url", "head_repo_url"})
+_HOSTED_COVERAGE_OMITTED_RUNTIME_ENV = frozenset({"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"})
 
 
 class HostedDelegationConfigError(ValueError):
@@ -386,7 +387,10 @@ class HostedValidationDelegate:
             start_path="/v1/validation-runs",
             payload={
                 "workspace_id": workspace_id,
-                "profile": _hosted_validation_profile_payload(profile),
+                "profile": _hosted_validation_profile_payload(
+                    profile,
+                    omit_runtime_environment=_HOSTED_COVERAGE_OMITTED_RUNTIME_ENV,
+                ),
                 "phase_names": [phase],
                 "run_healthchecks": False,
                 "include_coverage": True,
@@ -587,9 +591,18 @@ def _strip_url_userinfo(value: str) -> str:
     )
 
 
-def _hosted_validation_profile_payload(profile: WorkspaceProfile) -> dict[str, Any]:
+def _hosted_validation_profile_payload(
+    profile: WorkspaceProfile,
+    *,
+    omit_runtime_environment: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     payload = profile.model_dump(mode="json", by_alias=True)
     _hosted_validation_sanitize_secret_refs(payload.get("secrets"))
+    if omit_runtime_environment:
+        _hosted_validation_omit_environment_entries(
+            payload.get("runtime"),
+            names=omit_runtime_environment,
+        )
     _hosted_validation_sanitize_environment_container(payload.get("runtime"))
     services = payload.get("services")
     if isinstance(services, list):
@@ -626,6 +639,18 @@ def _hosted_validation_env_secret_ref_name(ref: object) -> str | None:
     if not _ENV_NAME_PATTERN.fullmatch(stripped):
         return None
     return stripped
+
+
+def _hosted_validation_omit_environment_entries(
+    container: object, *, names: frozenset[str]
+) -> None:
+    if not isinstance(container, dict):
+        return
+    environment = container.get("environment")
+    if not isinstance(environment, dict):
+        return
+    for name in names:
+        environment.pop(name, None)
 
 
 def _hosted_validation_sanitize_environment_container(container: object) -> None:

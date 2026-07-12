@@ -61,8 +61,9 @@ class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
         log_source: str,
         command_evidence: list[str] | None = None,
         operation_start_head: str | None = None,
+        state: object | None = None,
     ) -> AgentRunResult:
-        del operation_start_head
+        del operation_start_head, state
         result = await self._deps.adapter.run(
             compose_project=compose_project,
             compose_file=compose_file,
