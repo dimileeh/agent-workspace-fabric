@@ -97,6 +97,7 @@ async def test_hosted_validation_posts_operation_and_maps_validation_result(
     assert len(result.commands) == 1
     command = result.commands[0]
     assert command.command == "uv run pytest tests/unit/foo -q"
+    assert command.stdout_path.name == "01_validate.stdout"
     assert command.stdout_path.read_text(encoding="utf-8") == "passed\n"
     assert command.stderr_path.read_text(encoding="utf-8") == ""
     assert command.stream_ids == {
@@ -172,3 +173,68 @@ async def test_hosted_coverage_posts_pr_identity(tmp_path: Path) -> None:
     assert seen["body"]["phase_names"] == ["coverage"]
     assert seen["body"]["include_coverage"] is True
     assert seen["body"]["pr_identity"]["pr_number"] == 277
+
+
+@pytest.mark.unit
+async def test_hosted_validation_sanitizes_remote_phase_before_artifact_write(
+    tmp_path: Path,
+) -> None:
+    malicious_phase = "escape/../../owned"
+    workspace_artifacts = tmp_path / "ws_hosted"
+    (workspace_artifacts / "01_escape").mkdir(parents=True)
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/validation-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/v1/operations/val_1",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/operations/val_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "val_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "commands": [
+                        {
+                            "command": "pytest -q",
+                            "returncode": 0,
+                            "duration_seconds": 0.2,
+                            "stdout": "out\n",
+                            "stderr": "err\n",
+                            "phase": malicious_phase,
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        delegate = HostedValidationDelegate(
+            _config(),
+            artifacts_dir=tmp_path,
+            client=client,
+        )
+        result = await delegate.run_profile_phases(
+            workspace_id="ws_hosted",
+            compose_project="unused",
+            compose_file=tmp_path / "missing-compose.yml",
+            profile=WorkspaceProfile(name="hosted-test"),
+            phase_names=("validate",),
+        )
+
+    command = result.commands[0]
+    assert command.phase == malicious_phase
+    assert command.stdout_path.name == "01_escape_owned.stdout"
+    assert command.stderr_path.name == "01_escape_owned.stderr"
+    assert command.stdout_path.resolve().is_relative_to(workspace_artifacts.resolve())
+    assert command.stderr_path.resolve().is_relative_to(workspace_artifacts.resolve())
+    assert command.stdout_path.read_text(encoding="utf-8") == "out\n"
+    assert command.stderr_path.read_text(encoding="utf-8") == "err\n"
+    assert not (tmp_path / "owned.stdout").exists()
+    assert not (tmp_path / "owned.stderr").exists()

@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -63,6 +64,7 @@ HOSTED_DELEGATION_MISSING_BASE_URL = "AWF_HOSTED_DELEGATION_BASE_URL"
 HOSTED_DELEGATION_MISSING_TOKEN = (
     "AWF_HOSTED_DELEGATION_BEARER_TOKEN or AWF_HOSTED_DELEGATION_BEARER_TOKEN_ENV"
 )
+_ARTIFACT_LABEL_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 
 
 class HostedDelegationConfigError(ValueError):
@@ -514,7 +516,7 @@ def _validation_command_result_from_payload(
     if not isinstance(payload, Mapping):
         raise HostedDelegationProtocolError("hosted validation command result is malformed")
     phase = _optional_str(payload.get("phase")) or "validate"
-    label = f"{index:02d}_{phase}"
+    label = f"{index:02d}_{_artifact_label_component(phase)}"
     stdout = _text_payload_field(payload, "stdout")
     stderr = _text_payload_field(payload, "stderr")
     stdout_path = artifacts_dir / f"{label}.stdout"
@@ -543,6 +545,10 @@ def _validation_command_result_from_payload(
         captured_stdout=stdout,
         captured_stderr=stderr,
     )
+
+
+def _artifact_label_component(value: str) -> str:
+    return _ARTIFACT_LABEL_UNSAFE_CHARS.sub("_", value)
 
 
 def _coverage_result_from_payload(
