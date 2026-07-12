@@ -255,6 +255,50 @@ async def test_agent_delegation_posts_secret_free_body_and_maps_terminal_head_sh
 
 
 @pytest.mark.unit
+async def test_agent_delegation_polls_prefixed_absolute_operation_path() -> None:
+    seen_paths: list[str] = []
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        if request.method == "POST" and request.url.path == "/awf/v1/agent-runs":
+            return httpx.Response(
+                202,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "operation_url": "/awf/v1/operations/op_1",
+                    "state": "running",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/awf/v1/operations/op_1":
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "op_1",
+                    "workspace_id": "ws_hosted",
+                    "state": "succeeded",
+                    "returncode": 0,
+                    "stdout": "ok",
+                    "stderr": "",
+                    "terminal_head_sha": "c" * 40,
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        result = await HostedAgentRuntimeExecutor(
+            _config(base_url="https://hosted.example.test/awf"),
+            client=client,
+        ).execute(_agent_request())
+
+    assert result.returncode == 0
+    assert seen_paths == [
+        "/awf/v1/agent-runs",
+        "/awf/v1/operations/op_1",
+    ]
+
+
+@pytest.mark.unit
 async def test_agent_delegation_omits_pr_identity_when_request_has_no_pr_metadata() -> None:
     seen: dict[str, Any] = {}
     terminal_head_sha = "b" * 40

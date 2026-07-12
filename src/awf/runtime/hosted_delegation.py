@@ -43,7 +43,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -1064,7 +1064,8 @@ def _normalize_operation_url(raw_url: str, *, base_url: str) -> str:
         return raw_url
     if not raw_url.startswith("/"):
         raise HostedDelegationProtocolError("hosted delegation operation_url must be absolute path")
-    return _join_url(base_url, raw_url)
+    base = urlsplit(base_url)
+    return urlunsplit((base.scheme, base.netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 def _join_url(base_url: str, path: str) -> str:
