@@ -20,6 +20,7 @@ from awf.control.executor.constants import (
 )
 from awf.control.executor.monitor_handoff_setup import (
     _MonitorHandoffSetupFailureError,
+    _record_hosted_monitor_handoff_setup_completed,
     _run_hosted_monitor_handoff_profile_setup,
     _run_monitor_handoff_profile_setup,
 )
@@ -999,6 +1000,48 @@ class TestExecutorMonitorHandoffSetupSplit:
 
 
 class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
+    @pytest.mark.unit
+    async def test_record_hosted_monitor_handoff_setup_completed_allows_monitoring_pr_race(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Successful hosted setup keeps durable evidence after handoff advances."""
+        workspace_id = await _seed_ready(factory, create_worktree=False)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED_RUNNING")
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED_VALIDATING")
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.monitoring_pr,
+                reason_code="SEED_MONITORING_PR",
+            )
+            await s.commit()
+
+        class _Executor:
+            _session_factory = factory
+
+        ok = await _record_hosted_monitor_handoff_setup_completed(
+            _Executor(),
+            workspace_id=workspace_id,
+        )
+
+        assert ok is True
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            completed_events = [
+                event
+                for event in ws.events
+                if event.event_type == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE
+            ]
+
+        assert len(completed_events) == 1
+        assert completed_events[0].reason_code == HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE
+
     @pytest.mark.unit
     async def test_hosted_monitor_handoff_profile_setup_repairs_mirror_hooks_before_preflight(
         self,

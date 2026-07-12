@@ -37,6 +37,15 @@ from awf.runtime.ownership import (
 
 _log = get_logger(__name__)
 
+_HOSTED_MONITOR_HANDOFF_SETUP_MARKER_STATUSES = frozenset(
+    {
+        WorkspaceStatus.running.value,
+        WorkspaceStatus.validating.value,
+        WorkspaceStatus.pushing.value,
+        WorkspaceStatus.monitoring_pr.value,
+    }
+)
+
 
 class _MonitorHandoffSetupFailureError(RuntimeError):
     """Setup failure payload that still needs a terminal transition."""
@@ -586,7 +595,7 @@ async def _record_hosted_monitor_handoff_setup_completed(
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.get_for_update(workspace_id)
-        if ws is None or ws.status != WorkspaceStatus.running.value:
+        if ws is None or ws.status not in _HOSTED_MONITOR_HANDOFF_SETUP_MARKER_STATUSES:
             return False
         await repo.add_event(
             ws,
