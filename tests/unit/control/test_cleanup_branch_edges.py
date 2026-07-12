@@ -595,7 +595,7 @@ async def test_release_for_hosted_candidate_with_rendered_compose_file_skips_com
 
 
 @pytest.mark.unit
-async def test_release_for_hosted_candidate_with_compose_artifacts_warns_and_tears_down(
+async def test_release_for_hosted_candidate_with_compose_artifacts_warns_and_skips_compose_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     log = _RecordingLog()
@@ -643,6 +643,7 @@ async def test_release_for_hosted_candidate_with_compose_artifacts_warns_and_tea
             "compose_file_path": Path("/tmp/stale-compose.yml"),
             "remove_volumes": False,
             "remove_worktree": False,
+            "skip_compose": True,
         }
     ]
     assert log.warnings == [
