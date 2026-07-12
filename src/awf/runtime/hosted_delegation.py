@@ -762,7 +762,11 @@ def _validation_result_from_terminal(
         )
         for index, item in enumerate(commands_payload, start=1)
     ]
-    if state == "succeeded" and expected_command_count > 0 and not commands:
+    if (
+        state == "succeeded"
+        and expected_command_count > 0
+        and len(commands) < expected_command_count
+    ):
         raise HostedDelegationProtocolError(
             "hosted validation terminal response missing command evidence"
         )
