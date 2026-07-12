@@ -28,6 +28,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.service import config as service_config
 from awf.service import pr_monitor_adoption as adoption_module
 from awf.service.pr_monitor_adoption import (
     _LIVE_ADOPTION_STATUSES,
@@ -306,6 +307,48 @@ class TestPullRequestMonitorAdoptionServicePart001:
                 if event.event_type == "workspace.pr_monitor_adoption_requested"
             )
             assert event.payload["execution"] == {"mode": "hosted"}
+
+    @pytest.mark.unit
+    async def test_hosted_execution_policy_accepts_service_visible_token_env(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        token_env = "AWF_PR_MONITOR_ADOPTION_HOSTED_TOKEN"
+        monkeypatch.delenv(token_env, raising=False)
+        fetcher = _MetadataFetcher(_metadata())
+        settings = Settings(
+            _env_file=None,
+            hosted_delegation_base_url="https://hosted.example.test",
+            hosted_delegation_bearer_token_env=token_env,
+        )
+
+        def _resolve_service_settings(base: Settings) -> service_config.ServiceSettings:
+            assert base is settings
+            return service_config.resolve_service_settings(
+                base,
+                environ={token_env: "service-visible-token"},
+            )
+
+        monkeypatch.setattr(adoption_module, "resolve_service_settings", _resolve_service_settings)
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+                settings=settings,
+            )
+            response = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    execution={"mode": "hosted"},
+                )
+            )
+            await session.commit()
+
+        assert response.workspace_id.startswith("ws_")
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
 
     @pytest.mark.unit
     async def test_hosted_execution_policy_conflicts_with_existing_local_adoption(

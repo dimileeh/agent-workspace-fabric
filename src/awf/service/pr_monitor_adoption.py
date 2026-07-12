@@ -44,7 +44,6 @@ from awf.db.utils import escape_like_pattern as _escape_like_pattern
 from awf.profiles.models import normalize_inline_profile_snapshot
 from awf.runtime.hosted_delegation import (
     HostedDelegationConfigError,
-    hosted_delegation_config_from_settings,
 )
 from awf.service.config import (
     hosted_delegation_config_from_service_settings,
@@ -983,7 +982,6 @@ def _raise_if_hosted_delegation_unconfigured(
     if request.execution.mode != "hosted":
         return
     try:
-        hosted_delegation_config_from_settings(settings)
         service_settings = resolve_service_settings(settings)
         hosted_delegation_config_from_service_settings(service_settings, required=True)
     except HostedDelegationConfigError as exc:
