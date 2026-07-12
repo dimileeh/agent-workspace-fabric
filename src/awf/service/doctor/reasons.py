@@ -920,6 +920,79 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace remonitor <workspace_id>",
         "docs/REASON_CATALOG.md#git_base_fetch_transient_retry_exhausted",
     ),
+    "HOSTED_REMOTE_HEAD_MISSING": _ReasonText(
+        "Hosted PR monitor repair completed without reporting the terminal head commit.",
+        (
+            "Inspect the hosted agent result and monitor log, then remonitor after "
+            "the provider reports `terminal_head_sha`."
+        ),
+        (
+            "The hosted agent returned success but omitted the terminal head SHA "
+            "AWF needs before syncing the local worktree to the PR head."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#hosted_remote_head_missing",
+    ),
+    "HOSTED_REMOTE_HEAD_IDENTITY_MISSING": _ReasonText(
+        (
+            "AWF could not sync a hosted repair because PR head repository or "
+            "branch metadata was missing."
+        ),
+        (
+            "Verify the adopted PR metadata includes the head repository and head "
+            "ref, then re-adopt or remonitor the PR."
+        ),
+        (
+            "Stored PR identity lacked a usable head repository URL or head ref, "
+            "so AWF could not fetch the hosted repair result safely."
+        ),
+        "awf workspace show <workspace_id>",
+        "docs/REASON_CATALOG.md#hosted_remote_head_identity_missing",
+    ),
+    "HOSTED_REMOTE_HEAD_FETCH_FAILED": _ReasonText(
+        "AWF could not fetch the hosted PR head after a hosted repair completed.",
+        (
+            "Inspect the monitor log for git fetch stderr, verify remote access "
+            "and that the PR head branch still exists, then remonitor."
+        ),
+        (
+            "Git fetch of the PR head repository/ref failed due to credentials, "
+            "network availability, a deleted branch, or remote rejection."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#hosted_remote_head_fetch_failed",
+    ),
+    "HOSTED_REMOTE_HEAD_MISMATCH": _ReasonText(
+        (
+            "AWF refused to sync the hosted worktree because fetched PR head did "
+            "not match the reported terminal head."
+        ),
+        (
+            "Verify the hosted provider terminal head and PR head state, then "
+            "remonitor once they agree."
+        ),
+        (
+            "The hosted agent reported one terminal commit, but fetching the PR "
+            "head returned a different SHA, so syncing would risk using stale or "
+            "wrong content."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#hosted_remote_head_mismatch",
+    ),
+    "HOSTED_REMOTE_HEAD_SYNC_FAILED": _ReasonText(
+        ("AWF fetched the hosted terminal head but could not reset the local worktree to it."),
+        (
+            "Inspect the monitor log and worktree git state, repair local "
+            "permissions or recreate the workspace, then remonitor."
+        ),
+        (
+            "The final `git reset --hard` failed after fetching the expected PR "
+            "head, usually due to worktree corruption, permissions, or local git "
+            "state."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#hosted_remote_head_sync_failed",
+    ),
     "CI_TRANSIENT_RERUN_FAILED": _ReasonText(
         (
             "AWF could not request a GitHub rerun for CI failures classified "
