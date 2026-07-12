@@ -303,7 +303,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             if workspace.initial_review_grace_period_seconds is not None
             else profile.monitor.initial_review_grace_period_seconds
         )
-        workspace_is_hosted = pr_adoption_is_hosted(workspace.task_policy)
+        workspace_is_hosted = pr_adoption_is_hosted(getattr(workspace, "task_policy", None))
         if workspace_is_hosted and hosted_validation_delegate is None:
             raise RuntimeError(
                 "hosted PR adoption requested but hosted validation is not configured"

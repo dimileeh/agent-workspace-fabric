@@ -21,14 +21,8 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
-from awf.common.git_identity import (
-    git_identity_config_args,
-    git_safe_directory_config_args,
-)
-from awf.common.task_tag import (
-    commit_message_with_task_tag,
-    strip_leading_task_tag,
-)
+from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
+from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts

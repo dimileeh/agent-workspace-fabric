@@ -79,14 +79,23 @@ async def _run_monitor_agent_with_service_recovery(
     restart_attempts = 0
     while True:
         try:
-            result = await self._deps.adapter.run(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=prompt,
-                workspace_id=workspace_id,
-                log_source=log_source,
-                hosted_pr_identity=hosted_pr_identity,
-            )
+            if self._deps.adapter.is_hosted:
+                result = await self._deps.adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=prompt,
+                    workspace_id=workspace_id,
+                    log_source=log_source,
+                    hosted_pr_identity=hosted_pr_identity,
+                )
+            else:
+                result = await self._deps.adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=prompt,
+                    workspace_id=workspace_id,
+                    log_source=log_source,
+                )
         except AgentRunError as exc:
             recovered = await _recover_monitor_agent_service_after_error(
                 self,

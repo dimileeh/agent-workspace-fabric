@@ -879,6 +879,11 @@ def workspace_adopt_pr(
         "--auto-merge/--no-auto-merge",
         help="Allow the adopted PR monitor to merge when gates are green.",
     ),
+    execution: str = typer.Option(
+        "local",
+        "--execution",
+        help="PR monitor execution placement: local or hosted.",
+    ),
     initial_review_grace_period_seconds: float | None = typer.Option(
         None,
         "--initial-review-grace-period-seconds",
@@ -916,6 +921,9 @@ def workspace_adopt_pr(
         raise typer.BadParameter(
             "select a PR with exactly one selector: either --pr-url or both --repo and --pr"
         )
+    execution = execution.strip().lower()
+    if execution not in {"local", "hosted"}:
+        raise typer.BadParameter("--execution must be 'local' or 'hosted'")
     _repo_is_url = repo is not None and _repo_targets_github_host(repo)
     body: dict[str, Any] = {
         "repo_url": repo if _repo_is_url else None,
@@ -926,6 +934,7 @@ def workspace_adopt_pr(
         "profile_ref": profile_ref,
         "profile": None,
         "auto_merge": auto_merge,
+        "execution": {"mode": execution},
         "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
         "task_title": task_title,
         "task_prompt": task_prompt,
